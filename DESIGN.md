@@ -160,13 +160,22 @@ typedef enum {
     IXS_MAX,         // Max(a, b)
     IXS_MIN,         // Min(a, b)
     IXS_XOR,         // bitwise xor(a, b) (integer domain)
-    IXS_CMP,         // comparison: a op b, op in {>, <, >=, <=, ==, !=}
+    IXS_CMP,         // comparison: a op b (see ixs_cmp_op below)
     IXS_AND,         // boolean and
     IXS_OR,          // boolean or
     IXS_NOT,         // boolean not
     IXS_TRUE,        // boolean constant
     IXS_FALSE,       // boolean constant
 } ixs_tag;
+
+typedef enum {
+    IXS_CMP_GT,      // >
+    IXS_CMP_GE,      // >=
+    IXS_CMP_LT,      // <
+    IXS_CMP_LE,      // <=
+    IXS_CMP_EQ,      // ==
+    IXS_CMP_NE,      // !=
+} ixs_cmp_op;
 ```
 
 Each node is a small struct:
@@ -175,11 +184,10 @@ Each node is a small struct:
 typedef struct ixs_node {
     ixs_tag tag;
     uint32_t hash;        // precomputed, used for hash-consing
-    uint32_t refcount;    // for external API handles; DAG-internal refs are structural
     union {
         int64_t ival;                     // IXS_INT
         struct { int64_t p, q; } rat;     // IXS_RAT
-        const char *name;                 // IXS_SYM
+        const char *name;                 // IXS_SYM (interned in arena)
         struct {                          // IXS_ADD
             struct ixs_node *coeff;       //   rational constant term
             uint32_t nterms;
@@ -196,7 +204,7 @@ typedef struct ixs_node {
         struct {                          // IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP
             struct ixs_node *lhs;
             struct ixs_node *rhs;
-            uint8_t cmp_op;              // only for IXS_CMP
+            ixs_cmp_op cmp_op;           // only for IXS_CMP
         } binary;
         struct {                          // IXS_PIECEWISE
             uint32_t ncases;
@@ -212,6 +220,11 @@ typedef struct ixs_node {
     };
 } ixs_node;
 ```
+
+**Symbol interning**: Symbol names are copied into the arena and deduplicated.
+The `name` pointer in `IXS_SYM` always points to arena-owned memory, so it
+remains valid for the lifetime of the context regardless of whether the caller
+frees the original input string.
 
 **Hash-consing**: A global (per-context) hash table maps
 `(tag, hash_of_children)` -> `ixs_node*`. Before creating any node, look it
@@ -233,13 +246,26 @@ Operations: `add(a, b)`, `sub(a, b)`, `mul(a, b)`, `div(a, b)`,
 `neg(a)`, `gcd(a, b)`, `is_zero(a)`, `is_one(a)`, `is_negative(a)`,
 `cmp(a, b)`, `floor_rat(a)`, `ceil_rat(a)`, `mod_rat(a, b)`.
 
-All results are reduced to lowest terms. Overflow detection: if any operation
-would overflow int64, fall back to 128-bit intermediate (or assert — in
-practice, the numbers in this domain are small).
+**Division and Mod use floored (Python/SymPy) semantics, not C truncated
+semantics.** This is critical for correctness when comparing against SymPy:
+
+- `floor_div(a, b)` = floor(a / b), e.g., `floor_div(-7, 2) = -4` (not -3)
+- `floor_mod(a, b)` = `a - b * floor_div(a, b)`, always non-negative when
+  `b > 0`, e.g., `floor_mod(-7, 2) = 1` (not -1)
+
+All results are reduced to lowest terms.
+
+**Overflow**: All intermediate arithmetic is checked for overflow. On overflow
+the library returns an error (not UB, not assert). In practice the constants
+in this domain are small (< 2^20), so overflow should never occur; the checks
+are a safety net. No 128-bit fallback in the initial implementation — if
+overflow is ever observed in real workloads, it can be added later.
 
 ### Layer 3: Parser
 
-Recursive descent parser for the SymPy output format. The grammar is small:
+Recursive descent parser for the SymPy output format. A configurable
+recursion depth limit (default 256) prevents stack overflow on maliciously
+deep inputs. The grammar is small:
 
 ```
 expr     = term (('+' | '-') term)*
@@ -272,9 +298,12 @@ The parser builds the DAG directly via the hash-consing table.
 
 ### Layer 4: Simplification Engine
 
-Simplification is applied bottom-up during DAG construction (every
-`ixs_make_*` constructor runs simplification rules before hash-consing) and
-optionally as a top-down rewrite pass.
+Simplification is driven by a single rule engine. Each public constructor
+(e.g., `ixs_add`, `ixs_floor`, `ixs_mod`) calls the rule engine bottom-up
+during DAG construction (canonicalize before hash-consing). The same rule
+engine is invoked top-down by `ixs_simplify()` when assumptions enable
+additional rewrites (e.g., bound-dependent rules). There is one rule
+implementation, not two.
 
 #### 4.1 Constant Folding
 
@@ -394,18 +423,24 @@ floor(Piecewise((v1,c1),...))      → Piecewise((floor(v1),c1),...)
 Mod(Piecewise(...), m)             → Piecewise((Mod(v1,m),c1),...)
 ```
 
-The strategy is to push Piecewise outward (lift it to the top of the
-expression tree) when it enables further simplification, and push it
-inward when the branches can be individually simplified.
+**Propagation strategy**: Push Piecewise inward (into branches) when the
+enclosing operation is a simple linear function of the Piecewise result
+(multiply by constant, add a term, apply floor/Mod). This lets each branch
+simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
+Add in Piecewise) as that duplicates the non-Piecewise terms and causes
+expression blowup.
 
 #### 4.7 Max / Min Rules
 
 ```
 Max(a, a)       → a
 Max(a, b)       where a >= b provable → a
-Max(1, x)       where x > 0 provable → max(1, x) (keep)
+Max(1, x)       where x > 0 provable → Max(1, x) (keep)
                 where x >= 1 provable → x
-Min(a, b)       → -Max(-a, -b)  (normalize to Max)
+
+Min(a, a)       → a
+Min(a, b)       where a <= b provable → a
+Min(a, b)       where a,b constant   → min(a, b)
 ```
 
 #### 4.8 XOR Rules
@@ -468,12 +503,11 @@ This enables rules like:
 typedef struct ixs_ctx ixs_ctx;
 typedef struct ixs_node ixs_node;
 
-// Lifecycle
+// Lifecycle. ixs_ctx_create returns NULL on allocation failure.
 ixs_ctx   *ixs_ctx_create(void);
-void       ixs_ctx_destroy(ixs_ctx *ctx);
+void       ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
 
-
-// Parse a SymPy-format expression string
+// Parse a SymPy-format expression string. Returns NULL on parse error.
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 
 // Construct expressions programmatically
@@ -489,7 +523,7 @@ ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
-ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, uint8_t op, ixs_node *b);
+ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
@@ -502,8 +536,10 @@ ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
-// Structural equality (O(1) due to hash-consing)
-bool ixs_equal(ixs_node *a, ixs_node *b);  // just pointer comparison
+// Pointer equality (O(1) — hash-consing guarantees that structurally
+// identical expressions within the same context share the same pointer).
+// Only valid for nodes from the same ixs_ctx.
+bool ixs_same_node(ixs_node *a, ixs_node *b);
 
 // Substitution
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
@@ -629,14 +665,15 @@ ixsimpl/
 │   ├── test_parser.c
 │   ├── test_simplify.c
 │   ├── test_bounds.c
-│   ├── test_corpus.c         # run against the 609-expression corpus
+│   ├── test_corpus.c          # run against the 609-expression corpus
 │   ├── test_cpp.cpp           # C++ binding tests
 │   ├── test_python.py         # Python binding tests
-│   └── corpus.txt             # the reference expressions
+│   ├── corpus.txt             # the reference expressions
+│   └── corpus_expected.txt    # pre-generated SymPy simplified outputs
 ├── bench/
 │   └── bench_corpus.c        # benchmark: time all 609 expressions
 ├── CMakeLists.txt
-├── setup.py                   # Python package build
+├── pyproject.toml             # Python package build (PEP 517)
 └── LICENSE                    # MIT
 ```
 
@@ -701,12 +738,15 @@ public:
     }
 
     ixs_node *raw() const { return node_; }
+    ixs_ctx *raw_ctx() const { return ctx_; }
 };
 
 inline Expr floor(Expr x) { return {x.raw_ctx(), ixs_floor(x.raw_ctx(), x.raw())}; }
 inline Expr ceil(Expr x)  { return {x.raw_ctx(), ixs_ceil(x.raw_ctx(), x.raw())}; }
 inline Expr mod(Expr a, Expr b) { return {a.raw_ctx(), ixs_mod(a.raw_ctx(), a.raw(), b.raw())}; }
-// ... etc
+inline Expr max(Expr a, Expr b) { return {a.raw_ctx(), ixs_max(a.raw_ctx(), a.raw(), b.raw())}; }
+inline Expr min(Expr a, Expr b) { return {a.raw_ctx(), ixs_min(a.raw_ctx(), a.raw(), b.raw())}; }
+inline Expr xor_(Expr a, Expr b) { return {a.raw_ctx(), ixs_xor(a.raw_ctx(), a.raw(), b.raw())}; }
 
 } // namespace ixs
 ```
@@ -743,6 +783,12 @@ y = ctx.sym("y")
 e = ixsimpl.floor(x + y) + 3
 print(e.simplify(assumptions=assumptions))
 
+# Module-level convenience functions
+e2 = ixsimpl.mod(x, 4)
+e3 = ixsimpl.max_(x, y)   # trailing _ avoids shadowing builtin max
+e4 = ixsimpl.min_(x, y)
+e5 = ixsimpl.ceil(x / 4)
+
 # Batch
 exprs = [ctx.parse(line) for line in lines]
 ctx.simplify_batch(exprs, assumptions=assumptions)
@@ -761,8 +807,11 @@ Implementation:
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
-- `setup.py` / `pyproject.toml` builds the extension; no runtime
-  dependencies.
+- Module-level functions: `ixsimpl.floor()`, `ixsimpl.ceil()`,
+  `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`.
+  Trailing underscore on `max_`/`min_`/`xor_` avoids shadowing Python
+  builtins.
+- `pyproject.toml` builds the extension; no runtime dependencies.
 
 This binding adds ~800 lines of C and is the primary interface for testing
 against SymPy (run both, compare outputs).
@@ -772,13 +821,17 @@ against SymPy (run both, compare outputs).
 ### Phase 1: Foundation
 
 - Arena allocator
-- Rational arithmetic with full test coverage
-- Node types, hash-consing table
+- Rational arithmetic with full test coverage (floored division/Mod)
+- Node types, hash-consing table, symbol interning
 - Canonical Add/Mul construction with flattening and term collection
 - Basic constant folding
 - SymPy-format printer
+- Generate `test/corpus_expected.txt` by running SymPy on all 609 corpus
+  expressions (one-time script, checked in). This is the ground truth for
+  all subsequent phases.
 
-**Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`.
+**Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`. Corpus
+expected outputs are available for comparison.
 
 ### Phase 2: Parser + Floor/Ceil/Mod
 
@@ -922,6 +975,28 @@ assumption. The bug is in `sympy/core/mod.py` lines 166-172: factors of type
 `Mod` are duplicated into both `mod_l` and `non_mod_l`, causing them to
 appear squared. The fix (merged to `master` in Dec 2025) has not been included
 in any SymPy release yet (latest release is 1.14.0, April 2025).
+
+Concrete workarounds for the fuzz test oracle:
+
+1. **Reconstruct Mod with `evaluate=False`** when using SymPy as oracle.
+   The bug is in SymPy's auto-evaluation of `Mod()` — when `integer=True`
+   symbols are present, `Mod(k*Mod(x,n), m)` silently squares the inner
+   Mod factor. The fix (from IREE Wave's `_bounds_simplify_once`) is to
+   rebuild Mod nodes with `sympy.Mod(p, q, evaluate=False)` after
+   simplifying their arguments, bypassing the buggy code path. This lets
+   us keep `integer=True` on symbols (which is needed for other SymPy
+   rewrites to fire) while avoiding the specific Mod bug. Non-Mod nodes
+   are reconstructed normally via `expr.func(*simplified_args)`.
+2. **Primary oracle is numerical evaluation**, not SymPy's symbolic output.
+   For each test case, substitute 10+ random integer values into both the
+   original and simplified expressions and check equality. This catches bugs
+   in both SymPy and ixsimpl independently.
+3. **Pin SymPy version** for `corpus_expected.txt` generation and document it.
+   When a new SymPy release includes the fix, re-generate and note the
+   version.
+4. **Hypothesis `@example` decorators** for the specific pattern from #28744:
+   `Mod(2*Mod(x, 3), 5)` — ensure this is always tested and known to
+   diverge from buggy SymPy.
 
 ## Risks and Mitigations
 
