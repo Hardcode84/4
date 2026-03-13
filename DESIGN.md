@@ -69,16 +69,14 @@ complex numbers, floating-point constants.
 
 ### Variables (complete set, 20 total)
 
-Dollar-prefixed (runtime values):
 `$T0`, `$T1`, `$T2`, `$WG0`, `$WG1`, `$ARGK`,
 `$GPR_NUM`, `$MMA_ACC`, `$MMA_LHS_SCALE`, `$MMA_RHS_SCALE`,
-`$MMA_SCALE_FP4`, `$index0`, `$index1`
-
-Underscore-prefixed (derived constants):
-`_M_div_32`, `_N_div_32`, `_K_div_256`, `_aligned`
-
-Bare uppercase (dimension parameters):
+`$MMA_SCALE_FP4`, `$index0`, `$index1`,
+`_M_div_32`, `_N_div_32`, `_K_div_256`, `_aligned`,
 `M`, `N`, `K`
+
+The `$` and `_` prefixes are external naming conventions with no special
+meaning to the library. All are treated uniformly as opaque symbolic names.
 
 ### Constants
 
@@ -263,8 +261,8 @@ cmp_expr = '~' cmp_expr | expr cmp_op expr | 'True' | 'False'
 cmp_op   = '>' | '<' | '>=' | '<=' | '==' | '!='
 ```
 
-Symbols: `$`-prefixed identifiers, `_`-prefixed identifiers, and bare
-uppercase letters `M`, `N`, `K`. All parsed as `IXS_SYM`.
+Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
+`IXS_SYM`. The `$` and `_` prefixes carry no special semantics.
 
 Integer literals: sequences of digits. Rationals are not parsed directly —
 they arise from `3/8` being parsed as `IXS_INT(3) / IXS_INT(8)` and
@@ -908,16 +906,6 @@ assumption. The bug is in `sympy/core/mod.py` lines 166-172: factors of type
 `Mod` are duplicated into both `mod_l` and `non_mod_l`, causing them to
 appear squared. The fix (merged to `master` in Dec 2025) has not been included
 in any SymPy release yet (latest release is 1.14.0, April 2025).
-
-Workaround for the fuzz test oracle:
-
-- Do **not** set `integer=True` on SymPy symbols when constructing Mod
-  expressions. Use bare `Symbol('x')` instead of `Symbol('x', integer=True)`.
-- Alternatively, compare against SymPy `master` branch rather than the
-  released package.
-- As a secondary oracle, always verify via numerical evaluation (substituting
-  concrete integers) regardless of what SymPy's symbolic simplifier returns.
-  This catches both SymPy bugs and ixsimpl bugs independently.
 
 ## Risks and Mitigations
 
