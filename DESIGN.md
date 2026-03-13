@@ -592,41 +592,170 @@ Estimated working set for 609 expressions with shared subexpressions:
 ```
 ixsimpl/
 ├── include/
-│   └── ixsimpl.h          # public API (single header)
+│   └── ixsimpl.h            # public C API (single header)
 ├── src/
-│   ├── arena.c             # arena allocator
+│   ├── arena.c               # arena allocator
 │   ├── arena.h
-│   ├── rational.c          # exact rational arithmetic
+│   ├── rational.c            # exact rational arithmetic
 │   ├── rational.h
-│   ├── node.c              # node creation, hash-consing, canonical forms
+│   ├── node.c                # node creation, hash-consing, canonical forms
 │   ├── node.h
-│   ├── parser.c            # recursive descent parser
+│   ├── parser.c              # recursive descent parser
 │   ├── parser.h
-│   ├── simplify.c          # rewrite rules engine
+│   ├── simplify.c            # rewrite rules engine
 │   ├── simplify.h
-│   ├── bounds.c            # interval/bound analysis
+│   ├── bounds.c              # interval/bound analysis
 │   ├── bounds.h
-│   ├── print.c             # output formatters
+│   ├── print.c               # output formatters
 │   ├── print.h
-│   └── ctx.c               # context management, public API impl
+│   └── ctx.c                 # context management, public API impl
+├── bindings/
+│   ├── cpp/
+│   │   └── ixsimpl.hpp       # C++ header-only wrapper
+│   └── python/
+│       ├── ixsimpl.pyi       # type stubs
+│       └── _ixsimpl.c        # CPython extension module
 ├── test/
 │   ├── test_rational.c
 │   ├── test_parser.c
 │   ├── test_simplify.c
 │   ├── test_bounds.c
-│   ├── test_corpus.c       # run against the 609-expression corpus
-│   └── corpus.txt          # the reference expressions
+│   ├── test_corpus.c         # run against the 609-expression corpus
+│   ├── test_cpp.cpp           # C++ binding tests
+│   ├── test_python.py         # Python binding tests
+│   └── corpus.txt             # the reference expressions
 ├── bench/
-│   └── bench_corpus.c      # benchmark: time all 609 expressions
+│   └── bench_corpus.c        # benchmark: time all 609 expressions
 ├── CMakeLists.txt
-└── LICENSE                  # MIT
+├── setup.py                   # Python package build
+└── LICENSE                    # MIT
 ```
 
-Estimated total: 5,000-8,000 lines of C.
+Estimated total: 5,000-8,000 lines of C, ~500 lines C++ header, ~800 lines
+Python extension.
+
+## Language Bindings
+
+### C++ Binding — `ixsimpl.hpp`
+
+A thin header-only RAII wrapper over the C API. No additional runtime cost.
+
+```cpp
+namespace ixs {
+
+class Context {
+    ixs_ctx *ctx_;
+public:
+    Context() : ctx_(ixs_ctx_create()) {}
+    ~Context() { ixs_ctx_destroy(ctx_); }
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
+
+    void set_bounds(const char *var, int64_t lo, int64_t hi) {
+        ixs_ctx_set_bounds(ctx_, var, lo, hi);
+    }
+    void assume(Expr pred);
+
+    ixs_ctx *raw() const { return ctx_; }
+};
+
+class Expr {
+    ixs_ctx *ctx_;
+    ixs_node *node_;
+public:
+    Expr(ixs_ctx *ctx, ixs_node *node) : ctx_(ctx), node_(node) {}
+
+    static Expr parse(Context &ctx, std::string_view input) {
+        return {ctx.raw(), ixs_parse(ctx.raw(), input.data(), input.size())};
+    }
+    static Expr sym(Context &ctx, const char *name) {
+        return {ctx.raw(), ixs_sym(ctx.raw(), name)};
+    }
+    static Expr integer(Context &ctx, int64_t v) {
+        return {ctx.raw(), ixs_int(ctx.raw(), v)};
+    }
+
+    Expr simplify() const { return {ctx_, ixs_simplify(ctx_, node_)}; }
+    Expr subs(const char *var, Expr repl) const {
+        return {ctx_, ixs_subs(ctx_, node_, var, repl.node_)};
+    }
+
+    Expr operator+(Expr rhs) const { return {ctx_, ixs_add(ctx_, node_, rhs.node_)}; }
+    Expr operator*(Expr rhs) const { return {ctx_, ixs_mul(ctx_, node_, rhs.node_)}; }
+    bool operator==(Expr rhs) const { return node_ == rhs.node_; }
+
+    std::string str() const {
+        char buf[4096];
+        size_t n = ixs_print(node_, buf, sizeof(buf));
+        return {buf, n};
+    }
+
+    ixs_node *raw() const { return node_; }
+};
+
+inline Expr floor(Expr x) { return {x.raw_ctx(), ixs_floor(x.raw_ctx(), x.raw())}; }
+inline Expr ceil(Expr x)  { return {x.raw_ctx(), ixs_ceil(x.raw_ctx(), x.raw())}; }
+inline Expr mod(Expr a, Expr b) { return {a.raw_ctx(), ixs_mod(a.raw_ctx(), a.raw(), b.raw())}; }
+// ... etc
+
+} // namespace ixs
+```
+
+Key properties:
+- `Context` owns the arena; RAII cleans up everything on destruction.
+- `Expr` is a lightweight value type (two pointers). Cheap to copy.
+- Operator overloading for natural expression building.
+- No heap allocations beyond what the C library does internally.
+- No exceptions — errors reported via null returns, same as C API.
+
+### Python Binding — `_ixsimpl.c`
+
+A CPython C extension module (no pybind11/ctypes dependency). Exposes two
+Python types: `Context` and `Expr`.
+
+```python
+import ixsimpl
+
+ctx = ixsimpl.Context()
+ctx.set_bounds("$T0", 0, 255)
+ctx.set_bounds("M", 1, 2**31)
+
+expr = ctx.parse("128*floor($T0/64) + 4*floor(Mod($T0, 64)/16)")
+result = expr.simplify()
+print(result)              # SymPy-compatible string
+print(result.to_c())       # C code string
+
+# Programmatic construction
+x = ctx.sym("x")
+y = ctx.sym("y")
+e = ixsimpl.floor(x + y) + 3
+print(e.simplify())
+
+# Batch
+exprs = [ctx.parse(line) for line in lines]
+ctx.simplify_batch(exprs)
+```
+
+Implementation:
+- `_ixsimpl.c` is a single-file CPython extension using the stable ABI
+  (`Py_LIMITED_API`), so one `.so` works across Python 3.7+.
+- `Context` Python object wraps `ixs_ctx*`; destructor calls
+  `ixs_ctx_destroy`.
+- `Expr` Python object holds a reference to its `Context` (preventing
+  premature GC) and wraps `ixs_node*`.
+- `__repr__` and `__str__` call `ixs_print`.
+- `__eq__` is pointer comparison (O(1) via hash-consing).
+- `__hash__` returns the node's precomputed hash.
+- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`.
+- `setup.py` / `pyproject.toml` builds the extension; no runtime
+  dependencies.
+
+This binding adds ~800 lines of C and is the primary interface for testing
+against SymPy (run both, compare outputs).
 
 ## Implementation Plan
 
-### Phase 1: Foundation (3-4 weeks)
+### Phase 1: Foundation
 
 - Arena allocator
 - Rational arithmetic with full test coverage
@@ -637,7 +766,7 @@ Estimated total: 5,000-8,000 lines of C.
 
 **Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`.
 
-### Phase 2: Parser + Floor/Ceil/Mod (3-4 weeks)
+### Phase 2: Parser + Floor/Ceil/Mod
 
 - Recursive descent parser for the full grammar
 - `floor()`, `ceiling()` constructors with basic rules
@@ -647,7 +776,7 @@ Estimated total: 5,000-8,000 lines of C.
 **Milestone**: Can parse and round-trip all 609 expressions. Simplification of
 constant subexpressions works.
 
-### Phase 3: Piecewise + Boolean (3-4 weeks)
+### Phase 3: Piecewise + Boolean
 
 - Piecewise node type with condition simplification
 - Boolean algebra (And/Or/Not) with basic simplification
@@ -657,7 +786,7 @@ constant subexpressions works.
 **Milestone**: Expressions with Piecewise are simplified correctly. Many
 expressions in the corpus should already simplify significantly.
 
-### Phase 4: Advanced Rules + Bound Analysis (3-4 weeks)
+### Phase 4: Advanced Rules + Bound Analysis
 
 - Bound tracking infrastructure
 - Domain-aware floor/ceil/Mod rules
@@ -668,15 +797,22 @@ expressions in the corpus should already simplify significantly.
 **Milestone**: All 609 expressions produce correct results. Performance target
 met (< 50ms total).
 
-### Phase 5: Hardening + Integration (2-3 weeks)
+### Phase 5: Bindings
+
+- C++ header-only wrapper (`ixsimpl.hpp`)
+- CPython extension module (`_ixsimpl.c`)
+- Python test suite comparing output against SymPy
+- `setup.py` / `pyproject.toml` for pip-installable package
+
+**Milestone**: `pip install .` works; Python tests pass against SymPy oracle.
+
+### Phase 6: Hardening + Integration
 
 - Fuzz testing (generate random expressions, verify against SymPy)
 - Edge cases: overflow, division by zero, degenerate Piecewise
 - C code output mode
 - Documentation
 - Integration with the host compiler
-
-**Total: 14-19 weeks (~4-5 months)**
 
 ## Testing Strategy
 
@@ -687,10 +823,101 @@ met (< 50ms total).
    verify `s == e` by substituting random values for all variables and
    checking numerical equality. This catches bugs without requiring
    exact output matching.
-4. **Fuzz testing**: Generate random expressions within the grammar, simplify,
-   verify equivalence via the numerical oracle.
+4. **Fuzz testing**: Hypothesis-based (see below).
 5. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
    Track regressions in CI.
+
+### Fuzz Testing with Hypothesis
+
+Property-based fuzz testing uses Python's
+[Hypothesis](https://hypothesis.readthedocs.io/) library to generate random
+expressions within the grammar, simplify them with both ixsimpl and SymPy,
+and verify equivalence via numerical evaluation.
+
+```python
+from hypothesis import given, strategies as st, settings, assume
+import sympy
+import ixsimpl
+
+# Strategy: generate random expression trees within the grammar
+sym_names = st.sampled_from(["x", "y", "z", "w"])
+small_ints = st.integers(min_value=-64, max_value=64)
+pos_ints = st.integers(min_value=1, max_value=32)
+
+@st.composite
+def expressions(draw, max_depth=4):
+    if max_depth <= 0 or draw(st.booleans()):
+        return draw(st.one_of(sym_names, small_ints))
+    op = draw(st.sampled_from([
+        "add", "mul", "floor", "ceiling", "mod", "max", "min"
+    ]))
+    a = draw(expressions(max_depth=max_depth - 1))
+    if op in ("floor", "ceiling"):
+        return (op, a)
+    b = draw(expressions(max_depth=max_depth - 1))
+    if op == "mod":
+        b = draw(pos_ints)  # modulus must be positive
+    return (op, a, b)
+
+def to_sympy(tree):
+    """Convert expression tree to SymPy expression."""
+    ...
+
+def to_ixsimpl(ctx, tree):
+    """Convert expression tree to ixsimpl expression."""
+    ...
+
+@given(expr=expressions())
+@settings(max_examples=10000)
+def test_simplify_matches_numerical(expr):
+    """Simplification preserves semantics: evaluate original and simplified
+    at random points, check they agree."""
+    ctx = ixsimpl.Context()
+    ixs_expr = to_ixsimpl(ctx, expr)
+    ixs_simplified = ixs_expr.simplify()
+
+    # Evaluate both at random integer points
+    for _ in range(10):
+        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        orig = eval_expr(expr, env)
+        simp = eval_ixs(ixs_simplified, env)
+        assert orig == simp, f"Mismatch: {orig} != {simp} at {env}"
+
+@given(expr=expressions())
+@settings(max_examples=5000)
+def test_matches_sympy(expr):
+    """Cross-check against SymPy: both should produce numerically
+    equivalent results."""
+    ctx = ixsimpl.Context()
+    ixs_result = to_ixsimpl(ctx, expr).simplify()
+
+    sp_expr = to_sympy(expr)
+    sp_result = sympy.simplify(sp_expr)
+
+    for _ in range(10):
+        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        ixs_val = eval_ixs(ixs_result, env)
+        sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
+        assert ixs_val == sp_val, f"Divergence at {env}"
+```
+
+**Known SymPy bug to work around**: SymPy issue
+[#28744](https://github.com/sympy/sympy/issues/28744) — `Mod` incorrectly
+squares inner `Mod` subexpressions when the variable has `integer=True`
+assumption. The bug is in `sympy/core/mod.py` lines 166-172: factors of type
+`Mod` are duplicated into both `mod_l` and `non_mod_l`, causing them to
+appear squared. The fix (merged to `master` in Dec 2025) has not been included
+in any SymPy release yet (latest release is 1.14.0, April 2025).
+
+Workaround for the fuzz test oracle:
+
+- Do **not** set `integer=True` on SymPy symbols when constructing Mod
+  expressions. Use bare `Symbol('x')` instead of `Symbol('x', integer=True)`.
+- Alternatively, compare against SymPy `master` branch rather than the
+  released package.
+- As a secondary oracle, always verify via numerical evaluation (substituting
+  concrete integers) regardless of what SymPy's symbolic simplifier returns.
+  This catches both SymPy bugs and ixsimpl bugs independently.
 
 ## Risks and Mitigations
 
@@ -710,4 +937,4 @@ met (< 50ms total).
 - Trigonometric or transcendental functions
 - Matrix operations
 - Equation solving
-- Multi-language bindings (C is the target; callers link directly)
+- Bindings beyond C++ and Python
