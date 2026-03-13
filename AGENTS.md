@@ -70,11 +70,18 @@ git push                # Push to remote
 
 <!-- end-br-agent-instructions -->
 
+## Design
+
+`DESIGN.md` is the living spec. When code changes invalidate or extend what's described there — API signatures, node types, simplification rules, file structure, performance targets — update `DESIGN.md` in the same commit.
+
 ## Language & Build
 
 - **Pedantic C99**. Compile with `-std=c99 -pedantic -Wall -Wextra -Werror`.
 - No non-standard extensions (no GCC-isms, no `__attribute__`, no `typeof`, no statement-expressions, no zero-length arrays). If it doesn't compile with a strict C99 compiler, it doesn't ship.
 - **Build system: CMake**. No autotools, no plain Makefiles.
+- **No global state**. Zero file-scope or static mutable variables in the core library. All state lives in the context (`ixs_ctx`). The library must be safe to use from multiple threads with separate contexts.
+- **Arena-only allocation**. All memory is obtained in large 4K-aligned chunks and distributed via arenas. No direct `malloc`/`calloc`/`realloc`/`free` for individual objects.
+- **No OS-specific functions**. Only standard C library calls. No `mmap`, no `posix_memalign`, no `VirtualAlloc`, no platform headers. Portable C99 stdlib only.
 
 ## Tone
 

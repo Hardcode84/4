@@ -14,3 +14,9 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c, c++]
+
+# Sort file and library lists in CMake files.
+  -   repo: https://github.com/Hardcode84/3
+      rev: v0.3.0
+      hooks:
+      -   id: sort-cmake-lists
