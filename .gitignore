@@ -1,0 +1,25 @@
+# Build
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.out
+
+# Debug
+*.dSYM/
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+compile_commands.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Beads
+.beads/
