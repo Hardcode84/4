@@ -1,4 +1,7 @@
+# ixsimpl — Index Expression Simplifier
 
+A specialized C library for simplifying integer arithmetic expressions
+used in index computation, memory addressing, and loop bound calculation.
 
 <!-- br-agent-instructions-v1 -->
 
@@ -66,6 +69,12 @@ git push                # Push to remote
 - Always sync before ending session
 
 <!-- end-br-agent-instructions -->
+
+## Language & Build
+
+- **Pedantic C99**. Compile with `-std=c99 -pedantic -Wall -Wextra -Werror`.
+- No non-standard extensions (no GCC-isms, no `__attribute__`, no `typeof`, no statement-expressions, no zero-length arrays). If it doesn't compile with a strict C99 compiler, it doesn't ship.
+- **Build system: CMake**. No autotools, no plain Makefiles.
 
 ## Tone
 
