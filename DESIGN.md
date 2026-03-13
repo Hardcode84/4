@@ -449,8 +449,8 @@ analysis when the sign of `a - b` is provable.
 Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
 
-- Bounded variables: `0 <= $T0 < 256`, `0 <= $T1 < ...`, etc.
-  (bounds provided by the caller via API)
+- Bounded variables: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
+  extracts interval bounds from comparison assumptions automatically
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0`
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
@@ -472,11 +472,6 @@ typedef struct ixs_node ixs_node;
 ixs_ctx   *ixs_ctx_create(void);
 void       ixs_ctx_destroy(ixs_ctx *ctx);
 
-// Provide variable bounds (enables deeper simplification)
-void ixs_ctx_set_bounds(ixs_ctx *ctx, const char *var, int64_t lo, int64_t hi);
-
-// Assume a predicate (e.g., "M > 0", "_aligned == 1")
-void ixs_ctx_assume(ixs_ctx *ctx, ixs_node *predicate);
 
 // Parse a SymPy-format expression string
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
@@ -499,8 +494,13 @@ ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
 
-// Simplify (applies the full rewrite pass; parse already simplifies on construction)
-ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr);
+// Simplify with assumptions. Assumptions are boolean expression nodes
+// (e.g., comparisons like `M > 0`, `$T0 >= 0`, `$T0 < 256`, or equalities
+// like `Mod(M, 128) == 0`). The simplifier extracts variable bounds from
+// comparison assumptions automatically. Assumptions are separate from the
+// expression tree so that hash-consing is preserved. Pass NULL/0 if none.
+ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
+                        ixs_node *const *assumptions, size_t n_assumptions);
 
 // Structural equality (O(1) due to hash-consing)
 bool ixs_equal(ixs_node *a, ixs_node *b);  // just pointer comparison
@@ -515,23 +515,34 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 
 // Batch: simplify multiple expressions sharing subexpressions
 // (preserves CSE across the batch within the same context)
-void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n);
+void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
+                         ixs_node *const *assumptions, size_t n_assumptions);
 ```
 
 Usage pattern:
 
 ```c
 ixs_ctx *ctx = ixs_ctx_create();
-ixs_ctx_set_bounds(ctx, "$T0", 0, 255);
-ixs_ctx_set_bounds(ctx, "$T1", 0, 3);
-ixs_ctx_set_bounds(ctx, "$WG0", 0, INT64_MAX);
-ixs_ctx_set_bounds(ctx, "$WG1", 0, INT64_MAX);
-ixs_ctx_set_bounds(ctx, "M", 1, INT64_MAX);
-ixs_ctx_set_bounds(ctx, "N", 1, INT64_MAX);
-ixs_ctx_set_bounds(ctx, "K", 1, INT64_MAX);
+
+// Assumptions are just boolean expressions built with the same API
+ixs_node *T0  = ixs_sym(ctx, "$T0");
+ixs_node *T1  = ixs_sym(ctx, "$T1");
+ixs_node *M   = ixs_sym(ctx, "M");
+ixs_node *N   = ixs_sym(ctx, "N");
+ixs_node *K   = ixs_sym(ctx, "K");
+ixs_node *assumptions[] = {
+    ixs_cmp(ctx, T0, IXS_GE, ixs_int(ctx, 0)),    // $T0 >= 0
+    ixs_cmp(ctx, T0, IXS_LT, ixs_int(ctx, 256)),   // $T0 < 256
+    ixs_cmp(ctx, T1, IXS_GE, ixs_int(ctx, 0)),    // $T1 >= 0
+    ixs_cmp(ctx, T1, IXS_LT, ixs_int(ctx, 4)),     // $T1 < 4
+    ixs_cmp(ctx, M,  IXS_GE, ixs_int(ctx, 1)),     // M >= 1
+    ixs_cmp(ctx, N,  IXS_GE, ixs_int(ctx, 1)),     // N >= 1
+    ixs_cmp(ctx, K,  IXS_GE, ixs_int(ctx, 1)),     // K >= 1
+};
+size_t n_assumptions = sizeof(assumptions) / sizeof(assumptions[0]);
 
 ixs_node *expr = ixs_parse(ctx, input, strlen(input));
-ixs_node *simplified = ixs_simplify(ctx, expr);
+ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, n_assumptions);
 
 char buf[4096];
 ixs_print(simplified, buf, sizeof(buf));
@@ -649,11 +660,6 @@ public:
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
 
-    void set_bounds(const char *var, int64_t lo, int64_t hi) {
-        ixs_ctx_set_bounds(ctx_, var, lo, hi);
-    }
-    void assume(Expr pred);
-
     ixs_ctx *raw() const { return ctx_; }
 };
 
@@ -673,7 +679,13 @@ public:
         return {ctx.raw(), ixs_int(ctx.raw(), v)};
     }
 
-    Expr simplify() const { return {ctx_, ixs_simplify(ctx_, node_)}; }
+    Expr simplify(std::span<const Expr> assumptions = {}) const {
+        // Extract raw node pointers for the C API
+        std::vector<ixs_node*> raw(assumptions.size());
+        for (size_t i = 0; i < assumptions.size(); i++)
+            raw[i] = assumptions[i].raw();
+        return {ctx_, ixs_simplify(ctx_, node_, raw.data(), raw.size())};
+    }
     Expr subs(const char *var, Expr repl) const {
         return {ctx_, ixs_subs(ctx_, node_, var, repl.node_)};
     }
@@ -715,11 +727,13 @@ Python types: `Context` and `Expr`.
 import ixsimpl
 
 ctx = ixsimpl.Context()
-ctx.set_bounds("$T0", 0, 255)
-ctx.set_bounds("M", 1, 2**31)
+
+T0 = ctx.sym("$T0")
+M  = ctx.sym("M")
+assumptions = [T0 >= 0, T0 < 256, M >= 1]
 
 expr = ctx.parse("128*floor($T0/64) + 4*floor(Mod($T0, 64)/16)")
-result = expr.simplify()
+result = expr.simplify(assumptions=assumptions)
 print(result)              # SymPy-compatible string
 print(result.to_c())       # C code string
 
@@ -727,11 +741,11 @@ print(result.to_c())       # C code string
 x = ctx.sym("x")
 y = ctx.sym("y")
 e = ixsimpl.floor(x + y) + 3
-print(e.simplify())
+print(e.simplify(assumptions=assumptions))
 
 # Batch
 exprs = [ctx.parse(line) for line in lines]
-ctx.simplify_batch(exprs)
+ctx.simplify_batch(exprs, assumptions=assumptions)
 ```
 
 Implementation:
@@ -744,7 +758,9 @@ Implementation:
 - `__repr__` and `__str__` call `ixs_print`.
 - `__eq__` is pointer comparison (O(1) via hash-consing).
 - `__hash__` returns the node's precomputed hash.
-- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`.
+- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
+  `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
+  `Expr` nodes, not Python `bool`, so they can be used as assumptions).
 - `setup.py` / `pyproject.toml` builds the extension; no runtime
   dependencies.
 
