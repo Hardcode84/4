@@ -66,3 +66,14 @@ git push                # Push to remote
 - Always sync before ending session
 
 <!-- end-br-agent-instructions -->
+
+## Tone
+
+Code comments, docstrings, and commit messages share the same voice: terse, dry, informative. Wit is welcome, fluff is not. Say what the thing does, not what you wish it did. If a comment doesn't earn its line, delete it.
+
+## Commits
+
+- Small, focused commits. One logical change per commit. If you're wondering whether to split — split.
+- Stage files first, then run `pre-commit` — it only checks staged files. Fix issues and re-stage before committing.
+- Sign commits: `git commit -s`.
+- Commit messages should be descriptive, or at least funny. Not both is acceptable. Neither is not.
