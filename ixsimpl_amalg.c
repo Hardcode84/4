@@ -1497,7 +1497,7 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
 #include <string.h>
 
 #define PARSER_MAX_DEPTH 256
-#define MAX_TERMS 4096
+#include "ixs_limits.h"
 
 typedef struct {
   ixs_ctx *ctx;
@@ -2898,7 +2898,7 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 #include <string.h>
 
 /* Max terms/factors in a single flattened add/mul before we bail. */
-#define MAX_TERMS 4096
+#include "ixs_limits.h"
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ------------------------------------------------------------------ */

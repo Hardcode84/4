@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define PARSER_MAX_DEPTH 256
-#define MAX_TERMS 4096
+#include "ixs_limits.h"
 
 typedef struct {
   ixs_ctx *ctx;

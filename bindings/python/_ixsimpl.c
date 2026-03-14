@@ -89,12 +89,25 @@ static ContextObject *binop_ctx(PyObject *a, PyObject *b) {
 
 /* --- repr / str --- */
 
+static PyObject *print_to_pystr(ixs_node *node,
+                                size_t (*fn)(ixs_node *, char *, size_t)) {
+  char stack_buf[8192];
+  size_t n = fn(node, stack_buf, sizeof(stack_buf));
+  if (n < sizeof(stack_buf))
+    return PyUnicode_FromStringAndSize(stack_buf, (Py_ssize_t)n);
+  char *heap = PyMem_Malloc(n + 1);
+  if (!heap)
+    return PyErr_NoMemory();
+  fn(node, heap, n + 1);
+  PyObject *result = PyUnicode_FromStringAndSize(heap, (Py_ssize_t)n);
+  PyMem_Free(heap);
+  return result;
+}
+
 static PyObject *Expr_repr(ExprObject *self) {
-  char buf[8192];
   if (ixs_is_error(self->node))
     return PyUnicode_FromString("<error>");
-  ixs_print(self->node, buf, sizeof(buf));
-  return PyUnicode_FromString(buf);
+  return print_to_pystr(self->node, ixs_print);
 }
 
 static PyObject *Expr_str(ExprObject *self) { return Expr_repr(self); }
@@ -308,11 +321,9 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
 }
 
 static PyObject *Expr_to_c(ExprObject *self, PyObject *Py_UNUSED(args)) {
-  char buf[8192];
   if (ixs_is_error(self->node))
     return PyUnicode_FromString("/* error */");
-  ixs_print_c(self->node, buf, sizeof(buf));
-  return PyUnicode_FromString(buf);
+  return print_to_pystr(self->node, ixs_print_c);
 }
 
 static PyObject *Expr_subs(ExprObject *self, PyObject *args) {

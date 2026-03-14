@@ -4,7 +4,7 @@
 #include <string.h>
 
 /* Max terms/factors in a single flattened add/mul before we bail. */
-#define MAX_TERMS 4096
+#include "ixs_limits.h"
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ------------------------------------------------------------------ */
