@@ -16,6 +16,23 @@ static ixs_node *simp_err(ixs_ctx *ctx, const char *msg) {
   return ctx->sentinel_error;
 }
 
+/*
+ * Double a scratch-allocated array.  Returns the (possibly moved)
+ * pointer and updates *cap, or NULL on overflow/OOM.
+ */
+static void *scratch_grow(ixs_arena *a, void *ptr, size_t *cap,
+                          size_t elem_size) {
+  size_t old = *cap;
+  size_t next = old * 2;
+  if (next <= old || next > (size_t)-1 / elem_size)
+    return NULL;
+  void *p =
+      ixs_arena_grow(a, ptr, old * elem_size, next * elem_size, sizeof(void *));
+  if (p)
+    *cap = next;
+  return p;
+}
+
 static ixs_node *make_const(ixs_ctx *ctx, int64_t p, int64_t q) {
   if (q == 1)
     return ixs_node_int(ctx, p);
@@ -90,10 +107,14 @@ static int nodeptr_cmp(const void *a, const void *b) {
 /*  simp_add                                                          */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop;
   int64_t const_p = 0, const_q = 1;
-  ixs_addterm terms[MAX_TERMS];
+  size_t cap = 16;
+  ixs_addterm *terms =
+      ixs_arena_alloc(&ctx->scratch, cap * sizeof(*terms), sizeof(void *));
+  if (!terms)
+    return NULL;
   uint32_t nterms = 0;
   uint32_t i, j;
 
@@ -111,24 +132,31 @@ ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   for (i = 0; i < 2; i++) {
     ixs_node *x = inputs[i];
     if (x->tag == IXS_ADD) {
-      /* Flatten: add the constant and all terms. */
       int64_t cp, cq;
       ixs_node_get_rat(x->u.add.coeff, &cp, &cq);
       if (!ixs_rat_add(const_p, const_q, cp, cq, &const_p, &const_q))
         goto overflow;
-      for (j = 0; j < x->u.add.nterms && nterms < MAX_TERMS; j++)
+      for (j = 0; j < x->u.add.nterms; j++) {
+        if (nterms >= cap) {
+          terms = scratch_grow(&ctx->scratch, terms, &cap, sizeof(*terms));
+          if (!terms)
+            return NULL;
+        }
         terms[nterms++] = x->u.add.terms[j];
+      }
     } else {
       int64_t cp, cq;
       ixs_node *base;
       add_decompose(ctx, x, &cp, &cq, &base);
       if (!base) {
-        /* Pure constant */
         if (!ixs_rat_add(const_p, const_q, cp, cq, &const_p, &const_q))
           goto overflow;
       } else {
-        if (nterms >= MAX_TERMS)
-          goto overflow;
+        if (nterms >= cap) {
+          terms = scratch_grow(&ctx->scratch, terms, &cap, sizeof(*terms));
+          if (!terms)
+            return NULL;
+        }
         terms[nterms].term = base;
         terms[nterms].coeff = make_const(ctx, cp, cq);
         if (!terms[nterms].coeff)
@@ -152,7 +180,7 @@ ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       if (!ixs_rat_add(ap2, aq2, bp2, bq2, &rp, &rq))
         goto overflow;
       if (ixs_rat_is_zero(rp)) {
-        j--; /* Drop zero-coefficient term */
+        j--;
       } else {
         terms[j - 1].coeff = make_const(ctx, rp, rq);
         if (!terms[j - 1].coeff)
@@ -175,7 +203,6 @@ ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     ixs_node_get_rat(terms[0].coeff, &cp, &cq);
     if (ixs_rat_is_one(cp, cq))
       return terms[0].term;
-    /* c * term → MUL(c, term) */
     return simp_mul(ctx, make_const(ctx, cp, cq), terms[0].term);
   }
 
@@ -190,14 +217,25 @@ overflow:
   return simp_err(ctx, "rational overflow in add");
 }
 
+ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_add_impl(ctx, a, b);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
+}
+
 /* ------------------------------------------------------------------ */
 /*  simp_mul                                                          */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+static ixs_node *simp_mul_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop;
   int64_t coeff_p = 1, coeff_q = 1;
-  ixs_mulfactor factors[MAX_TERMS];
+  size_t cap = 16;
+  ixs_mulfactor *factors =
+      ixs_arena_alloc(&ctx->scratch, cap * sizeof(*factors), sizeof(void *));
+  if (!factors)
+    return NULL;
   uint32_t nfactors = 0;
   uint32_t i, j;
 
@@ -224,18 +262,28 @@ ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
       if (!ixs_rat_mul(coeff_p, coeff_q, cp, cq, &coeff_p, &coeff_q))
         goto overflow;
-      for (j = 0; j < x->u.mul.nfactors && nfactors < MAX_TERMS; j++)
+      for (j = 0; j < x->u.mul.nfactors; j++) {
+        if (nfactors >= cap) {
+          factors =
+              scratch_grow(&ctx->scratch, factors, &cap, sizeof(*factors));
+          if (!factors)
+            return NULL;
+        }
         factors[nfactors++] = x->u.mul.factors[j];
+      }
     } else {
-      if (nfactors >= MAX_TERMS)
-        goto overflow;
+      if (nfactors >= cap) {
+        factors = scratch_grow(&ctx->scratch, factors, &cap, sizeof(*factors));
+        if (!factors)
+          return NULL;
+      }
       factors[nfactors].base = x;
       factors[nfactors].exp = 1;
       nfactors++;
     }
   }
 
-  /* Short-circuit: coeff is zero → result is zero. */
+  /* Short-circuit: coeff is zero -> result is zero. */
   if (ixs_rat_is_zero(coeff_p))
     return ixs_node_int(ctx, 0);
 
@@ -251,7 +299,7 @@ ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       if (new_exp > INT32_MAX || new_exp < INT32_MIN)
         goto overflow;
       if (new_exp == 0) {
-        j--; /* base^0 = 1, drop */
+        j--;
       } else {
         factors[j - 1].exp = (int32_t)new_exp;
       }
@@ -279,6 +327,13 @@ ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 
 overflow:
   return simp_err(ctx, "rational overflow in multiply");
+}
+
+ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_mul_impl(ctx, a, b);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -524,9 +579,11 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (a->tag == IXS_MOD && a->u.binary.rhs == b)
     return a;
 
-  /* Mod(x + k*m, m) → Mod(x, m) when b is a constant integer.
-   * Look for multiples of m in the additive terms of a. */
-  if (a->tag == IXS_ADD && b->tag == IXS_INT && b->u.ival > 0) {
+  /* Mod(x + k*m, m) -> Mod(x, m) when b is a constant integer.
+   * Look for multiples of m in the additive terms of a.
+   * Guard: skip when nterms > MAX_TERMS (migrated to scratch in step 4). */
+  if (a->tag == IXS_ADD && b->tag == IXS_INT && b->u.ival > 0 &&
+      a->u.add.nterms <= MAX_TERMS) {
     int64_t m = b->u.ival;
     int64_t const_p, const_q;
     ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
@@ -539,7 +596,6 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         new_const_p += m;
     }
 
-    /* Check each term: if coefficient is a multiple of m, drop it. */
     ixs_addterm reduced[MAX_TERMS];
     uint32_t nr = 0;
     uint32_t i;
