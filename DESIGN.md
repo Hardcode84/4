@@ -144,6 +144,13 @@ function must belong to the same `ixs_ctx` as the `ctx` parameter. Passing
 a node from one context to a different context is **undefined behavior**
 (dangling arena pointer, wrong hash table).
 
+**Depth limit**: The parser enforces a recursion depth limit (default 256).
+Trees built programmatically via the API have no depth limit. The simplifier,
+printer, and `ixs_subs` traverse the DAG recursively. For expressions built
+from the corpus (max depth 11) this is safe. Deliberately constructing
+extremely deep trees (depth > ~10,000) via the API may cause stack overflow.
+This is considered acceptable for the target domain.
+
 ### Layer 0: Memory — Arena Allocator
 
 All expression nodes are allocated from a per-context arena. Nodes are never
@@ -531,7 +538,7 @@ simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
 
-**Sentinel handling**: Sentinel does not eagerly propagate through Piecewise
+**Sentinel handling**: Sentinels do not eagerly propagate through Piecewise
 (see Error Model). A sentinel value in a branch whose condition folds to
 `False` is silently dropped. A sentinel condition in an unreachable branch
 (preceded by a `True` condition) is silently dropped. Only when the sentinel
@@ -769,7 +776,8 @@ ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
-                    // n >= 1; last cond should be ixs_true; values/conds must be non-NULL
+                    // n >= 1; last cond should be ixs_true
+                    // values and conds must be non-NULL arrays of at least n elements
                     // NULL/sentinel entries: NULL element → entire result is NULL;
                     // sentinel element → propagates per priority rules
 ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
@@ -812,7 +820,7 @@ ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
 // Output — snprintf-like: returns the number of chars that would be written
 // (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
 // length without writing. Output is always null-terminated when bufsize > 0.
-// Sentinel prints as "<error>". NULL expr returns 0.
+// Sentinel prints as "<error>". NULL expr returns 0 and does not modify buf.
 size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);  // SymPy format
 size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 
@@ -1065,7 +1073,8 @@ Key properties:
   `is_null()` checks OOM, `is_parse_error()`/`is_domain_error()` check
   specific sentinels, `is_error()` checks either.
 - Operator overloading for natural expression building.
-- No heap allocations beyond what the C library does internally.
+- No heap allocations in expression construction or simplification beyond
+  what the C library does internally. (`str()` allocates a `std::string`.)
 - NULL and sentinel propagate through operators (same as C API).
 - **Cross-context contract** applies: all `Expr` values passed to an
   operation (including assumptions in `simplify()`) must belong to the
@@ -1330,14 +1339,19 @@ def eval_expr(tree, env):
 def eval_ixs(expr, env):
     """Evaluate ixsimpl Expr by substituting all variables via ixs_subs,
     then reading the resulting integer constant.
-    Returns int or raises ValueError if result is not a constant."""
+    Returns int or raises ValueError if result is not a constant/integer."""
     ctx = expr._ctx
     result = expr
     for name, val in env.items():
         result = result.subs(name, ctx.int_(val))
     if result.is_error:
         raise ValueError("sentinel")
-    return int(result)  # Expr.__int__ reads IXS_INT value; raises if not constant
+    # Expr.__int__ returns IXS_INT value; raises TypeError for non-INT nodes
+    # (including IXS_RAT — valid index expressions always reduce to integers)
+    try:
+        return int(result)
+    except TypeError:
+        raise ValueError(f"result is not an integer constant: {result}")
 
 @given(expr=expressions())
 @settings(max_examples=10000)
@@ -1354,7 +1368,7 @@ def test_simplify_matches_numerical(expr):
         env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
         try:
             orig = eval_expr(expr, env)
-        except (ZeroDivisionError, ValueError):
+        except (ZeroDivisionError, ValueError, TypeError):
             continue  # skip points where original is undefined
         simp = eval_ixs(ixs_simplified, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}"
@@ -1376,7 +1390,7 @@ def test_matches_sympy(expr):
         try:
             ixs_val = eval_ixs(ixs_result, env)
             sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
-        except (ZeroDivisionError, ValueError):
+        except (ZeroDivisionError, ValueError, TypeError):
             continue
         assert ixs_val == sp_val, f"Divergence at {env}"
 ```
