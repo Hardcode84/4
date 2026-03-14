@@ -1,0 +1,8 @@
+#ifndef IXS_PARSER_H
+#define IXS_PARSER_H
+
+#include "node.h"
+
+ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input, size_t len);
+
+#endif /* IXS_PARSER_H */

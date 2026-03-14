@@ -54,11 +54,15 @@ br sync --status      # Check sync status
 
 ```bash
 git status              # Check what changed
-git add <files>         # Stage code changes
+git add <files>         # Stage code changes (NOT .beads/)
 br sync --flush-only    # Export beads changes to JSONL
-git commit -m "..."     # Commit everything
+git commit -m "..."     # Commit code only
 git push                # Push to remote
 ```
+
+**Do NOT commit `.beads/`** — the beads database and JSONL files are local
+working state, not source artifacts. The `.beads/` directory should stay in
+`.gitignore`.
 
 ### Best Practices
 
@@ -67,6 +71,7 @@ git push                # Push to remote
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
+- Never `git add .beads/` — beads are local-only
 
 <!-- end-br-agent-instructions -->
 

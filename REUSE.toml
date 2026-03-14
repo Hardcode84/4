@@ -7,6 +7,11 @@ path = [
     ".gitignore",
     "*.md",
     "test/corpus.txt",
+    "CMakeLists.txt",
+    "include/**",
+    "src/**",
+    "test/**",
+    "bench/**",
 ]
 SPDX-FileCopyrightText = "2026 ixsimpl contributors"
 SPDX-License-Identifier = "Apache-2.0"

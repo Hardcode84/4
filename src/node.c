@@ -1,0 +1,658 @@
+#include "node.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/*  Hashing                                                           */
+/* ------------------------------------------------------------------ */
+
+static uint32_t hash_mix(uint32_t h, uint32_t v) {
+  h ^= v;
+  h *= 0x9e3779b9u;
+  h ^= h >> 16;
+  return h;
+}
+
+static uint32_t hash_i64(int64_t v) {
+  uint64_t u = (uint64_t)v;
+  return (uint32_t)(u ^ (u >> 32));
+}
+
+static uint32_t hash_str(const char *s) {
+  uint32_t h = 5381;
+  while (*s) {
+    h = ((h << 5) + h) ^ (unsigned char)*s;
+    s++;
+  }
+  return h;
+}
+
+static uint32_t compute_hash(const ixs_node *n) {
+  uint32_t h = (uint32_t)n->tag * 2654435761u;
+  switch (n->tag) {
+  case IXS_INT:
+    h = hash_mix(h, hash_i64(n->u.ival));
+    break;
+  case IXS_RAT:
+    h = hash_mix(h, hash_i64(n->u.rat.p));
+    h = hash_mix(h, hash_i64(n->u.rat.q));
+    break;
+  case IXS_SYM:
+    h = hash_mix(h, hash_str(n->u.name));
+    break;
+  case IXS_ADD: {
+    h = hash_mix(h, n->u.add.coeff->hash);
+    uint32_t i;
+    for (i = 0; i < n->u.add.nterms; i++) {
+      h = hash_mix(h, n->u.add.terms[i].term->hash);
+      h = hash_mix(h, n->u.add.terms[i].coeff->hash);
+    }
+    break;
+  }
+  case IXS_MUL: {
+    h = hash_mix(h, n->u.mul.coeff->hash);
+    uint32_t i;
+    for (i = 0; i < n->u.mul.nfactors; i++) {
+      h = hash_mix(h, n->u.mul.factors[i].base->hash);
+      h = hash_mix(h, (uint32_t)n->u.mul.factors[i].exp);
+    }
+    break;
+  }
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    h = hash_mix(h, n->u.unary.arg->hash);
+    break;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    h = hash_mix(h, n->u.binary.lhs->hash);
+    h = hash_mix(h, n->u.binary.rhs->hash);
+    break;
+  case IXS_CMP:
+    h = hash_mix(h, n->u.binary.lhs->hash);
+    h = hash_mix(h, n->u.binary.rhs->hash);
+    h = hash_mix(h, (uint32_t)n->u.binary.cmp_op);
+    break;
+  case IXS_PIECEWISE: {
+    uint32_t i;
+    for (i = 0; i < n->u.pw.ncases; i++) {
+      h = hash_mix(h, n->u.pw.cases[i].value->hash);
+      h = hash_mix(h, n->u.pw.cases[i].cond->hash);
+    }
+    break;
+  }
+  case IXS_AND:
+  case IXS_OR: {
+    uint32_t i;
+    for (i = 0; i < n->u.logic.nargs; i++)
+      h = hash_mix(h, n->u.logic.args[i]->hash);
+    break;
+  }
+  case IXS_NOT:
+    h = hash_mix(h, n->u.unary_bool.arg->hash);
+    break;
+  case IXS_TRUE:
+    h = hash_mix(h, 1);
+    break;
+  case IXS_FALSE:
+    h = hash_mix(h, 0);
+    break;
+  case IXS_ERROR:
+    h = hash_mix(h, 0xDEAD);
+    break;
+  case IXS_PARSE_ERROR:
+    h = hash_mix(h, 0xBEEF);
+    break;
+  }
+  return h;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Node equality (structural)                                        */
+/* ------------------------------------------------------------------ */
+
+bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  if (a == b)
+    return true;
+  if (a->tag != b->tag)
+    return false;
+  switch (a->tag) {
+  case IXS_INT:
+    return a->u.ival == b->u.ival;
+  case IXS_RAT:
+    return a->u.rat.p == b->u.rat.p && a->u.rat.q == b->u.rat.q;
+  case IXS_SYM:
+    return strcmp(a->u.name, b->u.name) == 0;
+  case IXS_ADD:
+    if (a->u.add.coeff != b->u.add.coeff)
+      return false;
+    if (a->u.add.nterms != b->u.add.nterms)
+      return false;
+    for (i = 0; i < a->u.add.nterms; i++) {
+      if (a->u.add.terms[i].term != b->u.add.terms[i].term)
+        return false;
+      if (a->u.add.terms[i].coeff != b->u.add.terms[i].coeff)
+        return false;
+    }
+    return true;
+  case IXS_MUL:
+    if (a->u.mul.coeff != b->u.mul.coeff)
+      return false;
+    if (a->u.mul.nfactors != b->u.mul.nfactors)
+      return false;
+    for (i = 0; i < a->u.mul.nfactors; i++) {
+      if (a->u.mul.factors[i].base != b->u.mul.factors[i].base)
+        return false;
+      if (a->u.mul.factors[i].exp != b->u.mul.factors[i].exp)
+        return false;
+    }
+    return true;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    return a->u.unary.arg == b->u.unary.arg;
+  case IXS_CMP:
+    return a->u.binary.lhs == b->u.binary.lhs &&
+           a->u.binary.rhs == b->u.binary.rhs &&
+           a->u.binary.cmp_op == b->u.binary.cmp_op;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    return a->u.binary.lhs == b->u.binary.lhs &&
+           a->u.binary.rhs == b->u.binary.rhs;
+  case IXS_PIECEWISE:
+    if (a->u.pw.ncases != b->u.pw.ncases)
+      return false;
+    for (i = 0; i < a->u.pw.ncases; i++) {
+      if (a->u.pw.cases[i].value != b->u.pw.cases[i].value)
+        return false;
+      if (a->u.pw.cases[i].cond != b->u.pw.cases[i].cond)
+        return false;
+    }
+    return true;
+  case IXS_AND:
+  case IXS_OR:
+    if (a->u.logic.nargs != b->u.logic.nargs)
+      return false;
+    for (i = 0; i < a->u.logic.nargs; i++)
+      if (a->u.logic.args[i] != b->u.logic.args[i])
+        return false;
+    return true;
+  case IXS_NOT:
+    return a->u.unary_bool.arg == b->u.unary_bool.arg;
+  case IXS_TRUE:
+  case IXS_FALSE:
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return true;
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Node comparison (total order)                                     */
+/* ------------------------------------------------------------------ */
+
+int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
+  uint32_t i, n;
+  int c;
+  if (a == b)
+    return 0;
+  if ((int)a->tag != (int)b->tag)
+    return (int)a->tag < (int)b->tag ? -1 : 1;
+
+  switch (a->tag) {
+  case IXS_INT:
+    if (a->u.ival < b->u.ival)
+      return -1;
+    if (a->u.ival > b->u.ival)
+      return 1;
+    return 0;
+  case IXS_RAT:
+    return ixs_rat_cmp(a->u.rat.p, a->u.rat.q, b->u.rat.p, b->u.rat.q);
+  case IXS_SYM:
+    return strcmp(a->u.name, b->u.name);
+  case IXS_ADD:
+    c = ixs_node_cmp(a->u.add.coeff, b->u.add.coeff);
+    if (c)
+      return c;
+    if (a->u.add.nterms != b->u.add.nterms)
+      return a->u.add.nterms < b->u.add.nterms ? -1 : 1;
+    for (i = 0; i < a->u.add.nterms; i++) {
+      c = ixs_node_cmp(a->u.add.terms[i].term, b->u.add.terms[i].term);
+      if (c)
+        return c;
+      c = ixs_node_cmp(a->u.add.terms[i].coeff, b->u.add.terms[i].coeff);
+      if (c)
+        return c;
+    }
+    return 0;
+  case IXS_MUL:
+    c = ixs_node_cmp(a->u.mul.coeff, b->u.mul.coeff);
+    if (c)
+      return c;
+    if (a->u.mul.nfactors != b->u.mul.nfactors)
+      return a->u.mul.nfactors < b->u.mul.nfactors ? -1 : 1;
+    for (i = 0; i < a->u.mul.nfactors; i++) {
+      c = ixs_node_cmp(a->u.mul.factors[i].base, b->u.mul.factors[i].base);
+      if (c)
+        return c;
+      if (a->u.mul.factors[i].exp != b->u.mul.factors[i].exp)
+        return a->u.mul.factors[i].exp < b->u.mul.factors[i].exp ? -1 : 1;
+    }
+    return 0;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    return ixs_node_cmp(a->u.unary.arg, b->u.unary.arg);
+  case IXS_CMP:
+    if (a->u.binary.cmp_op != b->u.binary.cmp_op)
+      return (int)a->u.binary.cmp_op < (int)b->u.binary.cmp_op ? -1 : 1;
+    /* fallthrough */
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    c = ixs_node_cmp(a->u.binary.lhs, b->u.binary.lhs);
+    if (c)
+      return c;
+    return ixs_node_cmp(a->u.binary.rhs, b->u.binary.rhs);
+  case IXS_PIECEWISE:
+    if (a->u.pw.ncases != b->u.pw.ncases)
+      return a->u.pw.ncases < b->u.pw.ncases ? -1 : 1;
+    for (i = 0; i < a->u.pw.ncases; i++) {
+      c = ixs_node_cmp(a->u.pw.cases[i].value, b->u.pw.cases[i].value);
+      if (c)
+        return c;
+      c = ixs_node_cmp(a->u.pw.cases[i].cond, b->u.pw.cases[i].cond);
+      if (c)
+        return c;
+    }
+    return 0;
+  case IXS_AND:
+  case IXS_OR:
+    if (a->u.logic.nargs != b->u.logic.nargs)
+      return a->u.logic.nargs < b->u.logic.nargs ? -1 : 1;
+    n = a->u.logic.nargs;
+    for (i = 0; i < n; i++) {
+      c = ixs_node_cmp(a->u.logic.args[i], b->u.logic.args[i]);
+      if (c)
+        return c;
+    }
+    return 0;
+  case IXS_NOT:
+    return ixs_node_cmp(a->u.unary_bool.arg, b->u.unary_bool.arg);
+  case IXS_TRUE:
+  case IXS_FALSE:
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return 0;
+  }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Hash-consing table                                                */
+/* ------------------------------------------------------------------ */
+
+bool ixs_htab_init(ixs_ctx *ctx) {
+  ctx->htab_cap = IXS_HTAB_INIT_CAP;
+  ctx->htab_used = 0;
+  ctx->htab = calloc(ctx->htab_cap, sizeof(ixs_node *));
+  return ctx->htab != NULL;
+}
+
+void ixs_htab_destroy(ixs_ctx *ctx) {
+  free(ctx->htab);
+  ctx->htab = NULL;
+}
+
+static bool htab_rehash(ixs_ctx *ctx) {
+  size_t new_cap = ctx->htab_cap * 2;
+  if (new_cap < ctx->htab_cap)
+    return false;
+
+  ixs_node **new_buckets = calloc(new_cap, sizeof(ixs_node *));
+  if (!new_buckets)
+    return false;
+
+  size_t mask = new_cap - 1;
+  size_t i;
+  for (i = 0; i < ctx->htab_cap; i++) {
+    ixs_node *n = ctx->htab[i];
+    if (!n)
+      continue;
+    size_t idx = n->hash & mask;
+    while (new_buckets[idx])
+      idx = (idx + 1) & mask;
+    new_buckets[idx] = n;
+  }
+
+  free(ctx->htab);
+  ctx->htab = new_buckets;
+  ctx->htab_cap = new_cap;
+  return true;
+}
+
+ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
+  size_t mask = ctx->htab_cap - 1;
+  size_t idx = node->hash & mask;
+
+  for (;;) {
+    ixs_node *slot = ctx->htab[idx];
+    if (!slot) {
+      ctx->htab[idx] = node;
+      ctx->htab_used++;
+      if (ctx->htab_used * IXS_HTAB_LOAD_DEN >
+          ctx->htab_cap * IXS_HTAB_LOAD_NUM) {
+        if (!htab_rehash(ctx))
+          return NULL;
+      }
+      return node;
+    }
+    if (slot->hash == node->hash && ixs_node_equal(slot, node))
+      return slot;
+    idx = (idx + 1) & mask;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Arena allocation helpers                                          */
+/* ------------------------------------------------------------------ */
+
+static ixs_node *alloc_node(ixs_ctx *ctx) {
+  ixs_node *n = ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
+  if (n)
+    memset(n, 0, sizeof(*n));
+  return n;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Raw node constructors                                             */
+/* ------------------------------------------------------------------ */
+
+ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
+  ixs_node tmp;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_INT;
+  tmp.u.ival = val;
+  tmp.hash = compute_hash(&tmp);
+
+  /* Check hash table first to avoid redundant arena alloc. */
+  size_t mask = ctx->htab_cap - 1;
+  size_t idx = tmp.hash & mask;
+  for (;;) {
+    ixs_node *slot = ctx->htab[idx];
+    if (!slot)
+      break;
+    if (slot->hash == tmp.hash && ixs_node_equal(slot, &tmp))
+      return slot;
+    idx = (idx + 1) & mask;
+  }
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  *n = tmp;
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
+  if (q == 1)
+    return ixs_node_int(ctx, p);
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_RAT;
+  n->u.rat.p = p;
+  n->u.rat.q = q;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
+  /* Intern the string: check if we've seen this symbol name before
+   * by looking up a temporary node. Symbols are common, so this
+   * avoids redundant string copies. */
+  ixs_node tmp;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_SYM;
+  tmp.u.name = name; /* temporary pointer for hash computation */
+  tmp.hash = compute_hash(&tmp);
+
+  size_t mask = ctx->htab_cap - 1;
+  size_t idx = tmp.hash & mask;
+  for (;;) {
+    ixs_node *slot = ctx->htab[idx];
+    if (!slot)
+      break;
+    if (slot->hash == tmp.hash && slot->tag == IXS_SYM &&
+        strlen(slot->u.name) == len && memcmp(slot->u.name, name, len) == 0)
+      return slot;
+    idx = (idx + 1) & mask;
+  }
+
+  char *interned = ixs_arena_strdup(&ctx->arena, name, len);
+  if (!interned)
+    return NULL;
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_SYM;
+  n->u.name = interned;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
+                       ixs_addterm *terms) {
+  ixs_addterm *a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
+                                   sizeof(void *));
+  if (!a && nterms > 0)
+    return NULL;
+  memcpy(a, terms, nterms * sizeof(ixs_addterm));
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_ADD;
+  n->u.add.coeff = coeff;
+  n->u.add.nterms = nterms;
+  n->u.add.terms = a;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
+                       ixs_mulfactor *factors) {
+  ixs_mulfactor *f = ixs_arena_alloc(
+      &ctx->arena, nfactors * sizeof(ixs_mulfactor), sizeof(void *));
+  if (!f && nfactors > 0)
+    return NULL;
+  memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_MUL;
+  n->u.mul.coeff = coeff;
+  n->u.mul.nfactors = nfactors;
+  n->u.mul.factors = f;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_FLOOR;
+  n->u.unary.arg = arg;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_CEIL;
+  n->u.unary.arg = arg;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
+                          ixs_node *rhs, ixs_cmp_op op) {
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = tag;
+  n->u.binary.lhs = lhs;
+  n->u.binary.rhs = rhs;
+  n->u.binary.cmp_op = op;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
+  ixs_pwcase *c =
+      ixs_arena_alloc(&ctx->arena, ncases * sizeof(ixs_pwcase), sizeof(void *));
+  if (!c && ncases > 0)
+    return NULL;
+  memcpy(c, cases, ncases * sizeof(ixs_pwcase));
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_PIECEWISE;
+  n->u.pw.ncases = ncases;
+  n->u.pw.cases = c;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
+                         ixs_node **args) {
+  ixs_node **a =
+      ixs_arena_alloc(&ctx->arena, nargs * sizeof(ixs_node *), sizeof(void *));
+  if (!a && nargs > 0)
+    return NULL;
+  memcpy(a, args, nargs * sizeof(ixs_node *));
+
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = tag;
+  n->u.logic.nargs = nargs;
+  n->u.logic.args = a;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
+  ixs_node *n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  n->tag = IXS_NOT;
+  n->u.unary_bool.arg = arg;
+  n->hash = compute_hash(n);
+  return ixs_htab_intern(ctx, n);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Utilities                                                         */
+/* ------------------------------------------------------------------ */
+
+bool ixs_node_is_const(const ixs_node *n) {
+  return n->tag == IXS_INT || n->tag == IXS_RAT;
+}
+
+bool ixs_node_is_int(const ixs_node *n) { return n->tag == IXS_INT; }
+
+bool ixs_node_is_zero(const ixs_node *n) {
+  return n->tag == IXS_INT && n->u.ival == 0;
+}
+
+bool ixs_node_is_one(const ixs_node *n) {
+  return n->tag == IXS_INT && n->u.ival == 1;
+}
+
+void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
+  if (n->tag == IXS_INT) {
+    *p = n->u.ival;
+    *q = 1;
+  } else {
+    *p = n->u.rat.p;
+    *q = n->u.rat.q;
+  }
+}
+
+bool ixs_node_is_sentinel(const ixs_node *n) {
+  return n->tag == IXS_ERROR || n->tag == IXS_PARSE_ERROR;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Error list                                                        */
+/* ------------------------------------------------------------------ */
+
+void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  char *msg = ixs_arena_strdup(&ctx->arena, buf, strlen(buf));
+  if (!msg)
+    return;
+
+  if (ctx->nerrors >= ctx->errors_cap) {
+    size_t new_cap = ctx->errors_cap ? ctx->errors_cap * 2 : 16;
+    const char **new_arr =
+        realloc((void *)ctx->errors, new_cap * sizeof(const char *));
+    if (!new_arr)
+      return;
+    ctx->errors = new_arr;
+    ctx->errors_cap = new_cap;
+  }
+  ctx->errors[ctx->nerrors++] = msg;
+}
+
+/* ------------------------------------------------------------------ */
+/*  NULL / sentinel propagation                                       */
+/* ------------------------------------------------------------------ */
+
+ixs_node *ixs_propagate1(ixs_node *a) {
+  if (!a)
+    return NULL;
+  if (ixs_node_is_sentinel(a))
+    return a;
+  return NULL; /* clean */
+}
+
+/*
+ * Returns non-NULL if propagation should short-circuit:
+ * - NULL input → returns sentinel_null (caller must check for NULL return
+ *   differently — we use a convention: return (ixs_node*)(uintptr_t)1
+ *   as a "NULL propagation" marker, but that's fragile).
+ *
+ * Simpler approach: caller checks NULL first, then calls propagate2.
+ * We return non-NULL only for sentinel propagation.
+ */
+ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
+  if (!a || !b)
+    return NULL; /* OOM propagation — caller returns NULL */
+  if (a->tag == IXS_PARSE_ERROR || b->tag == IXS_PARSE_ERROR)
+    return a->tag == IXS_PARSE_ERROR ? a : b;
+  if (a->tag == IXS_ERROR)
+    return a;
+  if (b->tag == IXS_ERROR)
+    return b;
+  return NULL; /* both clean */
+}
