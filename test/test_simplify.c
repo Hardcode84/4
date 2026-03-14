@@ -1,5 +1,6 @@
 #include <ixsimpl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int tests_run = 0;
@@ -641,6 +642,70 @@ static void test_divisibility_assumptions(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_large_expressions(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  int i;
+
+  /* ADD with >256 distinct terms. */
+  {
+    ixs_node *sum = ixs_int(ctx, 0);
+    char name[16];
+    for (i = 0; i < 300; i++) {
+      snprintf(name, sizeof(name), "s%d", i);
+      sum = ixs_add(ctx, sum, ixs_sym(ctx, name));
+      CHECK(sum != NULL && !ixs_is_error(sum));
+    }
+    CHECK(ixs_node_tag(sum) == IXS_ADD);
+  }
+
+  /* MUL with >256 distinct factors. */
+  {
+    ixs_node *prod = ixs_int(ctx, 1);
+    char name[16];
+    for (i = 0; i < 300; i++) {
+      snprintf(name, sizeof(name), "m%d", i);
+      prod = ixs_mul(ctx, prod, ixs_sym(ctx, name));
+      CHECK(prod != NULL && !ixs_is_error(prod));
+    }
+    CHECK(ixs_node_tag(prod) == IXS_MUL);
+  }
+
+  /* AND with >256 distinct args. */
+  {
+    ixs_node *conj = ixs_true(ctx);
+    char name[16];
+    for (i = 0; i < 300; i++) {
+      snprintf(name, sizeof(name), "a%d", i);
+      ixs_node *cmp =
+          ixs_cmp(ctx, ixs_sym(ctx, name), IXS_CMP_GT, ixs_int(ctx, 0));
+      conj = ixs_and(ctx, conj, cmp);
+      CHECK(conj != NULL && !ixs_is_error(conj));
+    }
+    CHECK(ixs_node_tag(conj) == IXS_AND);
+  }
+
+  /* Piecewise with >256 cases. */
+  {
+    ixs_node **vals = malloc(300 * sizeof(*vals));
+    ixs_node **conds = malloc(300 * sizeof(*conds));
+    CHECK(vals != NULL && conds != NULL);
+    char name[16];
+    for (i = 0; i < 299; i++) {
+      snprintf(name, sizeof(name), "p%d", i);
+      vals[i] = ixs_sym(ctx, name);
+      conds[i] = ixs_cmp(ctx, ixs_sym(ctx, name), IXS_CMP_GT, ixs_int(ctx, 0));
+    }
+    vals[299] = ixs_int(ctx, 0);
+    conds[299] = ixs_true(ctx);
+    ixs_node *pw = ixs_pw(ctx, 300, vals, conds);
+    CHECK(pw != NULL && !ixs_is_error(pw));
+    free(vals);
+    free(conds);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -659,6 +724,7 @@ int main(void) {
   test_same_node();
   test_print_roundtrip();
   test_divisibility_assumptions();
+  test_large_expressions();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
