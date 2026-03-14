@@ -146,7 +146,8 @@ a node from one context to a different context is **undefined behavior**
 
 **Depth limit**: The parser enforces a recursion depth limit (default 256).
 Trees built programmatically via the API have no depth limit. The simplifier,
-printer, and `ixs_subs` traverse the DAG recursively. For expressions built
+printer, and `ixs_subs` traverse the DAG recursively (with O(1) match per node
+via pointer equality on hash-consed nodes). For expressions built
 from the corpus (max depth 11) this is safe. Deliberately constructing
 extremely deep trees (depth > ~10,000) via the API may cause stack overflow.
 This is considered acceptable for the target domain.
@@ -844,13 +845,14 @@ ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
 // ixs_same_node(NULL, NULL) returns true, ixs_same_node(NULL, x) returns false.
 bool ixs_same_node(ixs_node *a, ixs_node *b);
 
-// Substitution — single-pass: replaces all occurrences of symbol `var` in
-// `expr` with `replacement`. Does NOT re-substitute into the replacement
-// itself (no recursive expansion). var must be a valid non-empty string
-// (NULL/empty is UB). NULL/sentinel propagation applies to expr and
-// replacement as with constructors.
+// Substitution — single-pass: replaces all occurrences of `target` in
+// `expr` with `replacement`. target can be any node (symbol, constant,
+// subexpression). Matching uses pointer equality (O(1) per node thanks
+// to hash-consing). Does NOT re-substitute into the replacement itself
+// (no recursive expansion). NULL/sentinel propagation applies to expr,
+// target, and replacement as with constructors.
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
-                    const char *var, ixs_node *replacement);
+                    ixs_node *target, ixs_node *replacement);
 
 // Output — snprintf-like: returns the number of chars that would be written
 // (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
@@ -1063,8 +1065,8 @@ public:
     Expr simplify() const {
         return {ctx_, ixs_simplify(ctx_, node_, nullptr, 0)};
     }
-    Expr subs(const char *var, Expr repl) const {
-        return {ctx_, ixs_subs(ctx_, node_, var, repl.node_)};
+    Expr subs(Expr target, Expr repl) const {
+        return {ctx_, ixs_subs(ctx_, node_, target.node_, repl.node_)};
     }
 
     Expr operator+(Expr rhs) const { return {ctx_, ixs_add(ctx_, node_, rhs.node_)}; }
@@ -1372,7 +1374,7 @@ def eval_expr(tree, env):
     ...
 
 def eval_ixs(expr, env):
-    """Evaluate ixsimpl Expr by substituting all variables via ixs_subs,
+    """Evaluate ixsimpl Expr by substituting all variables via subs,
     then reading the resulting integer constant.
     Returns int or raises ValueError if result is not a constant/integer."""
     ctx = expr._ctx

@@ -316,18 +316,29 @@ static PyObject *Expr_to_c(ExprObject *self, PyObject *Py_UNUSED(args)) {
 }
 
 static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
-  const char *var;
-  PyObject *repl_obj;
-  ixs_node *repl, *result;
+  PyObject *target_obj, *repl_obj;
+  ixs_node *target, *repl, *result;
 
-  if (!PyArg_ParseTuple(args, "sO", &var, &repl_obj))
+  if (!PyArg_ParseTuple(args, "OO", &target_obj, &repl_obj))
+    return NULL;
+
+  /* Accept string as shorthand for symbol lookup */
+  if (PyUnicode_Check(target_obj)) {
+    const char *name = PyUnicode_AsUTF8(target_obj);
+    if (!name)
+      return NULL;
+    target = ixs_sym(self->ctx_obj->ctx, name);
+  } else {
+    target = coerce_arg(self->ctx_obj, target_obj);
+  }
+  if (!target)
     return NULL;
 
   repl = coerce_arg(self->ctx_obj, repl_obj);
   if (!repl)
     return NULL;
 
-  result = ixs_subs(self->ctx_obj->ctx, self->node, var, repl);
+  result = ixs_subs(self->ctx_obj->ctx, self->node, target, repl);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -337,7 +348,7 @@ static PyMethodDef Expr_methods[] = {
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
-     "Substitute variable: expr.subs('x', replacement)."},
+     "Substitute: expr.subs(target, replacement). target is a string or Expr."},
     {NULL}};
 
 /* --- Expr properties --- */

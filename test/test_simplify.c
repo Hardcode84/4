@@ -182,13 +182,32 @@ static void test_substitution(void) {
 
   /* x + 1 with x=5 → 6 */
   ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
-  ixs_node *result = ixs_subs(ctx, expr, "x", ixs_int(ctx, 5));
+  ixs_node *result = ixs_subs(ctx, expr, x, ixs_int(ctx, 5));
   CHECK(result && ixs_node_int_val(result) == 6);
 
   /* floor(x/2) with x=7 → 3 */
   expr = ixs_floor(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 2)));
-  result = ixs_subs(ctx, expr, "x", ixs_int(ctx, 7));
+  result = ixs_subs(ctx, expr, x, ixs_int(ctx, 7));
   CHECK(result && ixs_node_int_val(result) == 3);
+
+  /* Subtree replacement: replace Mod(x,4) with y in a larger expression */
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *mod_x4 = ixs_mod(ctx, x, ixs_int(ctx, 4));
+  expr = ixs_add(ctx, mod_x4, ixs_int(ctx, 10));
+  result = ixs_subs(ctx, expr, mod_x4, y);
+  CHECK(result && strcmp(pr(result), "10 + y") == 0);
+
+  /* Replace constant: 2 → 3 in 2*x + 2 */
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *three = ixs_int(ctx, 3);
+  expr = ixs_add(ctx, ixs_mul(ctx, two, x), two);
+  result = ixs_subs(ctx, expr, two, three);
+  CHECK(result && strcmp(pr(result), "3 + 3*x") == 0);
+
+  /* No match: target not present leaves expression unchanged */
+  expr = ixs_add(ctx, x, ixs_int(ctx, 1));
+  result = ixs_subs(ctx, expr, y, ixs_int(ctx, 99));
+  CHECK(result && strcmp(pr(result), "1 + x") == 0);
 
   ixs_ctx_destroy(ctx);
 }

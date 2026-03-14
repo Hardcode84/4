@@ -30,8 +30,8 @@ ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
-/* Substitution: replace all occurrences of var with replacement. */
-ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, const char *var,
+/* Substitution: replace all occurrences of target with replacement. */
+ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                     ixs_node *replacement);
 
 #endif /* IXS_SIMPLIFY_H */

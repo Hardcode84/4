@@ -127,8 +127,10 @@ void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 /* Pointer equality on hash-consed nodes.  Safe to call with NULL. */
 bool ixs_same_node(ixs_node *a, ixs_node *b);
 
-/* Return expr with all occurrences of var replaced by replacement. */
-ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, const char *var,
+/* Return expr with all occurrences of target replaced by replacement.
+ * target can be any node (symbol, subexpression, constant, etc.).
+ * Uses pointer equality (hash-consed), so matching is O(1) per node. */
+ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement);
 
 /* --- Output ------------------------------------------------------------ */

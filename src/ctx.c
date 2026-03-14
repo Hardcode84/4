@@ -224,9 +224,9 @@ void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 
 bool ixs_same_node(ixs_node *a, ixs_node *b) { return a == b; }
 
-ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, const char *var,
+ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement) {
-  return simp_subs(ctx, expr, var, replacement);
+  return simp_subs(ctx, expr, target, replacement);
 }
 
 /* ------------------------------------------------------------------ */

@@ -301,7 +301,7 @@ static void test_sentinel_propagation(void) {
   CHECK(r && ixs_is_error(r));
 
   /* subs */
-  r = ixs_subs(ctx, err, "x", ixs_int(ctx, 1));
+  r = ixs_subs(ctx, err, ixs_sym(ctx, "x"), ixs_int(ctx, 1));
   CHECK(r && ixs_is_error(r));
 
   /* print: truncates safely, no overrun */
