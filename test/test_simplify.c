@@ -304,26 +304,42 @@ static void test_mod_extract_constant(void) {
   r = ixs_simplify(ctx, expr, NULL, 0);
   CHECK(strcmp(pr(r), "7 + Mod(8*floor(x), 16)") == 0);
 
-  /* Mod(4*floor(x) + 4, 16) should NOT extract: 4 is not < gcd(4)=4. */
+  /* Mod(4*floor(x) + 4, 16): c=4 >= gcd(4)=4, extraction must NOT fire. */
   sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), fx), ixs_int(ctx, 4));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
   r = ixs_simplify(ctx, expr, NULL, 0);
-  /* The existing strip rule reduces const 4 mod 16 = 4, but the extract
-   * rule should not fire (4 >= 4). Verify it's not "... + 4". */
   CHECK(r && !ixs_is_error(r));
+  CHECK(strstr(pr(r), "4 + Mod(") == NULL);
 
-  /* Mod(4*x + 3, 16) should NOT extract: x is a symbol (integer-valued
-   * by convention) so it does fire.  Let's check the non-integer case:
-   * Mod(4*(x/2) + 3, 16) — x/2 is not integer-valued. */
+  /* Mod(4*(x/2) + 3, 16) → Mod(2*x + 3, 16).
+   * 4*(1/2) collapses to 2, so gcd(2)=2, and 3 >= 2: no extraction. */
   ixs_node *xhalf = ixs_mul(ctx, x, ixs_rat(ctx, 1, 2));
   term = ixs_mul(ctx, ixs_int(ctx, 4), xhalf);
   sum = ixs_add(ctx, term, ixs_int(ctx, 3));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
   r = ixs_simplify(ctx, expr, NULL, 0);
-  /* 4*(x/2) = 2*x, which IS integer. The simplifier collapses 4*(1/2)=2.
-   * So this becomes Mod(2*x + 3, 16) → Mod(2*x, 16) + 3 (2 | 16, 3 < 2? no).
-   * Actually gcd(2) = 2, 3 >= 2, so no extraction. */
   CHECK(r && !ixs_is_error(r));
+  CHECK(strstr(pr(r), "3 + Mod(") == NULL);
+
+  /* Multi-term: Mod(4*floor(x) + 6*floor(y) + 3, 12).
+   * gcd(4, 6) = 2, and 3 >= 2: extraction must NOT fire.
+   * (Wave's original min(4,6)=4 would wrongly allow 3 < 4.) */
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *fy = ixs_floor(ctx, y);
+  ixs_node *t1 = ixs_mul(ctx, ixs_int(ctx, 4), fx);
+  ixs_node *t2 = ixs_mul(ctx, ixs_int(ctx, 6), fy);
+  sum = ixs_add(ctx, ixs_add(ctx, t1, t2), ixs_int(ctx, 3));
+  expr = ixs_mod(ctx, sum, ixs_int(ctx, 12));
+  r = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(r && !ixs_is_error(r));
+  CHECK(strstr(pr(r), "3 + Mod(") == NULL);
+
+  /* Multi-term positive: Mod(4*floor(x) + 6*floor(y) + 1, 12).
+   * gcd(4, 6) = 2, and 1 < 2: extraction fires. */
+  sum = ixs_add(ctx, ixs_add(ctx, t1, t2), ixs_int(ctx, 1));
+  expr = ixs_mod(ctx, sum, ixs_int(ctx, 12));
+  r = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(strstr(pr(r), "1 + Mod(") != NULL);
 
   ixs_ctx_destroy(ctx);
 }
@@ -341,10 +357,10 @@ static void test_floor_drop_small_rational(void) {
   ixs_node *inner =
       ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)), ixs_rat(ctx, 1, 6));
   ixs_node *expr = ixs_floor(ctx, inner);
-  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 2);
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 1);
   ixs_node *expected =
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
-                   assumptions, 2);
+                   assumptions, 1);
   CHECK(r == expected);
 
   /* floor(Mod(x, 8)/4 + 1/8) with 0 <= x → floor(Mod(x,8)/4)
@@ -353,23 +369,39 @@ static void test_floor_drop_small_rational(void) {
   inner =
       ixs_add(ctx, ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4)), ixs_rat(ctx, 1, 8));
   expr = ixs_floor(ctx, inner);
-  r = ixs_simplify(ctx, expr, assumptions, 2);
+  r = ixs_simplify(ctx, expr, assumptions, 1);
   expected =
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4))),
-                   assumptions, 2);
+                   assumptions, 1);
+  CHECK(r == expected);
+
+  /* Multi-term: floor(floor(x)/3 + Mod(x,8)/4 + 1/13) with x >= 0.
+   * L = lcm(3, 4) = 12, r = 1/13, 1/13 < 1/12: rational is dropped. */
+  ixs_node *assumptions2[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+  };
+  inner = ixs_add(ctx,
+                  ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)),
+                          ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4))),
+                  ixs_rat(ctx, 1, 13));
+  expr = ixs_floor(ctx, inner);
+  r = ixs_simplify(ctx, expr, assumptions2, 1);
+  expected = ixs_simplify(
+      ctx,
+      ixs_floor(ctx, ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)),
+                             ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4)))),
+      assumptions2, 1);
   CHECK(r == expected);
 
   /* floor(floor(x)/3 + 1/3) should NOT drop: 1/3 is not < 1/3. */
   inner =
       ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)), ixs_rat(ctx, 1, 3));
   expr = ixs_floor(ctx, inner);
-  r = ixs_simplify(ctx, expr, assumptions, 2);
+  r = ixs_simplify(ctx, expr, assumptions, 1);
   CHECK(r && !ixs_is_error(r));
-  /* Verify it's NOT the same as floor(floor(x)/3): the rational wasn't dropped.
-   */
   ixs_node *without_r =
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
-                   assumptions, 2);
+                   assumptions, 1);
   CHECK(!ixs_same_node(r, without_r));
 
   ixs_ctx_destroy(ctx);

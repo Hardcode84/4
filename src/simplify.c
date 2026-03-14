@@ -1141,6 +1141,26 @@ ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, const char *var,
 /* Forward decl for recursive rewrite. */
 static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds);
 
+/* Collapse floor or ceil to a constant when bounds pin it to one value.
+ * Returns the constant node, or NULL if bounds don't collapse. */
+static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
+                                         ixs_node *arg, bool is_ceil) {
+  ixs_interval iv;
+  int64_t lo_val, hi_val;
+  if (!bnds)
+    return NULL;
+  iv = ixs_bounds_get(bnds, arg);
+  if (!iv.valid)
+    return NULL;
+  lo_val = is_ceil ? ixs_rat_ceil(iv.lo_p, iv.lo_q)
+                   : ixs_rat_floor(iv.lo_p, iv.lo_q);
+  hi_val = is_ceil ? ixs_rat_ceil(iv.hi_p, iv.hi_q)
+                   : ixs_rat_floor(iv.hi_p, iv.hi_q);
+  if (lo_val == hi_val)
+    return ixs_node_int(ctx, lo_val);
+  return NULL;
+}
+
 static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   uint32_t i;
   if (!n || ixs_node_is_sentinel(n))
@@ -1197,14 +1217,9 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
       return NULL;
 
     if (bnds) {
-      /* Collapse floor to constant when bounds pin it to one value. */
-      ixs_interval iv = ixs_bounds_get(bnds, arg);
-      if (iv.valid) {
-        int64_t flo = ixs_rat_floor(iv.lo_p, iv.lo_q);
-        int64_t fhi = ixs_rat_floor(iv.hi_p, iv.hi_q);
-        if (flo == fhi)
-          return ixs_node_int(ctx, flo);
-      }
+      ixs_node *collapsed = try_floor_ceil_collapse(ctx, bnds, arg, false);
+      if (collapsed)
+        return collapsed;
 
       /* Drop a small rational constant from floor's argument when every
        * term is a non-negative-integer-valued multiple of 1/qi.
@@ -1270,13 +1285,9 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
       return NULL;
 
     if (bnds) {
-      ixs_interval iv = ixs_bounds_get(bnds, arg);
-      if (iv.valid) {
-        int64_t clo = ixs_rat_ceil(iv.lo_p, iv.lo_q);
-        int64_t chi = ixs_rat_ceil(iv.hi_p, iv.hi_q);
-        if (clo == chi)
-          return ixs_node_int(ctx, clo);
-      }
+      ixs_node *collapsed = try_floor_ceil_collapse(ctx, bnds, arg, true);
+      if (collapsed)
+        return collapsed;
     }
     return simp_ceil(ctx, arg);
   }
