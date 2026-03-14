@@ -61,7 +61,7 @@ A typical expression (929 chars average, 2994 chars max, depth up to 11):
 | Min/Max | `Max(a, b)`, `Min(a, b)` | 1,140 |
 | Bitwise | `xor(a, b)` | 116 |
 | Boolean | `&` (and), `\|` (or), `~` (not) | ~1,168 |
-| Comparison | `>`, `<`, `>=`, `<=`, `==` | ~2,236 |
+| Comparison | `>`, `<`, `>=`, `<=`, `==`, `!=` | ~2,236 |
 
 **Not present**: trig, hyperbolic, exp, log, sqrt, abs, derivatives,
 integrals, series, polynomials over symbolic variables, matrices, sets,
@@ -129,6 +129,11 @@ before hash-consing. This is intentional — it ensures all nodes in the DAG
 are always in canonical form. `ixs_simplify()` runs an additional top-down
 pass that leverages assumptions for bound-dependent rewrites.
 
+**Implementation dependency split**: Public constructors (in `ctx.c`) call
+rule functions (in `simplify.c`), which call internal node allocators (in
+`node.c`). `node.c` never calls `simplify.c` — the dependency is one-way:
+`ctx.c` → `simplify.c` → `node.c`. This prevents circular dependencies.
+
 **Thread safety**: A single `ixs_ctx` is **not** thread-safe. All operations
 on a context must be serialized by the caller. For parallel workloads, use one
 `ixs_ctx` per thread. Distinct contexts share no state and can be used
@@ -154,7 +159,8 @@ typedef struct ixs_arena {
 } ixs_arena;
 ```
 
-Arenas grow by doubling. Typical working set for one expression is < 64 KB.
+Arenas grow by doubling (with overflow check — if doubling would exceed
+`SIZE_MAX`, treat as OOM). Typical working set for one expression is < 64 KB.
 
 ### Layer 1: Expression Representation — Hash-Consed DAG
 
@@ -297,8 +303,17 @@ All results are reduced to lowest terms.
 
 **Overflow**: All intermediate arithmetic is checked for overflow. On overflow
 the enclosing constructor returns the sentinel node and appends an error (see
-Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled:
-`neg(INT64_MIN)` and `floor_div(INT64_MIN, -1)` produce sentinel + error.
+Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled throughout:
+
+- `neg(INT64_MIN)` → sentinel + error.
+- `floor_div(INT64_MIN, -1)` → sentinel + error.
+- `ixs_rat(ctx, INT64_MIN, -1)` → sentinel + error (negating both overflows).
+- `ixs_rat(ctx, p, INT64_MIN)` → sentinel + error (`-q` overflows).
+- `gcd(|p|, |q|)` where `p == INT64_MIN` or `q == INT64_MIN` → the GCD
+  implementation must handle this without computing `abs(INT64_MIN)`. Use
+  binary GCD or special-case: `gcd(INT64_MIN, q)` treats `INT64_MIN` as
+  `2^63` (its unsigned magnitude) for the purpose of reduction.
+
 In practice the constants in this domain are small (< 2^20), so overflow
 should never occur; the checks are a safety net. No 128-bit fallback in the
 initial implementation.
@@ -323,7 +338,7 @@ deep inputs. The grammar is small:
 expr     = term (('+' | '-') term)*
 term     = unary (('*' | '/') unary)*
 unary    = '-' unary | atom
-atom     = INT | RATIONAL | SYMBOL
+atom     = INT | SYMBOL
          | 'floor' '(' expr ')'
          | 'ceiling' '(' expr ')'
          | 'Mod' '(' expr ',' expr ')'
@@ -335,9 +350,20 @@ atom     = INT | RATIONAL | SYMBOL
 pw_cases = '(' expr ',' cond ')' (',' '(' expr ',' cond ')')*
 cond     = cmp_expr (('&' | '|') cmp_expr)*
 cmp_expr = '~' cmp_expr | expr cmp_op expr | 'True' | 'False'
-           | '(' cond ')'
+           | '(' cond ')' | expr
 cmp_op   = '>' | '<' | '>=' | '<=' | '==' | '!='
 ```
+
+**Bare expressions in conditions**: The grammar allows a bare `expr` in
+condition context (the `| expr` alternative in `cmp_expr`). This handles
+corpus patterns like `$MMA_LHS_SCALE | $MMA_RHS_SCALE | $MMA_SCALE_FP4` in
+Piecewise conditions, where integer-valued flag variables are used as boolean
+tests. A bare expression `e` in condition context is desugared to `e != 0`
+(i.e., `ixs_cmp(ctx, e, IXS_CMP_NE, ixs_int(ctx, 0))`). The `|` and `&`
+operators in conditions are always boolean (`IXS_OR`, `IXS_AND`), never
+bitwise. For the 0/1 flag variables in the corpus, boolean and bitwise OR
+produce identical truth values. True multi-bit integer bitwise OR is a
+non-goal (not present in the corpus).
 
 Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.
@@ -362,13 +388,15 @@ implementation, not two.
 
 **Termination guarantee**: The top-down rewrite pass in `ixs_simplify()` runs
 a fixed-point loop with a configurable iteration limit (default 64). Each
-iteration applies rules bottom-up over the DAG. Rules are designed to be
-monotonically size-reducing: every rewrite either reduces the number of nodes
-or replaces a complex node with a simpler one (e.g., `floor(3/2)` → `1`,
-`Mod(x, m)` where `0 <= x < m` → `x`). If the iteration limit is reached
-without convergence, the current best result is returned and an error is
-appended to the error list (not sentinel — the result is still valid, just
-possibly not fully simplified).
+iteration applies rules bottom-up over the DAG. Most rules are
+size-reducing: they either reduce the number of nodes or replace a complex
+node with a simpler one (e.g., `floor(3/2)` → `1`, `Mod(x, m)` where
+`0 <= x < m` → `x`). A few normalization rules (e.g., comparison
+`a > b` → `(a - b) > 0`) may temporarily increase size but enable subsequent
+reductions. The iteration limit is the safety net that guarantees termination
+regardless. If the limit is reached without convergence, the current best
+result is returned and an error is appended to the error list (not sentinel —
+the result is still valid, just possibly not fully simplified).
 
 #### 4.1 Constant Folding
 
@@ -411,7 +439,8 @@ Construction rules:
 Construction rules:
 
 - `MUL(... * MUL(c * Π dj^fj) ...)` → flatten
-- Collect like bases: if `bi == bj`, merge `ei + ej`
+- Collect like bases: if `bi == bj`, merge `ei + ej` (checked for `int32_t`
+  overflow; on overflow → sentinel + error)
 - Drop factors with `ei == 0` (they contribute 1)
 - If `coeff == 0`, return `0`
 - `expr * 1` → `expr`
@@ -699,7 +728,8 @@ typedef struct ixs_node ixs_node;
 ixs_ctx   *ixs_ctx_create(void);
 void       ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
 
-// Error list and sentinel checks (see Error Model section above)
+// Error list and sentinel checks (see Error Model section above).
+// ctx must be non-NULL for these (only ixs_ctx_destroy is NULL-safe).
 size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
 const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
 void        ixs_ctx_clear_errors(ixs_ctx *ctx);
@@ -727,7 +757,9 @@ ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
-                                                    // n must be >= 1; last cond should be ixs_true
+                    // n >= 1; last cond should be ixs_true; values/conds must be non-NULL
+                    // NULL/sentinel entries: NULL element → entire result is NULL;
+                    // sentinel element → propagates per priority rules
 ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // flattens into n-ary
 ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);   // flattens into n-ary
@@ -748,7 +780,8 @@ ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
 
 // Pointer equality (O(1) — hash-consing guarantees that structurally
 // identical expressions within the same context share the same pointer).
-// Only valid for nodes from the same ixs_ctx.
+// Only valid for nodes from the same ixs_ctx. NULL arguments are allowed:
+// ixs_same_node(NULL, NULL) returns true, ixs_same_node(NULL, x) returns false.
 bool ixs_same_node(ixs_node *a, ixs_node *b);
 
 // Substitution — single-pass: replaces all occurrences of symbol `var` in
@@ -770,6 +803,8 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 // (preserves CSE across the batch within the same context).
 // NULL/sentinel entries in exprs are left unchanged. NULL/sentinel
 // entries in assumptions are silently skipped.
+// Precondition: exprs must be non-NULL when n > 0; assumptions must be
+// non-NULL when n_assumptions > 0. No-op when n == 0.
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions);
 ```
@@ -904,9 +939,13 @@ ixsimpl/
 │   ├── test_cpp.cpp           # C++ binding tests
 │   ├── test_python.py         # Python binding tests
 │   ├── corpus.txt             # the reference expressions
-│   └── corpus_expected.txt    # pre-generated SymPy simplified outputs
+│   ├── corpus_expected.txt    # pre-generated SymPy simplified outputs
+│   └── corpus_assumptions.txt # shared assumption set for corpus tests
 ├── bench/
 │   └── bench_corpus.c        # benchmark: time all 609 expressions
+├── scripts/
+│   ├── gen_expected.py        # generate corpus_expected.txt via SymPy
+│   └── requirements-gen.txt   # pinned SymPy version for generation
 ├── CMakeLists.txt
 ├── pyproject.toml             # Python package build (PEP 517)
 └── LICENSE                    # MIT
@@ -951,12 +990,14 @@ public:
         return {ctx.raw(), ixs_int(ctx.raw(), v)};
     }
 
-    Expr simplify(std::span<const Expr> assumptions = {}) const {
-        // Extract raw node pointers for the C API
-        std::vector<ixs_node*> raw(assumptions.size());
-        for (size_t i = 0; i < assumptions.size(); i++)
+    Expr simplify(const Expr *assumptions, size_t n_assumptions) const {
+        std::vector<ixs_node*> raw(n_assumptions);
+        for (size_t i = 0; i < n_assumptions; i++)
             raw[i] = assumptions[i].raw();
         return {ctx_, ixs_simplify(ctx_, node_, raw.data(), raw.size())};
+    }
+    Expr simplify() const {
+        return {ctx_, ixs_simplify(ctx_, node_, nullptr, 0)};
     }
     Expr subs(const char *var, Expr repl) const {
         return {ctx_, ixs_subs(ctx_, node_, var, repl.node_)};
@@ -967,9 +1008,10 @@ public:
     bool operator==(Expr rhs) const { return node_ == rhs.node_; }
 
     std::string str() const {
-        char buf[4096];
-        size_t n = ixs_print(node_, buf, sizeof(buf));
-        return {buf, n};
+        size_t n = ixs_print(node_, nullptr, 0);
+        std::string s(n, '\0');
+        ixs_print(node_, s.data(), n + 1);
+        return s;
     }
 
     bool is_null() const { return node_ == nullptr; }
@@ -1075,9 +1117,12 @@ against SymPy (run both, compare outputs).
 - Basic constant folding
 - SymPy-format printer
 - Generate `test/corpus_expected.txt` by running SymPy on all 609 corpus
-  expressions (one-time script, checked in). Use the `Mod(p, q, evaluate=False)`
-  workaround (see SymPy #28744 section) when generating. Pin and record the
-  SymPy version. This is the ground truth for all subsequent phases.
+  expressions (one-time script `scripts/gen_expected.py`, checked in). The
+  script reads `corpus.txt` and `corpus_assumptions.txt`, applies the
+  `Mod(p, q, evaluate=False)` workaround (see SymPy #28744 section), and
+  writes one simplified expression per line. The SymPy version is pinned in
+  `scripts/requirements-gen.txt` (e.g., `sympy==1.14.0`). This is the ground
+  truth for all subsequent phases.
 
 **Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`. Corpus
 expected outputs are available for comparison.
@@ -1135,6 +1180,37 @@ met (< 50ms total).
 1. **Unit tests**: Each rule in isolation (test_rational, test_simplify).
 2. **Corpus test**: Parse all 609 expressions, simplify, verify output matches
    SymPy's output (or is provably equivalent via random evaluation).
+
+   **Corpus file format** — `corpus.txt` uses one expression per non-blank
+   line, prefixed with timing info: `simplify time: X.XXXXs: <expression>`.
+   The loader strips the prefix up to and including the second `: ` to extract
+   the raw expression. Blank lines are skipped.
+   `corpus_expected.txt` contains one simplified expression per line,
+   aligned 1:1 with the non-blank lines of `corpus.txt` (same count, same
+   order). Lines that SymPy cannot simplify are copied verbatim.
+
+   **Corpus assumptions** — The corpus test uses the following fixed
+   assumption set (matching the kernel's known variable ranges):
+
+   ```
+   $T0 >= 0, $T0 < 256
+   $T1 >= 0, $T1 < 4
+   $T2 >= 0
+   $WG0 >= 0, $WG1 >= 0
+   $GPR_NUM >= 0
+   M >= 1, N >= 1, K >= 1
+   _M_div_32 >= 0, _N_div_32 >= 0, _K_div_256 >= 0
+   $ARGK >= 0
+   $MMA_ACC >= 0, $MMA_LHS_SCALE >= 0, $MMA_RHS_SCALE >= 0
+   $MMA_SCALE_FP4 >= 0
+   $index0 >= 0, $index1 >= 0
+   _aligned >= 0
+   ```
+
+   These are stored in `test/corpus_assumptions.txt` (one assumption per
+   line, same syntax as the parser accepts) and loaded by the corpus test
+   and the `corpus_expected.txt` generation script. Using a shared
+   assumption file ensures SymPy and ixsimpl see identical constraints.
 3. **Equivalence oracle**: For any simplified expression `s` from input `e`,
    verify `s == e` by substituting random values for all variables and
    checking numerical equality. This catches bugs without requiring
@@ -1162,6 +1238,7 @@ expressions within the grammar, simplify them with both ixsimpl and SymPy,
 and verify equivalence via numerical evaluation.
 
 ```python
+import random
 from hypothesis import given, strategies as st, settings, assume
 import sympy
 import ixsimpl
