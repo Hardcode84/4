@@ -172,6 +172,7 @@ typedef enum {
     IXS_TRUE,        // boolean constant
     IXS_FALSE,       // boolean constant
     IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
+    IXS_PARSE_ERROR, // sentinel: syntax error from ixs_parse
 } ixs_tag;
 
 typedef enum {
@@ -550,7 +551,8 @@ This enables rules like:
 
 ## Error Model
 
-The library uses a two-tier error model:
+The library uses a three-tier error model: NULL, and two distinct sentinel
+node types.
 
 ### Tier 1: NULL — Out of Memory (catastrophic)
 
@@ -559,26 +561,47 @@ This is unrecoverable. No error string is set (we can't allocate memory for
 it). NULL propagates silently: any constructor that receives a NULL argument
 returns NULL immediately without side effects.
 
-### Tier 2: Sentinel Node — Domain Error (recoverable)
+### Tier 2: Parse Error Sentinel (`IXS_PARSE_ERROR`)
 
-Domain errors (division by zero, `Mod(x, 0)`, rational overflow,
-`ixs_rat(ctx, p, 0)`, integer literal overflow during parsing) produce a
-**sentinel node** (`IXS_ERROR`). There is exactly one sentinel node per
-context (singleton, trivially hash-consed). The sentinel carries no payload;
-error details are recorded in the context's error list.
+Returned by `ixs_parse` when the input is syntactically malformed (unexpected
+token, unmatched parentheses, unknown function name, recursion depth limit
+exceeded). There is one parse-error sentinel per context (singleton). Error
+details are appended to the context's error list.
 
-**Propagation rules:**
+Only `ixs_parse` produces this sentinel. Constructors never produce it.
+
+### Tier 3: Domain Error Sentinel (`IXS_ERROR`)
+
+Returned by constructors when an operation is mathematically undefined:
+division by zero, `Mod(x, 0)`, rational overflow, `ixs_rat(ctx, p, 0)`,
+integer literal overflow during parsing of a syntactically valid number.
+There is one domain-error sentinel per context (singleton). Error details are
+appended to the context's error list.
+
+`ixs_parse` can return this sentinel when the input is syntactically valid
+but contains a domain error (e.g., `"1/0 + x"`).
+
+### Propagation rules
+
+Both sentinels propagate identically through constructors:
 
 | Input | Behavior |
 |---|---|
-| Any constructor receives sentinel arg | Returns sentinel silently (no new error appended) |
+| Any constructor receives a sentinel arg | Returns that sentinel silently (no new error) |
 | Any constructor receives NULL arg | Returns NULL silently |
-| Operation causes domain error | Returns sentinel, appends error to context list |
+| Two sentinel args (different kinds) | Returns `IXS_PARSE_ERROR` (highest sentinel priority) |
+| NULL + any sentinel | Returns NULL (NULL always wins) |
+| Operation causes domain error | Returns `IXS_ERROR`, appends error to list |
+
+**Priority**: `NULL` > `IXS_PARSE_ERROR` > `IXS_ERROR`. When multiple error
+tiers are present in the arguments, the highest-priority one wins. This
+ensures that parse errors are never masked by domain errors, and OOM is
+never masked by anything.
 
 Only the operation that **originates** the error appends to the error list.
 Propagation through downstream constructors is silent.
 
-**Piecewise exception** — sentinel does NOT eagerly propagate through
+**Piecewise exception** — sentinels do NOT eagerly propagate through
 `ixs_pw`. A Piecewise branch may contain a sentinel value or sentinel
 condition without poisoning the entire expression, similar to LLVM's poison
 semantics in `select`:
@@ -587,8 +610,8 @@ semantics in `select`:
   value disappears harmlessly.
 - If a condition folds to `True`, the branch value (sentinel or not) becomes
   the result.
-- If the first non-eliminated condition is sentinel, the Piecewise cannot
-  determine which branch to take and becomes sentinel.
+- If the first non-eliminated condition is a sentinel, the Piecewise cannot
+  determine which branch to take and becomes that sentinel.
 - `Piecewise((sentinel, x > 0), (42, True))` with `x = -1` simplifies to
   `42`, not sentinel.
 
@@ -603,12 +626,16 @@ size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
 const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
 void        ixs_ctx_clear_errors(ixs_ctx *ctx);
 
-// Check if a node is the error sentinel
-bool        ixs_is_error(ixs_node *node);
+// Check sentinel kind
+bool        ixs_is_error(ixs_node *node);        // true for EITHER sentinel
+bool        ixs_is_parse_error(ixs_node *node);   // true only for IXS_PARSE_ERROR
+bool        ixs_is_domain_error(ixs_node *node);  // true only for IXS_ERROR
 ```
 
 Error strings are arena-allocated (so they live until `ixs_ctx_destroy`).
 Each string includes the error kind and location, e.g.:
+- `"parse error at offset 7: unexpected token 'bar'"`
+- `"parse error: recursion depth limit (256) exceeded"`
 - `"division by zero"`
 - `"Mod: divisor is zero"`
 - `"rational overflow in multiply"`
@@ -619,11 +646,22 @@ Each string includes the error kind and location, e.g.:
 | Condition | Return | Error list | Example |
 |---|---|---|---|
 | OOM | `NULL` | unchanged | arena exhausted |
-| Domain error | sentinel | appended | `1/0`, `Mod(x,0)`, overflow |
+| Syntax error | `IXS_PARSE_ERROR` | appended | `"foo bar +"` |
+| Domain error | `IXS_ERROR` | appended | `1/0`, `Mod(x,0)`, overflow |
+| Valid parse with domain error | `IXS_ERROR` | appended | `"1/0 + x"` |
 | NULL input | `NULL` | unchanged | propagation |
-| Sentinel input | sentinel | unchanged | propagation |
+| Sentinel input | same sentinel | unchanged | propagation |
 | Sentinel in Piecewise value | Piecewise kept | unchanged | dead branch |
 | `ixs_print(sentinel)` | writes `"<error>"` | unchanged | round-trip safe |
+
+### ixs_parse Return Values
+
+| Input | Return |
+|---|---|
+| Valid expression | `ixs_node*` (valid) |
+| Syntax error | `IXS_PARSE_ERROR` sentinel |
+| Syntactically valid but contains domain error | `IXS_ERROR` sentinel |
+| OOM | `NULL` |
 
 ## Public API
 
@@ -636,16 +674,18 @@ typedef struct ixs_node ixs_node;
 ixs_ctx   *ixs_ctx_create(void);
 void       ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
 
-// Error list (see Error Model section above)
+// Error list and sentinel checks (see Error Model section above)
 size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
 const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
 void        ixs_ctx_clear_errors(ixs_ctx *ctx);
-bool        ixs_is_error(ixs_node *node);
+bool        ixs_is_error(ixs_node *node);         // true for either sentinel
+bool        ixs_is_parse_error(ixs_node *node);    // true only for IXS_PARSE_ERROR
+bool        ixs_is_domain_error(ixs_node *node);   // true only for IXS_ERROR
 
 // Parse a SymPy-format expression string.
-// Returns NULL on OOM, sentinel on parse error (malformed input, depth
-// limit exceeded, integer literal overflow). Error details appended to
-// context error list.
+// Returns: valid node on success, IXS_PARSE_ERROR sentinel on syntax error,
+// IXS_ERROR sentinel if syntactically valid but contains domain error
+// (e.g. 1/0), NULL on OOM. Error details appended to context error list.
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 
 // Construct expressions programmatically
@@ -722,9 +762,15 @@ size_t n_assumptions = sizeof(assumptions) / sizeof(assumptions[0]);
 
 ixs_node *expr = ixs_parse(ctx, input, strlen(input));
 if (!expr) { /* OOM */ return; }
+if (ixs_is_parse_error(expr)) {
+    fprintf(stderr, "syntax: %s\n", ixs_ctx_error(ctx, 0));
+    ixs_ctx_clear_errors(ctx);
+    return;
+}
+
 ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, n_assumptions);
 
-if (ixs_is_error(simplified)) {
+if (ixs_is_domain_error(simplified)) {
     for (size_t i = 0; i < ixs_ctx_nerrors(ctx); i++)
         fprintf(stderr, "error: %s\n", ixs_ctx_error(ctx, i));
     ixs_ctx_clear_errors(ctx);
@@ -891,6 +937,8 @@ public:
 
     bool is_null() const { return node_ == nullptr; }
     bool is_error() const { return node_ && ixs_is_error(node_); }
+    bool is_parse_error() const { return node_ && ixs_is_parse_error(node_); }
+    bool is_domain_error() const { return node_ && ixs_is_domain_error(node_); }
     explicit operator bool() const { return node_ && !ixs_is_error(node_); }
 
     ixs_node *raw() const { return node_; }
@@ -911,7 +959,8 @@ Key properties:
 - `Context` owns the arena; RAII cleans up everything on destruction.
 - `Expr` is a lightweight value type (two pointers). Cheap to copy.
 - `operator bool()` returns `true` only for valid, non-error expressions.
-  `is_null()` checks OOM, `is_error()` checks sentinel.
+  `is_null()` checks OOM, `is_parse_error()`/`is_domain_error()` check
+  specific sentinels, `is_error()` checks either.
 - Operator overloading for natural expression building.
 - No heap allocations beyond what the C library does internally.
 - NULL and sentinel propagate through operators (same as C API).
@@ -962,7 +1011,8 @@ Implementation:
 - `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`.
 - `__eq__` is pointer comparison (O(1) via hash-consing).
 - `__hash__` returns the node's precomputed hash.
-- `Expr.is_error` property — returns `True` if the node is the sentinel.
+- `Expr.is_error` property — `True` for either sentinel.
+- `Expr.is_parse_error` / `Expr.is_domain_error` — specific checks.
 - `Context.errors` property — returns list of error strings; `Context.clear_errors()` resets.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
@@ -1052,15 +1102,16 @@ met (< 50ms total).
    checking numerical equality. This catches bugs without requiring
    exact output matching.
 4. **Negative/error-path tests**: Verify correct behavior for invalid inputs:
-   - Parse errors: malformed expressions, unmatched parens, unknown functions
-   - Depth limit: expressions deeper than 256 levels → sentinel
-   - Division by zero: `1/0`, `Mod(x,0)` → sentinel + error in list
-   - Integer literal overflow: `99999999999999999999` → sentinel
-   - `ixs_rat(ctx, 1, 0)` → sentinel
+   - Parse errors: `"foo bar +"` → `IXS_PARSE_ERROR`
+   - Depth limit: deeply nested input → `IXS_PARSE_ERROR`
+   - Domain error in parsed input: `"1/0 + x"` → `IXS_ERROR`
+   - Division by zero via API: `ixs_mod(ctx, x, zero)` → `IXS_ERROR`
+   - Integer literal overflow: `"99999999999999999999"` → `IXS_ERROR`
+   - `ixs_rat(ctx, 1, 0)` → `IXS_ERROR`
    - NULL propagation: `ixs_add(ctx, NULL, x)` → NULL
-   - Sentinel propagation: `ixs_floor(ctx, sentinel)` → sentinel, no new error
+   - Sentinel propagation: `ixs_floor(ctx, sentinel)` → same sentinel, no new error
    - Piecewise sentinel in dead branch: drops cleanly
-   - Empty/NULL input to `ixs_parse` → sentinel or NULL
+   - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
 5. **Fuzz testing**: Hypothesis-based (see below).
 6. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
    Track regressions in CI.
