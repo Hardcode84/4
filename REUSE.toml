@@ -17,6 +17,7 @@ path = [
     "scripts/**",
     "pyproject.toml",
     "setup.py",
+    "ixsimpl_amalg.c",
 ]
 SPDX-FileCopyrightText = "2026 ixsimpl contributors"
 SPDX-License-Identifier = "Apache-2.0"

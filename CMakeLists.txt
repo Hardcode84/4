@@ -13,18 +13,24 @@ if(ENABLE_ASAN)
     add_link_options(-fsanitize=address)
 endif()
 
+option(USE_AMALGAMATION "Build from single-file ixsimpl_amalg.c" OFF)
+
 # --- Library ---
 
-set(LIB_SOURCES
-    src/arena.c
-    src/rational.c
-    src/node.c
-    src/simplify.c
-    src/bounds.c
-    src/print.c
-    src/parser.c
-    src/ctx.c
-)
+if(USE_AMALGAMATION)
+    set(LIB_SOURCES ixsimpl_amalg.c)
+else()
+    set(LIB_SOURCES
+        src/arena.c
+        src/bounds.c
+        src/ctx.c
+        src/node.c
+        src/parser.c
+        src/print.c
+        src/rational.c
+        src/simplify.c
+    )
+endif()
 
 add_library(ixsimpl STATIC ${LIB_SOURCES})
 target_include_directories(ixsimpl

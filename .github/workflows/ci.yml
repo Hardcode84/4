@@ -35,6 +35,22 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  amalgamation:
+    runs-on: ubuntu-latest
+    name: Amalgamated build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DUSE_AMALGAMATION=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   python:
     runs-on: ubuntu-latest
     name: Python bindings + fuzz
