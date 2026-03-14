@@ -297,6 +297,18 @@ static void test_floor_bounds_collapse(void) {
   r = ixs_simplify(ctx, expr, alt, 2);
   CHECK(r == x);
 
+  /* 2*x >= 10 → x >= 5; 2*x < 20 → x < 10 → x <= 9.
+   * With x in [5, 9], Mod(x, 16) = x. */
+  ixs_node *csym[] = {
+      ixs_cmp(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), IXS_CMP_GE,
+              ixs_int(ctx, 10)),
+      ixs_cmp(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), IXS_CMP_LT,
+              ixs_int(ctx, 20)),
+  };
+  expr = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  r = ixs_simplify(ctx, expr, csym, 2);
+  CHECK(r == x);
+
   ixs_ctx_destroy(ctx);
 }
 

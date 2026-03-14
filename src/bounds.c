@@ -199,47 +199,77 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     ixs_node_get_rat(lhs->u.add.terms[0].coeff, &tp, &tq);
     ixs_node_get_rat(lhs->u.add.coeff, &kp, &kq);
 
-    /* We have: tp/tq * sym + kp/kq  OP  0 */
-    if (tp == 1 && tq == 1) {
-      /* sym + k OP 0  →  sym OP -k */
-      int64_t rp2, rq2;
-      if (!ixs_rat_neg(kp, kq, &rp2, &rq2))
-        return;
-      v = get_or_create_var(b, lhs->u.add.terms[0].term->u.name);
-      if (!v)
-        return;
+    /* We have: tp/tq * sym + kp/kq  OP  0, i.e. sym OP' (-kp/kq) / (tp/tq).
+     * Dividing by tp/tq flips the comparison when tp/tq < 0. */
+    if (tp == 0)
+      return;
+
+    /* Compute bound = -k / c = (-kp/kq) / (tp/tq) = (-kp * tq) / (kq * tp) */
+    int64_t np, nq;
+    if (!ixs_rat_neg(kp, kq, &np, &nq))
+      return;
+    int64_t raw_p, raw_q;
+    if (!ixs_rat_mul(np, nq, tq, tp, &raw_p, &raw_q))
+      return;
+    int64_t rp2, rq2;
+    if (!ixs_rat_normalize(raw_p, raw_q, &rp2, &rq2))
+      return;
+
+    /* Negative coefficient flips the comparison direction */
+    ixs_cmp_op eff_op = op;
+    if (ixs_rat_cmp(tp, tq, 0, 1) < 0) {
       switch (op) {
       case IXS_CMP_GE:
-        if (ixs_rat_cmp(rp2, rq2, v->iv.lo_p, v->iv.lo_q) > 0) {
-          v->iv.lo_p = rp2;
-          v->iv.lo_q = rq2;
-        }
+        eff_op = IXS_CMP_LE;
         break;
-      case IXS_CMP_GT: {
-        int64_t lo = ixs_rat_floor(rp2, rq2) + 1;
-        if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-          v->iv.lo_p = lo;
-          v->iv.lo_q = 1;
-        }
+      case IXS_CMP_GT:
+        eff_op = IXS_CMP_LT;
         break;
-      }
       case IXS_CMP_LE:
-        if (ixs_rat_cmp(rp2, rq2, v->iv.hi_p, v->iv.hi_q) < 0) {
-          v->iv.hi_p = rp2;
-          v->iv.hi_q = rq2;
-        }
+        eff_op = IXS_CMP_GE;
         break;
-      case IXS_CMP_LT: {
-        int64_t hi = ixs_rat_ceil(rp2, rq2) - 1;
-        if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-          v->iv.hi_p = hi;
-          v->iv.hi_q = 1;
-        }
+      case IXS_CMP_LT:
+        eff_op = IXS_CMP_GT;
         break;
-      }
       default:
         break;
       }
+    }
+
+    v = get_or_create_var(b, lhs->u.add.terms[0].term->u.name);
+    if (!v)
+      return;
+    switch (eff_op) {
+    case IXS_CMP_GE:
+      if (ixs_rat_cmp(rp2, rq2, v->iv.lo_p, v->iv.lo_q) > 0) {
+        v->iv.lo_p = rp2;
+        v->iv.lo_q = rq2;
+      }
+      break;
+    case IXS_CMP_GT: {
+      int64_t lo = ixs_rat_floor(rp2, rq2) + 1;
+      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+        v->iv.lo_p = lo;
+        v->iv.lo_q = 1;
+      }
+      break;
+    }
+    case IXS_CMP_LE:
+      if (ixs_rat_cmp(rp2, rq2, v->iv.hi_p, v->iv.hi_q) < 0) {
+        v->iv.hi_p = rp2;
+        v->iv.hi_q = rq2;
+      }
+      break;
+    case IXS_CMP_LT: {
+      int64_t hi = ixs_rat_ceil(rp2, rq2) - 1;
+      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+        v->iv.hi_p = hi;
+        v->iv.hi_q = 1;
+      }
+      break;
+    }
+    default:
+      break;
     }
   }
 }
