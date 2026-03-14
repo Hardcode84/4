@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            build_type: Release
+            asan: OFF
+          - name: Debug + ASAN
+            build_type: Debug
+            asan: ON
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DENABLE_ASAN=${{ matrix.asan }}
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  python:
+    runs-on: ubuntu-latest
+    name: Python bindings + fuzz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install sympy hypothesis
+
+      - name: Build extension (ASAN)
+        env:
+          CC: gcc
+          CFLAGS: "-fsanitize=address -fno-omit-frame-pointer -g"
+          LDSHARED: "gcc -shared -fsanitize=address"
+        run: pip install --no-build-isolation -e .
+
+      - name: Fuzz tests
+        env:
+          LD_PRELOAD: libasan.so.8
+          ASAN_OPTIONS: detect_leaks=0
+        run: python test/test_python.py
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    name: Lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: pre-commit/action@v3.0.1
+
+  reuse:
+    runs-on: ubuntu-latest
+    name: REUSE compliance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: fsfe/reuse-action@v5
