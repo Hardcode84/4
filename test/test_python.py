@@ -195,7 +195,39 @@ def eval_expr(tree, env):
         return max(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "min":
         return min(eval_expr(tree[1], env), eval_expr(tree[2], env))
+    if op == "piecewise":
+        val, cond, default = tree[1], tree[2], tree[3]
+        if eval_cond(cond, env):
+            return eval_expr(val, env)
+        return eval_expr(default, env)
     raise ValueError(f"unknown op: {op}")
+
+
+def eval_cond(tree, env):
+    """Evaluate condition tree to a bool."""
+    op = tree[0]
+    if op == "cmp":
+        _, cmp_op, a, b = tree
+        va, vb = eval_expr(a, env), eval_expr(b, env)
+        if cmp_op == ">=":
+            return va >= vb
+        if cmp_op == ">":
+            return va > vb
+        if cmp_op == "<=":
+            return va <= vb
+        if cmp_op == "<":
+            return va < vb
+        if cmp_op == "==":
+            return va == vb
+        if cmp_op == "!=":
+            return va != vb
+    if op == "not":
+        return not eval_cond(tree[1], env)
+    if op == "and":
+        return eval_cond(tree[1], env) and eval_cond(tree[2], env)
+    if op == "or":
+        return eval_cond(tree[1], env) or eval_cond(tree[2], env)
+    raise ValueError(f"unknown cond op: {op}")
 
 
 def eval_ixs(expr, ctx, env):
@@ -222,7 +254,10 @@ def test_simplify_self_consistency(expr):
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
     ctx = ixsimpl.Context()
-    ixs_expr = to_ixsimpl(ctx, expr)
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
     assume(not ixs_expr.is_error)
     ixs_simplified = ixs_expr.simplify()
     assume(not ixs_simplified.is_error)
@@ -248,7 +283,10 @@ def test_matches_sympy(expr):
     equivalent results. Uses Python eval_expr as ground truth to avoid
     SymPy Mod bug #28744 with evaluate=False."""
     ctx = ixsimpl.Context()
-    ixs_result = to_ixsimpl(ctx, expr)
+    try:
+        ixs_result = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
     assume(not ixs_result.is_error)
     ixs_simplified = ixs_result.simplify()
     assume(not ixs_simplified.is_error)

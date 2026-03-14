@@ -20,12 +20,11 @@ static uint32_t hash_i64(int64_t v) {
   return (uint32_t)(u ^ (u >> 32));
 }
 
-static uint32_t hash_str(const char *s) {
+static uint32_t hash_str(const char *s, size_t len) {
   uint32_t h = 5381;
-  while (*s) {
-    h = ((h << 5) + h) ^ (unsigned char)*s;
-    s++;
-  }
+  size_t i;
+  for (i = 0; i < len; i++)
+    h = ((h << 5) + h) ^ (unsigned char)s[i];
   return h;
 }
 
@@ -40,7 +39,7 @@ static uint32_t compute_hash(const ixs_node *n) {
     h = hash_mix(h, hash_i64(n->u.rat.q));
     break;
   case IXS_SYM:
-    h = hash_mix(h, hash_str(n->u.name));
+    h = hash_mix(h, hash_str(n->u.name, strlen(n->u.name)));
     break;
   case IXS_ADD: {
     h = hash_mix(h, n->u.add.coeff->hash);
@@ -422,37 +421,38 @@ ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
 }
 
 ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
-  /* Intern the string: check if we've seen this symbol name before
-   * by looking up a temporary node. Symbols are common, so this
-   * avoids redundant string copies. */
-  ixs_node tmp;
-  memset(&tmp, 0, sizeof(tmp));
-  tmp.tag = IXS_SYM;
-  tmp.u.name = name; /* temporary pointer for hash computation */
-  tmp.hash = compute_hash(&tmp);
+  uint32_t sym_hash;
+  ixs_node *n;
+  char *interned;
 
-  size_t mask = ctx->htab_cap - 1;
-  size_t idx = tmp.hash & mask;
-  for (;;) {
-    ixs_node *slot = ctx->htab[idx];
-    if (!slot)
-      break;
-    if (slot->hash == tmp.hash && slot->tag == IXS_SYM &&
-        strlen(slot->u.name) == len && memcmp(slot->u.name, name, len) == 0)
-      return slot;
-    idx = (idx + 1) & mask;
+  /* Compute hash from the bounded slice — name may not be NUL-terminated. */
+  sym_hash = (uint32_t)IXS_SYM * 2654435761u;
+  sym_hash = hash_mix(sym_hash, hash_str(name, len));
+
+  {
+    size_t mask = ctx->htab_cap - 1;
+    size_t idx = sym_hash & mask;
+    for (;;) {
+      ixs_node *slot = ctx->htab[idx];
+      if (!slot)
+        break;
+      if (slot->hash == sym_hash && slot->tag == IXS_SYM &&
+          strlen(slot->u.name) == len && memcmp(slot->u.name, name, len) == 0)
+        return slot;
+      idx = (idx + 1) & mask;
+    }
   }
 
-  char *interned = ixs_arena_strdup(&ctx->arena, name, len);
+  interned = ixs_arena_strdup(&ctx->arena, name, len);
   if (!interned)
     return NULL;
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
   n->tag = IXS_SYM;
   n->u.name = interned;
-  n->hash = compute_hash(n);
+  n->hash = sym_hash;
   return ixs_htab_intern(ctx, n);
 }
 
@@ -644,13 +644,9 @@ ixs_node *ixs_propagate1(ixs_node *a) {
 }
 
 /*
- * Returns non-NULL if propagation should short-circuit:
- * - NULL input → returns sentinel_null (caller must check for NULL return
- *   differently — we use a convention: return (ixs_node*)(uintptr_t)1
- *   as a "NULL propagation" marker, but that's fragile).
- *
- * Simpler approach: caller checks NULL first, then calls propagate2.
- * We return non-NULL only for sentinel propagation.
+ * If either arg is a sentinel (ERROR or PARSE_ERROR), return it so
+ * the caller can short-circuit.  NULL (OOM) returns NULL — callers
+ * propagate that by their own NULL return.  Both clean → NULL.
  */
 ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
   if (!a || !b)

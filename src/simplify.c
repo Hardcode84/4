@@ -7,6 +7,58 @@
 #define MAX_TERMS 4096
 #define SIMPLIFY_ITER_LIMIT 64
 
+/*
+ * Conservative check: is this node guaranteed to produce an integer
+ * for all variable assignments?  Used to gate Mod simplifications
+ * that assume integrality.
+ */
+static bool is_integer_node(const ixs_node *n) {
+  if (!n)
+    return false;
+  switch (n->tag) {
+  case IXS_INT:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_SYM:
+  case IXS_XOR:
+    return true;
+  case IXS_ADD: {
+    uint32_t i;
+    int64_t cp, cq;
+    ixs_node_get_rat(n->u.add.coeff, &cp, &cq);
+    if (cq != 1)
+      return false;
+    for (i = 0; i < n->u.add.nterms; i++) {
+      ixs_node_get_rat(n->u.add.terms[i].coeff, &cp, &cq);
+      if (cq != 1)
+        return false;
+      if (!is_integer_node(n->u.add.terms[i].term))
+        return false;
+    }
+    return true;
+  }
+  case IXS_MUL: {
+    uint32_t i;
+    int64_t cp, cq;
+    ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
+    if (cq != 1)
+      return false;
+    for (i = 0; i < n->u.mul.nfactors; i++) {
+      if (!is_integer_node(n->u.mul.factors[i].base))
+        return false;
+    }
+    return true;
+  }
+  case IXS_MOD:
+    return is_integer_node(n->u.binary.lhs) && is_integer_node(n->u.binary.rhs);
+  case IXS_MAX:
+  case IXS_MIN:
+    return is_integer_node(n->u.binary.lhs) && is_integer_node(n->u.binary.rhs);
+  default:
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
@@ -471,9 +523,8 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return make_const(ctx, rp, rq);
   }
 
-  /* Mod(x, 1) → 0 only when x is known integer (INT node or floor/ceil). */
-  if (ixs_node_is_one(b) &&
-      (a->tag == IXS_INT || a->tag == IXS_FLOOR || a->tag == IXS_CEIL))
+  /* Mod(x, 1) → 0 when x is known integer-valued. */
+  if (ixs_node_is_one(b) && is_integer_node(a))
     return ixs_node_int(ctx, 0);
 
   /* Mod(Mod(x, m), m) → Mod(x, m) */
@@ -504,9 +555,11 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     for (i = 0; i < a->u.add.nterms; i++) {
       int64_t cp, cq;
       ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
-      if (cq == 1 && cp % m == 0) {
+      /* Drop ci*ti when ci is a multiple of m AND ti is integer-valued,
+       * so that ci*ti is always a multiple of m. */
+      if (cq == 1 && cp % m == 0 && is_integer_node(a->u.add.terms[i].term)) {
         changed = true;
-        continue; /* drop: coefficient is multiple of m */
+        continue;
       }
       reduced[nr++] = a->u.add.terms[i];
     }
@@ -1147,16 +1200,6 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     if (!arg)
       return NULL;
 
-    /* Bound-dependent: if arg has integer bounds lo == hi, fold. */
-    if (bnds) {
-      ixs_interval iv = ixs_bounds_get(bnds, arg);
-      if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
-          iv.hi_p >= 0) {
-        /* If we know arg is integer-valued (from floor/ceil/mod
-         * structure), floor is identity. Check if arg comes from
-         * an operation that always produces integers. */
-      }
-    }
     return simp_floor(ctx, arg);
   }
   case IXS_CEIL: {

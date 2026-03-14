@@ -102,11 +102,20 @@ static size_t load_assumptions(ixs_ctx *ctx, ixs_node **assumptions,
   return n;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   FILE *corpus = fopen(corpus_path, "r");
+  FILE *gen_expected = NULL;
   if (!corpus) {
     fprintf(stderr, "test_corpus: cannot open %s\n", corpus_path);
     return 1;
+  }
+  if (argc > 1 && strcmp(argv[1], "--generate") == 0) {
+    gen_expected = fopen(expected_path, "w");
+    if (!gen_expected) {
+      fprintf(stderr, "test_corpus: cannot create %s\n", expected_path);
+      fclose(corpus);
+      return 1;
+    }
   }
 
   ixs_ctx *ctx = ixs_ctx_create();
@@ -117,6 +126,7 @@ int main(void) {
   size_t n_parsed = 0;
   size_t n_simplified = 0;
   size_t n_errors = 0;
+  size_t n_mismatches = 0;
   char line[MAX_LINE];
   char out_buf[MAX_LINE];
   char **expected_lines = NULL;
@@ -178,16 +188,30 @@ int main(void) {
     }
     n_simplified++;
 
-    if (expected_lines && expr_index < expected_len) {
+    {
       size_t n = ixs_print(simplified, out_buf, sizeof out_buf);
       out_buf[n] = '\0';
-      if (strcmp(out_buf, expected_lines[expr_index]) != 0)
+    }
+
+    if (gen_expected) {
+      fprintf(gen_expected, "%s\n", out_buf);
+    } else if (expected_lines && expr_index < expected_len) {
+      if (strcmp(out_buf, expected_lines[expr_index]) != 0) {
         fprintf(stderr, "mismatch line %zu: got '%s' expected '%s'\n", n_lines,
                 out_buf, expected_lines[expr_index]);
+        n_mismatches++;
+      }
     }
     expr_index++;
   }
   fclose(corpus);
+  if (gen_expected) {
+    fclose(gen_expected);
+    printf("test_corpus: generated %s with %zu entries\n", expected_path,
+           n_simplified);
+    ixs_ctx_destroy(ctx);
+    return (n_errors == 0 && n_parsed > 0) ? 0 : 1;
+  }
 
   /* Free expected lines */
   if (expected_lines) {
@@ -196,12 +220,16 @@ int main(void) {
     free(expected_lines);
   }
 
-  printf("test_corpus: %zu lines, %zu parsed, %zu simplified, %zu errors\n",
-         n_lines, n_parsed, n_simplified, n_errors);
+  printf("test_corpus: %zu lines, %zu parsed, %zu simplified, %zu errors, "
+         "%zu mismatches\n",
+         n_lines, n_parsed, n_simplified, n_errors, n_mismatches);
   if (n_assumptions > 0)
     printf("  (using %zu assumptions from %s)\n", n_assumptions,
            assumptions_path);
 
   ixs_ctx_destroy(ctx);
-  return (n_errors == 0 && n_parsed > 0 && n_parsed == n_simplified) ? 0 : 1;
+  return (n_errors == 0 && n_mismatches == 0 && n_parsed > 0 &&
+          n_parsed == n_simplified)
+             ? 0
+             : 1;
 }

@@ -136,11 +136,6 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
           pb_str(pb, "-");
           int64_t np, nq;
           ixs_rat_neg(tp, tq, &np, &nq);
-          if (!(np == 1 && nq == 1)) {
-            print_node(pb, NULL, PREC_ATOM); /* placeholder */
-            /* Actually print the abs coeff * term */
-          }
-          /* Print coeff * term */
           if (np == 1 && nq == 1) {
             print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
           } else {
