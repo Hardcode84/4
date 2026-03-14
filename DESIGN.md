@@ -271,7 +271,7 @@ remains valid for the lifetime of the context regardless of whether the caller
 frees the original input string.
 
 **Hash-consing**: A global (per-context) hash table maps
-`(tag, hash_of_children)` -> `ixs_node*`. Before creating any node, look it
+`(tag, hash_of_children)` → `ixs_node*`. Before creating any node, look it
 up. On hash match, perform a **full structural comparison** (tag + all
 children/fields) before returning the existing pointer. This guarantees that
 pointer equality implies structural equality despite hash collisions. The
@@ -461,14 +461,14 @@ floor(p/q)                         → ⌊p/q⌋  (constant fold)
 floor(floor(x))                    → floor(x)
 floor(ceiling(x))                  → ceiling(x)
 floor(x + n)  where n is integer   → floor(x) + n
-floor(n * x)  where n is integer   → n * floor(x)  IF x known integer
+floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer
 
 ceiling(integer)                   → identity
 ceiling(p/q)                       → ⌈p/q⌉  (constant fold)
 ceiling(ceiling(x))                → ceiling(x)
 ceiling(floor(x))                  → floor(x)
 ceiling(x + n)  where n is integer → ceiling(x) + n
-ceiling(n * x)  where n is integer → n * ceiling(x)  IF x known integer
+ceiling(n * x)  where n is integer → n * ceiling(x)  IF x is known integer
 ```
 
 More advanced rules (applied when domain info is available):
@@ -517,10 +517,10 @@ Piecewise((a, c), (b, True))       where c evaluates to True → a
                                     where c evaluates to False → b
 
 // Propagation through arithmetic:
-k * Piecewise((v1,c1),...,(vn,cn)) → Piecewise((k*v1,c1),...,(k*vn,cn))
-Piecewise(...) + expr              → Piecewise((v1+expr,c1),...,(vn+expr,cn))
-floor(Piecewise((v1,c1),...))      → Piecewise((floor(v1),c1),...)
-Mod(Piecewise(...), m)             → Piecewise((Mod(v1,m),c1),...)
+k * Piecewise((v1, c1), ..., (vn, cn)) → Piecewise((k*v1, c1), ..., (k*vn, cn))
+Piecewise(...) + expr                 → Piecewise((v1+expr, c1), ..., (vn+expr, cn))
+floor(Piecewise((v1, c1), ...))       → Piecewise((floor(v1), c1), ...)
+Mod(Piecewise(...), m)                → Piecewise((Mod(v1, m), c1), ...)
 ```
 
 **Propagation strategy**: Push Piecewise inward (into branches) when the
@@ -595,6 +595,16 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0`
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
+
+**Conflicting assumptions**: Detecting contradictory assumptions is
+**best-effort**. When a contradiction is detected (e.g., interval
+intersection yields `lo > hi` for a variable), the simplifier returns
+`IXS_ERROR` and appends a diagnostic (e.g., `"contradictory assumptions:
+$T0 >= 5 and $T0 < 3"`). However, not all contradictions are detectable
+(cross-variable constraints like `x >= y, y >= x + 1` require constraint
+solving, which is out of scope). When a contradiction goes undetected, the
+expression may be simplified incorrectly or returned unchanged. Passing
+consistent assumptions is the caller's responsibility.
 
 This enables rules like:
 
@@ -741,7 +751,8 @@ bool        ixs_is_domain_error(ixs_node *node);   // true only for IXS_ERROR
 // Returns: valid node on success, IXS_PARSE_ERROR sentinel on syntax error,
 // IXS_ERROR sentinel if syntactically valid but contains domain error
 // (e.g. 1/0), NULL on OOM. Error details appended to context error list.
-// Precondition: input must be a valid pointer (NULL is undefined behavior).
+// Precondition: input must be a non-NULL pointer to at least len bytes of
+// readable memory. NULL input is undefined behavior.
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 
 // Construct expressions programmatically
@@ -966,7 +977,9 @@ namespace ixs {
 class Context {
     ixs_ctx *ctx_;
 public:
-    Context() : ctx_(ixs_ctx_create()) {}
+    Context() : ctx_(ixs_ctx_create()) {
+        if (!ctx_) throw std::bad_alloc();
+    }
     ~Context() { ixs_ctx_destroy(ctx_); }
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
@@ -1036,13 +1049,19 @@ inline Expr xor_(Expr a, Expr b) { return {a.raw_ctx(), ixs_xor(a.raw_ctx(), a.r
 
 Key properties:
 - `Context` owns the arena; RAII cleans up everything on destruction.
+  Constructor throws `std::bad_alloc` on OOM.
 - `Expr` is a lightweight value type (two pointers). Cheap to copy.
+  **`Expr` must not outlive its `Context`** — destroying a `Context`
+  invalidates all `Expr` values created from it (dangling pointers).
 - `operator bool()` returns `true` only for valid, non-error expressions.
   `is_null()` checks OOM, `is_parse_error()`/`is_domain_error()` check
   specific sentinels, `is_error()` checks either.
 - Operator overloading for natural expression building.
 - No heap allocations beyond what the C library does internally.
 - NULL and sentinel propagate through operators (same as C API).
+- **Cross-context contract** applies: all `Expr` values passed to an
+  operation (including assumptions in `simplify()`) must belong to the
+  same `Context`. Mixing contexts is undefined behavior.
 
 ### Python Binding — `_ixsimpl.c`
 
@@ -1253,7 +1272,8 @@ def expressions(draw, max_depth=4):
     if max_depth <= 0 or draw(st.booleans()):
         return draw(st.one_of(sym_names, small_ints))
     op = draw(st.sampled_from([
-        "add", "mul", "floor", "ceiling", "mod", "max", "min"
+        "add", "mul", "div", "floor", "ceiling", "mod", "max", "min",
+        "piecewise",
     ]))
     a = draw(expressions(max_depth=max_depth - 1))
     if op in ("floor", "ceiling"):
@@ -1261,7 +1281,27 @@ def expressions(draw, max_depth=4):
     b = draw(expressions(max_depth=max_depth - 1))
     if op == "mod":
         b = draw(pos_ints)  # modulus must be positive
+    if op == "div":
+        b = draw(pos_ints)  # divisor must be nonzero
+    if op == "piecewise":
+        cond = draw(conditions(max_depth=max_depth - 1))
+        default = draw(expressions(max_depth=max_depth - 1))
+        return ("piecewise", a, cond, default)
     return (op, a, b)
+
+@st.composite
+def conditions(draw, max_depth=2):
+    if max_depth <= 0 or draw(st.booleans()):
+        a = draw(expressions(max_depth=2))
+        b = draw(expressions(max_depth=2))
+        op = draw(st.sampled_from([">=", ">", "<=", "<", "==", "!="]))
+        return ("cmp", op, a, b)
+    combiner = draw(st.sampled_from(["and", "or", "not"]))
+    c1 = draw(conditions(max_depth=max_depth - 1))
+    if combiner == "not":
+        return ("not", c1)
+    c2 = draw(conditions(max_depth=max_depth - 1))
+    return (combiner, c1, c2)
 
 def to_sympy(tree):
     """Convert expression tree to SymPy expression."""
@@ -1278,12 +1318,16 @@ def test_simplify_matches_numerical(expr):
     at random points, check they agree."""
     ctx = ixsimpl.Context()
     ixs_expr = to_ixsimpl(ctx, expr)
+    assume(not ixs_expr.is_error)  # skip if construction hit domain error
     ixs_simplified = ixs_expr.simplify()
+    assume(not ixs_simplified.is_error)  # skip if simplification hit error
 
-    # Evaluate both at random integer points
     for _ in range(10):
         env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
-        orig = eval_expr(expr, env)
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError):
+            continue  # skip points where original is undefined
         simp = eval_ixs(ixs_simplified, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}"
 
@@ -1294,14 +1338,18 @@ def test_matches_sympy(expr):
     equivalent results."""
     ctx = ixsimpl.Context()
     ixs_result = to_ixsimpl(ctx, expr).simplify()
+    assume(not ixs_result.is_error)
 
     sp_expr = to_sympy(expr)
     sp_result = sympy.simplify(sp_expr)
 
     for _ in range(10):
         env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
-        ixs_val = eval_ixs(ixs_result, env)
-        sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
+        try:
+            ixs_val = eval_ixs(ixs_result, env)
+            sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
+        except (ZeroDivisionError, ValueError):
+            continue
         assert ixs_val == sp_val, f"Divergence at {env}"
 ```
 
