@@ -477,6 +477,11 @@ static void test_nested_floor_ceil(void) {
   e = ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), inner), ixs_int(ctx, 4));
   CHECK(e != ixs_int(ctx, 0));
 
+  /* Negative: ceiling(2*ceiling(x/4) / 3) should NOT collapse */
+  inner = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  e = ixs_ceil(ctx, ixs_mul(ctx, ixs_rat(ctx, 2, 3), inner));
+  CHECK(e && strstr(pr(e), "ceiling") != NULL);
+
   /* Negative: floor(floor(x/3) * 2) → 2*floor(x/3) (integer, no nesting) */
   inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
   e = ixs_floor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), inner));

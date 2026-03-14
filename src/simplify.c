@@ -396,8 +396,7 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
     return simp_add(ctx, simp_floor(ctx, inner), ixs_node_int(ctx, n));
   }
 
-  /* floor(floor(y)/b) → floor(y/b) for positive integer b.
-   * Canonical form: MUL(1/b, floor(y)^1). */
+  /* floor(floor(y)/b) → floor(y/b) for positive integer b. */
   if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_FLOOR) {
