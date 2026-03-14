@@ -250,9 +250,11 @@ restoring it is always safe.
 
 **Arena grow**: Growing a scratch array is common enough to warrant a
 dedicated operation. `ixs_arena_grow` extends an existing allocation in
-place when possible, falling back to alloc + copy. Intended for scratch
-arena only — the slow path wastes the old block, which is reclaimed on
-restore. Using grow on the main arena would leak the old block permanently.
+place when possible, falling back to alloc + copy. Primarily intended for
+the scratch arena, where the slow path wastes the old block and restore
+reclaims it. Using grow on the main arena wastes the old block permanently,
+which is acceptable when growth is rare and bounded (e.g. the error pointer
+array doubles at most log2(n) times, totalling negligible waste).
 Shrinking is not supported (`new_size` must be `>= old_size`).
 
 ```c
