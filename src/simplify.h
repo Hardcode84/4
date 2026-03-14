@@ -1,6 +1,7 @@
 #ifndef IXS_SIMPLIFY_H
 #define IXS_SIMPLIFY_H
 
+#include "bounds.h"
 #include "node.h"
 
 /*
@@ -29,6 +30,10 @@ ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 /* Top-down simplification pass with assumptions + bound analysis. */
 ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
+
+/* Simplify with pre-built bounds (for batch use). */
+ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                    ixs_bounds *bnds);
 
 /* Substitution: replace all occurrences of target with replacement. */
 ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,

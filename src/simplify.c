@@ -1686,32 +1686,17 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   return n;
 }
 
-ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
-                        ixs_node *const *assumptions, size_t n_assumptions) {
+ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                    ixs_bounds *bnds) {
   int iter;
   if (!expr)
     return NULL;
   if (ixs_node_is_sentinel(expr))
     return expr;
 
-  ixs_bounds bnds;
-  ixs_bounds_init(&bnds);
-
-  /* Extract bounds from assumptions. */
-  if (assumptions) {
-    size_t i;
-    for (i = 0; i < n_assumptions; i++) {
-      ixs_node *a = assumptions[i];
-      if (!a || ixs_node_is_sentinel(a))
-        continue;
-      ixs_bounds_add_assumption(&bnds, a);
-    }
-  }
-
-  /* Fixed-point iteration. */
   for (iter = 0; iter < SIMPLIFY_ITER_LIMIT; iter++) {
     ixs_node *prev = expr;
-    expr = rewrite(ctx, expr, &bnds);
+    expr = rewrite(ctx, expr, bnds);
     if (!expr)
       return NULL;
     if (expr == prev)
@@ -1721,6 +1706,28 @@ ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
   if (iter == SIMPLIFY_ITER_LIMIT)
     ixs_ctx_push_error(ctx, "simplify: iteration limit reached");
 
+  return expr;
+}
+
+static void build_bounds(ixs_bounds *bnds, ixs_node *const *assumptions,
+                         size_t n_assumptions) {
+  ixs_bounds_init(bnds);
+  if (assumptions) {
+    size_t i;
+    for (i = 0; i < n_assumptions; i++) {
+      ixs_node *a = assumptions[i];
+      if (!a || ixs_node_is_sentinel(a))
+        continue;
+      ixs_bounds_add_assumption(bnds, a);
+    }
+  }
+}
+
+ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
+                        ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds bnds;
+  build_bounds(&bnds, assumptions, n_assumptions);
+  expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
   return expr;
 }

@@ -1,3 +1,4 @@
+#include "bounds.h"
 #include "node.h"
 #include "parser.h"
 #include "print.h"
@@ -203,19 +204,29 @@ ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
 
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds bnds;
   size_t i;
+  ixs_bounds_init(&bnds);
+  if (assumptions) {
+    for (i = 0; i < n_assumptions; i++) {
+      ixs_node *a = assumptions[i];
+      if (a && !ixs_node_is_sentinel(a))
+        ixs_bounds_add_assumption(&bnds, a);
+    }
+  }
   for (i = 0; i < n; i++) {
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
-    exprs[i] = simp_simplify(ctx, exprs[i], assumptions, n_assumptions);
+    exprs[i] = simp_simplify_with_bounds(ctx, exprs[i], &bnds);
     if (!exprs[i]) {
-      /* OOM: null out everything. */
       size_t j;
       for (j = 0; j < n; j++)
         exprs[j] = NULL;
+      ixs_bounds_destroy(&bnds);
       return;
     }
   }
+  ixs_bounds_destroy(&bnds);
 }
 
 /* ------------------------------------------------------------------ */
