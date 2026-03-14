@@ -197,11 +197,19 @@ bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
 /*  Node comparison (total order)                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Total order on nodes for canonical sorting.  Fast path: hash-consed
+ * nodes with identical structure are pointer-equal, caught immediately.
+ * Next: compare by precomputed structural hash (O(1), deterministic).
+ * Recursive fallback fires only on the rare 32-bit hash collision.
+ */
 int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
-  uint32_t i, n;
+  uint32_t i;
   int c;
   if (a == b)
     return 0;
+  if (a->hash != b->hash)
+    return a->hash < b->hash ? -1 : 1;
   if ((int)a->tag != (int)b->tag)
     return (int)a->tag < (int)b->tag ? -1 : 1;
 
@@ -276,8 +284,7 @@ int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   case IXS_OR:
     if (a->u.logic.nargs != b->u.logic.nargs)
       return a->u.logic.nargs < b->u.logic.nargs ? -1 : 1;
-    n = a->u.logic.nargs;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < a->u.logic.nargs; i++) {
       c = ixs_node_cmp(a->u.logic.args[i], b->u.logic.args[i]);
       if (c)
         return c;

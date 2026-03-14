@@ -45,6 +45,12 @@ target_link_libraries(test_simplify ixsimpl)
 target_include_directories(test_simplify PRIVATE src)
 add_test(NAME test_simplify COMMAND test_simplify)
 
+add_executable(test_corpus test/test_corpus.c)
+target_link_libraries(test_corpus ixsimpl)
+target_include_directories(test_corpus PRIVATE src)
+add_test(NAME test_corpus COMMAND test_corpus
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)
