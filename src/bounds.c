@@ -103,31 +103,30 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
         v->iv.lo_q = rq;
       }
       break;
-    case IXS_CMP_GT:
-      /* sym > c  →  sym >= c + 1 (integer context) */
-      if (rq == 1) {
-        int64_t lo = rp + 1;
-        if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-          v->iv.lo_p = lo;
-          v->iv.lo_q = 1;
-        }
+    case IXS_CMP_GT: {
+      /* sym > p/q → sym >= floor(p/q) + 1 (integer-valued sym) */
+      int64_t lo = ixs_rat_floor(rp, rq) + 1;
+      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+        v->iv.lo_p = lo;
+        v->iv.lo_q = 1;
       }
       break;
+    }
     case IXS_CMP_LE:
       if (ixs_rat_cmp(rp, rq, v->iv.hi_p, v->iv.hi_q) < 0) {
         v->iv.hi_p = rp;
         v->iv.hi_q = rq;
       }
       break;
-    case IXS_CMP_LT:
-      if (rq == 1) {
-        int64_t hi = rp - 1;
-        if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-          v->iv.hi_p = hi;
-          v->iv.hi_q = 1;
-        }
+    case IXS_CMP_LT: {
+      /* sym < p/q → sym <= ceil(p/q) - 1 (integer-valued sym) */
+      int64_t hi = ixs_rat_ceil(rp, rq) - 1;
+      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+        v->iv.hi_p = hi;
+        v->iv.hi_q = 1;
       }
       break;
+    }
     case IXS_CMP_EQ:
       v->iv.lo_p = rp;
       v->iv.lo_q = rq;
@@ -154,30 +153,30 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
         v->iv.hi_q = lq;
       }
       break;
-    case IXS_CMP_GT:
-      if (lq == 1) {
-        int64_t hi = lp - 1;
-        if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-          v->iv.hi_p = hi;
-          v->iv.hi_q = 1;
-        }
+    case IXS_CMP_GT: {
+      /* const > sym → sym <= ceil(const) - 1 */
+      int64_t hi = ixs_rat_ceil(lp, lq) - 1;
+      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+        v->iv.hi_p = hi;
+        v->iv.hi_q = 1;
       }
       break;
+    }
     case IXS_CMP_LE:
       if (ixs_rat_cmp(lp, lq, v->iv.lo_p, v->iv.lo_q) > 0) {
         v->iv.lo_p = lp;
         v->iv.lo_q = lq;
       }
       break;
-    case IXS_CMP_LT:
-      if (lq == 1) {
-        int64_t lo = lp + 1;
-        if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-          v->iv.lo_p = lo;
-          v->iv.lo_q = 1;
-        }
+    case IXS_CMP_LT: {
+      /* const < sym → sym >= floor(const) + 1 */
+      int64_t lo = ixs_rat_floor(lp, lq) + 1;
+      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+        v->iv.lo_p = lo;
+        v->iv.lo_q = 1;
       }
       break;
+    }
     case IXS_CMP_EQ:
       v->iv.lo_p = lp;
       v->iv.lo_q = lq;
@@ -216,30 +215,28 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
           v->iv.lo_q = rq2;
         }
         break;
-      case IXS_CMP_GT:
-        if (rq2 == 1) {
-          int64_t lo = rp2 + 1;
-          if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-            v->iv.lo_p = lo;
-            v->iv.lo_q = 1;
-          }
+      case IXS_CMP_GT: {
+        int64_t lo = ixs_rat_floor(rp2, rq2) + 1;
+        if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+          v->iv.lo_p = lo;
+          v->iv.lo_q = 1;
         }
         break;
+      }
       case IXS_CMP_LE:
         if (ixs_rat_cmp(rp2, rq2, v->iv.hi_p, v->iv.hi_q) < 0) {
           v->iv.hi_p = rp2;
           v->iv.hi_q = rq2;
         }
         break;
-      case IXS_CMP_LT:
-        if (rq2 == 1) {
-          int64_t hi = rp2 - 1;
-          if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-            v->iv.hi_p = hi;
-            v->iv.hi_q = 1;
-          }
+      case IXS_CMP_LT: {
+        int64_t hi = ixs_rat_ceil(rp2, rq2) - 1;
+        if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+          v->iv.hi_p = hi;
+          v->iv.hi_q = 1;
         }
         break;
+      }
       default:
         break;
       }

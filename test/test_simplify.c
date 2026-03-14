@@ -279,6 +279,24 @@ static void test_floor_bounds_collapse(void) {
   r = ixs_simplify(ctx, expr, a01, 2);
   CHECK(r && ixs_node_int_val(r) == 0);
 
+  /* sym > 5/2 with integer sym → sym >= 3 (floor(5/2) + 1 = 3) */
+  ixs_node *agt[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GT, ixs_rat(ctx, 5, 2)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 32)),
+  };
+  expr = ixs_mod(ctx, x, ixs_int(ctx, 32));
+  r = ixs_simplify(ctx, expr, agt, 2);
+  CHECK(r == x);
+
+  /* sym < 7/3 with integer sym → sym <= 1 (ceil(7/3) - 1 = 1) */
+  ixs_node *alt[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_rat(ctx, 7, 3)),
+  };
+  expr = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  r = ixs_simplify(ctx, expr, alt, 2);
+  CHECK(r == x);
+
   ixs_ctx_destroy(ctx);
 }
 
