@@ -3,8 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Max terms/factors in a single flattened add/mul before we bail. */
-#include "ixs_limits.h"
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ------------------------------------------------------------------ */
