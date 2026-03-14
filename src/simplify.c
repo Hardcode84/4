@@ -510,6 +510,26 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (ixs_node_is_one(b) && ixs_node_is_integer_valued(a))
     return ixs_node_int(ctx, 0);
 
+  /* Mod(c*t, m) → 0 when t is integer-valued and m divides c.
+   * Catches Mod(a*floor(x/a), a) and similar. */
+  if (a->tag == IXS_MUL && b->tag == IXS_INT && b->u.ival > 0) {
+    int64_t cp, cq;
+    ixs_node_get_rat(a->u.mul.coeff, &cp, &cq);
+    if (cq == 1 && cp != 0 && cp % b->u.ival == 0) {
+      uint32_t i;
+      bool all_int = true;
+      for (i = 0; i < a->u.mul.nfactors; i++) {
+        if (a->u.mul.factors[i].exp < 0 ||
+            !ixs_node_is_integer_valued(a->u.mul.factors[i].base)) {
+          all_int = false;
+          break;
+        }
+      }
+      if (all_int)
+        return ixs_node_int(ctx, 0);
+    }
+  }
+
   /* Mod(Mod(x, m), m) → Mod(x, m) */
   if (a->tag == IXS_MOD && a->u.binary.rhs == b)
     return a;

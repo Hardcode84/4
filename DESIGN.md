@@ -499,7 +499,7 @@ floor(x / n) where x = n*q + r, 0 <= r < n
 
 floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer
 ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer
-Mod(a*floor(x/a), a)     → 0                                          [TODO]
+Mod(a*floor(x/a), a)     → 0
 Mod(x, n) where 0 <= x < n is provable → x
 ```
 

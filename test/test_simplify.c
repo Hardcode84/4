@@ -462,6 +462,21 @@ static void test_nested_floor_ceil(void) {
   e = ixs_floor(ctx, ixs_mul(ctx, ixs_rat(ctx, 2, 5), inner));
   CHECK(e && strstr(pr(e), "floor") != NULL);
 
+  /* Mod(a*floor(x/a), a) → 0 */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  e = ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 4), inner), ixs_int(ctx, 4));
+  CHECK(e == ixs_int(ctx, 0));
+
+  /* Mod(6*floor(x/3), 3) → 0 (6 is multiple of 3) */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  e = ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 6), inner), ixs_int(ctx, 3));
+  CHECK(e == ixs_int(ctx, 0));
+
+  /* Negative: Mod(3*floor(x/4), 4) should NOT simplify to 0 */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  e = ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), inner), ixs_int(ctx, 4));
+  CHECK(e != ixs_int(ctx, 0));
+
   /* Negative: floor(floor(x/3) * 2) → 2*floor(x/3) (integer, no nesting) */
   inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
   e = ixs_floor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), inner));
