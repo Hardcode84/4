@@ -872,8 +872,9 @@ ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
 size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);  // SymPy format
 size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 
-// Batch: simplify multiple expressions sharing subexpressions
-// (preserves CSE across the batch within the same context).
+// Batch: simplify multiple expressions **in place**, sharing the same
+// assumption-derived bounds (parsed once, reused for every element).
+// Each exprs[i] is overwritten with its simplified form.
 // NULL/sentinel entries in exprs are left unchanged. NULL/sentinel
 // entries in assumptions are silently skipped.
 // OOM: if any simplification hits OOM, ALL entries in exprs are set to

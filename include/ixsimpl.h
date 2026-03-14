@@ -118,7 +118,10 @@ ixs_node *ixs_false(ixs_ctx *ctx);
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
-/* Simplify exprs[0..n-1] in place, sharing the same assumption set. */
+/* Simplify exprs[0..n-1] in place, sharing the same assumption set.
+ * Each element is replaced by its simplified form.  On OOM, all
+ * elements are set to NULL.  NULL or sentinel entries are skipped.
+ * Bounds are parsed from assumptions once and reused across all elements. */
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
