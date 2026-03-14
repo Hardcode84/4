@@ -82,6 +82,7 @@ git push                # Push to remote
 - **No global state**. Zero file-scope or static mutable variables in the core library. All state lives in the context (`ixs_ctx`). The library must be safe to use from multiple threads with separate contexts.
 - **Arena-only allocation**. All memory is obtained in large 4K-aligned chunks and distributed via arenas. No direct `malloc`/`calloc`/`realloc`/`free` for individual objects.
 - **No OS-specific functions**. Only standard C library calls. No `mmap`, no `posix_memalign`, no `VirtualAlloc`, no platform headers. Portable C99 stdlib only.
+- **No Unicode**. Only ASCII in source files — code, comments, string literals, all of it.
 
 ## Tone
 
