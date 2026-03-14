@@ -480,7 +480,8 @@ floor(p/q)                         → ⌊p/q⌋  (constant fold)
 floor(floor(x))                    → floor(x)
 floor(ceiling(x))                  → ceiling(x)
 floor(x + n)  where n is integer   → floor(x) + n
-floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer  [TODO]
+floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer
+    (subsumed by floor(integer_valued) → identity)
 
 ceiling(integer)                   → identity
 ceiling(p/q)                       → ⌈p/q⌉  (constant fold)
@@ -496,8 +497,8 @@ More advanced rules (applied when domain info is available):
 floor(x / n) where x = n*q + r, 0 <= r < n
   → q    (when r's bounds are provable)
 
-floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer   [TODO]
-ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer  [TODO]
+floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer
+ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer
 Mod(a*floor(x/a), a)     → 0                                          [TODO]
 Mod(x, n) where 0 <= x < n is provable → x
 ```

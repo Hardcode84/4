@@ -396,8 +396,21 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
     return simp_add(ctx, simp_floor(ctx, inner), ixs_node_int(ctx, n));
   }
 
-  /* floor(x + r) where r is rational (non-integer) constant
-   * Cannot split, but check if entire ADD is rational-valued. */
+  /* floor(floor(y)/b) → floor(y/b) for positive integer b.
+   * Canonical form: MUL(1/b, floor(y)^1). */
+  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
+      x->u.mul.factors[0].exp == 1 &&
+      x->u.mul.factors[0].base->tag == IXS_FLOOR) {
+    int64_t cp, cq;
+    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+    if (cp == 1 && cq > 1) {
+      ixs_node *inner_arg = x->u.mul.factors[0].base->u.unary.arg;
+      ixs_node *scaled = simp_mul(ctx, x->u.mul.coeff, inner_arg);
+      if (!scaled)
+        return NULL;
+      return simp_floor(ctx, scaled);
+    }
+  }
 
   return ixs_node_floor(ctx, x);
 }
@@ -440,6 +453,21 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
     if (!inner)
       return NULL;
     return simp_add(ctx, simp_ceil(ctx, inner), ixs_node_int(ctx, n));
+  }
+
+  /* ceiling(ceiling(y)/b) → ceiling(y/b) for positive integer b. */
+  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
+      x->u.mul.factors[0].exp == 1 &&
+      x->u.mul.factors[0].base->tag == IXS_CEIL) {
+    int64_t cp, cq;
+    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+    if (cp == 1 && cq > 1) {
+      ixs_node *inner_arg = x->u.mul.factors[0].base->u.unary.arg;
+      ixs_node *scaled = simp_mul(ctx, x->u.mul.coeff, inner_arg);
+      if (!scaled)
+        return NULL;
+      return simp_ceil(ctx, scaled);
+    }
   }
 
   return ixs_node_ceil(ctx, x);

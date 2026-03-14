@@ -438,6 +438,38 @@ static void test_floor_drop_small_rational(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_nested_floor_ceil(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* floor(floor(x/3) / 5) → floor(x/15) */
+  ixs_node *inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *e = ixs_floor(ctx, ixs_div(ctx, inner, ixs_int(ctx, 5)));
+  CHECK(e && strcmp(pr(e), "floor(1/15*x)") == 0);
+
+  /* ceiling(ceiling(x/4) / 3) → ceiling(x/12) */
+  inner = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  e = ixs_ceil(ctx, ixs_div(ctx, inner, ixs_int(ctx, 3)));
+  CHECK(e && strcmp(pr(e), "ceiling(1/12*x)") == 0);
+
+  /* floor(floor(x/2) / 2) → floor(x/4) */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  e = ixs_floor(ctx, ixs_div(ctx, inner, ixs_int(ctx, 2)));
+  CHECK(e && strcmp(pr(e), "floor(1/4*x)") == 0);
+
+  /* Negative: floor(2*floor(x/3) / 5) should NOT collapse */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  e = ixs_floor(ctx, ixs_mul(ctx, ixs_rat(ctx, 2, 5), inner));
+  CHECK(e && strstr(pr(e), "floor") != NULL);
+
+  /* Negative: floor(floor(x/3) * 2) → 2*floor(x/3) (integer, no nesting) */
+  inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  e = ixs_floor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), inner));
+  CHECK(e && strcmp(pr(e), "2*floor(1/3*x)") == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_same_node(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   CHECK(ixs_same_node(NULL, NULL));
@@ -573,6 +605,7 @@ int main(void) {
   test_floor_drop_small_rational();
   test_substitution();
   test_sentinel_propagation();
+  test_nested_floor_ceil();
   test_same_node();
   test_print_roundtrip();
   test_divisibility_assumptions();
