@@ -122,6 +122,11 @@ meaning to the library. All are treated uniformly as opaque symbolic names.
 └──────────────────────────────────────────────────────┘
 ```
 
+**Thread safety**: A single `ixs_ctx` is **not** thread-safe. All operations
+on a context must be serialized by the caller. For parallel workloads, use one
+`ixs_ctx` per thread. Distinct contexts share no state and can be used
+concurrently without synchronization.
+
 ### Layer 0: Memory — Arena Allocator
 
 All expression nodes are allocated from a per-context arena. Nodes are never
@@ -192,12 +197,12 @@ typedef struct ixs_node {
         struct {                          // IXS_ADD
             struct ixs_node *coeff;       //   rational constant term
             uint32_t nterms;
-            struct ixs_addterm *terms;    //   sorted array of {node, coeff}
+            struct ixs_addterm *terms;    //   sorted array (see below)
         } add;
         struct {                          // IXS_MUL
             struct ixs_node *coeff;       //   rational constant factor
             uint32_t nfactors;
-            struct ixs_mulfactor *factors; //  sorted array of {base, exp}
+            struct ixs_mulfactor *factors; //  sorted array (see below)
         } mul;
         struct {                          // IXS_FLOOR, IXS_CEIL
             struct ixs_node *arg;
@@ -205,21 +210,40 @@ typedef struct ixs_node {
         struct {                          // IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP
             struct ixs_node *lhs;
             struct ixs_node *rhs;
-            ixs_cmp_op cmp_op;           // only for IXS_CMP
+            ixs_cmp_op cmp_op;           // valid only for IXS_CMP; undefined for others
         } binary;
         struct {                          // IXS_PIECEWISE
             uint32_t ncases;
             struct ixs_pwcase *cases;     //  array of {value, condition}
         } pw;
-        struct {                          // IXS_AND, IXS_OR
+        struct {                          // IXS_AND, IXS_OR (n-ary, flattened)
             uint32_t nargs;
-            struct ixs_node **args;
+            struct ixs_node **args;       // sorted by canonical order
         } logic;
         struct {                          // IXS_NOT
             struct ixs_node *arg;
         } unary_bool;
     };
 } ixs_node;
+```
+
+Helper structs for compound nodes:
+
+```c
+typedef struct ixs_addterm {
+    struct ixs_node *term;    // the non-constant subexpression
+    struct ixs_node *coeff;   // rational coefficient (IXS_INT or IXS_RAT, nonzero)
+} ixs_addterm;
+
+typedef struct ixs_mulfactor {
+    struct ixs_node *base;    // the non-constant base
+    int32_t exp;              // nonzero integer exponent
+} ixs_mulfactor;
+
+typedef struct ixs_pwcase {
+    struct ixs_node *value;   // branch value
+    struct ixs_node *cond;    // branch condition (boolean expression)
+} ixs_pwcase;
 ```
 
 **Symbol interning**: Symbol names are copied into the arena and deduplicated.
@@ -229,8 +253,10 @@ frees the original input string.
 
 **Hash-consing**: A global (per-context) hash table maps
 `(tag, hash_of_children)` -> `ixs_node*`. Before creating any node, look it
-up. If found, return the existing pointer. This means pointer equality implies
-structural equality, and common subexpressions are automatically shared.
+up. On hash match, perform a **full structural comparison** (tag + all
+children/fields) before returning the existing pointer. This guarantees that
+pointer equality implies structural equality despite hash collisions. The
+table uses open addressing with linear probing and rehashes at 70% load.
 
 **Canonical ordering**: Children of `IXS_ADD` and `IXS_MUL` are sorted by a
 total order on nodes (by tag, then by content). This ensures `a + b` and
@@ -297,6 +323,9 @@ cmp_op   = '>' | '<' | '>=' | '<=' | '==' | '!='
 Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.
 
+The parser accepts SymPy's `ceiling`; the C API uses `ixs_ceil` for brevity.
+Similarly, the parser accepts `True`/`False`; the API uses `ixs_true`/`ixs_false`.
+
 Integer literals: sequences of digits. Rationals are not parsed directly —
 they arise from `3/8` being parsed as `IXS_INT(3) / IXS_INT(8)` and
 immediately folded to `IXS_RAT(3, 8)`.
@@ -311,6 +340,16 @@ during DAG construction (canonicalize before hash-consing). The same rule
 engine is invoked top-down by `ixs_simplify()` when assumptions enable
 additional rewrites (e.g., bound-dependent rules). There is one rule
 implementation, not two.
+
+**Termination guarantee**: The top-down rewrite pass in `ixs_simplify()` runs
+a fixed-point loop with a configurable iteration limit (default 64). Each
+iteration applies rules bottom-up over the DAG. Rules are designed to be
+monotonically size-reducing: every rewrite either reduces the number of nodes
+or replaces a complex node with a simpler one (e.g., `floor(3/2)` → `1`,
+`Mod(x, m)` where `0 <= x < m` → `x`). If the iteration limit is reached
+without convergence, the current best result is returned and an error is
+appended to the error list (not sentinel — the result is still valid, just
+possibly not fully simplified).
 
 #### 4.1 Constant Folding
 
@@ -623,9 +662,11 @@ ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
 ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
-ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // flattens into n-ary
+ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);   // flattens into n-ary
 ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
+ixs_node *ixs_true(ixs_ctx *ctx);
+ixs_node *ixs_false(ixs_ctx *ctx);
 
 // Simplify with assumptions. Assumptions are boolean expression nodes
 // (e.g., comparisons like `M > 0`, `$T0 >= 0`, `$T0 < 256`, or equalities
@@ -644,7 +685,10 @@ bool ixs_same_node(ixs_node *a, ixs_node *b);
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
                     const char *var, ixs_node *replacement);
 
-// Output
+// Output — snprintf-like: returns the number of chars that would be written
+// (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
+// length without writing. Output is always null-terminated when bufsize > 0.
+// Sentinel prints as "<error>". NULL expr returns 0.
 size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);  // SymPy format
 size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 
@@ -730,13 +774,15 @@ ixs_ctx_destroy(ctx);  // frees everything
 
 ### Memory budget
 
-Estimated working set for 609 expressions with shared subexpressions:
+Estimated peak memory for one `ixs_ctx` processing all 609 corpus expressions
+in batch mode (the primary use case):
 
 - Unique nodes (after hash-consing): ~10,000-30,000
 - Node size: ~64 bytes average
 - Hash table: ~128 KB
 - Arena: ~2-4 MB
-- Total: < 8 MB
+- Error list, symbol table: negligible
+- **Total: < 8 MB per context**
 
 ## File Structure
 
@@ -1005,8 +1051,18 @@ met (< 50ms total).
    verify `s == e` by substituting random values for all variables and
    checking numerical equality. This catches bugs without requiring
    exact output matching.
-4. **Fuzz testing**: Hypothesis-based (see below).
-5. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
+4. **Negative/error-path tests**: Verify correct behavior for invalid inputs:
+   - Parse errors: malformed expressions, unmatched parens, unknown functions
+   - Depth limit: expressions deeper than 256 levels → sentinel
+   - Division by zero: `1/0`, `Mod(x,0)` → sentinel + error in list
+   - Integer literal overflow: `99999999999999999999` → sentinel
+   - `ixs_rat(ctx, 1, 0)` → sentinel
+   - NULL propagation: `ixs_add(ctx, NULL, x)` → NULL
+   - Sentinel propagation: `ixs_floor(ctx, sentinel)` → sentinel, no new error
+   - Piecewise sentinel in dead branch: drops cleanly
+   - Empty/NULL input to `ixs_parse` → sentinel or NULL
+5. **Fuzz testing**: Hypothesis-based (see below).
+6. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
    Track regressions in CI.
 
 ### Fuzz Testing with Hypothesis
@@ -1121,7 +1177,7 @@ Concrete workarounds for the fuzz test oracle:
 | 64-bit rational overflow | Medium | Checked arithmetic → sentinel + error list; 128-bit fallback if needed later |
 | New expression patterns in future workloads | Medium | Grammar is extensible; add new node types as needed |
 | Hash-consing table becomes bottleneck | Low | Linear probing with power-of-2 sizing; rehash threshold 70% |
-| Simplification rules interact badly (infinite loops) | Medium | Depth limit on rewrite passes; monotonic rewrite ordering |
+| Simplification rules interact badly (infinite loops) | Medium | Fixed-point iteration limit (64); monotonically size-reducing rules |
 
 ## Non-Goals
 
