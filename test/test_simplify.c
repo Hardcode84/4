@@ -280,6 +280,15 @@ static void test_mod_bounds_tighten(void) {
   r = ixs_simplify(ctx, expr, a50, 2);
   CHECK(r == x);
 
+  /* Mod(3/2*x, 1) must NOT get bounds [0,0] — dividend is not integer.
+   * ceiling(Mod(3/2*x, 1)) must not collapse to 0. */
+  ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *three_half_x = ixs_add(ctx, half_x, x);
+  ixs_node *mod1 = ixs_mod(ctx, three_half_x, ixs_int(ctx, 1));
+  ixs_node *ce = ixs_ceil(ctx, mod1);
+  r = ixs_simplify(ctx, ce, NULL, 0);
+  CHECK(r != ixs_int(ctx, 0));
+
   ixs_ctx_destroy(ctx);
 }
 

@@ -7,6 +7,7 @@ Two properties:
 """
 
 import math
+import os
 import random
 
 import sympy
@@ -14,6 +15,10 @@ from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 import ixsimpl
+
+_IN_CI = os.environ.get("CI") == "true"
+_SELF_CONSISTENCY_EXAMPLES = 500 if _IN_CI else 10000
+_SYMPY_CROSSCHECK_EXAMPLES = 200 if _IN_CI else 5000
 
 # ---------------------------------------------------------------------------
 #  Expression tree strategies
@@ -249,7 +254,7 @@ def eval_ixs(expr, ctx, env):
 
 
 @given(expr=expressions())
-@settings(max_examples=10000, deadline=None)
+@settings(max_examples=_SELF_CONSISTENCY_EXAMPLES, deadline=None)
 def test_simplify_self_consistency(expr):
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
@@ -276,7 +281,7 @@ def test_simplify_self_consistency(expr):
 
 
 @given(expr=expressions())
-@settings(max_examples=5000, deadline=None)
+@settings(max_examples=_SYMPY_CROSSCHECK_EXAMPLES, deadline=None)
 @example(("mod", ("mul", 2, ("mod", "x", 3)), 5))
 def test_matches_sympy(expr):
     """Cross-check against SymPy: both should produce numerically
@@ -319,10 +324,10 @@ def test_matches_sympy(expr):
 
 
 if __name__ == "__main__":
-    print("Running self-consistency test (10000 examples)...")
+    print(f"Running self-consistency test ({_SELF_CONSISTENCY_EXAMPLES} examples)...")
     test_simplify_self_consistency()
     print("PASSED")
-    print("Running SymPy cross-check (5000 examples)...")
+    print(f"Running SymPy cross-check ({_SYMPY_CROSSCHECK_EXAMPLES} examples)...")
     test_matches_sympy()
     print("PASSED")
     print("All fuzz tests passed!")

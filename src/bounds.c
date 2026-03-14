@@ -289,15 +289,17 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
     return ixs_interval_unknown();
   }
   case IXS_MOD: {
-    /* Mod(x, m) ∈ [0, m-1] when m is a positive integer.
-     * Tighten to x's own bounds when they already fit in [0, m). */
+    /* Mod(x, m) ∈ [0, m-1] only when x is integer-valued and m is a
+     * positive integer.  For non-integer dividends the range is the
+     * half-open [0, m) which we cannot represent tightly. */
     ixs_node *m = expr->u.binary.rhs;
     if (m->tag == IXS_INT && m->u.ival > 0) {
       ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
       if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
           pi.hi_p < m->u.ival)
         return pi;
-      return ixs_interval_range(0, 1, m->u.ival - 1, 1);
+      if (ixs_node_is_integer_valued(expr->u.binary.lhs))
+        return ixs_interval_range(0, 1, m->u.ival - 1, 1);
     }
     return ixs_interval_unknown();
   }
