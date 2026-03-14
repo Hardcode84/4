@@ -20,10 +20,10 @@ typedef struct {
 void ixs_arena_init(ixs_arena *a, size_t initial_size);
 void ixs_arena_destroy(ixs_arena *a);
 
-/* Returns NULL on OOM. align must be a power of 2. */
+/* Returns NULL on OOM or overflow. align must be a power of 2, at most 16. */
 void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align);
 
-/* Copy len bytes of s into the arena, null-terminate. NULL on OOM. */
+/* Copy len bytes of s into the arena, null-terminate. NULL on OOM/overflow. */
 char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len);
 
 #endif /* IXS_ARENA_H */

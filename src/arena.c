@@ -1,23 +1,29 @@
 #include "arena.h"
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define ARENA_MAX_ALIGN 16
 
 static size_t align_up(size_t val, size_t align) {
   return (val + align - 1) & ~(align - 1);
 }
 
-static ixs_arena_chunk *chunk_new(size_t capacity) {
-  ixs_arena_chunk *c = malloc(sizeof(*c));
+/*
+ * Single allocation per chunk: the ixs_arena_chunk header lives at the
+ * start of the malloc'd block, followed by the data region aligned to
+ * ARENA_MAX_ALIGN.  One malloc, one free.  Returns NULL on overflow/OOM.
+ */
+static ixs_arena_chunk *chunk_new(size_t data_capacity) {
+  size_t header_sz = align_up(sizeof(ixs_arena_chunk), ARENA_MAX_ALIGN);
+  size_t total = header_sz + data_capacity;
+  if (total < data_capacity)
+    return NULL; /* overflow */
+  ixs_arena_chunk *c = malloc(total);
   if (!c)
     return NULL;
-  c->base = malloc(capacity);
-  if (!c->base) {
-    free(c);
-    return NULL;
-  }
+  c->base = (char *)c + header_sz;
   c->used = 0;
-  c->capacity = capacity;
+  c->capacity = data_capacity;
   c->next = NULL;
   return c;
 }
@@ -33,7 +39,6 @@ void ixs_arena_destroy(ixs_arena *a) {
   ixs_arena_chunk *c = a->current;
   while (c) {
     ixs_arena_chunk *next = c->next;
-    free(c->base);
     free(c);
     c = next;
   }
@@ -48,22 +53,22 @@ void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
 
   if (a->current) {
     size_t off = align_up(a->current->used, align);
-    if (off + size <= a->current->capacity) {
+    if (off <= a->current->capacity && size <= a->current->capacity - off) {
       a->current->used = off + size;
       return a->current->base + off;
     }
   }
 
-  /* Need a new chunk. Double previous, but at least big enough. */
   size_t prev = a->current ? a->current->capacity : 0;
   size_t want = size + align;
+  if (want < size)
+    return NULL; /* overflow */
   size_t cap = prev > 0 ? prev : a->min_chunk;
 
-  /* Double until big enough, with overflow check. */
   while (cap < want) {
     size_t doubled = cap * 2;
     if (doubled <= cap)
-      return NULL; /* overflow */
+      return NULL;
     cap = doubled;
   }
 
@@ -73,12 +78,13 @@ void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
   c->next = a->current;
   a->current = c;
 
-  size_t off = align_up(0, align);
-  c->used = off + size;
-  return c->base + off;
+  c->used = size;
+  return c->base;
 }
 
 char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
+  if (len == (size_t)-1)
+    return NULL;
   char *p = ixs_arena_alloc(a, len + 1, 1);
   if (!p)
     return NULL;

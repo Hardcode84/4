@@ -158,16 +158,24 @@ individually freed; the entire arena is freed when the context is destroyed.
 This eliminates per-node malloc/free overhead and improves cache locality.
 
 ```c
-typedef struct ixs_arena {
-    char *base;
+typedef struct ixs_arena_chunk {
+    char *base;            // data region (immediately after header)
     size_t used;
     size_t capacity;
-    struct ixs_arena *next;  // chain for overflow
+    struct ixs_arena_chunk *next;
+} ixs_arena_chunk;
+
+typedef struct {
+    ixs_arena_chunk *current;
+    size_t min_chunk;       // default 4096
 } ixs_arena;
 ```
 
-Arenas grow by doubling (with overflow check — if doubling would exceed
-`SIZE_MAX`, treat as OOM). Typical working set for one expression is < 64 KB.
+Each chunk is a **single `malloc`** — the `ixs_arena_chunk` header is
+emplaced at the start of the block, followed by the data region aligned
+to 16 bytes. One malloc, one free per chunk. Chunks grow by doubling
+(with overflow check — if doubling would exceed `SIZE_MAX`, treat as OOM).
+Typical working set for one expression is < 64 KB.
 
 ### Layer 1: Expression Representation — Hash-Consed DAG
 
