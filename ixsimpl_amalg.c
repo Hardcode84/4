@@ -1700,8 +1700,14 @@ static ixs_node *parse_func_1(parser *p, const char *name) {
   return arg;
 }
 
-static ixs_node *parse_piecewise(parser *p) {
-  ixs_node *values[MAX_TERMS], *conds[MAX_TERMS];
+static ixs_node *parse_piecewise_impl(parser *p) {
+  size_t cap = 16;
+  ixs_node **values =
+      ixs_arena_alloc(&p->ctx->scratch, cap * sizeof(*values), sizeof(void *));
+  ixs_node **conds =
+      ixs_arena_alloc(&p->ctx->scratch, cap * sizeof(*conds), sizeof(void *));
+  if (!values || !conds)
+    return NULL;
   uint32_t n = 0;
 
   if (!match_char(p, '('))
@@ -1728,8 +1734,20 @@ static ixs_node *parse_piecewise(parser *p) {
     if (!match_char(p, ')'))
       return parse_error(p, "expected ')' after Piecewise case");
 
-    if (n >= MAX_TERMS)
-      return parse_error(p, "too many Piecewise cases");
+    if (n >= cap) {
+      size_t old_cap = cap;
+      size_t new_cap = old_cap * 2;
+      if (new_cap <= old_cap || new_cap > (size_t)-1 / sizeof(*values))
+        return NULL;
+      values =
+          ixs_arena_grow(&p->ctx->scratch, values, old_cap * sizeof(*values),
+                         new_cap * sizeof(*values), sizeof(void *));
+      conds = ixs_arena_grow(&p->ctx->scratch, conds, old_cap * sizeof(*conds),
+                             new_cap * sizeof(*conds), sizeof(void *));
+      if (!values || !conds)
+        return NULL;
+      cap = new_cap;
+    }
     values[n] = val;
     conds[n] = cond;
     n++;
@@ -1742,6 +1760,13 @@ static ixs_node *parse_piecewise(parser *p) {
     return parse_error(p, "empty Piecewise");
 
   return simp_pw(p->ctx, n, values, conds);
+}
+
+static ixs_node *parse_piecewise(parser *p) {
+  ixs_arena_mark m = ixs_arena_save(&p->ctx->scratch);
+  ixs_node *result = parse_piecewise_impl(p);
+  ixs_arena_restore(&p->ctx->scratch, m);
+  return result;
 }
 
 static ixs_node *parse_atom(parser *p) {
@@ -3836,6 +3861,59 @@ ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
   return ixs_node_not(ctx, a);
 }
 
+static ixs_node *simp_logic_impl(ixs_ctx *ctx, ixs_tag tag, ixs_node *a,
+                                 ixs_node *b) {
+  size_t cap = 16;
+  ixs_node **args =
+      ixs_arena_alloc(&ctx->scratch, cap * sizeof(*args), sizeof(void *));
+  if (!args)
+    return NULL;
+  uint32_t nargs = 0;
+  uint32_t i;
+
+  ixs_node *inputs[2];
+  inputs[0] = a;
+  inputs[1] = b;
+
+  for (i = 0; i < 2; i++) {
+    ixs_node *x = inputs[i];
+    if (x->tag == tag) {
+      uint32_t j;
+      for (j = 0; j < x->u.logic.nargs; j++) {
+        if (nargs >= cap) {
+          args = scratch_grow(&ctx->scratch, args, &cap, sizeof(*args));
+          if (!args)
+            return NULL;
+        }
+        args[nargs++] = x->u.logic.args[j];
+      }
+    } else {
+      if (nargs >= cap) {
+        args = scratch_grow(&ctx->scratch, args, &cap, sizeof(*args));
+        if (!args)
+          return NULL;
+      }
+      args[nargs++] = x;
+    }
+  }
+
+  qsort(args, nargs, sizeof(ixs_node *), nodeptr_cmp);
+  {
+    uint32_t j2 = 0;
+    for (i = 0; i < nargs; i++) {
+      if (j2 > 0 && args[j2 - 1] == args[i])
+        continue;
+      args[j2++] = args[i];
+    }
+    nargs = j2;
+  }
+
+  if (nargs == 1)
+    return args[0];
+
+  return ixs_node_logic(ctx, tag, nargs, args);
+}
+
 ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
@@ -3852,43 +3930,10 @@ ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (a == b)
     return a;
 
-  /* Flatten n-ary AND. */
-  ixs_node *args[MAX_TERMS];
-  uint32_t nargs = 0;
-  uint32_t i;
-
-  ixs_node *inputs[2];
-  inputs[0] = a;
-  inputs[1] = b;
-
-  for (i = 0; i < 2; i++) {
-    ixs_node *x = inputs[i];
-    if (x->tag == IXS_AND) {
-      uint32_t j;
-      for (j = 0; j < x->u.logic.nargs && nargs < MAX_TERMS; j++)
-        args[nargs++] = x->u.logic.args[j];
-    } else {
-      if (nargs < MAX_TERMS)
-        args[nargs++] = x;
-    }
-  }
-
-  /* Sort and deduplicate. */
-  qsort(args, nargs, sizeof(ixs_node *), nodeptr_cmp);
-  {
-    uint32_t j2 = 0;
-    for (i = 0; i < nargs; i++) {
-      if (j2 > 0 && args[j2 - 1] == args[i])
-        continue;
-      args[j2++] = args[i];
-    }
-    nargs = j2;
-  }
-
-  if (nargs == 1)
-    return args[0];
-
-  return ixs_node_logic(ctx, IXS_AND, nargs, args);
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_logic_impl(ctx, IXS_AND, a, b);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
 }
 
 ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
@@ -3907,50 +3952,23 @@ ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (a == b)
     return a;
 
-  ixs_node *args[MAX_TERMS];
-  uint32_t nargs = 0;
-  uint32_t i;
-
-  ixs_node *inputs[2];
-  inputs[0] = a;
-  inputs[1] = b;
-
-  for (i = 0; i < 2; i++) {
-    ixs_node *x = inputs[i];
-    if (x->tag == IXS_OR) {
-      uint32_t j;
-      for (j = 0; j < x->u.logic.nargs && nargs < MAX_TERMS; j++)
-        args[nargs++] = x->u.logic.args[j];
-    } else {
-      if (nargs < MAX_TERMS)
-        args[nargs++] = x;
-    }
-  }
-
-  qsort(args, nargs, sizeof(ixs_node *), nodeptr_cmp);
-  {
-    uint32_t j2 = 0;
-    for (i = 0; i < nargs; i++) {
-      if (j2 > 0 && args[j2 - 1] == args[i])
-        continue;
-      args[j2++] = args[i];
-    }
-    nargs = j2;
-  }
-
-  if (nargs == 1)
-    return args[0];
-
-  return ixs_node_logic(ctx, IXS_OR, nargs, args);
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_logic_impl(ctx, IXS_OR, a, b);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
 /*  simp_pw (Piecewise)                                               */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                  ixs_node **conds) {
-  ixs_pwcase cases[MAX_TERMS];
+static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
+                              ixs_node **conds) {
+  size_t cap = n > 16 ? n : 16;
+  ixs_pwcase *cases =
+      ixs_arena_alloc(&ctx->scratch, cap * sizeof(*cases), sizeof(void *));
+  if (!cases)
+    return NULL;
   uint32_t ncases = 0;
   uint32_t i;
 
@@ -3964,23 +3982,17 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
     if (!v || !c)
       return NULL;
 
-    /* Drop branches with False condition. */
     if (c->tag == IXS_FALSE)
       continue;
 
-    /* Sentinel in condition of reachable branch. */
     if (ixs_node_is_sentinel(c)) {
-      /* If there's a preceding True branch, this is unreachable. */
       if (ncases > 0 && cases[ncases - 1].cond->tag == IXS_TRUE)
         continue;
       return c;
     }
 
-    /* True condition: this is the final branch. */
     if (c->tag == IXS_TRUE) {
       if (ixs_node_is_sentinel(v)) {
-        /* Sentinel in catch-all value: check if there were earlier
-         * branches that cover all cases. */
         if (ncases > 0 && cases[ncases - 1].cond->tag == IXS_TRUE)
           break;
         return v;
@@ -3991,7 +4003,6 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
       break;
     }
 
-    /* Merge adjacent cases with same value. */
     if (ncases > 0 && cases[ncases - 1].value == v) {
       cases[ncases - 1].cond = simp_or(ctx, cases[ncases - 1].cond, c);
       if (!cases[ncases - 1].cond)
@@ -3999,6 +4010,11 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
       continue;
     }
 
+    if (ncases >= cap) {
+      cases = scratch_grow(&ctx->scratch, cases, &cap, sizeof(*cases));
+      if (!cases)
+        return NULL;
+    }
     cases[ncases].value = v;
     cases[ncases].cond = c;
     ncases++;
@@ -4007,11 +4023,18 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
   if (ncases == 0)
     return simp_err(ctx, "Piecewise: all conditions are False");
 
-  /* Single branch with True → just return value. */
   if (ncases == 1 && cases[0].cond->tag == IXS_TRUE)
     return cases[0].value;
 
   return ixs_node_pw(ctx, ncases, cases);
+}
+
+ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
+                  ixs_node **conds) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_pw_impl(ctx, n, values, conds);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */

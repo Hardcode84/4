@@ -148,8 +148,14 @@ static ixs_node *parse_func_1(parser *p, const char *name) {
   return arg;
 }
 
-static ixs_node *parse_piecewise(parser *p) {
-  ixs_node *values[MAX_TERMS], *conds[MAX_TERMS];
+static ixs_node *parse_piecewise_impl(parser *p) {
+  size_t cap = 16;
+  ixs_node **values =
+      ixs_arena_alloc(&p->ctx->scratch, cap * sizeof(*values), sizeof(void *));
+  ixs_node **conds =
+      ixs_arena_alloc(&p->ctx->scratch, cap * sizeof(*conds), sizeof(void *));
+  if (!values || !conds)
+    return NULL;
   uint32_t n = 0;
 
   if (!match_char(p, '('))
@@ -176,8 +182,20 @@ static ixs_node *parse_piecewise(parser *p) {
     if (!match_char(p, ')'))
       return parse_error(p, "expected ')' after Piecewise case");
 
-    if (n >= MAX_TERMS)
-      return parse_error(p, "too many Piecewise cases");
+    if (n >= cap) {
+      size_t old_cap = cap;
+      size_t new_cap = old_cap * 2;
+      if (new_cap <= old_cap || new_cap > (size_t)-1 / sizeof(*values))
+        return NULL;
+      values =
+          ixs_arena_grow(&p->ctx->scratch, values, old_cap * sizeof(*values),
+                         new_cap * sizeof(*values), sizeof(void *));
+      conds = ixs_arena_grow(&p->ctx->scratch, conds, old_cap * sizeof(*conds),
+                             new_cap * sizeof(*conds), sizeof(void *));
+      if (!values || !conds)
+        return NULL;
+      cap = new_cap;
+    }
     values[n] = val;
     conds[n] = cond;
     n++;
@@ -190,6 +208,13 @@ static ixs_node *parse_piecewise(parser *p) {
     return parse_error(p, "empty Piecewise");
 
   return simp_pw(p->ctx, n, values, conds);
+}
+
+static ixs_node *parse_piecewise(parser *p) {
+  ixs_arena_mark m = ixs_arena_save(&p->ctx->scratch);
+  ixs_node *result = parse_piecewise_impl(p);
+  ixs_arena_restore(&p->ctx->scratch, m);
+  return result;
 }
 
 static ixs_node *parse_atom(parser *p) {
