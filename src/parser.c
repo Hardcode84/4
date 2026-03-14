@@ -63,8 +63,9 @@ static bool match_str(parser *p, const char *s) {
   return false;
 }
 
-static void parse_error(parser *p, const char *msg) {
+static ixs_node *parse_error(parser *p, const char *msg) {
   ixs_ctx_push_error(p->ctx, "parse error at offset %zu: %s", p->pos, msg);
+  return p->ctx->sentinel_parse_error;
 }
 
 static bool depth_push(parser *p) {
@@ -135,19 +136,15 @@ static ixs_node *parse_atom(parser *p);
 
 static ixs_node *parse_func_1(parser *p, const char *name) {
   (void)name;
-  if (!match_char(p, '(')) {
-    parse_error(p, "expected '(' after function name");
-    return p->ctx->sentinel_parse_error;
-  }
+  if (!match_char(p, '('))
+    return parse_error(p, "expected '(' after function name");
   ixs_node *arg = parse_expr(p);
   if (!arg)
     return NULL;
   if (ixs_node_is_sentinel(arg))
     return arg;
-  if (!match_char(p, ')')) {
-    parse_error(p, "expected ')' after function argument");
-    return p->ctx->sentinel_parse_error;
-  }
+  if (!match_char(p, ')'))
+    return parse_error(p, "expected ')' after function argument");
   return arg;
 }
 
@@ -155,58 +152,42 @@ static ixs_node *parse_piecewise(parser *p) {
   ixs_node *values[MAX_TERMS], *conds[MAX_TERMS];
   uint32_t n = 0;
 
-  if (!match_char(p, '(')) {
-    parse_error(p, "expected '(' after Piecewise");
-    return p->ctx->sentinel_parse_error;
-  }
+  if (!match_char(p, '('))
+    return parse_error(p, "expected '(' after Piecewise");
 
   while (!at_end(p) && peek(p) != ')') {
-    if (n > 0 && !match_char(p, ',')) {
-      parse_error(p, "expected ',' between Piecewise cases");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (n > 0 && !match_char(p, ','))
+      return parse_error(p, "expected ',' between Piecewise cases");
 
-    if (!match_char(p, '(')) {
-      parse_error(p, "expected '(' for Piecewise case");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (!match_char(p, '('))
+      return parse_error(p, "expected '(' for Piecewise case");
 
     ixs_node *val = parse_expr(p);
     if (!val)
       return NULL;
 
-    if (!match_char(p, ',')) {
-      parse_error(p, "expected ',' in Piecewise case");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (!match_char(p, ','))
+      return parse_error(p, "expected ',' in Piecewise case");
 
     ixs_node *cond = parse_cond(p);
     if (!cond)
       return NULL;
 
-    if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' after Piecewise case");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (!match_char(p, ')'))
+      return parse_error(p, "expected ')' after Piecewise case");
 
-    if (n >= MAX_TERMS) {
-      parse_error(p, "too many Piecewise cases");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (n >= MAX_TERMS)
+      return parse_error(p, "too many Piecewise cases");
     values[n] = val;
     conds[n] = cond;
     n++;
   }
 
-  if (!match_char(p, ')')) {
-    parse_error(p, "expected ')' after Piecewise");
-    return p->ctx->sentinel_parse_error;
-  }
+  if (!match_char(p, ')'))
+    return parse_error(p, "expected ')' after Piecewise");
 
-  if (n == 0) {
-    parse_error(p, "empty Piecewise");
-    return p->ctx->sentinel_parse_error;
-  }
+  if (n == 0)
+    return parse_error(p, "empty Piecewise");
 
   return simp_pw(p->ctx, n, values, conds);
 }
@@ -228,9 +209,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ')')) {
-      parse_error(p, "expected ')'");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ')'");
     }
     depth_pop(p);
     return result;
@@ -256,9 +236,8 @@ static ixs_node *parse_atom(parser *p) {
   }
   if (match_str(p, "Mod")) {
     if (!match_char(p, '(')) {
-      parse_error(p, "expected '(' after Mod");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected '(' after Mod");
     }
     ixs_node *a = parse_expr(p);
     if (!a) {
@@ -266,9 +245,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ',')) {
-      parse_error(p, "expected ',' in Mod");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ',' in Mod");
     }
     ixs_node *b = parse_expr(p);
     if (!b) {
@@ -276,18 +254,16 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' after Mod");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ')' after Mod");
     }
     depth_pop(p);
     return simp_mod(p->ctx, a, b);
   }
   if (match_str(p, "Max")) {
     if (!match_char(p, '(')) {
-      parse_error(p, "expected '(' after Max");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected '(' after Max");
     }
     ixs_node *a = parse_expr(p);
     if (!a) {
@@ -295,9 +271,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ',')) {
-      parse_error(p, "expected ',' in Max");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ',' in Max");
     }
     ixs_node *b = parse_expr(p);
     if (!b) {
@@ -305,18 +280,16 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' after Max");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ')' after Max");
     }
     depth_pop(p);
     return simp_max(p->ctx, a, b);
   }
   if (match_str(p, "Min")) {
     if (!match_char(p, '(')) {
-      parse_error(p, "expected '(' after Min");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected '(' after Min");
     }
     ixs_node *a = parse_expr(p);
     if (!a) {
@@ -324,9 +297,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ',')) {
-      parse_error(p, "expected ',' in Min");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ',' in Min");
     }
     ixs_node *b = parse_expr(p);
     if (!b) {
@@ -334,18 +306,16 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' after Min");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ')' after Min");
     }
     depth_pop(p);
     return simp_min(p->ctx, a, b);
   }
   if (match_str(p, "xor")) {
     if (!match_char(p, '(')) {
-      parse_error(p, "expected '(' after xor");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected '(' after xor");
     }
     ixs_node *a = parse_expr(p);
     if (!a) {
@@ -353,9 +323,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ',')) {
-      parse_error(p, "expected ',' in xor");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ',' in xor");
     }
     ixs_node *b = parse_expr(p);
     if (!b) {
@@ -363,9 +332,8 @@ static ixs_node *parse_atom(parser *p) {
       return NULL;
     }
     if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' after xor");
       depth_pop(p);
-      return p->ctx->sentinel_parse_error;
+      return parse_error(p, "expected ')' after xor");
     }
     depth_pop(p);
     return simp_xor(p->ctx, a, b);
@@ -394,9 +362,8 @@ static ixs_node *parse_atom(parser *p) {
     }
   }
 
-  parse_error(p, "unexpected token");
   depth_pop(p);
-  return p->ctx->sentinel_parse_error;
+  return parse_error(p, "unexpected token");
 }
 
 static ixs_node *parse_unary(parser *p) {
@@ -503,10 +470,8 @@ static ixs_node *parse_cmp_expr(parser *p) {
     ixs_node *c = parse_cond(p);
     if (!c)
       return NULL;
-    if (!match_char(p, ')')) {
-      parse_error(p, "expected ')' in condition");
-      return p->ctx->sentinel_parse_error;
-    }
+    if (!match_char(p, ')'))
+      return parse_error(p, "expected ')' in condition");
     return c;
   }
 
@@ -606,10 +571,8 @@ ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input, size_t len) {
     return NULL;
 
   skip_ws(&p);
-  if (p.pos < p.len) {
-    parse_error(&p, "trailing characters");
-    return ctx->sentinel_parse_error;
-  }
+  if (p.pos < p.len)
+    return parse_error(&p, "trailing characters");
 
   return result;
 }
