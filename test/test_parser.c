@@ -110,8 +110,8 @@ static void test_mod(void) {
   n = ixs_parse(ctx, "Mod(17, 5)", 10);
   CHECK(n && ixs_node_int_val(n) == 2);
 
-  /* Mod(x, 1) → 0 */
-  n = ixs_parse(ctx, "Mod(x, 1)", 9);
+  /* Mod(floor(x), 1) → 0 (only integer-valued args fold) */
+  n = ixs_parse(ctx, "Mod(floor(x), 1)", 16);
   CHECK(n && ixs_node_int_val(n) == 0);
 
   ixs_ctx_destroy(ctx);

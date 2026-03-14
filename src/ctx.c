@@ -131,6 +131,16 @@ ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_mul(ctx, a, b);
 }
 
+ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a) { return simp_neg(ctx, a); }
+
+ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  return simp_sub(ctx, a, b);
+}
+
+ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  return simp_div(ctx, a, b);
+}
+
 ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x) { return simp_floor(ctx, x); }
 
 ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x) { return simp_ceil(ctx, x); }
@@ -238,3 +248,5 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize) {
 ixs_tag ixs_node_tag(ixs_node *node) { return node->tag; }
 
 int64_t ixs_node_int_val(ixs_node *node) { return node->u.ival; }
+
+uint32_t ixs_node_hash(ixs_node *node) { return node->hash; }

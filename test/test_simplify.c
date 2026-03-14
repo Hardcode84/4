@@ -122,8 +122,9 @@ static void test_mod_rules(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
 
-  /* Mod(x, 1) → 0 */
-  CHECK(ixs_node_int_val(ixs_mod(ctx, x, ixs_int(ctx, 1))) == 0);
+  /* Mod(floor(x), 1) → 0 (only integer-valued args fold) */
+  CHECK(ixs_node_int_val(ixs_mod(ctx, ixs_floor(ctx, x), ixs_int(ctx, 1))) ==
+        0);
 
   /* Mod(17, 5) → 2 */
   CHECK(ixs_node_int_val(ixs_mod(ctx, ixs_int(ctx, 17), ixs_int(ctx, 5))) == 2);

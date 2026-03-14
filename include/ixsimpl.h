@@ -50,6 +50,9 @@ ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);
 
 ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a);
+ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
 ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x);
 ixs_node *ixs_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
@@ -113,6 +116,7 @@ typedef enum {
 
 ixs_tag ixs_node_tag(ixs_node *node);
 int64_t ixs_node_int_val(ixs_node *node);
+uint32_t ixs_node_hash(ixs_node *node);
 
 #ifdef __cplusplus
 }

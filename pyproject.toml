@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ixsimpl"
+version = "0.1.0"
+description = "Fast index expression simplifier for integer arithmetic"
+requires-python = ">=3.7"
+license = "Apache-2.0"

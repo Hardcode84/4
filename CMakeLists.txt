@@ -51,6 +51,11 @@ target_include_directories(test_corpus PRIVATE src)
 add_test(NAME test_corpus COMMAND test_corpus
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+add_executable(test_edge_cases test/test_edge_cases.c)
+target_link_libraries(test_edge_cases ixsimpl)
+target_include_directories(test_edge_cases PRIVATE src)
+add_test(NAME test_edge_cases COMMAND test_edge_cases)
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)

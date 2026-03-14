@@ -24,4 +24,10 @@ Thumbs.db
 # Beads
 .beads/
 
+# Python
+.hypothesis/
+*.egg-info/
+__pycache__/
+*.pyc
+
 .cursor/

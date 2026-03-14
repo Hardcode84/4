@@ -471,8 +471,9 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return make_const(ctx, rp, rq);
   }
 
-  /* Mod(x, 1) → 0 */
-  if (ixs_node_is_one(b))
+  /* Mod(x, 1) → 0 only when x is known integer (INT node or floor/ceil). */
+  if (ixs_node_is_one(b) &&
+      (a->tag == IXS_INT || a->tag == IXS_FLOOR || a->tag == IXS_CEIL))
     return ixs_node_int(ctx, 0);
 
   /* Mod(Mod(x, m), m) → Mod(x, m) */
