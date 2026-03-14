@@ -90,6 +90,10 @@ working state, not source artifacts. The `.beads/` directory should stay in
 - **No Unicode**. Only ASCII in source files — code, comments, string literals, all of it.
 - **Bounded recursion only**. Every recursive call must have a small, statically provable depth bound. If you can't prove the bound, rewrite it as iteration.
 
+## Testing
+
+Every simplification rule and transformation must have a corresponding unit test in `test/test_simplify.c`. When adding or modifying a rule, add a test that exercises the positive case (rule fires, result is correct) and at least one negative case (rule correctly does NOT fire when preconditions are unmet). No rule ships without a test.
+
 ## Tone
 
 Code comments, docstrings, and commit messages share the same voice: terse, dry, informative. Wit is welcome, fluff is not. Say what the thing does, not what you wish it did. If a comment doesn't earn its line, delete it.
