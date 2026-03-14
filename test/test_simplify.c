@@ -209,6 +209,11 @@ static void test_substitution(void) {
   result = ixs_subs(ctx, expr, y, ixs_int(ctx, 99));
   CHECK(result && strcmp(pr(result), "1 + x") == 0);
 
+  /* Multi-occurrence: Mod(x,4) + 2*Mod(x,4) with Mod(x,4)→y gives 3*y */
+  expr = ixs_add(ctx, mod_x4, ixs_mul(ctx, ixs_int(ctx, 2), mod_x4));
+  result = ixs_subs(ctx, expr, mod_x4, y);
+  CHECK(result && strcmp(pr(result), "3*y") == 0);
+
   ixs_ctx_destroy(ctx);
 }
 

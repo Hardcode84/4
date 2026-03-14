@@ -348,7 +348,8 @@ static PyMethodDef Expr_methods[] = {
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
-     "Substitute: expr.subs(target, replacement). target is a string or Expr."},
+     "expr.subs(target, replacement): target is str (variable name) or Expr "
+     "(any subexpression); replacement is Expr or int."},
     {NULL}};
 
 /* --- Expr properties --- */

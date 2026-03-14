@@ -975,21 +975,32 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
 }
 
 /* ------------------------------------------------------------------ */
-/*  simp_subs (substitution)                                          */
+/*  simp_subs (substitution with memoization)                         */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
-                    ixs_node *replacement) {
+#define SUBS_MEMO_SIZE 256u
+#define SUBS_MEMO_MASK (SUBS_MEMO_SIZE - 1u)
+
+typedef struct {
+  ixs_node *key;
+  ixs_node *val;
+} subs_memo_slot;
+
+static size_t subs_memo_idx(ixs_node *n) {
+  uint32_t h = n->hash;
+  return (size_t)((h ^ (h >> 8)) & SUBS_MEMO_MASK);
+}
+
+static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
+                          ixs_node *replacement, subs_memo_slot *memo) {
   uint32_t i;
+  size_t slot;
+  ixs_node *result;
 
   if (!expr)
     return NULL;
   if (ixs_node_is_sentinel(expr))
     return expr;
-  if (!target || !replacement)
-    return NULL;
-  if (ixs_node_is_sentinel(replacement))
-    return replacement;
 
   if (expr == target)
     return replacement;
@@ -1003,19 +1014,29 @@ ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return expr;
+  default:
+    break;
+  }
 
+  slot = subs_memo_idx(expr);
+  if (memo[slot].key == expr)
+    return memo[slot].val;
+
+  result = NULL;
+
+  switch (expr->tag) {
   case IXS_ADD: {
-    ixs_node *nc = simp_subs(ctx, expr->u.add.coeff, target, replacement);
+    ixs_node *nc = subs_rec(ctx, expr->u.add.coeff, target, replacement, memo);
     if (!nc)
       return NULL;
-    ixs_node *result = nc;
+    result = nc;
     for (i = 0; i < expr->u.add.nterms; i++) {
       ixs_node *nt =
-          simp_subs(ctx, expr->u.add.terms[i].term, target, replacement);
+          subs_rec(ctx, expr->u.add.terms[i].term, target, replacement, memo);
       if (!nt)
         return NULL;
       ixs_node *ncoeff =
-          simp_subs(ctx, expr->u.add.terms[i].coeff, target, replacement);
+          subs_rec(ctx, expr->u.add.terms[i].coeff, target, replacement, memo);
       if (!ncoeff)
         return NULL;
       ixs_node *term = simp_mul(ctx, ncoeff, nt);
@@ -1025,29 +1046,22 @@ ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       if (!result)
         return NULL;
     }
-    return result;
+    break;
   }
   case IXS_MUL: {
-    ixs_node *nc = simp_subs(ctx, expr->u.mul.coeff, target, replacement);
+    ixs_node *nc = subs_rec(ctx, expr->u.mul.coeff, target, replacement, memo);
     if (!nc)
       return NULL;
-    ixs_node *result = nc;
+    result = nc;
     for (i = 0; i < expr->u.mul.nfactors; i++) {
       ixs_node *nb =
-          simp_subs(ctx, expr->u.mul.factors[i].base, target, replacement);
+          subs_rec(ctx, expr->u.mul.factors[i].base, target, replacement, memo);
       if (!nb)
         return NULL;
       int32_t e = expr->u.mul.factors[i].exp;
-      /* Rebuild the power: b^e. For positive exponents, multiply
-       * repeatedly. For negative, use div. */
       ixs_node *power;
       if (e == 1) {
         power = nb;
-      } else if (e == -1) {
-        ixs_mulfactor f;
-        f.base = nb;
-        f.exp = -1;
-        power = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
       } else {
         ixs_mulfactor f;
         f.base = nb;
@@ -1060,84 +1074,124 @@ ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       if (!result)
         return NULL;
     }
-    return result;
+    break;
   }
   case IXS_FLOOR: {
-    ixs_node *na = simp_subs(ctx, expr->u.unary.arg, target, replacement);
-    return na ? simp_floor(ctx, na) : NULL;
+    ixs_node *na = subs_rec(ctx, expr->u.unary.arg, target, replacement, memo);
+    result = na ? simp_floor(ctx, na) : NULL;
+    break;
   }
   case IXS_CEIL: {
-    ixs_node *na = simp_subs(ctx, expr->u.unary.arg, target, replacement);
-    return na ? simp_ceil(ctx, na) : NULL;
+    ixs_node *na = subs_rec(ctx, expr->u.unary.arg, target, replacement, memo);
+    result = na ? simp_ceil(ctx, na) : NULL;
+    break;
   }
   case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR: {
-    ixs_node *nl = simp_subs(ctx, expr->u.binary.lhs, target, replacement);
-    ixs_node *nr = simp_subs(ctx, expr->u.binary.rhs, target, replacement);
+    ixs_node *nl = subs_rec(ctx, expr->u.binary.lhs, target, replacement, memo);
+    ixs_node *nr = subs_rec(ctx, expr->u.binary.rhs, target, replacement, memo);
     if (!nl || !nr)
       return NULL;
     switch (expr->tag) {
     case IXS_MOD:
-      return simp_mod(ctx, nl, nr);
+      result = simp_mod(ctx, nl, nr);
+      break;
     case IXS_MAX:
-      return simp_max(ctx, nl, nr);
+      result = simp_max(ctx, nl, nr);
+      break;
     case IXS_MIN:
-      return simp_min(ctx, nl, nr);
+      result = simp_min(ctx, nl, nr);
+      break;
     case IXS_XOR:
-      return simp_xor(ctx, nl, nr);
+      result = simp_xor(ctx, nl, nr);
+      break;
     default:
-      return NULL;
+      break;
     }
+    break;
   }
   case IXS_CMP: {
-    ixs_node *nl = simp_subs(ctx, expr->u.binary.lhs, target, replacement);
-    ixs_node *nr = simp_subs(ctx, expr->u.binary.rhs, target, replacement);
+    ixs_node *nl = subs_rec(ctx, expr->u.binary.lhs, target, replacement, memo);
+    ixs_node *nr = subs_rec(ctx, expr->u.binary.rhs, target, replacement, memo);
     if (!nl || !nr)
       return NULL;
-    return simp_cmp(ctx, nl, expr->u.binary.cmp_op, nr);
+    result = simp_cmp(ctx, nl, expr->u.binary.cmp_op, nr);
+    break;
   }
   case IXS_PIECEWISE: {
     ixs_node *vals[MAX_TERMS], *cds[MAX_TERMS];
     for (i = 0; i < expr->u.pw.ncases; i++) {
-      vals[i] = simp_subs(ctx, expr->u.pw.cases[i].value, target, replacement);
-      cds[i] = simp_subs(ctx, expr->u.pw.cases[i].cond, target, replacement);
+      vals[i] =
+          subs_rec(ctx, expr->u.pw.cases[i].value, target, replacement, memo);
+      cds[i] =
+          subs_rec(ctx, expr->u.pw.cases[i].cond, target, replacement, memo);
       if (!vals[i] || !cds[i])
         return NULL;
     }
-    return simp_pw(ctx, expr->u.pw.ncases, vals, cds);
+    result = simp_pw(ctx, expr->u.pw.ncases, vals, cds);
+    break;
   }
   case IXS_AND: {
-    ixs_node *result = ctx->node_true;
+    result = ctx->node_true;
     for (i = 0; i < expr->u.logic.nargs; i++) {
-      ixs_node *na = simp_subs(ctx, expr->u.logic.args[i], target, replacement);
+      ixs_node *na =
+          subs_rec(ctx, expr->u.logic.args[i], target, replacement, memo);
       if (!na)
         return NULL;
       result = simp_and(ctx, result, na);
       if (!result)
         return NULL;
     }
-    return result;
+    break;
   }
   case IXS_OR: {
-    ixs_node *result = ctx->node_false;
+    result = ctx->node_false;
     for (i = 0; i < expr->u.logic.nargs; i++) {
-      ixs_node *na = simp_subs(ctx, expr->u.logic.args[i], target, replacement);
+      ixs_node *na =
+          subs_rec(ctx, expr->u.logic.args[i], target, replacement, memo);
       if (!na)
         return NULL;
       result = simp_or(ctx, result, na);
       if (!result)
         return NULL;
     }
-    return result;
+    break;
   }
   case IXS_NOT: {
-    ixs_node *na = simp_subs(ctx, expr->u.unary_bool.arg, target, replacement);
-    return na ? simp_not(ctx, na) : NULL;
+    ixs_node *na =
+        subs_rec(ctx, expr->u.unary_bool.arg, target, replacement, memo);
+    result = na ? simp_not(ctx, na) : NULL;
+    break;
   }
+  default:
+    result = expr;
+    break;
   }
-  return expr;
+
+  if (result) {
+    memo[slot].key = expr;
+    memo[slot].val = result;
+  }
+  return result;
+}
+
+ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
+                    ixs_node *replacement) {
+  subs_memo_slot memo[SUBS_MEMO_SIZE];
+
+  if (!expr)
+    return NULL;
+  if (ixs_node_is_sentinel(expr))
+    return expr;
+  if (!target || !replacement)
+    return NULL;
+  if (expr == target)
+    return replacement;
+
+  memset(memo, 0, sizeof(memo));
+  return subs_rec(ctx, expr, target, replacement, memo);
 }
 
 /* ------------------------------------------------------------------ */
