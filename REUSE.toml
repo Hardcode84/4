@@ -1,0 +1,12 @@
+version = 1
+
+[[annotations]]
+path = [
+    ".pre-commit-config.yaml",
+    ".clang-format",
+    ".gitignore",
+    "*.md",
+    "test/corpus.txt",
+]
+SPDX-FileCopyrightText = "2026 ixsimpl contributors"
+SPDX-License-Identifier = "Apache-2.0"
