@@ -68,6 +68,11 @@ target_link_libraries(test_edge_cases ixsimpl)
 target_include_directories(test_edge_cases PRIVATE src)
 add_test(NAME test_edge_cases COMMAND test_edge_cases)
 
+add_executable(test_arena test/test_arena.c)
+target_link_libraries(test_arena ixsimpl)
+target_include_directories(test_arena PRIVATE src)
+add_test(NAME test_arena COMMAND test_arena)
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)

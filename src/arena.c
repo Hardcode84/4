@@ -92,3 +92,42 @@ char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
   p[len] = '\0';
   return p;
 }
+
+ixs_arena_mark ixs_arena_save(ixs_arena *a) {
+  ixs_arena_mark m;
+  m.chunk = a->current;
+  m.used = a->current ? a->current->used : 0;
+  return m;
+}
+
+void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
+  while (a->current != m.chunk) {
+    if (!a->current)
+      return;
+    ixs_arena_chunk *doomed = a->current;
+    a->current = doomed->next;
+    free(doomed);
+  }
+  if (a->current)
+    a->current->used = m.used;
+}
+
+void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
+                     size_t align) {
+  if (!ptr)
+    return ixs_arena_alloc(a, new_size, align);
+  if (new_size < old_size)
+    return NULL;
+  if (a->current && (char *)ptr >= a->current->base &&
+      (size_t)((char *)ptr - a->current->base) + old_size == a->current->used) {
+    size_t extra = new_size - old_size;
+    if (extra <= a->current->capacity - a->current->used) {
+      a->current->used += extra;
+      return ptr;
+    }
+  }
+  void *p = ixs_arena_alloc(a, new_size, align);
+  if (p)
+    memcpy(p, ptr, old_size);
+  return p;
+}

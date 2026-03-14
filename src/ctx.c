@@ -37,6 +37,7 @@ ixs_ctx *ixs_ctx_create(void) {
     return NULL;
 
   ixs_arena_init(&ctx->arena, IXS_ARENA_DEFAULT_SIZE);
+  ixs_arena_init(&ctx->scratch, IXS_ARENA_DEFAULT_SIZE);
 
   if (!ixs_htab_init(ctx)) {
     free(ctx);
@@ -70,6 +71,7 @@ void ixs_ctx_destroy(ixs_ctx *ctx) {
   if (!ctx)
     return;
   ixs_htab_destroy(ctx);
+  ixs_arena_destroy(&ctx->scratch);
   ixs_arena_destroy(&ctx->arena);
   free((void *)ctx->errors);
   free(ctx);

@@ -67,6 +67,7 @@ struct ixs_node {
 
 struct ixs_ctx {
   ixs_arena arena;
+  ixs_arena scratch;
 
   /* Hash-consing table (open addressing, linear probing) */
   ixs_node **htab;
