@@ -2666,15 +2666,19 @@ static uint64_t to_unsigned_mag(int64_t x) {
   return (uint64_t)(-(x + 1)) + 1u;
 }
 
+static int64_t u64_to_i64_clamped(uint64_t u) {
+  return (u > (uint64_t)INT64_MAX) ? INT64_MAX : (int64_t)u;
+}
+
 int64_t ixs_gcd(int64_t a, int64_t b) {
   uint64_t u = to_unsigned_mag(a);
   uint64_t v = to_unsigned_mag(b);
   unsigned shift;
 
   if (u == 0)
-    return (int64_t)v;
+    return u64_to_i64_clamped(v);
   if (v == 0)
-    return (int64_t)u;
+    return u64_to_i64_clamped(u);
 
   /* Factor out common 2s */
   for (shift = 0; ((u | v) & 1) == 0; ++shift) {
@@ -2696,7 +2700,7 @@ int64_t ixs_gcd(int64_t a, int64_t b) {
   } while (v != 0);
 
   u <<= shift;
-  return (int64_t)u;
+  return u64_to_i64_clamped(u);
 }
 
 /* --- Normalize --- */
