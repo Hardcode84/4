@@ -45,7 +45,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install sympy hypothesis
+        run: pip install setuptools sympy hypothesis
 
       - name: Build extension (ASAN)
         env:
@@ -56,9 +56,9 @@ jobs:
 
       - name: Fuzz tests
         env:
-          LD_PRELOAD: libasan.so.8
           ASAN_OPTIONS: detect_leaks=0
-        run: python test/test_python.py
+        run: |
+          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python test/test_python.py
 
   pre-commit:
     runs-on: ubuntu-latest
