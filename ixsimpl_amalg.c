@@ -2246,7 +2246,7 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
           print_wrapped(pb, n->u.add.terms[i].term, PREC_ADD);
         } else if (ixs_rat_is_neg(tp)) {
           pb_str(pb, "-");
-          int64_t np, nq;
+          int64_t np = 0, nq = 0;
           ixs_rat_neg(tp, tq, &np, &nq);
           if (np == 1 && nq == 1) {
             print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
@@ -2276,7 +2276,7 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
       } else {
         if (ixs_rat_is_neg(tp)) {
           pb_str(pb, " - ");
-          int64_t np, nq;
+          int64_t np = 0, nq = 0;
           ixs_rat_neg(tp, tq, &np, &nq);
           if (np == 1 && nq == 1) {
             print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
