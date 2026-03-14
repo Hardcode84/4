@@ -7,58 +7,6 @@
 #define MAX_TERMS 4096
 #define SIMPLIFY_ITER_LIMIT 64
 
-/*
- * Conservative check: is this node guaranteed to produce an integer
- * for all variable assignments?  Used to gate Mod simplifications
- * that assume integrality.
- */
-static bool is_integer_node(const ixs_node *n) {
-  if (!n)
-    return false;
-  switch (n->tag) {
-  case IXS_INT:
-  case IXS_FLOOR:
-  case IXS_CEIL:
-  case IXS_SYM:
-  case IXS_XOR:
-    return true;
-  case IXS_ADD: {
-    uint32_t i;
-    int64_t cp, cq;
-    ixs_node_get_rat(n->u.add.coeff, &cp, &cq);
-    if (cq != 1)
-      return false;
-    for (i = 0; i < n->u.add.nterms; i++) {
-      ixs_node_get_rat(n->u.add.terms[i].coeff, &cp, &cq);
-      if (cq != 1)
-        return false;
-      if (!is_integer_node(n->u.add.terms[i].term))
-        return false;
-    }
-    return true;
-  }
-  case IXS_MUL: {
-    uint32_t i;
-    int64_t cp, cq;
-    ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
-    if (cq != 1)
-      return false;
-    for (i = 0; i < n->u.mul.nfactors; i++) {
-      if (!is_integer_node(n->u.mul.factors[i].base))
-        return false;
-    }
-    return true;
-  }
-  case IXS_MOD:
-    return is_integer_node(n->u.binary.lhs) && is_integer_node(n->u.binary.rhs);
-  case IXS_MAX:
-  case IXS_MIN:
-    return is_integer_node(n->u.binary.lhs) && is_integer_node(n->u.binary.rhs);
-  default:
-    return false;
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
@@ -524,7 +472,7 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
 
   /* Mod(x, 1) → 0 when x is known integer-valued. */
-  if (ixs_node_is_one(b) && is_integer_node(a))
+  if (ixs_node_is_one(b) && ixs_node_is_integer_valued(a))
     return ixs_node_int(ctx, 0);
 
   /* Mod(Mod(x, m), m) → Mod(x, m) */
@@ -557,7 +505,8 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
       /* Drop ci*ti when ci is a multiple of m AND ti is integer-valued,
        * so that ci*ti is always a multiple of m. */
-      if (cq == 1 && cp % m == 0 && is_integer_node(a->u.add.terms[i].term)) {
+      if (cq == 1 && cp % m == 0 &&
+          ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
         changed = true;
         continue;
       }

@@ -659,3 +659,56 @@ ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
     return b;
   return NULL; /* both clean */
 }
+
+/* ------------------------------------------------------------------ */
+/*  Integer-valued predicate                                          */
+/* ------------------------------------------------------------------ */
+
+bool ixs_node_is_integer_valued(const ixs_node *n) {
+  if (!n)
+    return false;
+  switch (n->tag) {
+  case IXS_INT:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_SYM:
+  case IXS_XOR:
+    return true;
+  case IXS_ADD: {
+    uint32_t i;
+    int64_t cp, cq;
+    ixs_node_get_rat(n->u.add.coeff, &cp, &cq);
+    if (cq != 1)
+      return false;
+    for (i = 0; i < n->u.add.nterms; i++) {
+      ixs_node_get_rat(n->u.add.terms[i].coeff, &cp, &cq);
+      if (cq != 1)
+        return false;
+      if (!ixs_node_is_integer_valued(n->u.add.terms[i].term))
+        return false;
+    }
+    return true;
+  }
+  case IXS_MUL: {
+    uint32_t i;
+    int64_t cp, cq;
+    ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
+    if (cq != 1)
+      return false;
+    for (i = 0; i < n->u.mul.nfactors; i++) {
+      if (n->u.mul.factors[i].exp < 0)
+        return false;
+      if (!ixs_node_is_integer_valued(n->u.mul.factors[i].base))
+        return false;
+    }
+    return true;
+  }
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+    return ixs_node_is_integer_valued(n->u.binary.lhs) &&
+           ixs_node_is_integer_valued(n->u.binary.rhs);
+  default:
+    return false;
+  }
+}

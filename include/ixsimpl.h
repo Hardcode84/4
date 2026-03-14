@@ -165,10 +165,11 @@ typedef enum {
   IXS_PARSE_ERROR
 } ixs_tag;
 
-/* Node type tag.  node must not be NULL. */
+/* All introspection functions require non-NULL node. */
+
 ixs_tag ixs_node_tag(ixs_node *node);
 
-/* Extract integer value.  Only valid when tag is IXS_INT. */
+/* Only valid when tag is IXS_INT. */
 int64_t ixs_node_int_val(ixs_node *node);
 
 /* Structural hash (deterministic, not an address).  Useful for

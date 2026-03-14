@@ -213,6 +213,13 @@ int main(int argc, char **argv) {
     return (n_errors == 0 && n_parsed > 0) ? 0 : 1;
   }
 
+  if (expected_lines && expr_index != expected_len) {
+    fprintf(stderr,
+            "expected line count mismatch: %zu expressions vs %zu expected\n",
+            expr_index, expected_len);
+    n_mismatches++;
+  }
+
   /* Free expected lines */
   if (expected_lines) {
     for (size_t i = 0; i < expected_len; i++)

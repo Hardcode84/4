@@ -46,6 +46,7 @@ ctest --test-dir build
 ```c
 #include <ixsimpl.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(void) {
     ixs_ctx *ctx = ixs_ctx_create();
@@ -60,14 +61,16 @@ int main(void) {
     /* Print */
     char buf[256];
     ixs_print(result, buf, sizeof buf);
-    printf("%s\n", buf);  /* "2*x" ... or whatever it simplifies to */
+    printf("%s\n", buf);
 
     ixs_ctx_destroy(ctx);
     return 0;
 }
 ```
 
-Link with `-lixsimpl`.
+```bash
+gcc -o demo demo.c -Iinclude -Lbuild -lixsimpl
+```
 
 ## Quick Start (Python)
 
@@ -95,13 +98,16 @@ print(int(result))  # 38
 
 ```cpp
 #include "ixsimpl.hpp"
+#include <iostream>
 
-ixs::Context ctx;
-auto x = ctx.sym("x");
-auto y = ctx.sym("y");
-auto expr = ixs::floor(ctx, (x + y) / ctx.rat(1, 2));
-auto result = ctx.simplify(expr);
-std::cout << result.print() << "\n";
+int main() {
+    ixs::Context ctx;
+    auto x = ixs::Expr::sym(ctx, "x");
+    auto y = ixs::Expr::sym(ctx, "y");
+    auto expr = ixs::floor(x + y) * ixs::Expr::integer(ctx, 3);
+    auto result = expr.simplify();
+    std::cout << result.str() << "\n";
+}
 ```
 
 ## API Overview
@@ -138,7 +144,8 @@ context error list (`ixs_ctx_nerrors`, `ixs_ctx_error`).
 # C tests
 ctest --test-dir build
 
-# Python fuzz tests (requires hypothesis, sympy)
+# Python fuzz tests (requires ixsimpl, hypothesis, sympy)
+pip install .
 pip install hypothesis sympy
 python test/test_python.py
 ```
@@ -146,7 +153,8 @@ python test/test_python.py
 The test suite includes:
 - Unit tests for rationals, parser, simplifier
 - 609-expression corpus regression test
-- 58 edge-case tests (overflow, division by zero, deep nesting, etc.)
+- Edge-case tests (overflow, division by zero, deep nesting, sentinel
+  propagation, etc.)
 - Hypothesis-based fuzz tests (10,000 self-consistency + 5,000 SymPy
   cross-checks)
 
