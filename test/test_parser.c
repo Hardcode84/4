@@ -91,13 +91,13 @@ static void test_floor_ceil(void) {
   n = ixs_parse(ctx, "ceiling(7/2)", 12);
   CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 4);
 
-  /* floor(x) stays symbolic */
+  /* floor(x) → x (x is integer-valued) */
   n = ixs_parse(ctx, "floor(x)", 8);
-  CHECK(n && ixs_node_tag(n) == IXS_FLOOR);
+  CHECK(n && ixs_node_tag(n) == IXS_SYM);
 
-  /* floor(floor(x)) → floor(x) */
+  /* floor(floor(x)) → x */
   n = ixs_parse(ctx, "floor(floor(x))", 15);
-  CHECK(n && ixs_node_tag(n) == IXS_FLOOR);
+  CHECK(n && ixs_node_tag(n) == IXS_SYM);
 
   ixs_ctx_destroy(ctx);
 }

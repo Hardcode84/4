@@ -20,6 +20,7 @@ typedef struct {
 typedef struct {
   const char *name;
   ixs_interval iv;
+  int64_t divisor; /* known divisor (0 = no info, >0 = sym is multiple of d) */
 } ixs_var_bound;
 
 typedef struct {
@@ -35,6 +36,9 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 
 /* Get the interval for an expression using propagation rules. */
 ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
+
+/* Return the known divisor of a symbol (0 if none). */
+int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name);
 
 /* An interval representing "no info". */
 static inline ixs_interval ixs_interval_unknown(void) {

@@ -218,7 +218,7 @@ static void test_max_depth_expressions(void) {
     r = next;
   }
   CHECK(r && !ixs_is_error(r));
-  CHECK(ixs_node_tag(r) == IXS_FLOOR);
+  CHECK(ixs_node_tag(r) == IXS_SYM);
 
   ixs_ctx_destroy(ctx);
 }

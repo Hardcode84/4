@@ -47,10 +47,61 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
  *   sym < N           → hi = N - 1 (integer context)
  *   sym >= N          → lo = N
  */
+static void extract_divisibility(ixs_bounds *b, ixs_node *a) {
+  /* Recognize Mod(sym, const) == 0 as a divisibility assumption. */
+  if (a->tag != IXS_CMP || a->u.binary.cmp_op != IXS_CMP_EQ)
+    return;
+
+  ixs_node *lhs = a->u.binary.lhs;
+  ixs_node *rhs = a->u.binary.rhs;
+
+  /* Mod(sym, c) == 0 */
+  if (lhs->tag == IXS_MOD && ixs_node_is_zero(rhs)) {
+    ixs_node *dividend = lhs->u.binary.lhs;
+    ixs_node *modulus = lhs->u.binary.rhs;
+    if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
+        modulus->u.ival > 0) {
+      ixs_var_bound *v = get_or_create_var(b, dividend->u.name);
+      if (!v)
+        return;
+      if (v->divisor == 0)
+        v->divisor = modulus->u.ival;
+      else {
+        /* Multiple divisibility assumptions: take lcm. */
+        int64_t g = ixs_gcd(v->divisor, modulus->u.ival);
+        if (g > 0 && v->divisor <= INT64_MAX / (modulus->u.ival / g))
+          v->divisor = v->divisor / g * modulus->u.ival;
+      }
+    }
+    return;
+  }
+
+  /* 0 == Mod(sym, c) (flipped) */
+  if (rhs->tag == IXS_MOD && ixs_node_is_zero(lhs)) {
+    ixs_node *dividend = rhs->u.binary.lhs;
+    ixs_node *modulus = rhs->u.binary.rhs;
+    if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
+        modulus->u.ival > 0) {
+      ixs_var_bound *v = get_or_create_var(b, dividend->u.name);
+      if (!v)
+        return;
+      if (v->divisor == 0)
+        v->divisor = modulus->u.ival;
+      else {
+        int64_t g = ixs_gcd(v->divisor, modulus->u.ival);
+        if (g > 0 && v->divisor <= INT64_MAX / (modulus->u.ival / g))
+          v->divisor = v->divisor / g * modulus->u.ival;
+      }
+    }
+  }
+}
+
 void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   /* Only handle comparisons. */
   if (a->tag != IXS_CMP)
     return;
+
+  extract_divisibility(b, a);
 
   ixs_node *lhs = a->u.binary.lhs;
   ixs_node *rhs = a->u.binary.rhs;
@@ -363,4 +414,9 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   default:
     return ixs_interval_unknown();
   }
+}
+
+int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
+  ixs_var_bound *v = find_var(b, name);
+  return v ? v->divisor : 0;
 }

@@ -296,25 +296,24 @@ static void test_mod_extract_constant(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
 
-  /* Mod(4*floor(x) + 3, 16) → Mod(4*floor(x), 16) + 3
-   * because |4| divides 16, floor(x) is integer-valued, and 3 < gcd(4)=4. */
-  ixs_node *fx = ixs_floor(ctx, x);
-  ixs_node *term = ixs_mul(ctx, ixs_int(ctx, 4), fx);
+  /* Mod(4*x + 3, 16) → 3 + Mod(4*x, 16)
+   * because |4| divides 16, x is integer-valued, and 3 < gcd(4)=4.
+   * (floor(x) → x since x is integer-valued.) */
+  ixs_node *term = ixs_mul(ctx, ixs_int(ctx, 4), x);
   ixs_node *sum = ixs_add(ctx, term, ixs_int(ctx, 3));
   ixs_node *expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
   ixs_node *r = ixs_simplify(ctx, expr, NULL, 0);
-  CHECK(strcmp(pr(r), "3 + Mod(4*floor(x), 16)") == 0);
+  CHECK(strcmp(pr(r), "3 + Mod(4*x, 16)") == 0);
 
-  /* Mod(8*floor(x) + 7, 16) → 7 + Mod(8*floor(x), 16)
-   * because 8 divides 16, and 7 < gcd(8) = 8. */
-  term = ixs_mul(ctx, ixs_int(ctx, 8), fx);
+  /* Mod(8*x + 7, 16) → 7 + Mod(8*x, 16) */
+  term = ixs_mul(ctx, ixs_int(ctx, 8), x);
   sum = ixs_add(ctx, term, ixs_int(ctx, 7));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
   r = ixs_simplify(ctx, expr, NULL, 0);
-  CHECK(strcmp(pr(r), "7 + Mod(8*floor(x), 16)") == 0);
+  CHECK(strcmp(pr(r), "7 + Mod(8*x, 16)") == 0);
 
-  /* Mod(4*floor(x) + 4, 16): c=4 >= gcd(4)=4, extraction must NOT fire. */
-  sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), fx), ixs_int(ctx, 4));
+  /* Mod(4*x + 4, 16): c=4 >= gcd(4)=4, extraction must NOT fire. */
+  sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 4));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
   r = ixs_simplify(ctx, expr, NULL, 0);
   CHECK(r && !ixs_is_error(r));
@@ -330,20 +329,19 @@ static void test_mod_extract_constant(void) {
   CHECK(r && !ixs_is_error(r));
   CHECK(strstr(pr(r), "3 + Mod(") == NULL);
 
-  /* Multi-term: Mod(4*floor(x) + 6*floor(y) + 3, 12).
+  /* Multi-term: Mod(4*x + 6*y + 3, 12).
    * gcd(4, 6) = 2, and 3 >= 2: extraction must NOT fire.
    * (Wave's original min(4,6)=4 would wrongly allow 3 < 4.) */
   ixs_node *y = ixs_sym(ctx, "y");
-  ixs_node *fy = ixs_floor(ctx, y);
-  ixs_node *t1 = ixs_mul(ctx, ixs_int(ctx, 4), fx);
-  ixs_node *t2 = ixs_mul(ctx, ixs_int(ctx, 6), fy);
+  ixs_node *t1 = ixs_mul(ctx, ixs_int(ctx, 4), x);
+  ixs_node *t2 = ixs_mul(ctx, ixs_int(ctx, 6), y);
   sum = ixs_add(ctx, ixs_add(ctx, t1, t2), ixs_int(ctx, 3));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 12));
   r = ixs_simplify(ctx, expr, NULL, 0);
   CHECK(r && !ixs_is_error(r));
   CHECK(strstr(pr(r), "3 + Mod(") == NULL);
 
-  /* Multi-term positive: Mod(4*floor(x) + 6*floor(y) + 1, 12).
+  /* Multi-term positive: Mod(4*x + 6*y + 1, 12).
    * gcd(4, 6) = 2, and 1 < 2: extraction fires. */
   sum = ixs_add(ctx, ixs_add(ctx, t1, t2), ixs_int(ctx, 1));
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 12));
@@ -448,6 +446,90 @@ static void test_print_roundtrip(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_divisibility_assumptions(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *N = ixs_sym(ctx, "N");
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *r;
+
+  /* Assumption: Mod(K, 32) == 0  (K is divisible by 32) */
+  ixs_node *div_K_32[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+
+  /* floor(K/32) → K/32 when 32 | K */
+  ixs_node *e1 = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 32)));
+  r = ixs_simplify(ctx, e1, div_K_32, 1);
+  CHECK(strcmp(pr(r), "1/32*K") == 0);
+
+  /* Mod(K, 32) → 0 when 32 | K */
+  ixs_node *e2 = ixs_mod(ctx, K, ixs_int(ctx, 32));
+  r = ixs_simplify(ctx, e2, div_K_32, 1);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* floor(K/16) → K/16 since 32 | K implies 16 | K */
+  ixs_node *e3 = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 16)));
+  r = ixs_simplify(ctx, e3, div_K_32, 1);
+  CHECK(strcmp(pr(r), "1/16*K") == 0);
+
+  /* Mod(K, 64) should NOT simplify to 0 (32 | K does not imply 64 | K) */
+  ixs_node *e4 = ixs_mod(ctx, K, ixs_int(ctx, 64));
+  r = ixs_simplify(ctx, e4, div_K_32, 1);
+  CHECK(r != ixs_int(ctx, 0));
+
+  /* Mod(3*K, 32) → 0 when 32 | K */
+  ixs_node *e5 =
+      ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), K), ixs_int(ctx, 32));
+  r = ixs_simplify(ctx, e5, div_K_32, 1);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* Multiple assumptions: Mod(K, 32)==0 and Mod(N, 16)==0 */
+  ixs_node *multi_div[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_mod(ctx, N, ixs_int(ctx, 16)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), multi_div, 2);
+  CHECK(r == ixs_int(ctx, 0));
+  r = ixs_simplify(ctx, ixs_mod(ctx, N, ixs_int(ctx, 16)), multi_div, 2);
+  CHECK(r == ixs_int(ctx, 0));
+  r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, N, ixs_int(ctx, 16))),
+                   multi_div, 2);
+  CHECK(strcmp(pr(r), "1/16*N") == 0);
+
+  /* Mixed: floor(K/32) + Mod(K, 32) → K/32 when 32 | K */
+  ixs_node *e6 = ixs_add(ctx, ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 32))),
+                         ixs_mod(ctx, K, ixs_int(ctx, 32)));
+  r = ixs_simplify(ctx, e6, div_K_32, 1);
+  CHECK(strcmp(pr(r), "1/32*K") == 0);
+
+  /* Stronger assumption implies weaker: Mod(M, 256)==0 with tile=128 */
+  ixs_node *div_M_256[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, M, ixs_int(ctx, 256)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, M, ixs_int(ctx, 128)), div_M_256, 1);
+  CHECK(r == ixs_int(ctx, 0));
+  r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, M, ixs_int(ctx, 128))),
+                   div_M_256, 1);
+  CHECK(strcmp(pr(r), "1/128*M") == 0);
+
+  /* No assumptions: expressions pass through unchanged */
+  ixs_node *e7 = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 32)));
+  r = ixs_simplify(ctx, e7, NULL, 0);
+  CHECK(strstr(pr(r), "floor") != NULL);
+
+  /* ceiling(K/32) → K/32 when 32 | K */
+  ixs_node *e8 = ixs_ceil(ctx, ixs_div(ctx, K, ixs_int(ctx, 32)));
+  r = ixs_simplify(ctx, e8, div_K_32, 1);
+  CHECK(strcmp(pr(r), "1/32*K") == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -464,6 +546,7 @@ int main(void) {
   test_sentinel_propagation();
   test_same_node();
   test_print_roundtrip();
+  test_divisibility_assumptions();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

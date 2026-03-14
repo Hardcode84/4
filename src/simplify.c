@@ -367,6 +367,10 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
   if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
     return x;
 
+  /* floor(x) → x when x is structurally integer-valued */
+  if (ixs_node_is_integer_valued(x))
+    return x;
+
   /* floor(x + n) where n is integer → floor(x) + n
    * Applies when x is ADD and has an integer constant part. */
   if (x->tag == IXS_ADD && x->u.add.coeff->tag == IXS_INT &&
@@ -410,6 +414,9 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
     return ixs_node_int(ctx, ixs_rat_ceil(x->u.rat.p, x->u.rat.q));
 
   if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
+    return x;
+
+  if (ixs_node_is_integer_valued(x))
     return x;
 
   /* ceiling(x + n) where n is integer → ceiling(x) + n */
@@ -1161,6 +1168,105 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
   return NULL;
 }
 
+/* True when expr is provably divisible by m (m > 0) given bounds.
+ * Handles: sym with known divisor, c*sym, sums of divisible terms. */
+static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
+  if (!bnds || m <= 0)
+    return false;
+
+  /* Integer constant: m | val */
+  if (expr->tag == IXS_INT)
+    return expr->u.ival % m == 0;
+
+  /* Symbol with known divisor d: m | d */
+  if (expr->tag == IXS_SYM) {
+    int64_t d = ixs_bounds_get_divisor(bnds, expr->u.name);
+    return d > 0 && d % m == 0;
+  }
+
+  /* c * base^1: m | (c * divisor(base)) when c is integer */
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
+      expr->u.mul.factors[0].exp == 1 && expr->u.mul.coeff->tag == IXS_INT) {
+    int64_t c = expr->u.mul.coeff->u.ival;
+    if (c == 0)
+      return true;
+    int64_t abs_c = c > 0 ? c : -c;
+    int64_t g = ixs_gcd(abs_c, m);
+    int64_t remain = m / g;
+    return is_known_divisible(bnds, expr->u.mul.factors[0].base, remain);
+  }
+
+  /* ADD: every term c_i * t_i must be divisible by m, and the constant
+   * term must also be divisible by m. */
+  if (expr->tag == IXS_ADD) {
+    int64_t cp, cq;
+    uint32_t i;
+    ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+    if (cq != 1 || cp % m != 0)
+      return false;
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t tp, tq;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+      if (tq != 1)
+        return false;
+      int64_t abs_t = tp > 0 ? tp : -tp;
+      int64_t g = ixs_gcd(abs_t, m);
+      int64_t remain = m / g;
+      if (!is_known_divisible(bnds, expr->u.add.terms[i].term, remain))
+        return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/* True when expr is provably integer-valued given divisibility info.
+ * Extends ixs_node_is_integer_valued with divisibility reasoning:
+ * p/q * sym is integer when q divides the known divisor of sym. */
+static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
+  if (ixs_node_is_integer_valued(expr))
+    return true;
+  if (!bnds)
+    return false;
+
+  /* MUL: p/q * base^1 is integer if base's divisor absorbs q */
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
+      expr->u.mul.factors[0].exp == 1) {
+    int64_t cp, cq;
+    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+    if (cq <= 1)
+      return true;
+    int64_t g = ixs_gcd(cp > 0 ? cp : -cp, cq);
+    int64_t denom = cq / g;
+    return is_known_divisible(bnds, expr->u.mul.factors[0].base, denom);
+  }
+
+  /* ADD: integer coeff + all integer-valued terms */
+  if (expr->tag == IXS_ADD) {
+    uint32_t i;
+    if (!is_integer_with_divinfo(bnds, expr->u.add.coeff))
+      return false;
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t cp, cq;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
+      if (cq == 1) {
+        if (!is_integer_with_divinfo(bnds, expr->u.add.terms[i].term))
+          return false;
+      } else {
+        /* c_i/q_i * t_i: integer if t_i divisible by q_i/gcd(|c_i|,q_i) */
+        int64_t g = ixs_gcd(cp > 0 ? cp : -cp, cq);
+        int64_t denom = cq / g;
+        if (!is_known_divisible(bnds, expr->u.add.terms[i].term, denom))
+          return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
 static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   uint32_t i;
   if (!n || ixs_node_is_sentinel(n))
@@ -1220,6 +1326,10 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
       ixs_node *collapsed = try_floor_ceil_collapse(ctx, bnds, arg, false);
       if (collapsed)
         return collapsed;
+
+      /* floor(x) → x when x is provably integer via divisibility */
+      if (is_integer_with_divinfo(bnds, arg))
+        return arg;
 
       /* Drop a small rational constant from floor's argument when every
        * term is a non-negative-integer-valued multiple of 1/qi.
@@ -1288,6 +1398,10 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
       ixs_node *collapsed = try_floor_ceil_collapse(ctx, bnds, arg, true);
       if (collapsed)
         return collapsed;
+
+      /* ceil(x) → x when x is provably integer via divisibility */
+      if (is_integer_with_divinfo(bnds, arg))
+        return arg;
     }
     return simp_ceil(ctx, arg);
   }
@@ -1297,12 +1411,16 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     if (!l || !r)
       return NULL;
 
-    /* Bound-dependent: Mod(x, m) where 0 <= x < m → x */
     if (bnds && r->tag == IXS_INT && r->u.ival > 0) {
+      /* Mod(x, m) where 0 <= x < m → x */
       ixs_interval iv = ixs_bounds_get(bnds, l);
       if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
           iv.hi_p < r->u.ival)
         return l;
+
+      /* Mod(x, m) → 0 when x is known divisible by m */
+      if (is_known_divisible(bnds, l, r->u.ival))
+        return ixs_node_int(ctx, 0);
     }
     return simp_mod(ctx, l, r);
   }
