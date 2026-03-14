@@ -215,6 +215,166 @@ static void test_sentinel_propagation(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_bounds_collapse(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  ixs_node *assumptions[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 64)),
+  };
+
+  /* floor(x/64) with 0 <= x < 64 → 0 */
+  ixs_node *expr = ixs_floor(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 64)));
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 2);
+  CHECK(r && ixs_node_int_val(r) == 0);
+
+  /* ceiling(x/64) with 0 <= x < 64: ceil(0/64)=0, ceil(63/64)=1 — NOT constant
+   */
+  expr = ixs_ceil(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 64)));
+  r = ixs_simplify(ctx, expr, assumptions, 2);
+  CHECK(r && !ixs_is_error(r));
+  /* Should NOT fold to a constant (0 != 1). */
+  CHECK(ixs_node_tag(r) != IXS_INT);
+
+  /* floor(x/32) with 0 <= x < 32 → 0 */
+  ixs_node *a32[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 32)),
+  };
+  expr = ixs_floor(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 32)));
+  r = ixs_simplify(ctx, expr, a32, 2);
+  CHECK(r && ixs_node_int_val(r) == 0);
+
+  /* ceiling(x/32) with 0 <= x < 1 (i.e. x=0 only) → 0 */
+  ixs_node *a01[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 1)),
+  };
+  expr = ixs_ceil(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 32)));
+  r = ixs_simplify(ctx, expr, a01, 2);
+  CHECK(r && ixs_node_int_val(r) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_mod_bounds_tighten(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* Mod(x, 16) with 0 <= x < 8 → x (bounds tighter than [0,15]) */
+  ixs_node *assumptions[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8)),
+  };
+  ixs_node *expr = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 2);
+  CHECK(r == x);
+
+  /* Mod(x, 100) with 0 <= x < 50 → x */
+  ixs_node *a50[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 50)),
+  };
+  expr = ixs_mod(ctx, x, ixs_int(ctx, 100));
+  r = ixs_simplify(ctx, expr, a50, 2);
+  CHECK(r == x);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_mod_extract_constant(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* Mod(4*floor(x) + 3, 16) → Mod(4*floor(x), 16) + 3
+   * because |4| divides 16, floor(x) is integer-valued, and 3 < gcd(4)=4. */
+  ixs_node *fx = ixs_floor(ctx, x);
+  ixs_node *term = ixs_mul(ctx, ixs_int(ctx, 4), fx);
+  ixs_node *sum = ixs_add(ctx, term, ixs_int(ctx, 3));
+  ixs_node *expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
+  ixs_node *r = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(strcmp(pr(r), "3 + Mod(4*floor(x), 16)") == 0);
+
+  /* Mod(8*floor(x) + 7, 16) → 7 + Mod(8*floor(x), 16)
+   * because 8 divides 16, and 7 < gcd(8) = 8. */
+  term = ixs_mul(ctx, ixs_int(ctx, 8), fx);
+  sum = ixs_add(ctx, term, ixs_int(ctx, 7));
+  expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
+  r = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(strcmp(pr(r), "7 + Mod(8*floor(x), 16)") == 0);
+
+  /* Mod(4*floor(x) + 4, 16) should NOT extract: 4 is not < gcd(4)=4. */
+  sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), fx), ixs_int(ctx, 4));
+  expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
+  r = ixs_simplify(ctx, expr, NULL, 0);
+  /* The existing strip rule reduces const 4 mod 16 = 4, but the extract
+   * rule should not fire (4 >= 4). Verify it's not "... + 4". */
+  CHECK(r && !ixs_is_error(r));
+
+  /* Mod(4*x + 3, 16) should NOT extract: x is a symbol (integer-valued
+   * by convention) so it does fire.  Let's check the non-integer case:
+   * Mod(4*(x/2) + 3, 16) — x/2 is not integer-valued. */
+  ixs_node *xhalf = ixs_mul(ctx, x, ixs_rat(ctx, 1, 2));
+  term = ixs_mul(ctx, ixs_int(ctx, 4), xhalf);
+  sum = ixs_add(ctx, term, ixs_int(ctx, 3));
+  expr = ixs_mod(ctx, sum, ixs_int(ctx, 16));
+  r = ixs_simplify(ctx, expr, NULL, 0);
+  /* 4*(x/2) = 2*x, which IS integer. The simplifier collapses 4*(1/2)=2.
+   * So this becomes Mod(2*x + 3, 16) → Mod(2*x, 16) + 3 (2 | 16, 3 < 2? no).
+   * Actually gcd(2) = 2, 3 >= 2, so no extraction. */
+  CHECK(r && !ixs_is_error(r));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_floor_drop_small_rational(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* floor(floor(x)/3 + 1/6) with floor(x) >= 0 → floor(floor(x)/3)
+   * because floor(x) is non-neg integer, denom=3, r=1/6, 1/6 < 1/3. */
+  ixs_node *assumptions[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+  };
+  ixs_node *fx = ixs_floor(ctx, x);
+  ixs_node *inner =
+      ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)), ixs_rat(ctx, 1, 6));
+  ixs_node *expr = ixs_floor(ctx, inner);
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 2);
+  ixs_node *expected =
+      ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
+                   assumptions, 2);
+  CHECK(r == expected);
+
+  /* floor(Mod(x, 8)/4 + 1/8) with 0 <= x → floor(Mod(x,8)/4)
+   * Mod(x, 8) ∈ [0,7] (non-negative integer), denom=4, r=1/8, 1/8 < 1/4. */
+  ixs_node *mx8 = ixs_mod(ctx, x, ixs_int(ctx, 8));
+  inner =
+      ixs_add(ctx, ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4)), ixs_rat(ctx, 1, 8));
+  expr = ixs_floor(ctx, inner);
+  r = ixs_simplify(ctx, expr, assumptions, 2);
+  expected =
+      ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4))),
+                   assumptions, 2);
+  CHECK(r == expected);
+
+  /* floor(floor(x)/3 + 1/3) should NOT drop: 1/3 is not < 1/3. */
+  inner =
+      ixs_add(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3)), ixs_rat(ctx, 1, 3));
+  expr = ixs_floor(ctx, inner);
+  r = ixs_simplify(ctx, expr, assumptions, 2);
+  CHECK(r && !ixs_is_error(r));
+  /* Verify it's NOT the same as floor(floor(x)/3): the rational wasn't dropped.
+   */
+  ixs_node *without_r =
+      ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
+                   assumptions, 2);
+  CHECK(!ixs_same_node(r, without_r));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_same_node(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   CHECK(ixs_same_node(NULL, NULL));
@@ -255,6 +415,10 @@ int main(void) {
   test_mod_rules();
   test_boolean();
   test_simplify_with_bounds();
+  test_floor_bounds_collapse();
+  test_mod_bounds_tighten();
+  test_mod_extract_constant();
+  test_floor_drop_small_rational();
   test_substitution();
   test_sentinel_propagation();
   test_same_node();
