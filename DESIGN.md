@@ -166,6 +166,7 @@ typedef enum {
     IXS_NOT,         // boolean not
     IXS_TRUE,        // boolean constant
     IXS_FALSE,       // boolean constant
+    IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
 } ixs_tag;
 
 typedef enum {
@@ -256,10 +257,16 @@ semantics.** This is critical for correctness when comparing against SymPy:
 All results are reduced to lowest terms.
 
 **Overflow**: All intermediate arithmetic is checked for overflow. On overflow
-the library returns an error (not UB, not assert). In practice the constants
-in this domain are small (< 2^20), so overflow should never occur; the checks
-are a safety net. No 128-bit fallback in the initial implementation — if
-overflow is ever observed in real workloads, it can be added later.
+the enclosing constructor returns the sentinel node and appends an error (see
+Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled:
+`neg(INT64_MIN)` and `floor_div(INT64_MIN, -1)` produce sentinel + error.
+In practice the constants in this domain are small (< 2^20), so overflow
+should never occur; the checks are a safety net. No 128-bit fallback in the
+initial implementation.
+
+**Division by zero**: `ixs_rat(ctx, p, 0)` returns sentinel. `Mod(x, 0)` and
+any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
+`q < 0` normalizes to `(-p, -q)`.
 
 ### Layer 3: Parser
 
@@ -430,6 +437,12 @@ simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
 
+**Sentinel handling**: Sentinel does not eagerly propagate through Piecewise
+(see Error Model). A sentinel value in a branch whose condition folds to
+`False` is silently dropped. A sentinel condition in an unreachable branch
+(preceded by a `True` condition) is silently dropped. Only when the sentinel
+is in the "live" path does the Piecewise become sentinel.
+
 #### 4.7 Max / Min Rules
 
 ```
@@ -496,6 +509,83 @@ This enables rules like:
 - `floor(x/64)` where `0 <= x < 64` → `0`
 - `Max(1, expr)` where `expr >= 1` → `expr`
 
+## Error Model
+
+The library uses a two-tier error model:
+
+### Tier 1: NULL — Out of Memory (catastrophic)
+
+All constructors and `ixs_parse` return `NULL` when the arena cannot grow.
+This is unrecoverable. No error string is set (we can't allocate memory for
+it). NULL propagates silently: any constructor that receives a NULL argument
+returns NULL immediately without side effects.
+
+### Tier 2: Sentinel Node — Domain Error (recoverable)
+
+Domain errors (division by zero, `Mod(x, 0)`, rational overflow,
+`ixs_rat(ctx, p, 0)`, integer literal overflow during parsing) produce a
+**sentinel node** (`IXS_ERROR`). There is exactly one sentinel node per
+context (singleton, trivially hash-consed). The sentinel carries no payload;
+error details are recorded in the context's error list.
+
+**Propagation rules:**
+
+| Input | Behavior |
+|---|---|
+| Any constructor receives sentinel arg | Returns sentinel silently (no new error appended) |
+| Any constructor receives NULL arg | Returns NULL silently |
+| Operation causes domain error | Returns sentinel, appends error to context list |
+
+Only the operation that **originates** the error appends to the error list.
+Propagation through downstream constructors is silent.
+
+**Piecewise exception** — sentinel does NOT eagerly propagate through
+`ixs_pw`. A Piecewise branch may contain a sentinel value or sentinel
+condition without poisoning the entire expression, similar to LLVM's poison
+semantics in `select`:
+
+- If a condition folds to `False`, the branch is dropped — sentinel in its
+  value disappears harmlessly.
+- If a condition folds to `True`, the branch value (sentinel or not) becomes
+  the result.
+- If the first non-eliminated condition is sentinel, the Piecewise cannot
+  determine which branch to take and becomes sentinel.
+- `Piecewise((sentinel, x > 0), (42, True))` with `x = -1` simplifies to
+  `42`, not sentinel.
+
+This enables batch processing: one expression with a div/0 in a dead
+Piecewise branch doesn't invalidate the other 608 expressions.
+
+### Error List API
+
+```c
+// Query errors accumulated since last clear
+size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
+const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
+void        ixs_ctx_clear_errors(ixs_ctx *ctx);
+
+// Check if a node is the error sentinel
+bool        ixs_is_error(ixs_node *node);
+```
+
+Error strings are arena-allocated (so they live until `ixs_ctx_destroy`).
+Each string includes the error kind and location, e.g.:
+- `"division by zero"`
+- `"Mod: divisor is zero"`
+- `"rational overflow in multiply"`
+- `"integer literal overflow at offset 42"`
+
+### Summary Table
+
+| Condition | Return | Error list | Example |
+|---|---|---|---|
+| OOM | `NULL` | unchanged | arena exhausted |
+| Domain error | sentinel | appended | `1/0`, `Mod(x,0)`, overflow |
+| NULL input | `NULL` | unchanged | propagation |
+| Sentinel input | sentinel | unchanged | propagation |
+| Sentinel in Piecewise value | Piecewise kept | unchanged | dead branch |
+| `ixs_print(sentinel)` | writes `"<error>"` | unchanged | round-trip safe |
+
 ## Public API
 
 ```c
@@ -503,11 +593,20 @@ This enables rules like:
 typedef struct ixs_ctx ixs_ctx;
 typedef struct ixs_node ixs_node;
 
-// Lifecycle. ixs_ctx_create returns NULL on allocation failure.
+// Lifecycle. Returns NULL on OOM.
 ixs_ctx   *ixs_ctx_create(void);
 void       ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
 
-// Parse a SymPy-format expression string. Returns NULL on parse error.
+// Error list (see Error Model section above)
+size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
+const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
+void        ixs_ctx_clear_errors(ixs_ctx *ctx);
+bool        ixs_is_error(ixs_node *node);
+
+// Parse a SymPy-format expression string.
+// Returns NULL on OOM, sentinel on parse error (malformed input, depth
+// limit exceeded, integer literal overflow). Error details appended to
+// context error list.
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 
 // Construct expressions programmatically
@@ -578,11 +677,18 @@ ixs_node *assumptions[] = {
 size_t n_assumptions = sizeof(assumptions) / sizeof(assumptions[0]);
 
 ixs_node *expr = ixs_parse(ctx, input, strlen(input));
+if (!expr) { /* OOM */ return; }
 ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, n_assumptions);
 
-char buf[4096];
-ixs_print(simplified, buf, sizeof(buf));
-printf("%s\n", buf);
+if (ixs_is_error(simplified)) {
+    for (size_t i = 0; i < ixs_ctx_nerrors(ctx); i++)
+        fprintf(stderr, "error: %s\n", ixs_ctx_error(ctx, i));
+    ixs_ctx_clear_errors(ctx);
+} else {
+    char buf[4096];
+    ixs_print(simplified, buf, sizeof(buf));
+    printf("%s\n", buf);
+}
 
 ixs_ctx_destroy(ctx);  // frees everything
 ```
@@ -737,6 +843,10 @@ public:
         return {buf, n};
     }
 
+    bool is_null() const { return node_ == nullptr; }
+    bool is_error() const { return node_ && ixs_is_error(node_); }
+    explicit operator bool() const { return node_ && !ixs_is_error(node_); }
+
     ixs_node *raw() const { return node_; }
     ixs_ctx *raw_ctx() const { return ctx_; }
 };
@@ -754,9 +864,11 @@ inline Expr xor_(Expr a, Expr b) { return {a.raw_ctx(), ixs_xor(a.raw_ctx(), a.r
 Key properties:
 - `Context` owns the arena; RAII cleans up everything on destruction.
 - `Expr` is a lightweight value type (two pointers). Cheap to copy.
+- `operator bool()` returns `true` only for valid, non-error expressions.
+  `is_null()` checks OOM, `is_error()` checks sentinel.
 - Operator overloading for natural expression building.
 - No heap allocations beyond what the C library does internally.
-- No exceptions — errors reported via null returns, same as C API.
+- NULL and sentinel propagate through operators (same as C API).
 
 ### Python Binding — `_ixsimpl.c`
 
@@ -801,12 +913,15 @@ Implementation:
   `ixs_ctx_destroy`.
 - `Expr` Python object holds a reference to its `Context` (preventing
   premature GC) and wraps `ixs_node*`.
-- `__repr__` and `__str__` call `ixs_print`.
+- `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`.
 - `__eq__` is pointer comparison (O(1) via hash-consing).
 - `__hash__` returns the node's precomputed hash.
+- `Expr.is_error` property — returns `True` if the node is the sentinel.
+- `Context.errors` property — returns list of error strings; `Context.clear_errors()` resets.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
+- NULL (OOM) raises `MemoryError`. Sentinel propagates as a regular Expr.
 - Module-level functions: `ixsimpl.floor()`, `ixsimpl.ceil()`,
   `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`.
   Trailing underscore on `max_`/`min_`/`xor_` avoids shadowing Python
@@ -1003,7 +1118,7 @@ Concrete workarounds for the fuzz test oracle:
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Simplification produces wrong results | Critical | Numerical equivalence oracle; fuzz testing |
-| 64-bit rational overflow | Medium | Overflow check in rational ops; fallback to 128-bit |
+| 64-bit rational overflow | Medium | Checked arithmetic → sentinel + error list; 128-bit fallback if needed later |
 | New expression patterns in future workloads | Medium | Grammar is extensible; add new node types as needed |
 | Hash-consing table becomes bottleneck | Low | Linear probing with power-of-2 sizing; rehash threshold 70% |
 | Simplification rules interact badly (infinite loops) | Medium | Depth limit on rewrite passes; monotonic rewrite ordering |
