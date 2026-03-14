@@ -227,7 +227,7 @@ Each node is a small struct:
 typedef struct ixs_node {
     ixs_tag tag;
     uint32_t hash;        // precomputed, used for hash-consing
-    union {
+    union ixs_node_data {
         int64_t ival;                     // IXS_INT
         struct { int64_t p, q; } rat;     // IXS_RAT
         const char *name;                 // IXS_SYM (interned in arena)
@@ -260,7 +260,7 @@ typedef struct ixs_node {
         struct {                          // IXS_NOT
             struct ixs_node *arg;
         } unary_bool;
-    };
+    } u;
 } ixs_node;
 ```
 
@@ -480,7 +480,7 @@ floor(p/q)                         → ⌊p/q⌋  (constant fold)
 floor(floor(x))                    → floor(x)
 floor(ceiling(x))                  → ceiling(x)
 floor(x + n)  where n is integer   → floor(x) + n
-floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer
+floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer  [TODO]
 
 ceiling(integer)                   → identity
 ceiling(p/q)                       → ⌈p/q⌉  (constant fold)
@@ -496,9 +496,9 @@ More advanced rules (applied when domain info is available):
 floor(x / n) where x = n*q + r, 0 <= r < n
   → q    (when r's bounds are provable)
 
-floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer
-ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer
-Mod(a*floor(x/a), a)     → 0
+floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer   [TODO]
+ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer  [TODO]
+Mod(a*floor(x/a), a)     → 0                                          [TODO]
 Mod(x, n) where 0 <= x < n is provable → x
 ```
 
@@ -844,6 +844,11 @@ ixs_node *ixs_false(ixs_ctx *ctx);
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
+// Introspection — node must not be NULL:
+ixs_tag ixs_node_tag(ixs_node *node);       // returns the node's type tag
+int64_t ixs_node_int_val(ixs_node *node);   // IXS_INT value; UB if tag != IXS_INT
+uint32_t ixs_node_hash(ixs_node *node);     // precomputed content hash
+
 // Pointer equality (O(1) — hash-consing guarantees that structurally
 // identical expressions within the same context share the same pointer).
 // Only valid for nodes from the same ixs_ctx. NULL arguments are allowed:
@@ -971,6 +976,30 @@ in batch mode (the primary use case):
 - Error list, symbol table: negligible
 - **Total: < 8 MB per context**
 
+## Build and CI
+
+**CMake options**:
+
+- `ENABLE_ASAN` (default `OFF`): Build with AddressSanitizer
+  (`-fsanitize=address -fno-omit-frame-pointer`).
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+cmake --build build
+ctest --test-dir build
+```
+
+**GitHub Actions** (`.github/workflows/ci.yml`) runs on every push to
+`master` and on pull requests:
+
+| Job | What it does |
+|-----|-------------|
+| Release | Build + test with optimizations |
+| Debug + ASAN | Build + test under AddressSanitizer |
+| Python bindings + fuzz | Build extension with ASAN, run Hypothesis fuzz tests |
+| Lint | `pre-commit` (clang-format, whitespace, REUSE) |
+| REUSE compliance | License metadata check |
+
 ## File Structure
 
 ```
@@ -1003,9 +1032,8 @@ ixsimpl/
 │   ├── test_rational.c
 │   ├── test_parser.c
 │   ├── test_simplify.c
-│   ├── test_bounds.c
+│   ├── test_edge_cases.c      # edge cases, error paths, sentinel propagation
 │   ├── test_corpus.c          # run against the 609-expression corpus
-│   ├── test_cpp.cpp           # C++ binding tests
 │   ├── test_python.py         # Python binding tests
 │   ├── corpus.txt             # the reference expressions
 │   ├── corpus_expected.txt    # pre-generated SymPy simplified outputs
@@ -1079,12 +1107,14 @@ public:
     Expr operator-()         const { return {ctx_, ixs_neg(ctx_, node_)}; }
     Expr operator*(Expr rhs) const { return {ctx_, ixs_mul(ctx_, node_, rhs.node_)}; }
     Expr operator/(Expr rhs) const { return {ctx_, ixs_div(ctx_, node_, rhs.node_)}; }
-    bool operator==(Expr rhs) const { return node_ == rhs.node_; }
+    bool operator==(Expr rhs) const { return ixs_same_node(node_, rhs.node_); }
 
     std::string str() const {
+        if (!node_) return {};
         size_t n = ixs_print(node_, nullptr, 0);
-        std::string s(n, '\0');
+        std::string s(n + 1, '\0');
         ixs_print(node_, s.data(), n + 1);
+        s.resize(n);
         return s;
     }
 
@@ -1338,7 +1368,7 @@ def expressions(draw, max_depth=4):
         return draw(st.one_of(sym_names, small_ints))
     op = draw(st.sampled_from([
         "add", "mul", "div", "floor", "ceiling", "mod", "max", "min",
-        "piecewise",
+        # "piecewise",  -- disabled pending piecewise fuzz stability
     ]))
     a = draw(expressions(max_depth=max_depth - 1))
     if op in ("floor", "ceiling"):
@@ -1381,11 +1411,10 @@ def eval_expr(tree, env):
     Raises ZeroDivisionError/ValueError on undefined operations."""
     ...
 
-def eval_ixs(expr, env):
+def eval_ixs(expr, ctx, env):
     """Evaluate ixsimpl Expr by substituting all variables via subs,
     then reading the resulting integer constant.
     Returns int or raises ValueError if result is not a constant/integer."""
-    ctx = expr._ctx
     result = expr
     for name, val in env.items():
         result = result.subs(name, ctx.int_(val))
@@ -1415,7 +1444,7 @@ def test_simplify_matches_numerical(expr):
             orig = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
             continue  # skip points where original is undefined
-        simp = eval_ixs(ixs_simplified, env)
+        simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}"
 
 @given(expr=expressions())
@@ -1433,7 +1462,7 @@ def test_matches_sympy(expr):
     for _ in range(10):
         env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
         try:
-            ixs_val = eval_ixs(ixs_result, env)
+            ixs_val = eval_ixs(ixs_result, ctx, env)
             sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
         except (ZeroDivisionError, ValueError, TypeError):
             continue

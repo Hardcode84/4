@@ -56,8 +56,8 @@ public:
   Expr simplify() const {
     return Expr(ctx_, ixs_simplify(ctx_, node_, nullptr, 0));
   }
-  Expr subs(const char *var, Expr repl) const {
-    return Expr(ctx_, ixs_subs(ctx_, node_, var, repl.node_));
+  Expr subs(Expr target, Expr repl) const {
+    return Expr(ctx_, ixs_subs(ctx_, node_, target.node_, repl.node_));
   }
 
   Expr operator+(Expr rhs) const {
