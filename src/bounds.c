@@ -268,7 +268,7 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
       }
       break;
     }
-    default:
+    default: /* EQ/NE: not useful here; EQ already handled by sym-op-const */
       break;
     }
   }

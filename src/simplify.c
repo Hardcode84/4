@@ -1707,8 +1707,8 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   return n;
 }
 
-ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
-                                    ixs_bounds *bnds) {
+static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                           ixs_bounds *bnds) {
   int iter;
   rewrite_memo_slot memo[REWRITE_MEMO_SIZE];
 
@@ -1754,4 +1754,24 @@ ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
   return expr;
+}
+
+void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
+                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds bnds;
+  size_t i;
+  build_bounds(&bnds, assumptions, n_assumptions);
+  for (i = 0; i < n; i++) {
+    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
+      continue;
+    exprs[i] = simp_simplify_with_bounds(ctx, exprs[i], &bnds);
+    if (!exprs[i]) {
+      size_t j;
+      for (j = 0; j < n; j++)
+        exprs[j] = NULL;
+      ixs_bounds_destroy(&bnds);
+      return;
+    }
+  }
+  ixs_bounds_destroy(&bnds);
 }
