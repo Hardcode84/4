@@ -105,6 +105,13 @@ static void test_cmp(void) {
   CHECK(ixs_rat_cmp(1, 3, 1, 2) < 0);
   CHECK(ixs_rat_cmp(2, 4, 1, 2) == 0);
   CHECK(ixs_rat_cmp(-1, 1, 1, 1) < 0);
+  /* Large values that overflow 64-bit cross-multiply */
+  CHECK(ixs_rat_cmp(INT64_MAX, 1, INT64_MAX - 1, 1) > 0);
+  CHECK(ixs_rat_cmp(INT64_MAX, INT64_MAX, 1, 1) == 0);
+  CHECK(ixs_rat_cmp(INT64_MAX, 2, INT64_MAX, 3) > 0);
+  CHECK(ixs_rat_cmp(INT64_MIN + 1, 1, INT64_MIN + 2, 1) < 0);
+  CHECK(ixs_rat_cmp(INT64_MAX, INT64_MAX - 1, INT64_MAX - 1, INT64_MAX - 2) <
+        0);
 }
 
 static void test_safe_ops(void) {

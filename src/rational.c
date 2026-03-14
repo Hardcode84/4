@@ -290,22 +290,55 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
     return 0;
   }
 
-  /* Fallback: reduce and compare. In practice this domain doesn't need it. */
-  int64_t dp, dq;
-  if (ixs_rat_sub(ap, aq, bp, bq, &dp, &dq)) {
-    if (dp == 0)
-      return 0;
-    return (dp > 0) == (dq > 0) ? 1 : -1;
-  }
-
-  /* Absolute last resort: compare doubles. */
+  /* Fallback: 128-bit cross-multiply using portable C99 arithmetic.
+   * Compare sign(ap*bq - bp*aq) without overflow. */
   {
-    double da = (double)ap / (double)aq;
-    double db = (double)bp / (double)bq;
-    if (da < db)
-      return -1;
-    if (da > db)
-      return 1;
-    return 0;
+    /* Compute lhs128 = ap*bq and rhs128 = bp*aq as signed 128-bit values,
+     * represented as (sign, hi, lo) where value = sign * (hi*2^64 + lo). */
+    uint64_t al = to_unsigned_mag(ap), bl = to_unsigned_mag(bq);
+    uint64_t cl = to_unsigned_mag(bp), dl = to_unsigned_mag(aq);
+    int lhs_sign = ((ap < 0) != (bq < 0)) ? -1 : 1;
+    int rhs_sign = ((bp < 0) != (aq < 0)) ? -1 : 1;
+    if (ap == 0)
+      lhs_sign = 0;
+    if (bp == 0)
+      rhs_sign = 0;
+
+    /* Unsigned 64x64 -> 128 multiply: split into 32-bit halves */
+    uint64_t a_lo = al & 0xFFFFFFFFu, a_hi = al >> 32;
+    uint64_t b_lo = bl & 0xFFFFFFFFu, b_hi = bl >> 32;
+    uint64_t ll = a_lo * b_lo;
+    uint64_t lh = a_lo * b_hi;
+    uint64_t hl = a_hi * b_lo;
+    uint64_t hh = a_hi * b_hi;
+    uint64_t mid = (ll >> 32) + (lh & 0xFFFFFFFFu) + (hl & 0xFFFFFFFFu);
+    uint64_t lhs_lo = (ll & 0xFFFFFFFFu) | (mid << 32);
+    uint64_t lhs_hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+
+    uint64_t c_lo = cl & 0xFFFFFFFFu, c_hi = cl >> 32;
+    uint64_t d_lo = dl & 0xFFFFFFFFu, d_hi = dl >> 32;
+    ll = c_lo * d_lo;
+    lh = c_lo * d_hi;
+    hl = c_hi * d_lo;
+    hh = c_hi * d_hi;
+    mid = (ll >> 32) + (lh & 0xFFFFFFFFu) + (hl & 0xFFFFFFFFu);
+    uint64_t rhs_lo = (ll & 0xFFFFFFFFu) | (mid << 32);
+    uint64_t rhs_hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+
+    /* Compare signed 128-bit values */
+    if (lhs_sign != rhs_sign)
+      return (lhs_sign > rhs_sign) ? 1 : -1;
+    if (lhs_sign == 0)
+      return 0;
+
+    int mag_cmp;
+    if (lhs_hi != rhs_hi)
+      mag_cmp = (lhs_hi > rhs_hi) ? 1 : -1;
+    else if (lhs_lo != rhs_lo)
+      mag_cmp = (lhs_lo > rhs_lo) ? 1 : -1;
+    else
+      return 0;
+
+    return lhs_sign > 0 ? mag_cmp : -mag_cmp;
   }
 }
