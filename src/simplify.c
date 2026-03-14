@@ -1190,8 +1190,7 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
     int64_t c = expr->u.mul.coeff->u.ival;
     if (c == 0)
       return true;
-    int64_t abs_c = c > 0 ? c : -c;
-    int64_t g = ixs_gcd(abs_c, m);
+    int64_t g = ixs_gcd(c, m);
     int64_t remain = m / g;
     return is_known_divisible(bnds, expr->u.mul.factors[0].base, remain);
   }
@@ -1209,8 +1208,7 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
       ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
       if (tq != 1)
         return false;
-      int64_t abs_t = tp > 0 ? tp : -tp;
-      int64_t g = ixs_gcd(abs_t, m);
+      int64_t g = ixs_gcd(tp, m);
       int64_t remain = m / g;
       if (!is_known_divisible(bnds, expr->u.add.terms[i].term, remain))
         return false;
@@ -1237,7 +1235,7 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
     ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
     if (cq <= 1)
       return true;
-    int64_t g = ixs_gcd(cp > 0 ? cp : -cp, cq);
+    int64_t g = ixs_gcd(cp, cq);
     int64_t denom = cq / g;
     return is_known_divisible(bnds, expr->u.mul.factors[0].base, denom);
   }
@@ -1255,7 +1253,7 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
           return false;
       } else {
         /* c_i/q_i * t_i: integer if t_i divisible by q_i/gcd(|c_i|,q_i) */
-        int64_t g = ixs_gcd(cp > 0 ? cp : -cp, cq);
+        int64_t g = ixs_gcd(cp, cq);
         int64_t denom = cq / g;
         if (!is_known_divisible(bnds, expr->u.add.terms[i].term, denom))
           return false;

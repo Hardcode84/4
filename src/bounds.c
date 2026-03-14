@@ -35,69 +35,50 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v->iv.lo_q = 1;
   v->iv.hi_p = INT64_MAX;
   v->iv.hi_q = 1;
+  v->divisor = 0;
   return v;
 }
 
-/*
- * Extract a bound from a comparison assumption normalized to (expr cmp 0).
- * Pattern: sym >= 0, sym < N, sym - N >= 0, N - sym > 0, etc.
- *
- * This handles common patterns from the corpus:
- *   sym >= 0          → lo = 0
- *   sym < N           → hi = N - 1 (integer context)
- *   sym >= N          → lo = N
- */
-static void extract_divisibility(ixs_bounds *b, ixs_node *a) {
-  /* Recognize Mod(sym, const) == 0 as a divisibility assumption. */
-  if (a->tag != IXS_CMP || a->u.binary.cmp_op != IXS_CMP_EQ)
+/* Record that sym is divisible by d (combine with lcm if existing). */
+static void apply_divisor(ixs_bounds *b, const char *name, int64_t d) {
+  ixs_var_bound *v = get_or_create_var(b, name);
+  if (!v)
     return;
-
-  ixs_node *lhs = a->u.binary.lhs;
-  ixs_node *rhs = a->u.binary.rhs;
-
-  /* Mod(sym, c) == 0 */
-  if (lhs->tag == IXS_MOD && ixs_node_is_zero(rhs)) {
-    ixs_node *dividend = lhs->u.binary.lhs;
-    ixs_node *modulus = lhs->u.binary.rhs;
-    if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
-        modulus->u.ival > 0) {
-      ixs_var_bound *v = get_or_create_var(b, dividend->u.name);
-      if (!v)
-        return;
-      if (v->divisor == 0)
-        v->divisor = modulus->u.ival;
-      else {
-        /* Multiple divisibility assumptions: take lcm. */
-        int64_t g = ixs_gcd(v->divisor, modulus->u.ival);
-        if (g > 0 && v->divisor <= INT64_MAX / (modulus->u.ival / g))
-          v->divisor = v->divisor / g * modulus->u.ival;
-      }
-    }
-    return;
-  }
-
-  /* 0 == Mod(sym, c) (flipped) */
-  if (rhs->tag == IXS_MOD && ixs_node_is_zero(lhs)) {
-    ixs_node *dividend = rhs->u.binary.lhs;
-    ixs_node *modulus = rhs->u.binary.rhs;
-    if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
-        modulus->u.ival > 0) {
-      ixs_var_bound *v = get_or_create_var(b, dividend->u.name);
-      if (!v)
-        return;
-      if (v->divisor == 0)
-        v->divisor = modulus->u.ival;
-      else {
-        int64_t g = ixs_gcd(v->divisor, modulus->u.ival);
-        if (g > 0 && v->divisor <= INT64_MAX / (modulus->u.ival / g))
-          v->divisor = v->divisor / g * modulus->u.ival;
-      }
-    }
+  if (v->divisor == 0) {
+    v->divisor = d;
+  } else {
+    int64_t g = ixs_gcd(v->divisor, d);
+    if (g > 0 && v->divisor <= INT64_MAX / (d / g))
+      v->divisor = v->divisor / g * d;
   }
 }
 
+/* Recognize Mod(sym, const) == 0 as a divisibility assumption. */
+static void extract_divisibility(ixs_bounds *b, ixs_node *a) {
+  ixs_node *mod_node;
+
+  if (a->tag != IXS_CMP || a->u.binary.cmp_op != IXS_CMP_EQ)
+    return;
+
+  if (a->u.binary.lhs->tag == IXS_MOD && ixs_node_is_zero(a->u.binary.rhs))
+    mod_node = a->u.binary.lhs;
+  else if (a->u.binary.rhs->tag == IXS_MOD && ixs_node_is_zero(a->u.binary.lhs))
+    mod_node = a->u.binary.rhs;
+  else
+    return;
+
+  ixs_node *dividend = mod_node->u.binary.lhs;
+  ixs_node *modulus = mod_node->u.binary.rhs;
+  if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
+      modulus->u.ival > 0)
+    apply_divisor(b, dividend->u.name, modulus->u.ival);
+}
+
+/*
+ * Extract interval bounds and divisibility info from a comparison.
+ * Patterns: sym >= 0, sym < N, Mod(sym, d) == 0, etc.
+ */
 void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
-  /* Only handle comparisons. */
   if (a->tag != IXS_CMP)
     return;
 

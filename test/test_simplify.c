@@ -517,6 +517,11 @@ static void test_divisibility_assumptions(void) {
                    div_M_256, 1);
   CHECK(strcmp(pr(r), "1/128*M") == 0);
 
+  /* Negative: floor(K/64) with 32|K should NOT drop floor */
+  ixs_node *e_neg = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 64)));
+  r = ixs_simplify(ctx, e_neg, div_K_32, 1);
+  CHECK(strstr(pr(r), "floor") != NULL);
+
   /* No assumptions: expressions pass through unchanged */
   ixs_node *e7 = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 32)));
   r = ixs_simplify(ctx, e7, NULL, 0);
