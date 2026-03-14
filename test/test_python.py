@@ -1,9 +1,11 @@
 """
 Fuzz tests for ixsimpl using Hypothesis.
 
-Two properties:
+Three properties:
 1. Self-consistency: simplification preserves numerical semantics.
 2. Cross-check: ixsimpl agrees with SymPy on random expressions.
+3. Divisibility: simplification with Mod(sym, d)==0 preserves semantics
+   at evaluation points satisfying the assumption.
 """
 
 import math
@@ -19,6 +21,7 @@ import ixsimpl
 _IN_CI = os.environ.get("CI") == "true"
 _SELF_CONSISTENCY_EXAMPLES = 500 if _IN_CI else 10000
 _SYMPY_CROSSCHECK_EXAMPLES = 200 if _IN_CI else 5000
+_DIVISIBILITY_EXAMPLES = 200 if _IN_CI else 2000
 
 # ---------------------------------------------------------------------------
 #  Expression tree strategies
@@ -323,11 +326,55 @@ def test_matches_sympy(expr):
             pass
 
 
+@given(
+    expr=expressions(),
+    div_sym=st.sampled_from(["x", "y", "z", "w"]),
+    divisor=st.integers(min_value=2, max_value=64),
+)
+@settings(max_examples=_DIVISIBILITY_EXAMPLES, deadline=None)
+def test_simplify_with_divisibility(expr, div_sym, divisor):
+    """Simplification with a divisibility assumption preserves semantics
+    when evaluated at points satisfying the assumption."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sym_node = ctx.sym(div_sym)
+    assumption = ctx.eq(ixsimpl.mod(sym_node, ctx.int_(divisor)), ctx.int_(0))
+    ixs_simplified = ixs_expr.simplify(assumptions=[assumption])
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for _ in range(10):
+        env = {v: random.randint(1, 50) for v in ["x", "y", "z", "w"]}
+        env[div_sym] = random.randint(-25, 25) * divisor
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        try:
+            simp = eval_ixs(ixs_simplified, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        assert orig == simp, (
+            f"Divisibility mismatch: {orig} != {simp} at {env}, "
+            f"expr={expr}, assumption=Mod({div_sym},{divisor})==0"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
 if __name__ == "__main__":
     print(f"Running self-consistency test ({_SELF_CONSISTENCY_EXAMPLES} examples)...")
     test_simplify_self_consistency()
     print("PASSED")
     print(f"Running SymPy cross-check ({_SYMPY_CROSSCHECK_EXAMPLES} examples)...")
     test_matches_sympy()
+    print("PASSED")
+    print(f"Running divisibility test ({_DIVISIBILITY_EXAMPLES} examples)...")
+    test_simplify_with_divisibility()
     print("PASSED")
     print("All fuzz tests passed!")
