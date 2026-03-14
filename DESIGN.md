@@ -806,7 +806,10 @@ ixs_node *ixs_int(ixs_ctx *ctx, int64_t val);
 ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q);
 ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);  // name must be non-NULL and non-empty
 ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // a + (-1)*b
+ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a);                // (-1)*a
 ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // a*b^(-1); ERROR on b==0
 ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
 ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x);
 ixs_node *ixs_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
@@ -1072,7 +1075,10 @@ public:
     }
 
     Expr operator+(Expr rhs) const { return {ctx_, ixs_add(ctx_, node_, rhs.node_)}; }
+    Expr operator-(Expr rhs) const { return {ctx_, ixs_sub(ctx_, node_, rhs.node_)}; }
+    Expr operator-()         const { return {ctx_, ixs_neg(ctx_, node_)}; }
     Expr operator*(Expr rhs) const { return {ctx_, ixs_mul(ctx_, node_, rhs.node_)}; }
+    Expr operator/(Expr rhs) const { return {ctx_, ixs_div(ctx_, node_, rhs.node_)}; }
     bool operator==(Expr rhs) const { return node_ == rhs.node_; }
 
     std::string str() const {
