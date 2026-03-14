@@ -73,7 +73,6 @@ void ixs_ctx_destroy(ixs_ctx *ctx) {
   ixs_htab_destroy(ctx);
   ixs_arena_destroy(&ctx->scratch);
   ixs_arena_destroy(&ctx->arena);
-  free((void *)ctx->errors);
   free(ctx);
 }
 

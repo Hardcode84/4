@@ -625,7 +625,9 @@ void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
   if (ctx->nerrors >= ctx->errors_cap) {
     size_t new_cap = ctx->errors_cap ? ctx->errors_cap * 2 : 16;
     const char **new_arr =
-        realloc((void *)ctx->errors, new_cap * sizeof(const char *));
+        ixs_arena_grow(&ctx->arena, (void *)ctx->errors,
+                       ctx->errors_cap * sizeof(const char *),
+                       new_cap * sizeof(const char *), sizeof(void *));
     if (!new_arr)
       return;
     ctx->errors = new_arr;

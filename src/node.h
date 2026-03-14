@@ -74,7 +74,7 @@ struct ixs_ctx {
   size_t htab_cap;
   size_t htab_used;
 
-  /* Error list (malloc-managed) */
+  /* Error list (arena-managed pointer array, strings also arena) */
   const char **errors;
   size_t nerrors;
   size_t errors_cap;
