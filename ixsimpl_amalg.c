@@ -3555,15 +3555,12 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return a;
 
   /* Mod(x + k*m, m) -> Mod(x, m) when b is a constant integer.
-   * Look for multiples of m in the additive terms of a.
-   * Guard: skip when nterms > MAX_TERMS (migrated to scratch in step 4). */
-  if (a->tag == IXS_ADD && b->tag == IXS_INT && b->u.ival > 0 &&
-      a->u.add.nterms <= MAX_TERMS) {
+   * Look for multiples of m in the additive terms of a. */
+  if (a->tag == IXS_ADD && b->tag == IXS_INT && b->u.ival > 0) {
     int64_t m = b->u.ival;
     int64_t const_p, const_q;
     ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
 
-    /* Reduce the constant term mod m. */
     int64_t new_const_p = const_p, new_const_q = const_q;
     if (const_q == 1) {
       new_const_p = const_p % m;
@@ -3571,7 +3568,13 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         new_const_p += m;
     }
 
-    ixs_addterm reduced[MAX_TERMS];
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_addterm *reduced = ixs_arena_alloc(
+        &ctx->scratch, a->u.add.nterms * sizeof(*reduced), sizeof(void *));
+    if (!reduced) {
+      ixs_arena_restore(&ctx->scratch, sm);
+      return NULL;
+    }
     uint32_t nr = 0;
     uint32_t i;
     bool changed = (new_const_p != const_p || new_const_q != const_q);
@@ -3579,8 +3582,6 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     for (i = 0; i < a->u.add.nterms; i++) {
       int64_t cp, cq;
       ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
-      /* Drop ci*ti when ci is a multiple of m AND ti is integer-valued,
-       * so that ci*ti is always a multiple of m. */
       if (cq == 1 && cp % m == 0 &&
           ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
         changed = true;
@@ -3595,8 +3596,10 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         new_a = make_const(ctx, new_const_p, new_const_q);
       } else {
         ixs_node *c = make_const(ctx, new_const_p, new_const_q);
-        if (!c)
+        if (!c) {
+          ixs_arena_restore(&ctx->scratch, sm);
           return NULL;
+        }
         if (nr == 1 && ixs_rat_is_zero(new_const_p)) {
           int64_t rcp, rcq;
           ixs_node_get_rat(reduced[0].coeff, &rcp, &rcq);
@@ -3608,10 +3611,12 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
           new_a = ixs_node_add(ctx, c, nr, reduced);
         }
       }
+      ixs_arena_restore(&ctx->scratch, sm);
       if (!new_a)
         return NULL;
       return simp_mod(ctx, new_a, b);
     }
+    ixs_arena_restore(&ctx->scratch, sm);
   }
 
   /* Extract a small constant addend from Mod when every other term's
@@ -4184,18 +4189,28 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
     break;
   }
   case IXS_PIECEWISE: {
-    ixs_node *vals[MAX_TERMS], *cds[MAX_TERMS];
-    if (expr->u.pw.ncases > MAX_TERMS)
+    uint32_t nc = expr->u.pw.ncases;
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_node **vals =
+        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
+    ixs_node **cds =
+        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*cds), sizeof(void *));
+    if (!vals || !cds) {
+      ixs_arena_restore(&ctx->scratch, sm);
       return NULL;
-    for (i = 0; i < expr->u.pw.ncases; i++) {
+    }
+    for (i = 0; i < nc; i++) {
       vals[i] =
           subs_rec(ctx, expr->u.pw.cases[i].value, target, replacement, memo);
       cds[i] =
           subs_rec(ctx, expr->u.pw.cases[i].cond, target, replacement, memo);
-      if (!vals[i] || !cds[i])
+      if (!vals[i] || !cds[i]) {
+        ixs_arena_restore(&ctx->scratch, sm);
         return NULL;
+      }
     }
-    result = simp_pw(ctx, expr->u.pw.ncases, vals, cds);
+    result = simp_pw(ctx, nc, vals, cds);
+    ixs_arena_restore(&ctx->scratch, sm);
     break;
   }
   case IXS_AND: {
@@ -4680,16 +4695,29 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     return result;
   }
   case IXS_PIECEWISE: {
-    ixs_node *vals[MAX_TERMS], *cds[MAX_TERMS];
-    if (n->u.pw.ncases > MAX_TERMS)
+    uint32_t nc = n->u.pw.ncases;
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_node **vals =
+        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
+    ixs_node **cds =
+        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*cds), sizeof(void *));
+    if (!vals || !cds) {
+      ixs_arena_restore(&ctx->scratch, sm);
       return NULL;
-    for (i = 0; i < n->u.pw.ncases; i++) {
+    }
+    for (i = 0; i < nc; i++) {
       vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
       cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo);
-      if (!vals[i] || !cds[i])
+      if (!vals[i] || !cds[i]) {
+        ixs_arena_restore(&ctx->scratch, sm);
         return NULL;
+      }
     }
-    return simp_pw(ctx, n->u.pw.ncases, vals, cds);
+    {
+      ixs_node *pw = simp_pw(ctx, nc, vals, cds);
+      ixs_arena_restore(&ctx->scratch, sm);
+      return pw;
+    }
   }
   case IXS_AND: {
     ixs_node *result = ctx->node_true;
