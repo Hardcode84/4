@@ -1122,6 +1122,8 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
   }
   case IXS_PIECEWISE: {
     ixs_node *vals[MAX_TERMS], *cds[MAX_TERMS];
+    if (expr->u.pw.ncases > MAX_TERMS)
+      return NULL;
     for (i = 0; i < expr->u.pw.ncases; i++) {
       vals[i] =
           subs_rec(ctx, expr->u.pw.cases[i].value, target, replacement, memo);
@@ -1595,6 +1597,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   }
   case IXS_PIECEWISE: {
     ixs_node *vals[MAX_TERMS], *cds[MAX_TERMS];
+    if (n->u.pw.ncases > MAX_TERMS)
+      return NULL;
     for (i = 0; i < n->u.pw.ncases; i++) {
       vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds);
       cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds);

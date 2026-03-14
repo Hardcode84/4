@@ -146,8 +146,10 @@ a node from one context to a different context is **undefined behavior**
 
 **Depth limit**: The parser enforces a recursion depth limit (default 256).
 Trees built programmatically via the API have no depth limit. The simplifier,
-printer, and `ixs_subs` traverse the DAG recursively (with O(1) match per node
-via pointer equality on hash-consed nodes). For expressions built
+printer, and `ixs_subs` traverse the DAG recursively. `ixs_subs` uses a
+256-slot direct-mapped memo cache (4 KB on the stack) keyed by node pointer
+to avoid exponential re-traversal of shared subexpressions; collisions only
+cause redundant work, never incorrect results. For expressions built
 from the corpus (max depth 11) this is safe. Deliberately constructing
 extremely deep trees (depth > ~10,000) via the API may cause stack overflow.
 This is considered acceptable for the target domain.
