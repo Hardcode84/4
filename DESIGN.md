@@ -162,15 +162,15 @@ This eliminates per-node malloc/free overhead and improves cache locality.
 
 ```c
 typedef struct ixs_arena_chunk {
-    char *base;            // data region (immediately after header)
-    size_t used;
-    size_t capacity;
-    struct ixs_arena_chunk *next;
+  char *base;            /* data region (immediately after header) */
+  size_t used;
+  size_t capacity;
+  struct ixs_arena_chunk *next;
 } ixs_arena_chunk;
 
 typedef struct {
-    ixs_arena_chunk *current;
-    size_t min_chunk;       // default 4096
+  ixs_arena_chunk *current;
+  size_t min_chunk;      /* default 4096 */
 } ixs_arena;
 ```
 
@@ -179,6 +179,228 @@ emplaced at the start of the block, followed by the data region aligned
 to 16 bytes. One malloc, one free per chunk. Chunks grow by doubling
 (with overflow check — if doubling would exceed `SIZE_MAX`, treat as OOM).
 Typical working set for one expression is < 64 KB.
+
+#### Scratch Arena
+
+Smart constructors (`simp_add`, `simp_mul`, `simp_and`, `simp_or`, `simp_pw`)
+and the parser flatten variadic children into temporary arrays before building
+the final hash-consed node. Currently these are fixed-size stack arrays bounded
+by `MAX_TERMS` (256). This is a hard cap — expressions with more terms hit an
+error. While 256 is generous for the target domain, a hard compile-time limit
+is architecturally limiting.
+
+**Solution**: A second arena (`ixs_arena scratch`) in `ixs_ctx`, used
+exclusively for short-lived temporary allocations. A save/restore API lets
+callers rewind the scratch arena after the temporary data is consumed:
+
+```c
+typedef struct {
+  ixs_arena_chunk *chunk;
+  size_t used;
+} ixs_arena_mark;
+
+ixs_arena_mark ixs_arena_save(ixs_arena *a);
+void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m);
+```
+
+`ixs_arena_save` snapshots the current allocation position — returns
+`{a->current, a->current ? a->current->used : 0}`. For an empty arena
+(`a->current == NULL`) the mark is `{NULL, 0}`, and restoring to it frees
+all chunks. `ixs_arena_restore` rewinds to that snapshot, logically freeing everything
+allocated after the save point. Any chunks that were allocated between save
+and restore are freed:
+
+```c
+void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
+  while (a->current != m.chunk) {
+    ixs_arena_chunk *doomed = a->current;
+    a->current = doomed->next;
+    free(doomed);
+  }
+  if (a->current)
+    a->current->used = m.used;
+}
+```
+
+In the common case (no new chunks allocated), restore is O(1) — just an
+offset reset.
+
+**Precondition**: The mark must have been obtained from the same arena via
+`ixs_arena_save`. Passing a mark from a different arena or a destroyed arena
+is undefined behavior (the loop walks off the chunk list).
+
+Save/restore pairs nest naturally (LIFO). A function that saves, allocates
+scratch space, then calls another function which also saves/allocates/restores
+— the inner restore only rewinds to the inner save point, leaving the outer
+function's scratch data intact. This is safe to arbitrary depth as long as
+every save is paired with a restore in the same function scope, which is
+guaranteed by the usage pattern (save at entry, restore before return).
+
+**Scratch usage contract**: Only allocate from the scratch arena inside a
+save/restore pair. Always use the wrapper/impl pattern (below) so that
+restore is called on every exit path. The scratch arena is *not* for
+long-lived data — anything that must survive the current function call
+belongs in the main arena.
+
+The scratch arena is separate from the main arena because permanent nodes
+(created by `ixs_node_add`, etc.) are allocated from the main arena *during*
+the window between scratch allocation and restore. Restoring the main arena
+would destroy those nodes. The scratch arena holds only temporaries, so
+restoring it is always safe.
+
+**Arena grow**: Growing a scratch array is common enough to warrant a
+dedicated operation. `ixs_arena_grow` extends an existing allocation in
+place when possible, falling back to alloc + copy. Intended for scratch
+arena only — the slow path wastes the old block, which is reclaimed on
+restore. Using grow on the main arena would leak the old block permanently.
+Shrinking is not supported (`new_size` must be `>= old_size`).
+
+```c
+void *ixs_arena_grow(ixs_arena *a, void *ptr,
+                      size_t old_size, size_t new_size,
+                      size_t align) {
+  if (!ptr)
+    return ixs_arena_alloc(a, new_size, align);
+  if (new_size < old_size)
+    return NULL;
+  /* Fast path: ptr is at the tip of the current chunk.
+     Use offset arithmetic (ptr - base) to avoid pointer overflow UB. */
+  if (a->current &&
+      (char *)ptr >= a->current->base &&
+      (size_t)((char *)ptr - a->current->base) + old_size
+          == a->current->used) {
+    size_t extra = new_size - old_size;
+    if (extra <= a->current->capacity - a->current->used) {
+      a->current->used += extra;
+      return ptr; /* extended in place, no copy */
+    }
+  }
+  /* Slow path: alloc new, copy, old space wasted. */
+  void *p = ixs_arena_alloc(a, new_size, align);
+  if (p)
+    memcpy(p, ptr, old_size);
+  return p;
+}
+```
+
+The fast path is free — no copy, no waste. The `ptr - base` offset
+comparison avoids pointer-addition overflow UB on 32-bit systems. The
+`extra <= capacity - used` check avoids wrapping (since `used <= capacity`
+is a maintained invariant). The slow path wastes the old block, but this
+is harmless since scratch space is reclaimed on restore. Returns NULL on
+OOM.
+
+**Cleanup discipline — wrapper/impl split**: C has no RAII, and manually
+calling `ixs_arena_restore` at every return site is fragile. The solution is
+to split each function that uses scratch space into a thin wrapper (owns the
+save/restore) and an inner impl (has unrestricted control flow):
+
+```c
+static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  size_t cap = 16;
+  ixs_addterm *terms = ixs_arena_alloc(&ctx->scratch,
+                                        cap * sizeof(*terms),
+                                        sizeof(void *));
+  if (!terms)
+    return NULL; /* OOM */
+  /* ... can return early from anywhere: */
+  if (ixs_node_is_zero(a))
+    return b;
+  /* ... flatten children into terms[], growing as needed: */
+  if (nterms >= cap) {
+    size_t newcap = cap * 2;
+    if (newcap <= cap || newcap > (size_t)-1 / sizeof(*terms))
+      return NULL; /* overflow */
+    terms = ixs_arena_grow(&ctx->scratch, terms,
+                            cap * sizeof(*terms),
+                            newcap * sizeof(*terms),
+                            sizeof(void *));
+    if (!terms)
+      return NULL; /* OOM */
+    cap = newcap;
+  }
+  /* coeff and nterms are computed during flattening (elided). */
+  return ixs_node_add(ctx, coeff, nterms, terms);
+}
+
+ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = simp_add_impl(ctx, a, b);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
+}
+```
+
+The impl can have any number of early returns — sentinel propagation, NULL
+checks, overflow bailouts — without worrying about cleanup. The wrapper is
+mechanical and impossible to get wrong. This is essentially manual RAII: the
+wrapper is the destructor scope, the impl is the body.
+
+Alternatives and why they're worse here:
+
+- **goto cleanup**: Viable for one or two exit points; painful when every
+  other line can bail out (which is the case in our constructors with
+  sentinel/NULL propagation checks).
+- **Single-exit with result variable**: Forces deep nesting or threading a
+  result through the whole function. Obscures the logic.
+- **Cleanup macros**: Can't `return` from inside a macro scope without
+  skipping the cleanup, so you're back to the same problem.
+
+In practice, the initial allocation (16 elements) covers >99% of cases;
+growth is rare, and when it happens the in-place fast path almost always
+hits.
+
+**OOM on scratch**: Scratch allocation failure is treated identically to
+main-arena OOM — the impl returns NULL, which propagates through the
+existing NULL-propagation rules. The wrapper always calls
+`ixs_arena_restore`, even when the impl returned NULL, keeping the scratch
+arena consistent. No error string is pushed (same as main-arena OOM — we
+can't allocate memory for it).
+
+**Error path cleanup**: With scratch arena, the `MAX_TERMS` limit and its
+associated error paths (`"too many Piecewise cases"`, the `overflow` goto
+labels that conflated term-count overflow with rational overflow) are
+removed entirely. The only remaining failure mode for term accumulation is
+OOM (NULL return).
+
+**Scratch arena in the parser**: `parse_piecewise` collects `values[]` and
+`conds[]` arrays of unknown length. Same wrapper/impl split:
+`parse_piecewise` saves, calls `parse_piecewise_impl` (which has all the
+early `return parse_error(...)` exits), then restores.
+
+**Recursive calls**: A wrapper (e.g. `simp_add`) may call another wrapper
+(`simp_mul`) which saves/restores its own scratch region. This is safe —
+save/restore pairs nest in LIFO order, each wrapper restores only its own
+mark. The scratch arena never leaks across wrapper boundaries.
+
+**Lifecycle**: Initialized in `ixs_ctx_create`, destroyed in
+`ixs_ctx_destroy`. No other management needed.
+
+**Implementation plan** (incremental):
+
+1. Add `ixs_arena_save`, `ixs_arena_restore`, `ixs_arena_grow` to
+   `arena.c`/`arena.h`. Add `ixs_arena scratch` to `ixs_ctx`. Unit tests
+   for save/restore nesting and grow fast/slow paths.
+2. Migrate `simp_add` and `simp_mul` to scratch (wrapper/impl split).
+   Corpus and benchmarks must stay green.
+3. Migrate `simp_and`, `simp_or`, `simp_pw`, and `parse_piecewise`.
+4. Migrate remaining `MAX_TERMS` sites: `simp_mod` (`reduced[]` array),
+   `ixs_subs` (IXS_PIECEWISE case: `vals[]`/`cds[]`), and `rewrite_impl`
+   (IXS_PIECEWISE case: `vals[]`/`cds[]`). `subs_rec` and `rewrite` must
+   be split so the wrapper (not the impl) is the recursive entry point —
+   child calls go through the wrapper to get their own save/restore scope.
+5. Remove `MAX_TERMS` and `ixs_limits.h`.
+
+Each step is a separate commit (or PR) — tests and benchmarks must pass
+after every step, and each is independently revertible.
+
+**Testing**: Unit tests must cover: expressions with >256 terms (the old
+limit), nested constructors (add-of-mul-of-add) exercising LIFO
+save/restore, and the `ixs_arena_grow` slow path (alloc something else
+between the initial alloc and the grow to defeat the in-place fast path).
+OOM testing requires a general-purpose OOM injection mechanism for the
+arena (e.g. a configurable allocation cap or a fail-after-N-bytes mode);
+this is tracked separately and deferred.
 
 ### Layer 1: Expression Representation — Hash-Consed DAG
 
