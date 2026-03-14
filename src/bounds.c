@@ -289,10 +289,16 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
     return ixs_interval_unknown();
   }
   case IXS_MOD: {
-    /* Mod(x, m) ∈ [0, m-1] when m is a positive integer. */
+    /* Mod(x, m) ∈ [0, m-1] when m is a positive integer.
+     * Tighten to x's own bounds when they already fit in [0, m). */
     ixs_node *m = expr->u.binary.rhs;
-    if (m->tag == IXS_INT && m->u.ival > 0)
+    if (m->tag == IXS_INT && m->u.ival > 0) {
+      ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
+      if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
+          pi.hi_p < m->u.ival)
+        return pi;
       return ixs_interval_range(0, 1, m->u.ival - 1, 1);
+    }
     return ixs_interval_unknown();
   }
   case IXS_FLOOR: {

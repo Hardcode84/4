@@ -538,6 +538,53 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     }
   }
 
+  /* Extract a small constant addend from Mod when every other term's
+   * coefficient divides the modulus.  Corrected from the Wave compiler:
+   * use gcd(|ci|) not min(|ci|) for the bound on the extractable constant.
+   *
+   *   Mod(4*floor(a) + 3, 16)  →  Mod(4*floor(a), 16) + 3
+   *
+   * Proof: each |ci| | q, so sum = Σ ci*ti is a multiple of g = gcd(|ci|).
+   * Then (sum mod q) ∈ {0, g, 2g, ..., q-g}.  If 0 < c < g, then
+   * (sum mod q) + c < q, so Mod(sum + c, q) = (sum mod q) + c. */
+  if (a->tag == IXS_ADD && b->tag == IXS_INT && b->u.ival > 0) {
+    int64_t m = b->u.ival;
+    int64_t const_p, const_q;
+    ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
+
+    if (const_q == 1 && const_p > 0 && a->u.add.nterms > 0) {
+      int64_t g = 0;
+      bool ok = true;
+      uint32_t i;
+
+      for (i = 0; i < a->u.add.nterms; i++) {
+        int64_t cp, cq;
+        ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
+        int64_t acp = cp < 0 ? -cp : cp;
+        if (cq != 1 || acp == 0 || m % acp != 0 ||
+            !ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
+          ok = false;
+          break;
+        }
+        g = (g == 0) ? acp : ixs_gcd(g, acp);
+      }
+
+      if (ok && g > 1 && const_p < g) {
+        ixs_node *zero = ixs_node_int(ctx, 0);
+        if (!zero)
+          return NULL;
+        ixs_node *inner =
+            ixs_node_add(ctx, zero, a->u.add.nterms, a->u.add.terms);
+        if (!inner)
+          return NULL;
+        ixs_node *moded = simp_mod(ctx, inner, b);
+        if (!moded)
+          return NULL;
+        return simp_add(ctx, moded, ixs_node_int(ctx, const_p));
+      }
+    }
+  }
+
   return ixs_node_binary(ctx, IXS_MOD, a, b, (ixs_cmp_op)0);
 }
 
@@ -1149,11 +1196,89 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     if (!arg)
       return NULL;
 
+    if (bnds) {
+      /* Collapse floor to constant when bounds pin it to one value. */
+      ixs_interval iv = ixs_bounds_get(bnds, arg);
+      if (iv.valid) {
+        int64_t flo = ixs_rat_floor(iv.lo_p, iv.lo_q);
+        int64_t fhi = ixs_rat_floor(iv.hi_p, iv.hi_q);
+        if (flo == fhi)
+          return ixs_node_int(ctx, flo);
+      }
+
+      /* Drop a small rational constant from floor's argument when every
+       * term is a non-negative-integer-valued multiple of 1/qi.
+       *
+       *   floor(floor(a)/3 + 1/6)  →  floor(floor(a)/3)
+       *
+       * Each ti/qi has fractional part in {0, 1/L, ..., (L-1)/L} where
+       * L = lcm(qi).  If 0 < r < 1/L, adding r can't cross an integer
+       * boundary, so floor(sum + r) = floor(sum). */
+      if (arg->tag == IXS_ADD && arg->u.add.coeff->tag == IXS_RAT &&
+          arg->u.add.nterms > 0) {
+        int64_t rp = arg->u.add.coeff->u.rat.p;
+        int64_t rq = arg->u.add.coeff->u.rat.q;
+
+        if (rp > 0 && rq > 1) {
+          int64_t L = 1;
+          bool ok = true;
+          uint32_t j;
+
+          for (j = 0; j < arg->u.add.nterms; j++) {
+            int64_t cp, cq;
+            ixs_node_get_rat(arg->u.add.terms[j].coeff, &cp, &cq);
+            if (cq <= 1) {
+              ok = false;
+              break;
+            }
+            if (!ixs_node_is_integer_valued(arg->u.add.terms[j].term)) {
+              ok = false;
+              break;
+            }
+            ixs_interval ti = ixs_bounds_get(bnds, arg->u.add.terms[j].term);
+            if (!ti.valid || ti.lo_q != 1 || ti.lo_p < 0) {
+              ok = false;
+              break;
+            }
+            int64_t g = ixs_gcd(L, cq);
+            if (g == 0 || L > INT64_MAX / (cq / g)) {
+              ok = false;
+              break;
+            }
+            L = L / g * cq;
+          }
+
+          /* r < 1/L  ⟺  rp * L < rq  (since rp, rq, L > 0) */
+          if (ok && L > 0 && rp <= INT64_MAX / L && rp * L < rq) {
+            ixs_node *zero = ixs_node_int(ctx, 0);
+            if (!zero)
+              return NULL;
+            ixs_node *inner =
+                ixs_node_add(ctx, zero, arg->u.add.nterms, arg->u.add.terms);
+            if (!inner)
+              return NULL;
+            return simp_floor(ctx, inner);
+          }
+        }
+      }
+    }
     return simp_floor(ctx, arg);
   }
   case IXS_CEIL: {
     ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds);
-    return arg ? simp_ceil(ctx, arg) : NULL;
+    if (!arg)
+      return NULL;
+
+    if (bnds) {
+      ixs_interval iv = ixs_bounds_get(bnds, arg);
+      if (iv.valid) {
+        int64_t clo = ixs_rat_ceil(iv.lo_p, iv.lo_q);
+        int64_t chi = ixs_rat_ceil(iv.hi_p, iv.hi_q);
+        if (clo == chi)
+          return ixs_node_int(ctx, clo);
+      }
+    }
+    return simp_ceil(ctx, arg);
   }
   case IXS_MOD: {
     ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);

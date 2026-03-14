@@ -618,7 +618,22 @@ This enables rules like:
 
 - `Mod(x, 32)` where `0 <= x < 32` → `x`
 - `floor(x/64)` where `0 <= x < 64` → `0`
+- `floor(x)` → constant when `floor(lo) == floor(hi)` (same for ceiling)
+- `Mod(x, m)` bounds tightened to dividend's bounds when `0 <= x < m`
 - `Max(1, expr)` where `expr >= 1` → `expr`
+
+**Algebraic rewrites** (no bounds needed):
+
+- `Mod(c1*t1 + ... + c, q)` → `Mod(terms, q) + c` when each `|ci|`
+  divides `q`, each `ti` is integer-valued, and `0 < c < gcd(|ci|)`.
+  (Ported from IREE Wave's `symbol_utils.py`, corrected: use `gcd` not
+  `min` for the multi-term case.)
+
+**Bounds-gated algebraic rewrites**:
+
+- `floor(c1*t1 + ... + r)` → `floor(c1*t1 + ...)` when each `ti` is a
+  non-negative integer (verified via bounds), `0 < r < 1/lcm(denoms)`,
+  so `r` is too small to shift the floor past an integer boundary.
 
 ## Error Model
 
