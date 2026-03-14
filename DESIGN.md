@@ -307,7 +307,8 @@ Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled throughout:
 
 - `neg(INT64_MIN)` → sentinel + error.
 - `floor_div(INT64_MIN, -1)` → sentinel + error.
-- `ixs_rat(ctx, INT64_MIN, -1)` → sentinel + error (negating both overflows).
+- `ixs_rat(ctx, INT64_MIN, q)` for any `q < 0` → sentinel + error (negating
+  `p` overflows). Includes `q = -1, -2, ...`.
 - `ixs_rat(ctx, p, INT64_MIN)` → sentinel + error (`-q` overflows).
 - `gcd(|p|, |q|)` where `p == INT64_MIN` or `q == INT64_MIN` → the GCD
   implementation must handle this without computing `abs(INT64_MIN)`. Use
@@ -499,7 +500,7 @@ Mod(x, 1)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
-Mod(a*m + b, m)     where a doesn't depend on Mod → Mod(b, m)
+Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 ```
 
 #### 4.6 Piecewise Rules
@@ -758,7 +759,7 @@ ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 // Construct expressions programmatically
 ixs_node *ixs_int(ixs_ctx *ctx, int64_t val);
 ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q);
-ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);  // name must be non-NULL
+ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);  // name must be non-NULL and non-empty
 ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
@@ -786,6 +787,11 @@ ixs_node *ixs_false(ixs_ctx *ctx);
 // NULL/sentinel propagation: if expr is NULL returns NULL, if expr is
 // sentinel returns that sentinel. NULL/sentinel entries in assumptions
 // array are silently skipped.
+// Precondition: assumptions must be non-NULL when n_assumptions > 0.
+// NOTE: if the fixed-point iteration limit is reached without convergence,
+// the current best result is returned and an error is appended to the
+// error list. Always check ixs_ctx_nerrors() after simplification if you
+// need to detect incomplete simplification.
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
@@ -814,6 +820,8 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 // (preserves CSE across the batch within the same context).
 // NULL/sentinel entries in exprs are left unchanged. NULL/sentinel
 // entries in assumptions are silently skipped.
+// OOM: if any simplification hits OOM, ALL entries in exprs are set to
+// NULL (the arena is likely exhausted, so no expression is trustworthy).
 // Precondition: exprs must be non-NULL when n > 0; assumptions must be
 // non-NULL when n_assumptions > 0. No-op when n == 0.
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
@@ -1107,6 +1115,8 @@ Implementation:
 - `Expr` Python object holds a reference to its `Context` (preventing
   premature GC) and wraps `ixs_node*`.
 - `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`.
+- `__int__` returns the integer value if the node is `IXS_INT`; raises
+  `TypeError` otherwise. Used by `eval_ixs` for numerical evaluation.
 - `__eq__` is pointer comparison (O(1) via hash-consing).
 - `__hash__` returns the node's precomputed hash.
 - `Expr.is_error` property — `True` for either sentinel.
@@ -1115,6 +1125,7 @@ Implementation:
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
+- `Context.int_(val)` creates an `IXS_INT` node (wraps `ixs_int`).
 - NULL (OOM) raises `MemoryError`. Sentinel propagates as a regular Expr.
 - Module-level functions: `ixsimpl.floor()`, `ixsimpl.ceil()`,
   `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`.
@@ -1311,6 +1322,23 @@ def to_ixsimpl(ctx, tree):
     """Convert expression tree to ixsimpl expression."""
     ...
 
+def eval_expr(tree, env):
+    """Evaluate expression tree numerically using Python arithmetic.
+    Raises ZeroDivisionError/ValueError on undefined operations."""
+    ...
+
+def eval_ixs(expr, env):
+    """Evaluate ixsimpl Expr by substituting all variables via ixs_subs,
+    then reading the resulting integer constant.
+    Returns int or raises ValueError if result is not a constant."""
+    ctx = expr._ctx
+    result = expr
+    for name, val in env.items():
+        result = result.subs(name, ctx.int_(val))
+    if result.is_error:
+        raise ValueError("sentinel")
+    return int(result)  # Expr.__int__ reads IXS_INT value; raises if not constant
+
 @given(expr=expressions())
 @settings(max_examples=10000)
 def test_simplify_matches_numerical(expr):
@@ -1323,7 +1351,7 @@ def test_simplify_matches_numerical(expr):
     assume(not ixs_simplified.is_error)  # skip if simplification hit error
 
     for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
         try:
             orig = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError):
@@ -1344,7 +1372,7 @@ def test_matches_sympy(expr):
     sp_result = sympy.simplify(sp_expr)
 
     for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
         try:
             ixs_val = eval_ixs(ixs_result, env)
             sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
