@@ -594,9 +594,12 @@ void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
   if (n->tag == IXS_INT) {
     *p = n->u.ival;
     *q = 1;
-  } else {
+  } else if (n->tag == IXS_RAT) {
     *p = n->u.rat.p;
     *q = n->u.rat.q;
+  } else {
+    *p = 0;
+    *q = 1;
   }
 }
 
