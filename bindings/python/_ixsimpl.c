@@ -709,6 +709,95 @@ static PyObject *mod_xor_(PyObject *Py_UNUSED(module), PyObject *args) {
   return mod_binary_op(args, ixs_xor, "xor_");
 }
 
+static PyObject *mod_and_(PyObject *Py_UNUSED(module), PyObject *args) {
+  return mod_binary_op(args, ixs_and, "and_");
+}
+
+static PyObject *mod_or_(PyObject *Py_UNUSED(module), PyObject *args) {
+  return mod_binary_op(args, ixs_or, "or_");
+}
+
+static PyObject *mod_not_(PyObject *Py_UNUSED(module), PyObject *arg) {
+  ExprObject *e;
+  ixs_node *result;
+  if (Py_TYPE(arg) != &ExprType) {
+    PyErr_SetString(PyExc_TypeError, "ixsimpl.not_() requires an Expr");
+    return NULL;
+  }
+  e = (ExprObject *)arg;
+  result = ixs_not(e->ctx_obj->ctx, e->node);
+  return (PyObject *)Expr_wrap(e->ctx_obj, result);
+}
+
+static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
+  Py_ssize_t n = PyTuple_Size(args);
+  Py_ssize_t i;
+  ContextObject *ctx_obj;
+  ixs_node **values, **conds;
+  ixs_node *result;
+
+  if (n < 1) {
+    PyErr_SetString(PyExc_TypeError,
+                    "ixsimpl.pw() requires at least one (value, cond) pair");
+    return NULL;
+  }
+
+  values = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+  conds = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+  if (!values || !conds) {
+    PyMem_Free(values);
+    PyMem_Free(conds);
+    return PyErr_NoMemory();
+  }
+
+  ctx_obj = NULL;
+  for (i = 0; i < n; i++) {
+    PyObject *pair = PyTuple_GetItem(args, i);
+    PyObject *val_obj, *cond_obj;
+    if (!PyTuple_Check(pair) || PyTuple_Size(pair) != 2) {
+      PyMem_Free(values);
+      PyMem_Free(conds);
+      PyErr_SetString(PyExc_TypeError,
+                      "ixsimpl.pw() each arg must be a (value, cond) tuple");
+      return NULL;
+    }
+    val_obj = PyTuple_GetItem(pair, 0);
+    cond_obj = PyTuple_GetItem(pair, 1);
+
+    if (!ctx_obj) {
+      if (Py_TYPE(val_obj) == &ExprType)
+        ctx_obj = ((ExprObject *)val_obj)->ctx_obj;
+      else if (Py_TYPE(cond_obj) == &ExprType)
+        ctx_obj = ((ExprObject *)cond_obj)->ctx_obj;
+      else {
+        PyMem_Free(values);
+        PyMem_Free(conds);
+        PyErr_SetString(PyExc_TypeError,
+                        "ixsimpl.pw() requires at least one Expr argument");
+        return NULL;
+      }
+    }
+
+    values[i] = coerce_arg(ctx_obj, val_obj);
+    if (!values[i]) {
+      PyMem_Free(values);
+      PyMem_Free(conds);
+      return NULL;
+    }
+    conds[i] = coerce_arg(ctx_obj, cond_obj);
+    if (!conds[i]) {
+      PyMem_Free(values);
+      PyMem_Free(conds);
+      return NULL;
+    }
+  }
+
+  result = ixs_pw(ctx_obj->ctx, (uint32_t)n, values, conds);
+  PyMem_Free(values);
+  PyMem_Free(conds);
+  return (PyObject *)Expr_wrap(ctx_obj, result);
+}
+
 static PyObject *mod_same_node(PyObject *Py_UNUSED(module), PyObject *args) {
   PyObject *a_obj, *b_obj;
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
@@ -735,6 +824,14 @@ static PyMethodDef module_methods[] = {
      "min_(a, b) -> Expr: minimum."},
     {"xor_", (PyCFunction)mod_xor_, METH_VARARGS,
      "xor_(a, b) -> Expr: bitwise xor."},
+    {"and_", (PyCFunction)mod_and_, METH_VARARGS,
+     "and_(a, b) -> Expr: logical and."},
+    {"or_", (PyCFunction)mod_or_, METH_VARARGS,
+     "or_(a, b) -> Expr: logical or."},
+    {"not_", (PyCFunction)mod_not_, METH_O, "not_(a) -> Expr: logical not."},
+    {"pw", (PyCFunction)mod_pw, METH_VARARGS,
+     "pw((val, cond), ...) -> Expr: piecewise expression. "
+     "Each arg is a (value, condition) tuple; last condition should be true."},
     {"same_node", (PyCFunction)mod_same_node, METH_VARARGS,
      "same_node(a, b) -> bool: True if a and b are the same node (pointer "
      "eq)."},

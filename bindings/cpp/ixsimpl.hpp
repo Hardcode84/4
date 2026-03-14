@@ -1,10 +1,12 @@
 #ifndef IXSIMPL_HPP
 #define IXSIMPL_HPP
 
+#include <initializer_list>
 #include <ixsimpl.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ixs {
@@ -136,6 +138,21 @@ inline Expr min(Expr a, Expr b) {
 }
 inline Expr xor_(Expr a, Expr b) {
   return Expr(a.raw_ctx(), ixs_xor(a.raw_ctx(), a.raw(), b.raw()));
+}
+
+inline Expr pw(std::initializer_list<std::pair<Expr, Expr>> branches) {
+  if (branches.size() == 0)
+    throw std::invalid_argument("pw requires at least one branch");
+  ixs_ctx *ctx = branches.begin()->first.raw_ctx();
+  std::vector<ixs_node *> vals, conds;
+  vals.reserve(branches.size());
+  conds.reserve(branches.size());
+  for (auto &b : branches) {
+    vals.push_back(b.first.raw());
+    conds.push_back(b.second.raw());
+  }
+  return Expr(ctx, ixs_pw(ctx, static_cast<uint32_t>(vals.size()), vals.data(),
+                          conds.data()));
 }
 
 } // namespace ixs

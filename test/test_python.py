@@ -32,19 +32,24 @@ small_ints = st.integers(min_value=-64, max_value=64)
 pos_ints = st.integers(min_value=1, max_value=32)
 
 
+_OPS_BASE = ["add", "mul", "div", "floor", "ceiling", "mod", "max", "min"]
+_OPS_WITH_PW = _OPS_BASE + ["piecewise"]
+
+
 @st.composite
-def expressions(draw, max_depth=4):
+def expressions(draw, max_depth=4, include_piecewise=True):
     if max_depth <= 0 or draw(st.booleans()):
         return draw(st.one_of(sym_names, small_ints))
-    op = draw(
-        st.sampled_from(
-            ["add", "mul", "div", "floor", "ceiling", "mod", "max", "min"]
-        )
-    )
-    a = draw(expressions(max_depth=max_depth - 1))
+    ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
+    op = draw(st.sampled_from(ops))
+    a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op in ("floor", "ceiling"):
         return (op, a)
-    b = draw(expressions(max_depth=max_depth - 1))
+    if op == "piecewise":
+        cond = draw(conditions(max_depth=1))
+        default = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+        return (op, a, cond, default)
+    b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op == "mod":
         b = draw(pos_ints)
     if op == "div":
@@ -155,7 +160,46 @@ def to_ixsimpl(ctx, tree):
         return ixsimpl.max_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "min":
         return ixsimpl.min_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+    if op == "piecewise":
+        val, cond, default = tree[1], tree[2], tree[3]
+        cond_expr = to_ixsimpl_cond(ctx, cond)
+        return ixsimpl.pw(
+            (to_ixsimpl(ctx, val), cond_expr),
+            (to_ixsimpl(ctx, default), ctx.true_()),
+        )
     raise ValueError(f"unknown op: {op}")
+
+
+def to_ixsimpl_cond(ctx, tree):
+    """Convert condition tree to ixsimpl Expr."""
+    op = tree[0]
+    if op == "cmp":
+        _, cmp_op, a, b = tree
+        ia, ib = to_ixsimpl(ctx, a), to_ixsimpl(ctx, b)
+        if cmp_op == ">=":
+            return ia >= ib
+        if cmp_op == ">":
+            return ia > ib
+        if cmp_op == "<=":
+            return ia <= ib
+        if cmp_op == "<":
+            return ia < ib
+        if cmp_op == "==":
+            return ctx.eq(ia, ib)
+        if cmp_op == "!=":
+            return ctx.ne(ia, ib)
+        raise ValueError(f"unknown cmp_op: {cmp_op}")
+    if op == "not":
+        return ixsimpl.not_(to_ixsimpl_cond(ctx, tree[1]))
+    if op == "and":
+        return ixsimpl.and_(
+            to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2])
+        )
+    if op == "or":
+        return ixsimpl.or_(
+            to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2])
+        )
+    raise ValueError(f"unknown cond op: {op}")
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +327,7 @@ def test_simplify_self_consistency(expr):
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
 
 
-@given(expr=expressions())
+@given(expr=expressions(include_piecewise=False))
 @settings(max_examples=_SYMPY_CROSSCHECK_EXAMPLES, deadline=None)
 @example(("mod", ("mul", 2, ("mod", "x", 3)), 5))
 def test_matches_sympy(expr):

@@ -1135,6 +1135,7 @@ inline Expr mod(Expr a, Expr b) { return {a.raw_ctx(), ixs_mod(a.raw_ctx(), a.ra
 inline Expr max(Expr a, Expr b) { return {a.raw_ctx(), ixs_max(a.raw_ctx(), a.raw(), b.raw())}; }
 inline Expr min(Expr a, Expr b) { return {a.raw_ctx(), ixs_min(a.raw_ctx(), a.raw(), b.raw())}; }
 inline Expr xor_(Expr a, Expr b) { return {a.raw_ctx(), ixs_xor(a.raw_ctx(), a.raw(), b.raw())}; }
+inline Expr pw(std::initializer_list<std::pair<Expr, Expr>> branches); // piecewise
 
 } // namespace ixs
 ```
@@ -1185,6 +1186,10 @@ print(e.simplify(assumptions=assumptions))
 e2 = ixsimpl.mod(x, 4)
 e3 = ixsimpl.max_(x, y)   # trailing _ avoids shadowing builtin max
 e4 = ixsimpl.min_(x, y)
+e5 = ixsimpl.pw((x, x >= 0), (-x, ctx.true_()))  # piecewise
+cond = ixsimpl.and_(x >= 0, y >= 0)               # boolean combinators
+cond2 = ixsimpl.or_(x >= 0, y >= 0)
+cond3 = ixsimpl.not_(x >= 0)
 e5 = ixsimpl.ceil(x / 4)
 
 # Batch
@@ -1213,9 +1218,11 @@ Implementation:
 - `Context.int_(val)` creates an `IXS_INT` node (wraps `ixs_int`).
 - NULL (OOM) raises `MemoryError`. Sentinel propagates as a regular Expr.
 - Module-level functions: `ixsimpl.floor()`, `ixsimpl.ceil()`,
-  `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`.
-  Trailing underscore on `max_`/`min_`/`xor_` avoids shadowing Python
-  builtins.
+  `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`,
+  `ixsimpl.and_()`, `ixsimpl.or_()`, `ixsimpl.not_()`,
+  `ixsimpl.pw((val, cond), ...)`.
+  Trailing underscore on `max_`/`min_`/`xor_`/`and_`/`or_`/`not_` avoids
+  shadowing Python builtins.
 - `pyproject.toml` builds the extension; no runtime dependencies.
 
 This binding adds ~800 lines of C and is the primary interface for testing
@@ -1367,10 +1374,8 @@ pos_ints = st.integers(min_value=1, max_value=32)
 def expressions(draw, max_depth=4):
     if max_depth <= 0 or draw(st.booleans()):
         return draw(st.one_of(sym_names, small_ints))
-    op = draw(st.sampled_from([
-        "add", "mul", "div", "floor", "ceiling", "mod", "max", "min",
-        # "piecewise",  -- disabled pending piecewise fuzz stability
-    ]))
+    ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
+    op = draw(st.sampled_from(ops))
     a = draw(expressions(max_depth=max_depth - 1))
     if op in ("floor", "ceiling"):
         return (op, a)
