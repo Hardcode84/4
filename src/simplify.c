@@ -1247,8 +1247,30 @@ ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
 /*  simp_simplify (top-down with assumptions)                         */
 /* ------------------------------------------------------------------ */
 
-/* Forward decl for recursive rewrite. */
-static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds);
+/* Memo cache for rewrite (same direct-mapped scheme as subs). */
+#define REWRITE_MEMO_SIZE 256u
+#define REWRITE_MEMO_MASK (REWRITE_MEMO_SIZE - 1u)
+
+typedef struct {
+  ixs_node *key;
+  ixs_node *val;
+} rewrite_memo_slot;
+
+static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
+                              rewrite_memo_slot *memo);
+
+static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
+                         rewrite_memo_slot *memo) {
+  if (!n || ixs_node_is_sentinel(n))
+    return n;
+  uint32_t slot = n->hash & REWRITE_MEMO_MASK;
+  if (memo[slot].key == n)
+    return memo[slot].val;
+  ixs_node *result = rewrite_impl(ctx, n, bnds, memo);
+  memo[slot].key = n;
+  memo[slot].val = result;
+  return result;
+}
 
 /* Collapse floor or ceil to a constant when bounds pin it to one value.
  * Returns the constant node, or NULL if bounds don't collapse. */
@@ -1367,10 +1389,9 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   return false;
 }
 
-static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
+static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
+                              rewrite_memo_slot *memo) {
   uint32_t i;
-  if (!n || ixs_node_is_sentinel(n))
-    return n;
 
   switch (n->tag) {
   case IXS_INT:
@@ -1383,11 +1404,11 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return n;
 
   case IXS_ADD: {
-    ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds);
+    ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo);
     if (!result)
       return NULL;
     for (i = 0; i < n->u.add.nterms; i++) {
-      ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds);
+      ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds, memo);
       if (!t)
         return NULL;
       ixs_node *c = n->u.add.terms[i].coeff;
@@ -1398,11 +1419,11 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return result;
   }
   case IXS_MUL: {
-    ixs_node *result = rewrite(ctx, n->u.mul.coeff, bnds);
+    ixs_node *result = rewrite(ctx, n->u.mul.coeff, bnds, memo);
     if (!result)
       return NULL;
     for (i = 0; i < n->u.mul.nfactors; i++) {
-      ixs_node *b = rewrite(ctx, n->u.mul.factors[i].base, bnds);
+      ixs_node *b = rewrite(ctx, n->u.mul.factors[i].base, bnds, memo);
       if (!b)
         return NULL;
       ixs_mulfactor f;
@@ -1418,7 +1439,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return result;
   }
   case IXS_FLOOR: {
-    ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds);
+    ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo);
     if (!arg)
       return NULL;
 
@@ -1490,7 +1511,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return simp_floor(ctx, arg);
   }
   case IXS_CEIL: {
-    ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds);
+    ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo);
     if (!arg)
       return NULL;
 
@@ -1506,8 +1527,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return simp_ceil(ctx, arg);
   }
   case IXS_MOD: {
-    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);
-    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds);
+    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
+    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
     if (!l || !r)
       return NULL;
 
@@ -1525,8 +1546,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return simp_mod(ctx, l, r);
   }
   case IXS_MAX: {
-    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);
-    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds);
+    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
+    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
     if (!l || !r)
       return NULL;
 
@@ -1544,8 +1565,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return simp_max(ctx, l, r);
   }
   case IXS_MIN: {
-    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);
-    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds);
+    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
+    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
     if (!l || !r)
       return NULL;
     if (bnds) {
@@ -1561,13 +1582,13 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return simp_min(ctx, l, r);
   }
   case IXS_XOR: {
-    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);
-    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds);
+    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
+    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
     return (l && r) ? simp_xor(ctx, l, r) : NULL;
   }
   case IXS_CMP: {
-    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds);
-    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds);
+    ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
+    ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
     if (!l || !r)
       return NULL;
     ixs_node *result = simp_cmp(ctx, l, n->u.binary.cmp_op, r);
@@ -1647,8 +1668,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     if (n->u.pw.ncases > MAX_TERMS)
       return NULL;
     for (i = 0; i < n->u.pw.ncases; i++) {
-      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds);
-      cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds);
+      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+      cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo);
       if (!vals[i] || !cds[i])
         return NULL;
     }
@@ -1657,7 +1678,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   case IXS_AND: {
     ixs_node *result = ctx->node_true;
     for (i = 0; i < n->u.logic.nargs; i++) {
-      ixs_node *a = rewrite(ctx, n->u.logic.args[i], bnds);
+      ixs_node *a = rewrite(ctx, n->u.logic.args[i], bnds, memo);
       if (!a)
         return NULL;
       result = simp_and(ctx, result, a);
@@ -1669,7 +1690,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
   case IXS_OR: {
     ixs_node *result = ctx->node_false;
     for (i = 0; i < n->u.logic.nargs; i++) {
-      ixs_node *a = rewrite(ctx, n->u.logic.args[i], bnds);
+      ixs_node *a = rewrite(ctx, n->u.logic.args[i], bnds, memo);
       if (!a)
         return NULL;
       result = simp_or(ctx, result, a);
@@ -1679,7 +1700,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
     return result;
   }
   case IXS_NOT: {
-    ixs_node *a = rewrite(ctx, n->u.unary_bool.arg, bnds);
+    ixs_node *a = rewrite(ctx, n->u.unary_bool.arg, bnds, memo);
     return a ? simp_not(ctx, a) : NULL;
   }
   }
@@ -1689,6 +1710,8 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
 ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
                                     ixs_bounds *bnds) {
   int iter;
+  rewrite_memo_slot memo[REWRITE_MEMO_SIZE];
+
   if (!expr)
     return NULL;
   if (ixs_node_is_sentinel(expr))
@@ -1696,7 +1719,8 @@ ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
 
   for (iter = 0; iter < SIMPLIFY_ITER_LIMIT; iter++) {
     ixs_node *prev = expr;
-    expr = rewrite(ctx, expr, bnds);
+    memset(memo, 0, sizeof(memo));
+    expr = rewrite(ctx, expr, bnds, memo);
     if (!expr)
       return NULL;
     if (expr == prev)
