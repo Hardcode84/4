@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+static ixs_node *ctx_err(ixs_ctx *ctx, const char *msg) {
+  ixs_ctx_push_error(ctx, "%s", msg);
+  return ctx->sentinel_error;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Singleton creation                                                */
 /* ------------------------------------------------------------------ */
@@ -107,15 +112,11 @@ bool ixs_is_domain_error(ixs_node *node) {
 ixs_node *ixs_int(ixs_ctx *ctx, int64_t val) { return ixs_node_int(ctx, val); }
 
 ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
-  if (q == 0) {
-    ixs_ctx_push_error(ctx, "ixs_rat: denominator is zero");
-    return ctx->sentinel_error;
-  }
+  if (q == 0)
+    return ctx_err(ctx, "ixs_rat: denominator is zero");
   int64_t rp, rq;
-  if (!ixs_rat_normalize(p, q, &rp, &rq)) {
-    ixs_ctx_push_error(ctx, "ixs_rat: rational overflow");
-    return ctx->sentinel_error;
-  }
+  if (!ixs_rat_normalize(p, q, &rp, &rq))
+    return ctx_err(ctx, "ixs_rat: rational overflow");
   return ixs_node_rat(ctx, rp, rq);
 }
 

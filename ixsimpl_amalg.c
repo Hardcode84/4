@@ -548,6 +548,11 @@ int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
 #include <stdlib.h>
 #include <string.h>
 
+static ixs_node *ctx_err(ixs_ctx *ctx, const char *msg) {
+  ixs_ctx_push_error(ctx, "%s", msg);
+  return ctx->sentinel_error;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Singleton creation                                                */
 /* ------------------------------------------------------------------ */
@@ -650,15 +655,11 @@ bool ixs_is_domain_error(ixs_node *node) {
 ixs_node *ixs_int(ixs_ctx *ctx, int64_t val) { return ixs_node_int(ctx, val); }
 
 ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
-  if (q == 0) {
-    ixs_ctx_push_error(ctx, "ixs_rat: denominator is zero");
-    return ctx->sentinel_error;
-  }
+  if (q == 0)
+    return ctx_err(ctx, "ixs_rat: denominator is zero");
   int64_t rp, rq;
-  if (!ixs_rat_normalize(p, q, &rp, &rq)) {
-    ixs_ctx_push_error(ctx, "ixs_rat: rational overflow");
-    return ctx->sentinel_error;
-  }
+  if (!ixs_rat_normalize(p, q, &rp, &rq))
+    return ctx_err(ctx, "ixs_rat: rational overflow");
   return ixs_node_rat(ctx, rp, rq);
 }
 
@@ -2919,6 +2920,11 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
+static ixs_node *simp_err(ixs_ctx *ctx, const char *msg) {
+  ixs_ctx_push_error(ctx, "%s", msg);
+  return ctx->sentinel_error;
+}
+
 static ixs_node *make_const(ixs_ctx *ctx, int64_t p, int64_t q) {
   if (q == 1)
     return ixs_node_int(ctx, p);
@@ -3090,8 +3096,7 @@ ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
 
 overflow:
-  ixs_ctx_push_error(ctx, "rational overflow in add");
-  return ctx->sentinel_error;
+  return simp_err(ctx, "rational overflow in add");
 }
 
 /* ------------------------------------------------------------------ */
@@ -3182,8 +3187,7 @@ ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
 
 overflow:
-  ixs_ctx_push_error(ctx, "rational overflow in multiply");
-  return ctx->sentinel_error;
+  return simp_err(ctx, "rational overflow in multiply");
 }
 
 /* ------------------------------------------------------------------ */
@@ -3214,20 +3218,16 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return prop;
 
   /* Division by zero */
-  if (ixs_node_is_zero(b)) {
-    ixs_ctx_push_error(ctx, "division by zero");
-    return ctx->sentinel_error;
-  }
+  if (ixs_node_is_zero(b))
+    return simp_err(ctx, "division by zero");
 
   /* Constant / constant → rational fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
     int64_t ap, aq, bp, bq, rp, rq;
     ixs_node_get_rat(a, &ap, &aq);
     ixs_node_get_rat(b, &bp, &bq);
-    if (!ixs_rat_div(ap, aq, bp, bq, &rp, &rq)) {
-      ixs_ctx_push_error(ctx, "rational overflow in division");
-      return ctx->sentinel_error;
-    }
+    if (!ixs_rat_div(ap, aq, bp, bq, &rp, &rq))
+      return simp_err(ctx, "rational overflow in division");
     return make_const(ctx, rp, rq);
   }
 
@@ -3235,10 +3235,8 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (ixs_node_is_const(b)) {
     int64_t bp, bq, rp, rq;
     ixs_node_get_rat(b, &bp, &bq);
-    if (!ixs_rat_div(1, 1, bp, bq, &rp, &rq)) {
-      ixs_ctx_push_error(ctx, "rational overflow in division");
-      return ctx->sentinel_error;
-    }
+    if (!ixs_rat_div(1, 1, bp, bq, &rp, &rq))
+      return simp_err(ctx, "rational overflow in division");
     return simp_mul(ctx, make_const(ctx, rp, rq), a);
   }
 
@@ -3392,24 +3390,18 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return prop;
 
   /* Mod(x, 0) → error */
-  if (ixs_node_is_zero(b)) {
-    ixs_ctx_push_error(ctx, "Mod: divisor is zero");
-    return ctx->sentinel_error;
-  }
+  if (ixs_node_is_zero(b))
+    return simp_err(ctx, "Mod: divisor is zero");
 
   /* Mod(c1, c2) → constant fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
     int64_t ap, aq, bp, bq, rp, rq;
     ixs_node_get_rat(a, &ap, &aq);
     ixs_node_get_rat(b, &bp, &bq);
-    if (ixs_rat_is_neg(bp)) {
-      ixs_ctx_push_error(ctx, "Mod: divisor is negative");
-      return ctx->sentinel_error;
-    }
-    if (!ixs_rat_mod(ap, aq, bp, bq, &rp, &rq)) {
-      ixs_ctx_push_error(ctx, "rational overflow in Mod");
-      return ctx->sentinel_error;
-    }
+    if (ixs_rat_is_neg(bp))
+      return simp_err(ctx, "Mod: divisor is negative");
+    if (!ixs_rat_mod(ap, aq, bp, bq, &rp, &rq))
+      return simp_err(ctx, "rational overflow in Mod");
     return make_const(ctx, rp, rq);
   }
 
@@ -3865,10 +3857,8 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
   uint32_t ncases = 0;
   uint32_t i;
 
-  if (n == 0) {
-    ixs_ctx_push_error(ctx, "Piecewise: zero cases");
-    return ctx->sentinel_error;
-  }
+  if (n == 0)
+    return simp_err(ctx, "Piecewise: zero cases");
 
   for (i = 0; i < n; i++) {
     ixs_node *v = values[i];
@@ -3917,10 +3907,8 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
     ncases++;
   }
 
-  if (ncases == 0) {
-    ixs_ctx_push_error(ctx, "Piecewise: all conditions are False");
-    return ctx->sentinel_error;
-  }
+  if (ncases == 0)
+    return simp_err(ctx, "Piecewise: all conditions are False");
 
   /* Single branch with True → just return value. */
   if (ncases == 1 && cases[0].cond->tag == IXS_TRUE)
