@@ -567,7 +567,7 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       for (i = 0; i < a->u.add.nterms; i++) {
         int64_t cp, cq;
         ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
-        int64_t acp = cp < 0 ? -cp : cp;
+        int64_t acp = (cp > 0) ? cp : (cp >= -INT64_MAX) ? -cp : 0;
         if (cq != 1 || acp == 0 || m % acp != 0 ||
             !ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
           ok = false;
