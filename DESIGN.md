@@ -111,9 +111,10 @@ meaning to the library. All are treated uniformly as opaque symbolic names.
 │                    Public C API                      │
 │  ixs_ctx_create / ixs_parse / ixs_simplify / ...     │
 ├──────────────────────────────────────────────────────┤
-│                  Simplifier Engine                   │
-│  Constant folding → Canonicalization → Rewrite rules │
-│  → Piecewise propagation → floor/ceil/mod rules      │
+│          Node Construction + Simplification          │
+│  Constructors canonicalize bottom-up via shared      │
+│  rule engine; ixs_simplify adds top-down pass with   │
+│  assumptions. One rule implementation, not two.      │
 ├──────────────┬───────────────┬───────────────────────┤
 │  Expression  │  Hash-consing │  Rational             │
 │  DAG Nodes   │  Table        │  Arithmetic           │
@@ -122,10 +123,21 @@ meaning to the library. All are treated uniformly as opaque symbolic names.
 └──────────────────────────────────────────────────────┘
 ```
 
+Node construction and simplification are **one logical layer**: every
+constructor (e.g., `ixs_add`, `ixs_floor`) applies canonicalization rules
+before hash-consing. This is intentional — it ensures all nodes in the DAG
+are always in canonical form. `ixs_simplify()` runs an additional top-down
+pass that leverages assumptions for bound-dependent rewrites.
+
 **Thread safety**: A single `ixs_ctx` is **not** thread-safe. All operations
 on a context must be serialized by the caller. For parallel workloads, use one
 `ixs_ctx` per thread. Distinct contexts share no state and can be used
 concurrently without synchronization.
+
+**Cross-context contract**: All `ixs_node*` arguments passed to any API
+function must belong to the same `ixs_ctx` as the `ctx` parameter. Passing
+a node from one context to a different context is **undefined behavior**
+(dangling arena pointer, wrong hash table).
 
 ### Layer 0: Memory — Arena Allocator
 
@@ -211,7 +223,7 @@ typedef struct ixs_node {
         struct {                          // IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP
             struct ixs_node *lhs;
             struct ixs_node *rhs;
-            ixs_cmp_op cmp_op;           // valid only for IXS_CMP; undefined for others
+            ixs_cmp_op cmp_op;           // used only for IXS_CMP; value ignored for other binary types
         } binary;
         struct {                          // IXS_PIECEWISE
             uint32_t ncases;
@@ -294,6 +306,12 @@ initial implementation.
 **Division by zero**: `ixs_rat(ctx, p, 0)` returns sentinel. `Mod(x, 0)` and
 any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
 `q < 0` normalizes to `(-p, -q)`.
+
+**Mod with negative divisor**: `Mod(x, b)` requires `b > 0`. If `b` is a
+known negative constant, the constructor returns `IXS_ERROR`. If `b` is
+symbolic, it is assumed positive (the caller's responsibility via
+assumptions). This matches the corpus where all Mod divisors are positive
+constants or expressions provably positive under assumptions.
 
 ### Layer 3: Parser
 
@@ -394,10 +412,12 @@ Construction rules:
 
 - `MUL(... * MUL(c * Π dj^fj) ...)` → flatten
 - Collect like bases: if `bi == bj`, merge `ei + ej`
+- Drop factors with `ei == 0` (they contribute 1)
 - If `coeff == 0`, return `0`
 - `expr * 1` → `expr`
 - Pull constant factors out of ADD: `2 * (a + b)` is kept as-is (don't
-  distribute). Distribution is only done by an explicit `expand()` call.
+  distribute). Distribution is not performed by the simplifier. A future
+  `ixs_expand` API could be added if needed.
 
 #### 4.4 Floor / Ceiling Rules
 
@@ -454,6 +474,10 @@ Mod(a*m + b, m)     where a doesn't depend on Mod → Mod(b, m)
 ```
 
 #### 4.6 Piecewise Rules
+
+Piecewise requires `n >= 1`. The last case should have condition `True`
+(catch-all default). If after eliminating `False` branches no cases remain,
+the result is `IXS_ERROR` (no defined value).
 
 ```
 Piecewise((v, True))                → v
@@ -532,7 +556,7 @@ a > b   → (a - b) > 0   (normalize to compare against 0)
 Then apply constant folding when `a - b` reduces to a constant, or bound
 analysis when the sign of `a - b` is provable.
 
-### Layer 5: Bound Analysis (Optional, Phase 2)
+### Layer 5: Bound Analysis (Phase 4)
 
 Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
@@ -621,13 +645,14 @@ Piecewise branch doesn't invalidate the other 608 expressions.
 ### Error List API
 
 ```c
-// Query errors accumulated since last clear
+// Query errors accumulated since last clear.
+// ixs_ctx_error returns NULL if index >= ixs_ctx_nerrors(ctx).
 size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
 const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
 void        ixs_ctx_clear_errors(ixs_ctx *ctx);
 
 // Check sentinel kind
-bool        ixs_is_error(ixs_node *node);        // true for EITHER sentinel
+bool        ixs_is_error(ixs_node *node);        // true for either sentinel
 bool        ixs_is_parse_error(ixs_node *node);   // true only for IXS_PARSE_ERROR
 bool        ixs_is_domain_error(ixs_node *node);  // true only for IXS_ERROR
 ```
@@ -686,12 +711,13 @@ bool        ixs_is_domain_error(ixs_node *node);   // true only for IXS_ERROR
 // Returns: valid node on success, IXS_PARSE_ERROR sentinel on syntax error,
 // IXS_ERROR sentinel if syntactically valid but contains domain error
 // (e.g. 1/0), NULL on OOM. Error details appended to context error list.
+// Precondition: input must be a valid pointer (NULL is undefined behavior).
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
 
 // Construct expressions programmatically
 ixs_node *ixs_int(ixs_ctx *ctx, int64_t val);
 ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q);
-ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);
+ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);  // name must be non-NULL
 ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
@@ -701,6 +727,7 @@ ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
+                                                    // n must be >= 1; last cond should be ixs_true
 ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // flattens into n-ary
 ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);   // flattens into n-ary
@@ -713,6 +740,9 @@ ixs_node *ixs_false(ixs_ctx *ctx);
 // like `Mod(M, 128) == 0`). The simplifier extracts variable bounds from
 // comparison assumptions automatically. Assumptions are separate from the
 // expression tree so that hash-consing is preserved. Pass NULL/0 if none.
+// NULL/sentinel propagation: if expr is NULL returns NULL, if expr is
+// sentinel returns that sentinel. NULL/sentinel entries in assumptions
+// array are silently skipped.
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
@@ -721,7 +751,11 @@ ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
 // Only valid for nodes from the same ixs_ctx.
 bool ixs_same_node(ixs_node *a, ixs_node *b);
 
-// Substitution
+// Substitution — single-pass: replaces all occurrences of symbol `var` in
+// `expr` with `replacement`. Does NOT re-substitute into the replacement
+// itself (no recursive expansion). var must be a valid non-empty string
+// (NULL/empty is UB). NULL/sentinel propagation applies to expr and
+// replacement as with constructors.
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
                     const char *var, ixs_node *replacement);
 
@@ -733,7 +767,9 @@ size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);  // SymPy format
 size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 
 // Batch: simplify multiple expressions sharing subexpressions
-// (preserves CSE across the batch within the same context)
+// (preserves CSE across the batch within the same context).
+// NULL/sentinel entries in exprs are left unchanged. NULL/sentinel
+// entries in assumptions are silently skipped.
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions);
 ```
@@ -750,13 +786,13 @@ ixs_node *M   = ixs_sym(ctx, "M");
 ixs_node *N   = ixs_sym(ctx, "N");
 ixs_node *K   = ixs_sym(ctx, "K");
 ixs_node *assumptions[] = {
-    ixs_cmp(ctx, T0, IXS_GE, ixs_int(ctx, 0)),    // $T0 >= 0
-    ixs_cmp(ctx, T0, IXS_LT, ixs_int(ctx, 256)),   // $T0 < 256
-    ixs_cmp(ctx, T1, IXS_GE, ixs_int(ctx, 0)),    // $T1 >= 0
-    ixs_cmp(ctx, T1, IXS_LT, ixs_int(ctx, 4)),     // $T1 < 4
-    ixs_cmp(ctx, M,  IXS_GE, ixs_int(ctx, 1)),     // M >= 1
-    ixs_cmp(ctx, N,  IXS_GE, ixs_int(ctx, 1)),     // N >= 1
-    ixs_cmp(ctx, K,  IXS_GE, ixs_int(ctx, 1)),     // K >= 1
+    ixs_cmp(ctx, T0, IXS_CMP_GE, ixs_int(ctx, 0)),   // $T0 >= 0
+    ixs_cmp(ctx, T0, IXS_CMP_LT, ixs_int(ctx, 256)), // $T0 < 256
+    ixs_cmp(ctx, T1, IXS_CMP_GE, ixs_int(ctx, 0)),   // $T1 >= 0
+    ixs_cmp(ctx, T1, IXS_CMP_LT, ixs_int(ctx, 4)),   // $T1 < 4
+    ixs_cmp(ctx, M,  IXS_CMP_GE, ixs_int(ctx, 1)),   // M >= 1
+    ixs_cmp(ctx, N,  IXS_CMP_GE, ixs_int(ctx, 1)),   // N >= 1
+    ixs_cmp(ctx, K,  IXS_CMP_GE, ixs_int(ctx, 1)),   // K >= 1
 };
 size_t n_assumptions = sizeof(assumptions) / sizeof(assumptions[0]);
 
@@ -769,6 +805,7 @@ if (ixs_is_parse_error(expr)) {
 }
 
 ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, n_assumptions);
+if (!simplified) { /* OOM */ return; }
 
 if (ixs_is_domain_error(simplified)) {
     for (size_t i = 0; i < ixs_ctx_nerrors(ctx); i++)
@@ -1038,8 +1075,9 @@ against SymPy (run both, compare outputs).
 - Basic constant folding
 - SymPy-format printer
 - Generate `test/corpus_expected.txt` by running SymPy on all 609 corpus
-  expressions (one-time script, checked in). This is the ground truth for
-  all subsequent phases.
+  expressions (one-time script, checked in). Use the `Mod(p, q, evaluate=False)`
+  workaround (see SymPy #28744 section) when generating. Pin and record the
+  SymPy version. This is the ground truth for all subsequent phases.
 
 **Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`. Corpus
 expected outputs are available for comparison.
@@ -1080,7 +1118,7 @@ met (< 50ms total).
 - C++ header-only wrapper (`ixsimpl.hpp`)
 - CPython extension module (`_ixsimpl.c`)
 - Python test suite comparing output against SymPy
-- `setup.py` / `pyproject.toml` for pip-installable package
+- `pyproject.toml` for pip-installable package
 
 **Milestone**: `pip install .` works; Python tests pass against SymPy oracle.
 
