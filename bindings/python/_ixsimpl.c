@@ -353,6 +353,22 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
+static PyObject *Expr_child(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  uint32_t n;
+  ixs_node *ch;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  n = ixs_node_nchildren(self->node);
+  if (i >= n) {
+    PyErr_Format(PyExc_IndexError, "child index %u out of range (nchildren=%u)",
+                 i, n);
+    return NULL;
+  }
+  ch = ixs_node_child(self->node, (uint32_t)i);
+  return (PyObject *)Expr_wrap(self->ctx_obj, ch);
+}
+
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
      "Simplify expression with optional assumptions."},
@@ -361,6 +377,8 @@ static PyMethodDef Expr_methods[] = {
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
      "expr.subs(target, replacement): target is str (variable name) or Expr "
      "(any subexpression); replacement is Expr or int."},
+    {"child", (PyCFunction)Expr_child, METH_VARARGS,
+     "expr.child(i) -> Expr: i-th child node (0 <= i < nchildren)."},
     {NULL}};
 
 /* --- Expr properties --- */
@@ -383,6 +401,28 @@ static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
 }
 
+static PyObject *Expr_get_nchildren(ExprObject *self,
+                                    void *Py_UNUSED(closure)) {
+  return PyLong_FromUnsignedLong(ixs_node_nchildren(self->node));
+}
+
+static PyObject *Expr_get_children(ExprObject *self, void *Py_UNUSED(closure)) {
+  uint32_t n = ixs_node_nchildren(self->node);
+  uint32_t i;
+  PyObject *tup = PyTuple_New((Py_ssize_t)n);
+  if (!tup)
+    return NULL;
+  for (i = 0; i < n; i++) {
+    ExprObject *child = Expr_wrap(self->ctx_obj, ixs_node_child(self->node, i));
+    if (!child) {
+      Py_DECREF(tup);
+      return NULL;
+    }
+    PyTuple_SET_ITEM(tup, (Py_ssize_t)i, (PyObject *)child);
+  }
+  return tup;
+}
+
 static PyGetSetDef Expr_getset[] = {
     {"is_error", (getter)Expr_get_is_error, NULL,
      "True if node is any error sentinel.", NULL},
@@ -391,6 +431,10 @@ static PyGetSetDef Expr_getset[] = {
     {"is_domain_error", (getter)Expr_get_is_domain_error, NULL,
      "True if node is a domain error sentinel.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
+    {"nchildren", (getter)Expr_get_nchildren, NULL,
+     "Number of child node pointers (0 for leaves).", NULL},
+    {"children", (getter)Expr_get_children, NULL, "Tuple of child Expr nodes.",
+     NULL},
     {NULL}};
 
 static PyTypeObject ExprType = {

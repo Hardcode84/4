@@ -10,6 +10,7 @@ sources = [
     "src/parser.c",
     "src/print.c",
     "src/ctx.c",
+    "src/walk.c",
 ]
 
 ixsimpl_ext = Extension(
