@@ -10,6 +10,8 @@ Properties tested:
    expressions that agree numerically with ixsimpl evaluation.
 5. from_sympy semantics: ixsimpl.sympy_conv.from_sympy produces ixsimpl
    expressions that agree numerically with the original tree.
+6. Roundtrip: ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves
+   numerical semantics.
 """
 
 from __future__ import annotations
@@ -492,6 +494,44 @@ def test_from_sympy_semantics(expr: ExprTree) -> None:
     assume(checked > 0)
 
 
+@given(expr=expressions(include_piecewise=False))
+@settings(max_examples=_CONV_EXAMPLES, deadline=None)
+def test_sympy_roundtrip_semantics(expr: ExprTree) -> None:
+    """ixsimpl -> conv.to_sympy -> conv.from_sympy -> ixsimpl preserves
+    numerical semantics at random integer points."""
+    ctx = ixsimpl.Context()
+    try:
+        original = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not original.is_error)
+
+    sp_expr = conv_to_sympy(original)
+    try:
+        roundtripped = conv_from_sympy(ctx, sp_expr)
+    except (ValueError, TypeError):
+        assume(False)
+    assume(not roundtripped.is_error)
+
+    checked = 0
+    for _ in range(10):
+        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        try:
+            orig_val = eval_ixs(original, ctx, env)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        try:
+            rt_val = eval_ixs(roundtripped, ctx, env)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        assert orig_val == rt_val, (
+            f"roundtrip mismatch at {env}: "
+            f"original={orig_val}, roundtripped={rt_val}, expr={expr}"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
 if __name__ == "__main__":
     print(f"Running self-consistency test ({_SELF_CONSISTENCY_EXAMPLES} examples)...")
     test_simplify_self_consistency()
@@ -507,5 +547,8 @@ if __name__ == "__main__":
     print("PASSED")
     print(f"Running from_sympy semantics test ({_CONV_EXAMPLES} examples)...")
     test_from_sympy_semantics()
+    print("PASSED")
+    print(f"Running SymPy roundtrip semantics test ({_CONV_EXAMPLES} examples)...")
+    test_sympy_roundtrip_semantics()
     print("PASSED")
     print("All fuzz tests passed!")
