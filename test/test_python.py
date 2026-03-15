@@ -555,25 +555,3 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
         )
         checked += 1
     assume(checked > 0)
-
-
-if __name__ == "__main__":
-    print(f"Running self-consistency test ({_SELF_CONSISTENCY_EXAMPLES} examples)...")
-    test_simplify_self_consistency()
-    print("PASSED")
-    print(f"Running SymPy cross-check ({_SYMPY_CROSSCHECK_EXAMPLES} examples)...")
-    test_matches_sympy()
-    print("PASSED")
-    print(f"Running divisibility test ({_DIVISIBILITY_EXAMPLES} examples)...")
-    test_simplify_with_divisibility()
-    print("PASSED")
-    print(f"Running to_sympy semantics test ({_CONV_EXAMPLES} examples)...")
-    test_to_sympy_semantics()
-    print("PASSED")
-    print(f"Running from_sympy semantics test ({_CONV_EXAMPLES} examples)...")
-    test_from_sympy_semantics()
-    print("PASSED")
-    print(f"Running SymPy roundtrip semantics test ({_CONV_EXAMPLES} examples)...")
-    test_sympy_roundtrip_semantics()
-    print("PASSED")
-    print("All fuzz tests passed!")

@@ -63,7 +63,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install hatchling "scikit-build-core~=0.12.0" sympy hypothesis pytest
+        run: pip install hatchling "scikit-build-core~=0.12.0" sympy hypothesis pytest pytest-xdist
 
       - name: Build extension (ASAN)
         env:
@@ -72,17 +72,11 @@ jobs:
           LDFLAGS: "-fsanitize=address"
         run: pip install --no-build-isolation .
 
-      - name: Fuzz tests
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python test/test_python.py
-
       - name: Python tests
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest test/test_accessors.py test/test_sympy_conv.py -v
+          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest -n auto
 
   pre-commit:
     runs-on: ubuntu-latest

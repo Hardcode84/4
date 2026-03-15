@@ -32,6 +32,10 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-v"
+
 [[tool.mypy.overrides]]
 module = ["sympy", "sympy.*", "numpy", "numpy.*", "_ixsimpl", "pytest", "ixsimpl", "ixsimpl.*"]
 ignore_missing_imports = true
