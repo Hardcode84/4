@@ -10,6 +10,12 @@
  * Lightweight interval analysis for bound-dependent rewrites.
  * Stores per-variable intervals extracted from comparison assumptions,
  * and propagates through expression structure.
+ *
+ * The var table is a growable array on the scratch arena.  Lookup is
+ * linear by pointer equality (symbol names are interned).  If this
+ * ever becomes a bottleneck, swap the array for an open-addressing
+ * hash map keyed on the interned name pointer — the interface is
+ * already designed to make that a drop-in replacement.
  */
 
 typedef struct {
@@ -18,20 +24,20 @@ typedef struct {
   bool valid;
 } ixs_interval;
 
-#define IXS_BOUNDS_MAX_VARS 64
-
 typedef struct {
-  const char *name;
+  const char *name; /* interned pointer — identity compare only */
   ixs_interval iv;
   int64_t divisor; /* known divisor (0 = no info, >0 = sym is multiple of d) */
 } ixs_var_bound;
 
 typedef struct {
-  ixs_var_bound vars[IXS_BOUNDS_MAX_VARS];
+  ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
+  size_t cap;
+  ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
-void ixs_bounds_init(ixs_bounds *b);
+void ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 void ixs_bounds_destroy(ixs_bounds *b);
 
 /* Extract variable bounds from an assumption (e.g., $T0 >= 0). */

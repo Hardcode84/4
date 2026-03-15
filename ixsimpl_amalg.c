@@ -153,7 +153,6 @@ void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
  */
 #include "bounds.h"
 #include <limits.h>
-#include <string.h>
 
 #ifndef INT64_MIN
 #define INT64_MIN (-9223372036854775807LL - 1)
@@ -162,14 +161,24 @@ void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
 #define INT64_MAX 9223372036854775807LL
 #endif
 
-void ixs_bounds_init(ixs_bounds *b) { memset(b, 0, sizeof(*b)); }
+#define BOUNDS_INIT_CAP 16
+
+void ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
+  b->scratch = scratch;
+  b->nvars = 0;
+  b->cap = BOUNDS_INIT_CAP;
+  b->vars = ixs_arena_alloc(scratch, BOUNDS_INIT_CAP * sizeof(*b->vars),
+                            sizeof(void *));
+}
 
 void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
 
 static ixs_var_bound *find_var(ixs_bounds *b, const char *name) {
   size_t i;
+  if (!b->vars)
+    return NULL;
   for (i = 0; i < b->nvars; i++) {
-    if (strcmp(b->vars[i].name, name) == 0)
+    if (b->vars[i].name == name)
       return &b->vars[i];
   }
   return NULL;
@@ -179,8 +188,15 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   ixs_var_bound *v = find_var(b, name);
   if (v)
     return v;
-  if (b->nvars >= IXS_BOUNDS_MAX_VARS)
+  if (!b->vars)
     return NULL;
+  if (b->nvars >= b->cap) {
+    b->vars = ixs_arena_grow(b->scratch, b->vars, b->cap * sizeof(*b->vars),
+                             b->cap * 2 * sizeof(*b->vars), sizeof(void *));
+    if (!b->vars)
+      return NULL;
+    b->cap *= 2;
+  }
   v = &b->vars[b->nvars++];
   v->name = name;
   v->iv.valid = true;
@@ -5309,9 +5325,9 @@ static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-static void build_bounds(ixs_bounds *bnds, ixs_node *const *assumptions,
-                         size_t n_assumptions) {
-  ixs_bounds_init(bnds);
+static void build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
+                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds_init(bnds, scratch);
   if (assumptions) {
     size_t i;
     for (i = 0; i < n_assumptions; i++) {
@@ -5325,18 +5341,21 @@ static void build_bounds(ixs_bounds *bnds, ixs_node *const *assumptions,
 
 ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  build_bounds(&bnds, assumptions, n_assumptions);
+  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
+  ixs_arena_restore(&ctx->scratch, m);
   return expr;
 }
 
 void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   size_t i;
-  build_bounds(&bnds, assumptions, n_assumptions);
+  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
   for (i = 0; i < n; i++) {
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
@@ -5346,10 +5365,12 @@ void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
       for (j = 0; j < n; j++)
         exprs[j] = NULL;
       ixs_bounds_destroy(&bnds);
+      ixs_arena_restore(&ctx->scratch, m);
       return;
     }
   }
   ixs_bounds_destroy(&bnds);
+  ixs_arena_restore(&ctx->scratch, m);
 }
 
 /* ==================================================================== */

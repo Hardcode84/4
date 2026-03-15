@@ -1949,9 +1949,9 @@ static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-static void build_bounds(ixs_bounds *bnds, ixs_node *const *assumptions,
-                         size_t n_assumptions) {
-  ixs_bounds_init(bnds);
+static void build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
+                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds_init(bnds, scratch);
   if (assumptions) {
     size_t i;
     for (i = 0; i < n_assumptions; i++) {
@@ -1965,18 +1965,21 @@ static void build_bounds(ixs_bounds *bnds, ixs_node *const *assumptions,
 
 ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  build_bounds(&bnds, assumptions, n_assumptions);
+  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
+  ixs_arena_restore(&ctx->scratch, m);
   return expr;
 }
 
 void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   size_t i;
-  build_bounds(&bnds, assumptions, n_assumptions);
+  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
   for (i = 0; i < n; i++) {
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
@@ -1986,8 +1989,10 @@ void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
       for (j = 0; j < n; j++)
         exprs[j] = NULL;
       ixs_bounds_destroy(&bnds);
+      ixs_arena_restore(&ctx->scratch, m);
       return;
     }
   }
   ixs_bounds_destroy(&bnds);
+  ixs_arena_restore(&ctx->scratch, m);
 }

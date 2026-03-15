@@ -845,6 +845,12 @@ analysis when the sign of `a - b` is provable.
 Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
 
+- **Variable storage**: Per-variable bounds live in a growable array on the
+  scratch arena (starts at 16 slots, doubles on overflow).  Lookup is O(n)
+  linear scan by interned name pointer.  If profiling shows this is hot,
+  the array can be swapped for an open-addressing hash map keyed on the
+  same pointer — the `ixs_bounds` interface is designed to make that a
+  drop-in replacement.
 - **Interval bounds**: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
   extracts interval bounds from comparison assumptions automatically
 - **Divisibility**: `Mod(K, 32) == 0` — the simplifier recognizes this as

@@ -773,6 +773,36 @@ static void test_large_expressions(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_many_vars(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  int i;
+
+  /* Build 100 symbols each with bounds: 0 <= v_i < 256.
+   * Then Mod(v_i, 256) should simplify to v_i for all of them. */
+  ixs_node *assumptions[200];
+  ixs_node *syms[100];
+  char name[16];
+  for (i = 0; i < 100; i++) {
+    snprintf(name, sizeof(name), "v%d", i);
+    syms[i] = ixs_sym(ctx, name);
+    assumptions[2 * i] = ixs_cmp(ctx, syms[i], IXS_CMP_GE, ixs_int(ctx, 0));
+    assumptions[2 * i + 1] =
+        ixs_cmp(ctx, syms[i], IXS_CMP_LT, ixs_int(ctx, 256));
+  }
+
+  /* Simplify Mod(v_99, 256) — the 100th variable — to v_99. */
+  ixs_node *expr = ixs_mod(ctx, syms[99], ixs_int(ctx, 256));
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 200);
+  CHECK(r == syms[99]);
+
+  /* Also check an early one. */
+  expr = ixs_mod(ctx, syms[0], ixs_int(ctx, 256));
+  r = ixs_simplify(ctx, expr, assumptions, 200);
+  CHECK(r == syms[0]);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_mod_floor_regression(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -864,6 +894,7 @@ int main(void) {
   test_print_roundtrip();
   test_divisibility_assumptions();
   test_large_expressions();
+  test_bounds_many_vars();
   test_mod_floor_regression();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
