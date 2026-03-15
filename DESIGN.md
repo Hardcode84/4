@@ -158,6 +158,9 @@ This is considered acceptable for the target domain.
 
 All expression nodes are allocated from a per-context arena. Nodes are never
 individually freed; the entire arena is freed when the context is destroyed.
+The `ixs_ctx` struct itself is emplaced into the main arena (built on the
+stack, then memcpy'd in), so `ixs_ctx_create` issues zero `calloc` calls.
+`ixs_ctx_destroy` snapshots the arena to a local before freeing it.
 This eliminates per-node malloc/free overhead and improves cache locality.
 
 ```c

@@ -623,39 +623,44 @@ static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
 /* ------------------------------------------------------------------ */
 
 ixs_ctx *ixs_ctx_create(void) {
-  ixs_ctx *ctx = calloc(1, sizeof(ixs_ctx));
-  if (!ctx)
-    return NULL;
+  ixs_ctx tmp;
+  ixs_ctx *ctx;
+  memset(&tmp, 0, sizeof(tmp));
 
-  ixs_arena_init(&ctx->arena, IXS_ARENA_DEFAULT_SIZE);
-  ixs_arena_init(&ctx->scratch, IXS_ARENA_DEFAULT_SIZE);
+  ixs_arena_init(&tmp.arena, IXS_ARENA_DEFAULT_SIZE);
+  ixs_arena_init(&tmp.scratch, IXS_ARENA_DEFAULT_SIZE);
 
-  if (!ixs_htab_init(ctx)) {
-    free(ctx);
+  if (!ixs_htab_init(&tmp))
     return NULL;
-  }
 
   /* Create singletons. */
-  ctx->sentinel_error = make_singleton(ctx, IXS_ERROR, 0xDEAD);
-  ctx->sentinel_parse_error = make_singleton(ctx, IXS_PARSE_ERROR, 0xBEEF);
-  ctx->node_true = make_singleton(ctx, IXS_TRUE, 1);
-  ctx->node_false = make_singleton(ctx, IXS_FALSE, 0);
+  tmp.sentinel_error = make_singleton(&tmp, IXS_ERROR, 0xDEAD);
+  tmp.sentinel_parse_error = make_singleton(&tmp, IXS_PARSE_ERROR, 0xBEEF);
+  tmp.node_true = make_singleton(&tmp, IXS_TRUE, 1);
+  tmp.node_false = make_singleton(&tmp, IXS_FALSE, 0);
 
-  if (!ctx->sentinel_error || !ctx->sentinel_parse_error || !ctx->node_true ||
-      !ctx->node_false) {
-    ixs_ctx_destroy(ctx);
-    return NULL;
-  }
+  if (!tmp.sentinel_error || !tmp.sentinel_parse_error || !tmp.node_true ||
+      !tmp.node_false)
+    goto fail;
 
-  ctx->node_zero = ixs_node_int(ctx, 0);
-  ctx->node_one = ixs_node_int(ctx, 1);
+  tmp.node_zero = ixs_node_int(&tmp, 0);
+  tmp.node_one = ixs_node_int(&tmp, 1);
 
-  if (!ctx->node_zero || !ctx->node_one) {
-    ixs_ctx_destroy(ctx);
-    return NULL;
-  }
+  if (!tmp.node_zero || !tmp.node_one)
+    goto fail;
 
+  /* Emplace ctx into its own arena — one fewer heap allocation. */
+  ctx = ixs_arena_alloc(&tmp.arena, sizeof(ixs_ctx), sizeof(void *));
+  if (!ctx)
+    goto fail;
+  memcpy(ctx, &tmp, sizeof(ixs_ctx));
   return ctx;
+
+fail:
+  ixs_htab_destroy(&tmp);
+  ixs_arena_destroy(&tmp.scratch);
+  ixs_arena_destroy(&tmp.arena);
+  return NULL;
 }
 
 void ixs_ctx_destroy(ixs_ctx *ctx) {
@@ -663,8 +668,9 @@ void ixs_ctx_destroy(ixs_ctx *ctx) {
     return;
   ixs_htab_destroy(ctx);
   ixs_arena_destroy(&ctx->scratch);
-  ixs_arena_destroy(&ctx->arena);
-  free(ctx);
+  /* ctx itself lives inside the main arena; snapshot before freeing. */
+  ixs_arena arena = ctx->arena;
+  ixs_arena_destroy(&arena);
 }
 
 /* ------------------------------------------------------------------ */
