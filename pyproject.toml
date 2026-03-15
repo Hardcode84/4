@@ -1,13 +1,19 @@
 [build-system]
-requires = ["setuptools>=42"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.24", "scikit-build-core~=0.12.0"]
+build-backend = "hatchling.build"
 
 [project]
 name = "ixsimpl"
 version = "0.1.0"
 description = "Fast index expression simplifier for integer arithmetic"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 license = "Apache-2.0"
+
+[tool.hatch.build.targets.wheel.hooks.scikit-build]
+experimental = true
+
+[tool.scikit-build]
+cmake.build-type = "Release"
 
 [tool.black]
 line-length = 100
@@ -24,5 +30,5 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["sympy", "sympy.*", "numpy", "numpy.*", "setuptools", "setuptools.*"]
+module = ["sympy", "sympy.*", "numpy", "numpy.*"]
 ignore_missing_imports = true

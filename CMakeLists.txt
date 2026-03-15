@@ -1,21 +1,11 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.17)
 project(ixsimpl C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-add_compile_options(-pedantic -Wall -Wextra -Werror)
-
-option(ENABLE_ASAN "Build with AddressSanitizer" OFF)
-if(ENABLE_ASAN)
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=address)
-endif()
-
 option(USE_AMALGAMATION "Build from single-file ixsimpl_amalg.c" OFF)
-
-# --- Library ---
 
 if(USE_AMALGAMATION)
     set(LIB_SOURCES ixsimpl_amalg.c)
@@ -31,6 +21,35 @@ else()
         src/simplify.c
         src/walk.c
     )
+endif()
+
+# --- Python extension (driven by scikit-build-core) ---
+
+if(SKBUILD)
+    find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+    python_add_library(ixsimpl MODULE WITH_SOABI
+        bindings/python/_ixsimpl.c
+        ${LIB_SOURCES}
+    )
+    target_include_directories(ixsimpl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    install(TARGETS ixsimpl DESTINATION .)
+    install(FILES bindings/python/ixsimpl.pyi DESTINATION .)
+    return()
+endif()
+
+# --- Standalone C library + tests + benchmarks ---
+
+add_compile_options(-pedantic -Wall -Wextra -Werror)
+
+option(ENABLE_ASAN "Build with AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
 endif()
 
 add_library(ixsimpl STATIC ${LIB_SOURCES})
