@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 /*
  * Edge case tests for ixsimpl: overflow, div-by-zero, degenerate piecewise,
  * INT64_MIN, empty inputs, max depth, sentinel propagation, large integers,

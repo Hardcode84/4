@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ixsimpl contributors
+# SPDX-License-Identifier: Apache-2.0
 """Unit tests for ixsimpl type-specific accessors and constants."""
 
 from __future__ import annotations

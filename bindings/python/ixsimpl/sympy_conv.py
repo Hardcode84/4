@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ixsimpl contributors
+# SPDX-License-Identifier: Apache-2.0
 """Structural converters between ixsimpl Expr trees and SymPy expressions."""
 
 from __future__ import annotations

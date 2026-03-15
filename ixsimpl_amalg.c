@@ -7,6 +7,9 @@
 /* arena.c                                                            */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "arena.h"
 #include <stdlib.h>
 #include <string.h>
@@ -145,6 +148,9 @@ void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
 /* bounds.c                                                           */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "bounds.h"
 #include <limits.h>
 #include <string.h>
@@ -580,6 +586,9 @@ int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
 /* ctx.c                                                              */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "node.h"
 #include "parser.h"
 #include "print.h"
@@ -827,6 +836,9 @@ uint32_t ixs_node_hash(ixs_node *node) { return node->hash; }
 /* node.c                                                             */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "node.h"
 #include <assert.h>
 #include <stdarg.h>
@@ -1737,6 +1749,9 @@ ixs_node *ixs_node_child(ixs_node *node, uint32_t i) {
 /* parser.c                                                           */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "parser.h"
 #include "simplify.h"
 #include <ctype.h>
@@ -2344,6 +2359,9 @@ ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input, size_t len) {
 /* print.c                                                            */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "print.h"
 #include <stdio.h>
 #include <string.h>
@@ -2810,6 +2828,9 @@ size_t ixs_print_c_impl(ixs_node *expr, char *buf, size_t bufsize) {
 /* rational.c                                                         */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "rational.h"
 #include <limits.h>
 
@@ -3159,6 +3180,9 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 /* simplify.c                                                         */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "simplify.h"
 #include "bounds.h"
 #include <stdlib.h>
@@ -5008,6 +5032,9 @@ void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 /* walk.c                                                             */
 /* ==================================================================== */
 
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "node.h"
 
 static ixs_node *walk_pre(ixs_node *node, ixs_visit_fn fn, void *ud) {

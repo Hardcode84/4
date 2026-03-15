@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef IXSIMPL_HPP
 #define IXSIMPL_HPP
 

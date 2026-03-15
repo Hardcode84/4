@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ixsimpl contributors
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """Generate ixsimpl_amalg.c by concatenating all src/*.c files.
 

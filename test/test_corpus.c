@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 /*
  * Corpus test: parse and simplify all expressions from test/corpus.txt.
  * Reads assumptions from test/corpus_assumptions.txt if present.

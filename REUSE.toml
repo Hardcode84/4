@@ -2,22 +2,14 @@ version = 1
 
 [[annotations]]
 path = [
-    ".github/**",
-    ".pre-commit-config.yaml",
+    "*.md",
     ".clang-format",
     ".gitignore",
-    "*.md",
-    "test/corpus.txt",
-    "CMakeLists.txt",
-    "include/**",
-    "src/**",
-    "test/**",
-    "bench/**",
-    "bindings/**",
-    "scripts/**",
-    "pyproject.toml",
-    "setup.py",
     "ixsimpl_amalg.c",
+    "test/corpus.txt",
+    "test/corpus_assumptions.txt",
+    "test/corpus_expected.txt",
+    "scripts/requirements-gen.txt",
 ]
 SPDX-FileCopyrightText = "2026 ixsimpl contributors"
 SPDX-License-Identifier = "Apache-2.0"

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ixsimpl contributors
+# SPDX-License-Identifier: Apache-2.0
 """ixsimpl - Fast index expression simplifier for integer arithmetic."""
 
 from __future__ import annotations

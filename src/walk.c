@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "node.h"
 
 static ixs_node *walk_pre(ixs_node *node, ixs_visit_fn fn, void *ud) {

@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
 /*
  * Corpus benchmark: time parse + simplify of all expressions from
  * test/corpus.txt. Uses clock() for portable C99 timing. Runs 3 iterations,

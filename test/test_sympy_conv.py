@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 ixsimpl contributors
+# SPDX-License-Identifier: Apache-2.0
 """Tests for ixsimpl.sympy_conv: to_sympy / from_sympy roundtrip."""
 
 from __future__ import annotations
