@@ -369,6 +369,22 @@ static PyObject *Expr_child(ExprObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self->ctx_obj, ch);
 }
 
+static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_MUL) {
+    PyErr_SetString(PyExc_TypeError, "mul_factor_exp requires MUL node");
+    return NULL;
+  }
+  if (i >= ixs_node_mul_nfactors(self->node)) {
+    PyErr_Format(PyExc_IndexError, "factor index %u out of range (nfactors=%u)",
+                 i, ixs_node_mul_nfactors(self->node));
+    return NULL;
+  }
+  return PyLong_FromLong(ixs_node_mul_factor_exp(self->node, (uint32_t)i));
+}
+
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
      "Simplify expression with optional assumptions."},
@@ -379,6 +395,8 @@ static PyMethodDef Expr_methods[] = {
      "(any subexpression); replacement is Expr or int."},
     {"child", (PyCFunction)Expr_child, METH_VARARGS,
      "expr.child(i) -> Expr: i-th child node (0 <= i < nchildren)."},
+    {"mul_factor_exp", (PyCFunction)Expr_mul_factor_exp, METH_VARARGS,
+     "expr.mul_factor_exp(i) -> int: exponent of i-th factor (MUL only)."},
     {NULL}};
 
 /* --- Expr properties --- */
@@ -423,6 +441,47 @@ static PyObject *Expr_get_children(ExprObject *self, void *Py_UNUSED(closure)) {
   return tup;
 }
 
+static PyObject *Expr_get_sym_name(ExprObject *self, void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_SYM) {
+    PyErr_SetString(PyExc_TypeError, "sym_name requires SYM node");
+    return NULL;
+  }
+  return PyUnicode_FromString(ixs_node_sym_name(self->node));
+}
+
+static PyObject *Expr_get_rat_num(ExprObject *self, void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_RAT) {
+    PyErr_SetString(PyExc_TypeError, "rat_num requires RAT node");
+    return NULL;
+  }
+  return PyLong_FromLongLong(ixs_node_rat_num(self->node));
+}
+
+static PyObject *Expr_get_rat_den(ExprObject *self, void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_RAT) {
+    PyErr_SetString(PyExc_TypeError, "rat_den requires RAT node");
+    return NULL;
+  }
+  return PyLong_FromLongLong(ixs_node_rat_den(self->node));
+}
+
+static PyObject *Expr_get_mul_nfactors(ExprObject *self,
+                                       void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_MUL) {
+    PyErr_SetString(PyExc_TypeError, "mul_nfactors requires MUL node");
+    return NULL;
+  }
+  return PyLong_FromUnsignedLong(ixs_node_mul_nfactors(self->node));
+}
+
+static PyObject *Expr_get_cmp_op(ExprObject *self, void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_CMP) {
+    PyErr_SetString(PyExc_TypeError, "cmp_op requires CMP node");
+    return NULL;
+  }
+  return PyLong_FromLong((long)ixs_node_cmp_op(self->node));
+}
+
 static PyGetSetDef Expr_getset[] = {
     {"is_error", (getter)Expr_get_is_error, NULL,
      "True if node is any error sentinel.", NULL},
@@ -434,6 +493,17 @@ static PyGetSetDef Expr_getset[] = {
     {"nchildren", (getter)Expr_get_nchildren, NULL,
      "Number of child node pointers (0 for leaves).", NULL},
     {"children", (getter)Expr_get_children, NULL, "Tuple of child Expr nodes.",
+     NULL},
+    {"sym_name", (getter)Expr_get_sym_name, NULL,
+     "Symbol name (str). Only valid for SYM nodes.", NULL},
+    {"rat_num", (getter)Expr_get_rat_num, NULL,
+     "Rational numerator (int). Only valid for RAT nodes.", NULL},
+    {"rat_den", (getter)Expr_get_rat_den, NULL,
+     "Rational denominator (int). Only valid for RAT nodes.", NULL},
+    {"mul_nfactors", (getter)Expr_get_mul_nfactors, NULL,
+     "Number of factors (int). Only valid for MUL nodes.", NULL},
+    {"cmp_op", (getter)Expr_get_cmp_op, NULL,
+     "Comparison operator (int, CMP_* constant). Only valid for CMP nodes.",
      NULL},
     {NULL}};
 
@@ -951,6 +1021,13 @@ PyMODINIT_FUNC PyInit_ixsimpl(void) {
   PyModule_AddIntConstant(m, "FALSE", IXS_FALSE);
   PyModule_AddIntConstant(m, "ERROR", IXS_ERROR);
   PyModule_AddIntConstant(m, "PARSE_ERROR", IXS_PARSE_ERROR);
+
+  PyModule_AddIntConstant(m, "CMP_GT", IXS_CMP_GT);
+  PyModule_AddIntConstant(m, "CMP_GE", IXS_CMP_GE);
+  PyModule_AddIntConstant(m, "CMP_LT", IXS_CMP_LT);
+  PyModule_AddIntConstant(m, "CMP_LE", IXS_CMP_LE);
+  PyModule_AddIntConstant(m, "CMP_EQ", IXS_CMP_EQ);
+  PyModule_AddIntConstant(m, "CMP_NE", IXS_CMP_NE);
 
   return m;
 }
