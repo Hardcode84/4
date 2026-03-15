@@ -72,9 +72,13 @@ static void add_decompose(ixs_ctx *ctx, ixs_node *n, int64_t *cp, int64_t *cq,
     if (n->u.mul.nfactors == 1 && n->u.mul.factors[0].exp == 1) {
       *base = n->u.mul.factors[0].base;
     } else {
-      /* Rebuild MUL with coeff=1 */
       *base = ixs_node_mul(ctx, ixs_node_int(ctx, 1), n->u.mul.nfactors,
                            n->u.mul.factors);
+      if (!*base) {
+        *cp = 1;
+        *cq = 1;
+        *base = n;
+      }
     }
     return;
   }

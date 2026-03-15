@@ -124,3 +124,28 @@ def test_cross_context_batch() -> None:
     x2 = ctx2.sym("x")
     with pytest.raises(ValueError):
         ctx1.simplify_batch([x1, x2])
+
+
+def test_parse_error_sentinel() -> None:
+    ctx = ixsimpl.Context()
+    e = ctx.parse("???")
+    assert e.is_error
+    assert e.is_parse_error
+    assert e.tag == ixsimpl.PARSE_ERROR
+
+
+def test_error_propagation() -> None:
+    ctx = ixsimpl.Context()
+    err = ctx.parse("???")
+    x = ctx.sym("x")
+    assert (err + x).is_error
+    assert (x + err).is_error
+    assert (err * x).is_error
+    assert (x - err).is_error
+
+
+def test_is_error_on_valid() -> None:
+    ctx = ixsimpl.Context()
+    assert not ctx.int_(5).is_error
+    assert not ctx.sym("x").is_error
+    assert not (ctx.sym("x") + ctx.int_(1)).is_error

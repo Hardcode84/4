@@ -70,10 +70,12 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   if (!b->vars)
     return NULL;
   if (b->nvars >= b->cap) {
-    b->vars = ixs_arena_grow(b->scratch, b->vars, b->cap * sizeof(*b->vars),
-                             b->cap * 2 * sizeof(*b->vars), sizeof(void *));
-    if (!b->vars)
+    ixs_var_bound *grown =
+        ixs_arena_grow(b->scratch, b->vars, b->cap * sizeof(*b->vars),
+                       b->cap * 2 * sizeof(*b->vars), sizeof(void *));
+    if (!grown)
       return NULL;
+    b->vars = grown;
     b->cap *= 2;
   }
   v = &b->vars[b->nvars++];
@@ -153,7 +155,9 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     }
     break;
   case IXS_CMP_GT: {
-    int64_t lo = ixs_rat_floor(cp, cq) + 1;
+    int64_t lo;
+    if (!ixs_safe_add(ixs_rat_floor(cp, cq), 1, &lo))
+      break;
     if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
       v->iv.lo_p = lo;
       v->iv.lo_q = 1;
@@ -167,7 +171,9 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     }
     break;
   case IXS_CMP_LT: {
-    int64_t hi = ixs_rat_ceil(cp, cq) - 1;
+    int64_t hi;
+    if (!ixs_safe_sub(ixs_rat_ceil(cp, cq), 1, &hi))
+      break;
     if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
       v->iv.hi_p = hi;
       v->iv.hi_q = 1;
@@ -330,6 +336,8 @@ static ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
     r.hi_p = b.hi_p;
     r.hi_q = b.hi_q;
   }
+  if (ixs_rat_cmp(r.lo_p, r.lo_q, r.hi_p, r.hi_q) > 0)
+    r.valid = false;
   return r;
 }
 

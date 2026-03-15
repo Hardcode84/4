@@ -1000,6 +1000,52 @@ static void test_piecewise_branch_bounds(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_simplify_batch(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  ixs_node *exprs[3];
+  exprs[0] = ixs_add(ctx, x, ixs_int(ctx, 0));
+  exprs[1] = ixs_mul(ctx, ixs_int(ctx, 1), x);
+  exprs[2] = ixs_floor(ctx, ixs_int(ctx, 7));
+
+  ixs_node *assume = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_simplify_batch(ctx, exprs, 3, &assume, 1);
+
+  CHECK(exprs[0] == x);
+  CHECK(exprs[1] == x);
+  CHECK(exprs[2] == ixs_int(ctx, 7));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_print_c(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+
+  /* floor -> ixs_floor_i */
+  ixs_node *fl = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  ixs_print_c(fl, buf, sizeof(buf));
+  CHECK(strstr(buf, "ixs_floor_i") != NULL);
+
+  /* Mod -> ixs_mod_i */
+  ixs_node *m = ixs_mod(ctx, x, ixs_int(ctx, 8));
+  ixs_print_c(m, buf, sizeof(buf));
+  CHECK(strstr(buf, "ixs_mod_i") != NULL);
+
+  /* xor -> infix ^ */
+  ixs_node *xr = ixs_xor(ctx, x, y);
+  ixs_print_c(xr, buf, sizeof(buf));
+  CHECK(strstr(buf, " ^ ") != NULL);
+
+  /* integer */
+  ixs_print_c(ixs_int(ctx, 42), buf, sizeof(buf));
+  CHECK(strcmp(buf, "42") == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1024,6 +1070,8 @@ int main(void) {
   test_mod_recognition();
   test_floor_mod_divisor();
   test_piecewise_branch_bounds();
+  test_simplify_batch();
+  test_print_c();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
