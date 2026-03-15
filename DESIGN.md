@@ -706,17 +706,25 @@ floor(integer)                     → identity
 floor(p/q)                         → ⌊p/q⌋  (constant fold)
 floor(floor(x))                    → floor(x)
 floor(ceiling(x))                  → ceiling(x)
-floor(x + n)  where n is integer   → floor(x) + n
-floor(n * x)  where n is integer   → n * floor(x)  IF x is known integer
-    (subsumed by floor(integer_valued) → identity)
+floor(integer_valued)              → identity
+floor(n + intval_terms + rest)     → n + intval_terms + floor(rest)
+    where each intval_term has integer coeff and integer-valued base
+floor(outer * (a + b + ...))       → distribute, extract integer-valued products
+    e.g. floor((6*K*floor(x/3) + y) / (2*K)) → 3*floor(x/3) + floor(y/(2*K))
+    MUL bases in outer are decomposed for symbolic cancellation
 
 ceiling(integer)                   → identity
 ceiling(p/q)                       → ⌈p/q⌉  (constant fold)
 ceiling(ceiling(x))                → ceiling(x)
 ceiling(floor(x))                  → floor(x)
-ceiling(x + n)  where n is integer → ceiling(x) + n
-ceiling(n * x)  where n is integer → n * ceiling(x)  IF x is known integer
+ceiling(integer_valued)            → identity
+ceiling(n + intval_terms + rest)   → n + intval_terms + ceiling(rest)
+ceiling(outer * (a + b + ...))     → distribute, extract integer-valued products
 ```
+
+The ADD and MUL-over-ADD extraction rules share implementation via
+`round_extract_add` and `round_extract_mul_add`, parameterized by a
+`round_fn` function pointer to avoid duplication between floor and ceiling.
 
 More advanced rules (applied when domain info is available):
 

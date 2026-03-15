@@ -166,6 +166,23 @@ static void test_floor_rules(void) {
     CHECK(result == expected);
   }
 
+  /* ceil(x + 1/2) -> x + 1  (x is integer-valued: SYM) */
+  CHECK(ixs_ceil(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2))) ==
+        ixs_add(ctx, x, ixs_int(ctx, 1)));
+
+  /* ceil extraction from MUL*ADD:
+   * ceil((4*ceil(x/3) + y) / 2) -> 2*ceil(x/3) + ceil(y/2) */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *cx3 = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), cx3), y);
+    ixs_node *result = ixs_ceil(ctx, ixs_div(ctx, sum, ixs_int(ctx, 2)));
+    ixs_node *expected =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), cx3),
+                ixs_ceil(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
+    CHECK(result == expected);
+  }
+
   ixs_ctx_destroy(ctx);
 }
 
