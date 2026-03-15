@@ -37,9 +37,6 @@ ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
 void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions);
 
-/* Expand: distribute MUL over ADD recursively. */
-ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr);
-
 /* Substitution: replace all occurrences of target with replacement. */
 ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                     ixs_node *replacement);

@@ -130,7 +130,8 @@ void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 
 /* Distribute MUL over ADD (expand products of sums into sums of products).
  * Recurses into subexpressions (floor args, piecewise branches, etc.).
- * Does not expand powers with exponent > 1.  NULL-safe. */
+ * Powers are expanded by repeated multiplication (capped at exponent 64).
+ * NULL-safe. */
 ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
 
 /* --- Comparison and substitution --------------------------------------- */

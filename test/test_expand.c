@@ -148,6 +148,27 @@ static void test_expand_three_factors(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_expand_piecewise(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* Piecewise((2*(a+b), x > 0), (0, True)) -> Piecewise((2*a+2*b, ...)) */
+  ixs_node *vals[2];
+  ixs_node *conds[2];
+  vals[0] = ixs_mul(ctx, ixs_int(ctx, 2), ixs_add(ctx, a, b));
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  vals[1] = ixs_int(ctx, 0);
+  conds[1] = ixs_true(ctx);
+  ixs_node *pw = ixs_pw(ctx, 2, vals, conds);
+  ixs_node *r = ixs_expand(ctx, pw);
+  const char *s = pr(r);
+  CHECK(strstr(s, "2*a + 2*b") != NULL);
+  CHECK(strstr(s, "Piecewise") != NULL);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_expand_sentinel(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *err = ixs_parse(ctx, "???", 3);
@@ -166,6 +187,7 @@ int main(void) {
   test_expand_inside_floor();
   test_expand_already_expanded();
   test_expand_three_factors();
+  test_expand_piecewise();
   test_expand_sentinel();
 
   printf("test_expand: %d/%d passed\n", tests_passed, tests_run);

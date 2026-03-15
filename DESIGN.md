@@ -1423,6 +1423,8 @@ ixsimpl/
 │   ├── parser.h
 │   ├── simplify.c            # rewrite rules engine
 │   ├── simplify.h
+│   ├── expand.c              # MUL-over-ADD distribution
+│   ├── expand.h
 │   ├── bounds.c              # interval/bound analysis
 │   ├── bounds.h
 │   ├── print.c               # output formatters
@@ -1438,6 +1440,7 @@ ixsimpl/
 │   ├── test_rational.c
 │   ├── test_parser.c
 │   ├── test_simplify.c
+│   ├── test_expand.c           # expand (MUL-over-ADD distribution) tests
 │   ├── test_edge_cases.c      # edge cases, error paths, sentinel propagation
 │   ├── test_corpus.c          # run against the 609-expression corpus
 │   ├── test_python.py         # Python binding tests

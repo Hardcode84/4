@@ -310,6 +310,22 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
 # ---------------------------------------------------------------------------
 
 
+def test_expand_basic() -> None:
+    """expand() distributes MUL over ADD."""
+    ctx = ixsimpl.Context()
+    e = ctx.parse("2*(a + b)")
+    expanded = e.expand()
+    s = str(expanded)
+    assert "2*a" in s
+    assert "2*b" in s
+    assert "+" in s
+
+    e2 = ctx.parse("(a + b)*(c + d)")
+    s2 = str(e2.expand())
+    for term in ("a*d", "c*a", "c*b", "d*b"):
+        assert term in s2, f"missing {term} in {s2}"
+
+
 @given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
 def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics: evaluate original and simplified

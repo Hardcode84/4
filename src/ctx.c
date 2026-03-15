@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "expand.h"
 #include "node.h"
 #include "parser.h"
 #include "print.h"
