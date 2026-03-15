@@ -235,8 +235,9 @@ typedef enum {
 typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
 
 /* Pre-order: visit node, then recurse into children.
- * Returns root on completion, the stopping node on STOP, NULL on OOM.
- * NULL root returns NULL (no-op).
+ * Returns root on completion, the stopping node on STOP, NULL if root
+ * is NULL.  A future iterative implementation may also return NULL on
+ * OOM (scratch arena exhausted); ctx is accepted for that purpose.
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
