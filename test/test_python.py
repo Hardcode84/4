@@ -1,11 +1,15 @@
 """
 Fuzz tests for ixsimpl using Hypothesis.
 
-Three properties:
+Properties tested:
 1. Self-consistency: simplification preserves numerical semantics.
 2. Cross-check: ixsimpl agrees with SymPy on random expressions.
 3. Divisibility: simplification with Mod(sym, d)==0 preserves semantics
    at evaluation points satisfying the assumption.
+4. to_sympy semantics: ixsimpl.sympy_conv.to_sympy produces SymPy
+   expressions that agree numerically with ixsimpl evaluation.
+5. from_sympy semantics: ixsimpl.sympy_conv.from_sympy produces ixsimpl
+   expressions that agree numerically with the original tree.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import ixsimpl
 import sympy
 from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
+from ixsimpl.sympy_conv import from_sympy as conv_from_sympy
 from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 
 ExprTree = str | int | tuple[Any, ...]
@@ -427,6 +432,7 @@ def test_to_sympy_semantics(expr: ExprTree) -> None:
 
     sp_converted = conv_to_sympy(ixs_expr)
 
+    checked = 0
     for _ in range(10):
         env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
         try:
@@ -442,8 +448,48 @@ def test_to_sympy_semantics(expr: ExprTree) -> None:
                 f"to_sympy mismatch at {env}: "
                 f"ixsimpl={ixs_val}, sympy={int(sp_val)}, expr={expr}"
             )
-        except (ZeroDivisionError, ValueError, TypeError):
+            checked += 1
+        except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             continue
+    assume(checked > 0)
+
+
+@given(expr=expressions(include_piecewise=False))
+@settings(max_examples=_CONV_EXAMPLES, deadline=None)
+def test_from_sympy_semantics(expr: ExprTree) -> None:
+    """conv.from_sympy produces an ixsimpl Expr that evaluates identically
+    to the original tree at random integer points."""
+    try:
+        sp_expr = to_sympy(expr)
+    except (ValueError, TypeError):
+        assume(False)
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_converted = conv_from_sympy(ctx, sp_expr)
+    except (ValueError, TypeError):
+        assume(False)
+    assume(not ixs_converted.is_error)
+
+    checked = 0
+    for _ in range(10):
+        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        try:
+            ground_truth = eval_expr(expr, env)
+            if not isinstance(ground_truth, int):
+                ground_truth = int(ground_truth)
+        except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            continue
+        try:
+            ixs_val = eval_ixs(ixs_converted, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        assert ixs_val == ground_truth, (
+            f"from_sympy mismatch at {env}: "
+            f"expected={ground_truth}, ixsimpl={ixs_val}, expr={expr}"
+        )
+        checked += 1
+    assume(checked > 0)
 
 
 if __name__ == "__main__":
@@ -458,5 +504,8 @@ if __name__ == "__main__":
     print("PASSED")
     print(f"Running to_sympy semantics test ({_CONV_EXAMPLES} examples)...")
     test_to_sympy_semantics()
+    print("PASSED")
+    print(f"Running from_sympy semantics test ({_CONV_EXAMPLES} examples)...")
+    test_from_sympy_semantics()
     print("PASSED")
     print("All fuzz tests passed!")
