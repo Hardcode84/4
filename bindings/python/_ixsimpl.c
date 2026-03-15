@@ -1000,13 +1000,13 @@ static PyMethodDef module_methods[] = {
 
 static struct PyModuleDef ixsimpl_module = {
     .m_base = PyModuleDef_HEAD_INIT,
-    .m_name = "ixsimpl",
+    .m_name = "ixsimpl._ixsimpl",
     .m_doc = "Index expression simplifier - fast symbolic integer arithmetic.",
     .m_size = -1,
     .m_methods = module_methods,
 };
 
-PyMODINIT_FUNC PyInit_ixsimpl(void) {
+PyMODINIT_FUNC PyInit__ixsimpl(void) {
   PyObject *m;
 
   if (PyType_Ready(&ContextType) < 0)

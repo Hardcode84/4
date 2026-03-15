@@ -28,17 +28,17 @@ endif()
 if(SKBUILD)
     find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-    python_add_library(ixsimpl MODULE WITH_SOABI
+    python_add_library(_ixsimpl MODULE WITH_SOABI
         bindings/python/_ixsimpl.c
         ${LIB_SOURCES}
     )
-    target_include_directories(ixsimpl PRIVATE
+    target_include_directories(_ixsimpl PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
-    install(TARGETS ixsimpl DESTINATION .)
-    install(FILES bindings/python/ixsimpl.pyi DESTINATION .)
+    install(TARGETS _ixsimpl DESTINATION ixsimpl)
+    install(FILES bindings/python/ixsimpl/_ixsimpl.pyi DESTINATION ixsimpl)
     return()
 endif()
 

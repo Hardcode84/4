@@ -9,6 +9,9 @@ description = "Fast index expression simplifier for integer arithmetic"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 
+[tool.hatch.build.targets.wheel]
+packages = ["bindings/python/ixsimpl"]
+
 [tool.hatch.build.targets.wheel.hooks.scikit-build]
 experimental = true
 
@@ -30,5 +33,5 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["sympy", "sympy.*", "numpy", "numpy.*", "ixsimpl", "pytest"]
+module = ["sympy", "sympy.*", "numpy", "numpy.*", "_ixsimpl", "pytest"]
 ignore_missing_imports = true
