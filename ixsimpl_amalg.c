@@ -3572,6 +3572,73 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
   nterms = j;
 
+  /* Mod recognition: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N).
+   * Scan for FLOOR terms whose arg is MUL(1/N, [(B, exp=1)]) and a
+   * matching base term B with the right coefficient ratio.  Matched
+   * terms are NULLed and the result is rebuilt through simp_add. */
+  {
+    bool found_mod = false;
+    for (i = 0; i < nterms; i++) {
+      int64_t fp, fq, N;
+      ixs_node *farg, *fbase;
+      if (!terms[i].term || terms[i].term->tag != IXS_FLOOR)
+        continue;
+      farg = terms[i].term->u.unary.arg;
+      if (farg->tag != IXS_MUL)
+        continue;
+      ixs_node_get_rat(farg->u.mul.coeff, &fp, &fq);
+      if (fp != 1 || fq <= 1)
+        continue;
+      N = fq;
+      if (farg->u.mul.nfactors == 1 && farg->u.mul.factors[0].exp == 1) {
+        fbase = farg->u.mul.factors[0].base;
+      } else {
+        fbase = ixs_node_mul(ctx, ixs_node_int(ctx, 1), farg->u.mul.nfactors,
+                             farg->u.mul.factors);
+        if (!fbase)
+          continue;
+      }
+      if (N == INT64_MIN)
+        continue;
+      for (j = 0; j < nterms; j++) {
+        int64_t bp, bq, fl_p, fl_q, want_p, want_q;
+        ixs_node *mod_node;
+        if (j == i || !terms[j].term || terms[j].term != fbase)
+          continue;
+        ixs_node_get_rat(terms[j].coeff, &bp, &bq);
+        ixs_node_get_rat(terms[i].coeff, &fl_p, &fl_q);
+        if (!ixs_rat_mul(-N, 1, bp, bq, &want_p, &want_q))
+          continue;
+        if (fl_p != want_p || fl_q != want_q)
+          continue;
+        mod_node = simp_mod(ctx, fbase, ixs_node_int(ctx, N));
+        if (!mod_node)
+          return NULL;
+        terms[j].term = mod_node;
+        terms[i].term = NULL;
+        found_mod = true;
+        break;
+      }
+    }
+    if (found_mod) {
+      ixs_node *result = make_const(ctx, const_p, const_q);
+      if (!result)
+        return NULL;
+      for (i = 0; i < nterms; i++) {
+        ixs_node *t;
+        if (!terms[i].term)
+          continue;
+        t = simp_mul(ctx, terms[i].coeff, terms[i].term);
+        if (!t)
+          return NULL;
+        result = simp_add(ctx, result, t);
+        if (!result)
+          return NULL;
+      }
+      return result;
+    }
+  }
+
   /* Result cases. */
   if (nterms == 0)
     return make_const(ctx, const_p, const_q);

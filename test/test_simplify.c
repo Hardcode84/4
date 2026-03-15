@@ -875,6 +875,52 @@ static void test_mod_floor_regression(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_mod_recognition(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *cx = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 8)));
+
+  /* x - 32*floor(x/32) -> Mod(x, 32) */
+  ixs_node *e =
+      ixs_add(ctx, x,
+              ixs_mul(ctx, ixs_int(ctx, -32),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
+  CHECK(e == ixs_mod(ctx, x, ixs_int(ctx, 32)));
+
+  /* ceiling(x/8) - 32*floor(ceiling(x/8)/32) -> Mod(ceiling(x/8), 32) */
+  e = ixs_add(ctx, cx,
+              ixs_mul(ctx, ixs_int(ctx, -32),
+                      ixs_floor(ctx, ixs_div(ctx, cx, ixs_int(ctx, 32)))));
+  CHECK(e == ixs_mod(ctx, cx, ixs_int(ctx, 32)));
+
+  /* With a scalar: 3*x - 96*floor(x/32) -> 3*Mod(x, 32)  (96 = 3*32) */
+  e = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), x),
+              ixs_mul(ctx, ixs_int(ctx, -96),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
+  CHECK(e == ixs_mul(ctx, ixs_int(ctx, 3), ixs_mod(ctx, x, ixs_int(ctx, 32))));
+
+  /* Extra terms preserved: y + x - 32*floor(x/32) -> y + Mod(x, 32) */
+  e = ixs_add(ctx, ixs_add(ctx, y, x),
+              ixs_mul(ctx, ixs_int(ctx, -32),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
+  CHECK(e == ixs_add(ctx, y, ixs_mod(ctx, x, ixs_int(ctx, 32))));
+
+  /* Constant offset preserved: 5 + x - 32*floor(x/32) -> 5 + Mod(x, 32) */
+  e = ixs_add(ctx, ixs_add(ctx, ixs_int(ctx, 5), x),
+              ixs_mul(ctx, ixs_int(ctx, -32),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
+  CHECK(e == ixs_add(ctx, ixs_int(ctx, 5), ixs_mod(ctx, x, ixs_int(ctx, 32))));
+
+  /* No false match: 5*x - 32*floor(x/32) stays as is (5 != 1, 5*32 != 32) */
+  e = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 5), x),
+              ixs_mul(ctx, ixs_int(ctx, -32),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
+  CHECK(ixs_node_tag(e) == IXS_ADD);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -896,6 +942,7 @@ int main(void) {
   test_large_expressions();
   test_bounds_many_vars();
   test_mod_floor_regression();
+  test_mod_recognition();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
