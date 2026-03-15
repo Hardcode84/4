@@ -7,7 +7,7 @@ from __future__ import annotations
 import ixsimpl
 import pytest
 import sympy
-from ixsimpl.sympy_conv import from_sympy, to_sympy
+from ixsimpl.sympy_conv import extract_assumptions, from_sympy, to_sympy
 
 
 @pytest.fixture()
@@ -45,6 +45,21 @@ def test_to_sympy_sym(ctx: ixsimpl.Context) -> None:
     sp = to_sympy(ctx.sym("x"))
     assert isinstance(sp, sympy.Symbol)
     assert sp.name == "x"
+    assert sp.is_integer is True
+
+
+def test_to_sympy_sym_with_symbol_map(ctx: ixsimpl.Context) -> None:
+    rich = sympy.Symbol("x", integer=True, nonnegative=True)
+    sp = to_sympy(ctx.sym("x"), symbols={"x": rich})
+    assert sp is rich
+    assert sp.is_nonnegative is True
+
+
+def test_to_sympy_sym_map_fallback(ctx: ixsimpl.Context) -> None:
+    """Symbols not in the map get the default integer=True."""
+    sp = to_sympy(ctx.sym("y"), symbols={"x": sympy.Symbol("x")})
+    assert sp.name == "y"
+    assert sp.is_integer is True
 
 
 def test_to_sympy_add(
@@ -115,6 +130,32 @@ def test_to_sympy_piecewise(
     sp = to_sympy(pw)
     assert isinstance(sp, sympy.Piecewise)
     assert len(sp.args) == 2
+
+
+def test_to_sympy_xor_default(
+    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
+) -> None:
+    sp = to_sympy(ixsimpl.xor_(syms["x"], syms["y"]))
+    assert isinstance(sp, sympy.Xor)
+
+
+def test_to_sympy_xor_custom_fn(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
+    class bitwise_xor(sympy.Function):  # type: ignore[misc]
+        pass
+
+    sp = to_sympy(ixsimpl.xor_(syms["x"], syms["y"]), xor_fn=bitwise_xor)
+    assert isinstance(sp, bitwise_xor)
+
+
+def test_to_sympy_symbol_map_propagates(
+    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]
+) -> None:
+    """symbol_map is used for symbols nested inside compound expressions."""
+    rich_x = sympy.Symbol("x", integer=True, nonnegative=True)
+    sp = to_sympy(syms["x"] + syms["y"] + 1, symbols={"x": rich_x})
+    x_atoms = [a for a in sp.free_symbols if a.name == "x"]
+    assert len(x_atoms) == 1
+    assert x_atoms[0].is_nonnegative is True
 
 
 def test_to_sympy_bool(ctx: ixsimpl.Context) -> None:
@@ -259,3 +300,62 @@ def test_roundtrip_piecewise(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]
     sp = to_sympy(pw_expr)
     e2 = from_sympy(ctx, sp)
     assert e2.tag == ixsimpl.PIECEWISE
+
+
+# ---------------------------------------------------------------------------
+#  extract_assumptions tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_assumptions_nonnegative(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True, nonnegative=True)
+    assumptions = extract_assumptions(ctx, x + 1)
+    assert len(assumptions) == 1
+    assert assumptions[0].tag == ixsimpl.CMP
+    assert str(assumptions[0]) == "x >= 0"
+
+
+def test_extract_assumptions_positive(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True, positive=True)
+    assumptions = extract_assumptions(ctx, x + 1)
+    assert len(assumptions) == 1
+    assert assumptions[0].tag == ixsimpl.CMP
+    assert str(assumptions[0]) == "-1 + x >= 0"
+
+
+def test_extract_assumptions_negative(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True, negative=True)
+    assumptions = extract_assumptions(ctx, x + 1)
+    assert len(assumptions) == 1
+    assert assumptions[0].tag == ixsimpl.CMP
+    assert str(assumptions[0]) == "1 + x <= 0"
+
+
+def test_extract_assumptions_nonpositive(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True, nonpositive=True)
+    assumptions = extract_assumptions(ctx, x + 1)
+    assert len(assumptions) == 1
+    assert str(assumptions[0]) == "x <= 0"
+
+
+def test_extract_assumptions_no_info(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True)
+    assert extract_assumptions(ctx, x + 1) == []
+
+
+def test_extract_assumptions_multiple_symbols(ctx: ixsimpl.Context) -> None:
+    x = sympy.Symbol("x", integer=True, nonnegative=True)
+    y = sympy.Symbol("y", integer=True, positive=True)
+    z = sympy.Symbol("z", integer=True)
+    assumptions = extract_assumptions(ctx, x + y + z)
+    strs = {str(a) for a in assumptions}
+    assert "x >= 0" in strs
+    assert "-1 + y >= 0" in strs
+    assert len(assumptions) == 2
+
+
+def test_extract_assumptions_dedup(ctx: ixsimpl.Context) -> None:
+    """Same symbol appearing twice produces one assumption."""
+    x = sympy.Symbol("x", integer=True, nonnegative=True)
+    assumptions = extract_assumptions(ctx, x + x * 2)
+    assert len(assumptions) == 1

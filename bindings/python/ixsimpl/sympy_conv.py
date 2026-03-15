@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import sympy
@@ -22,12 +23,33 @@ _CMP_TO_SYMPY: dict[int, type[sympy.core.relational.Relational]] = {
 }
 
 
-def to_sympy(expr: ixsimpl.Expr) -> sympy.Basic:
+def to_sympy(
+    expr: ixsimpl.Expr,
+    *,
+    symbols: dict[str, sympy.Symbol] | None = None,
+    xor_fn: Callable[..., sympy.Basic] | None = None,
+) -> sympy.Basic:
     """Convert an ixsimpl Expr to an equivalent sympy expression.
 
     Walks the ixsimpl node tree structurally and builds the SymPy
     counterpart.  No simplification is performed on the SymPy side.
+
+    Parameters
+    ----------
+    symbols:
+        Optional mapping from symbol name to a pre-built ``sympy.Symbol``.
+        Use this to preserve SymPy assumptions (``integer``, ``nonnegative``,
+        etc.) that ixsimpl does not track.  Symbols not in the map fall back
+        to ``sympy.Symbol(name, integer=True)``.
+    xor_fn:
+        Callable used for ``IXS_XOR`` nodes.  Defaults to ``sympy.Xor``
+        (boolean XOR).  Pass a custom ``sympy.Function`` subclass for
+        integer bitwise XOR instead.
     """
+
+    def _convert(node: ixsimpl.Expr) -> sympy.Basic:
+        return to_sympy(node, symbols=symbols, xor_fn=xor_fn)
+
     tag = expr.tag
 
     if tag == ixsimpl.INT:
@@ -37,62 +59,66 @@ def to_sympy(expr: ixsimpl.Expr) -> sympy.Basic:
         return sympy.Rational(expr.rat_num, expr.rat_den)
 
     if tag == ixsimpl.SYM:
-        return sympy.Symbol(expr.sym_name, integer=True)
+        name = expr.sym_name
+        if symbols and name in symbols:
+            return symbols[name]
+        return sympy.Symbol(name, integer=True)
 
     if tag == ixsimpl.ADD:
-        result: sympy.Basic = to_sympy(expr.add_coeff)
+        result: sympy.Basic = _convert(expr.add_coeff)
         for i in range(expr.add_nterms):
-            result = result + to_sympy(expr.add_term_coeff(i)) * to_sympy(expr.add_term(i))
+            result = result + _convert(expr.add_term_coeff(i)) * _convert(expr.add_term(i))
         return result
 
     if tag == ixsimpl.MUL:
-        result = to_sympy(expr.mul_coeff)
+        result = _convert(expr.mul_coeff)
         for i in range(expr.mul_nfactors):
-            base = to_sympy(expr.mul_factor_base(i))
+            base = _convert(expr.mul_factor_base(i))
             exp = expr.mul_factor_exp(i)
             result = result * base ** sympy.Integer(exp)
         return result
 
     if tag == ixsimpl.FLOOR:
-        return sympy.floor(to_sympy(expr.child(0)))
+        return sympy.floor(_convert(expr.child(0)))
 
     if tag == ixsimpl.CEIL:
-        return sympy.ceiling(to_sympy(expr.child(0)))
+        return sympy.ceiling(_convert(expr.child(0)))
 
     if tag == ixsimpl.MOD:
-        return sympy.Mod(to_sympy(expr.child(0)), to_sympy(expr.child(1)), evaluate=False)
+        return sympy.Mod(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
 
     if tag == ixsimpl.MAX:
-        return sympy.Max(to_sympy(expr.child(0)), to_sympy(expr.child(1)))
+        return sympy.Max(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.MIN:
-        return sympy.Min(to_sympy(expr.child(0)), to_sympy(expr.child(1)))
+        return sympy.Min(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.XOR:
-        return sympy.Xor(to_sympy(expr.child(0)), to_sympy(expr.child(1)))
+        fn = xor_fn if xor_fn is not None else sympy.Xor
+        return fn(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.CMP:
         rel = _CMP_TO_SYMPY.get(expr.cmp_op)
         if rel is None:
             raise ValueError(f"unsupported cmp_op: {expr.cmp_op}")
-        return rel(to_sympy(expr.child(0)), to_sympy(expr.child(1)))
+        return rel(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.AND:
-        args = [to_sympy(expr.child(i)) for i in range(expr.nchildren)]
+        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
         return sympy.And(*args)
 
     if tag == ixsimpl.OR:
-        args = [to_sympy(expr.child(i)) for i in range(expr.nchildren)]
+        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
         return sympy.Or(*args)
 
     if tag == ixsimpl.NOT:
-        return sympy.Not(to_sympy(expr.child(0)))
+        return sympy.Not(_convert(expr.child(0)))
 
     if tag == ixsimpl.PIECEWISE:
         pieces: list[tuple[Any, Any]] = []
         for i in range(expr.pw_ncases):
-            val = to_sympy(expr.pw_value(i))
-            cond = to_sympy(expr.pw_cond(i))
+            val = _convert(expr.pw_value(i))
+            cond = _convert(expr.pw_cond(i))
             pieces.append((val, cond))
         return sympy.Piecewise(*pieces)
 
@@ -228,7 +254,7 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
     if expr is sympy.false:
         return ctx.false_()
 
-    # Custom sympy.Function subclasses matched by name (e.g. Wave's xor).
+    # Custom sympy.Function subclasses matched by name.
     if isinstance(expr, sympy.Function):
         name = type(expr).__name__
         if name == "xor":
@@ -236,3 +262,43 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
             return ixsimpl.xor_(args[0], args[1])
 
     raise ValueError(f"unsupported sympy expression type: {type(expr).__name__}: {expr}")
+
+
+def extract_assumptions(
+    ctx: ixsimpl.Context,
+    expr: sympy.Basic,
+) -> list[ixsimpl.Expr]:
+    """Extract ixsimpl assumption nodes from SymPy symbol properties.
+
+    Walks *expr*, finds every ``sympy.Symbol``, and converts its SymPy
+    assumption flags into ixsimpl comparison nodes suitable for passing
+    to ``Expr.simplify(assumptions=...)``.
+
+    Recognized flags (checked via ``sym.is_<flag>``):
+
+    * ``nonnegative`` -- emits ``sym >= 0``
+    * ``positive``    -- emits ``sym >= 1`` (symbols are integer-valued)
+    * ``nonpositive`` -- emits ``sym <= 0``
+    * ``negative``    -- emits ``sym <= -1``
+
+    Symbols without any of these flags produce no assumptions.
+    """
+    seen: set[str] = set()
+    result: list[ixsimpl.Expr] = []
+    for sym in expr.free_symbols:
+        if not isinstance(sym, sympy.Symbol):
+            continue
+        name = sym.name
+        if name in seen:
+            continue
+        seen.add(name)
+        ix = ctx.sym(name)
+        if sym.is_positive:
+            result.append(ix >= 1)
+        elif sym.is_nonnegative:
+            result.append(ix >= 0)
+        if sym.is_negative:
+            result.append(ix <= ctx.int_(-1))
+        elif sym.is_nonpositive:
+            result.append(ix <= 0)
+    return result
