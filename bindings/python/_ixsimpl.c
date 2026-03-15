@@ -378,6 +378,133 @@ static PyObject *Expr_child(ExprObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self->ctx_obj, ch);
 }
 
+/* --- ADD accessors --- */
+
+static PyObject *Expr_get_add_coeff(ExprObject *self,
+                                    void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_ADD) {
+    PyErr_SetString(PyExc_TypeError, "add_coeff requires ADD node");
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(self->ctx_obj, ixs_node_add_coeff(self->node));
+}
+
+static PyObject *Expr_get_add_nterms(ExprObject *self,
+                                     void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_ADD) {
+    PyErr_SetString(PyExc_TypeError, "add_nterms requires ADD node");
+    return NULL;
+  }
+  return PyLong_FromUnsignedLong(ixs_node_add_nterms(self->node));
+}
+
+static PyObject *Expr_add_term(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_ADD) {
+    PyErr_SetString(PyExc_TypeError, "add_term requires ADD node");
+    return NULL;
+  }
+  if (i >= ixs_node_add_nterms(self->node)) {
+    PyErr_Format(PyExc_IndexError, "term index %u out of range (nterms=%u)", i,
+                 ixs_node_add_nterms(self->node));
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(self->ctx_obj,
+                               ixs_node_add_term(self->node, (uint32_t)i));
+}
+
+static PyObject *Expr_add_term_coeff(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_ADD) {
+    PyErr_SetString(PyExc_TypeError, "add_term_coeff requires ADD node");
+    return NULL;
+  }
+  if (i >= ixs_node_add_nterms(self->node)) {
+    PyErr_Format(PyExc_IndexError, "term index %u out of range (nterms=%u)", i,
+                 ixs_node_add_nterms(self->node));
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(
+      self->ctx_obj, ixs_node_add_term_coeff(self->node, (uint32_t)i));
+}
+
+/* --- MUL accessors --- */
+
+static PyObject *Expr_get_mul_coeff(ExprObject *self,
+                                    void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_MUL) {
+    PyErr_SetString(PyExc_TypeError, "mul_coeff requires MUL node");
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(self->ctx_obj, ixs_node_mul_coeff(self->node));
+}
+
+static PyObject *Expr_mul_factor_base(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_MUL) {
+    PyErr_SetString(PyExc_TypeError, "mul_factor_base requires MUL node");
+    return NULL;
+  }
+  if (i >= ixs_node_mul_nfactors(self->node)) {
+    PyErr_Format(PyExc_IndexError, "factor index %u out of range (nfactors=%u)",
+                 i, ixs_node_mul_nfactors(self->node));
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(
+      self->ctx_obj, ixs_node_mul_factor_base(self->node, (uint32_t)i));
+}
+
+/* --- PW accessors --- */
+
+static PyObject *Expr_get_pw_ncases(ExprObject *self,
+                                    void *Py_UNUSED(closure)) {
+  if (ixs_node_tag(self->node) != IXS_PIECEWISE) {
+    PyErr_SetString(PyExc_TypeError, "pw_ncases requires PIECEWISE node");
+    return NULL;
+  }
+  return PyLong_FromUnsignedLong(ixs_node_pw_ncases(self->node));
+}
+
+static PyObject *Expr_pw_value(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_PIECEWISE) {
+    PyErr_SetString(PyExc_TypeError, "pw_value requires PIECEWISE node");
+    return NULL;
+  }
+  if (i >= ixs_node_pw_ncases(self->node)) {
+    PyErr_Format(PyExc_IndexError, "case index %u out of range (ncases=%u)", i,
+                 ixs_node_pw_ncases(self->node));
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(self->ctx_obj,
+                               ixs_node_pw_value(self->node, (uint32_t)i));
+}
+
+static PyObject *Expr_pw_cond(ExprObject *self, PyObject *args) {
+  unsigned int i;
+  if (!PyArg_ParseTuple(args, "I", &i))
+    return NULL;
+  if (ixs_node_tag(self->node) != IXS_PIECEWISE) {
+    PyErr_SetString(PyExc_TypeError, "pw_cond requires PIECEWISE node");
+    return NULL;
+  }
+  if (i >= ixs_node_pw_ncases(self->node)) {
+    PyErr_Format(PyExc_IndexError, "case index %u out of range (ncases=%u)", i,
+                 ixs_node_pw_ncases(self->node));
+    return NULL;
+  }
+  return (PyObject *)Expr_wrap(self->ctx_obj,
+                               ixs_node_pw_cond(self->node, (uint32_t)i));
+}
+
 static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
   unsigned int i;
   if (!PyArg_ParseTuple(args, "I", &i))
@@ -404,8 +531,18 @@ static PyMethodDef Expr_methods[] = {
      "(any subexpression); replacement is Expr or int."},
     {"child", (PyCFunction)Expr_child, METH_VARARGS,
      "expr.child(i) -> Expr: i-th child node (0 <= i < nchildren)."},
+    {"add_term", (PyCFunction)Expr_add_term, METH_VARARGS,
+     "expr.add_term(i) -> Expr: i-th term (ADD only)."},
+    {"add_term_coeff", (PyCFunction)Expr_add_term_coeff, METH_VARARGS,
+     "expr.add_term_coeff(i) -> Expr: coefficient of i-th term (ADD only)."},
+    {"mul_factor_base", (PyCFunction)Expr_mul_factor_base, METH_VARARGS,
+     "expr.mul_factor_base(i) -> Expr: base of i-th factor (MUL only)."},
     {"mul_factor_exp", (PyCFunction)Expr_mul_factor_exp, METH_VARARGS,
      "expr.mul_factor_exp(i) -> int: exponent of i-th factor (MUL only)."},
+    {"pw_value", (PyCFunction)Expr_pw_value, METH_VARARGS,
+     "expr.pw_value(i) -> Expr: value of i-th case (PIECEWISE only)."},
+    {"pw_cond", (PyCFunction)Expr_pw_cond, METH_VARARGS,
+     "expr.pw_cond(i) -> Expr: condition of i-th case (PIECEWISE only)."},
     {NULL}};
 
 /* --- Expr properties --- */
@@ -509,8 +646,16 @@ static PyGetSetDef Expr_getset[] = {
      "Rational numerator (int). Only valid for RAT nodes.", NULL},
     {"rat_den", (getter)Expr_get_rat_den, NULL,
      "Rational denominator (int). Only valid for RAT nodes.", NULL},
+    {"add_coeff", (getter)Expr_get_add_coeff, NULL,
+     "Constant coefficient (Expr). Only valid for ADD nodes.", NULL},
+    {"add_nterms", (getter)Expr_get_add_nterms, NULL,
+     "Number of terms (int). Only valid for ADD nodes.", NULL},
+    {"mul_coeff", (getter)Expr_get_mul_coeff, NULL,
+     "Constant coefficient (Expr). Only valid for MUL nodes.", NULL},
     {"mul_nfactors", (getter)Expr_get_mul_nfactors, NULL,
      "Number of factors (int). Only valid for MUL nodes.", NULL},
+    {"pw_ncases", (getter)Expr_get_pw_ncases, NULL,
+     "Number of cases (int). Only valid for PIECEWISE nodes.", NULL},
     {"cmp_op", (getter)Expr_get_cmp_op, NULL,
      "Comparison operator (int, CMP_* constant). Only valid for CMP nodes.",
      NULL},

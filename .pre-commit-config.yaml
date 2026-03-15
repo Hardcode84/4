@@ -43,7 +43,7 @@ repos:
     rev: v1.8.0
     hooks:
       - id: mypy
-        additional_dependencies: [hypothesis, sympy]
+        additional_dependencies: [hypothesis, sympy, pytest]
         args: [--strict]
 
   - repo: local
