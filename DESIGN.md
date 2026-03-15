@@ -1155,6 +1155,147 @@ if (ixs_is_domain_error(simplified)) {
 ixs_ctx_destroy(ctx);  // frees everything
 ```
 
+### Node Introspection API
+
+Nodes are opaque — `struct ixs_node` is internal. The only introspection
+today is `ixs_node_tag`, `ixs_node_int_val`, and `ixs_node_hash`.
+Consumers need structural destructuring, generic traversal, and DAG
+walking.
+
+**Representation mismatch with sympy**: sympy's `Add(a, 2*b, 3)` has
+`args = [a, 2*b, 3]` — flat list of sub-expressions. ixsimpl's ADD is
+`coeff=3, terms=[{a,1},{b,2}]` — structured. Similarly, sympy MUL has
+`Pow(x,-1)` as a first-class arg; ixsimpl stores exponents as `int32_t`
+on each mulfactor. The C API exposes ixsimpl's actual structure; the
+Python binding layer reconstructs sympy-compatible `.args` if needed.
+The accessor API is tied to the current node layout; changes to the
+internal representation of ADD/MUL are API-breaking.
+
+#### Type-specific accessors
+
+One function per field. Caller must check `ixs_node_tag` first — calling
+the wrong accessor is UB (same contract as `ixs_node_int_val`). No
+allocation, no ctx needed.
+
+```c
+/* Only valid when tag is IXS_RAT. */
+int64_t ixs_node_rat_num(ixs_node *node);
+int64_t ixs_node_rat_den(ixs_node *node);
+
+/* Only valid when tag is IXS_SYM.  Pointer valid for ctx lifetime. */
+const char *ixs_node_sym_name(ixs_node *node);
+
+/* Only valid when tag is IXS_ADD.  i must be < nterms.
+ * ADD = coeff + sum(term_coeff[i] * term[i]). */
+ixs_node *ixs_node_add_coeff(ixs_node *node);
+uint32_t ixs_node_add_nterms(ixs_node *node);
+ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_MUL.  i must be < nfactors.
+ * MUL = coeff * product(base[i] ^ exp[i]). */
+ixs_node *ixs_node_mul_coeff(ixs_node *node);
+uint32_t ixs_node_mul_nfactors(ixs_node *node);
+ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i);
+int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
+ixs_node *ixs_node_unary_arg(ixs_node *node);
+
+/* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
+ * IXS_XOR, or IXS_CMP. */
+ixs_node *ixs_node_binary_lhs(ixs_node *node);
+ixs_node *ixs_node_binary_rhs(ixs_node *node);
+
+/* Only valid when tag is IXS_CMP. */
+ixs_cmp_op ixs_node_cmp_op(ixs_node *node);
+
+/* Only valid when tag is IXS_PIECEWISE.  i must be < ncases. */
+uint32_t ixs_node_pw_ncases(ixs_node *node);
+ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
+uint32_t ixs_node_logic_nargs(ixs_node *node);
+ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
+```
+
+~20 functions, all trivial one-liners into the internal union fields
+(except `ixs_node_unary_arg` which branches on tag internally).
+
+#### Tree walk
+
+```c
+/* Callback action: controls walk behavior after visiting a node. */
+typedef enum {
+  IXS_WALK_CONTINUE,  /* recurse into children */
+  IXS_WALK_SKIP,      /* skip this node's children (pre-order only) */
+  IXS_WALK_STOP       /* stop the entire walk */
+} ixs_walk_action;
+
+/* Callback must return exactly one of the three values above.
+ * Any other return value is undefined behavior. */
+typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
+
+/* Pre-order: visit node, then recurse into children.
+ * Returns root on completion, the stopping node on STOP, NULL on OOM.
+ * NULL root returns NULL (no-op).
+ * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
+ * must check ixs_node_tag before using type-specific accessors.
+ * SKIP prevents descent into children. */
+ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root,
+                        ixs_visit_fn fn, void *userdata);
+
+/* Post-order: recurse into children, then visit node.
+ * Same return/NULL/sentinel semantics as ixs_walk_pre.
+ * SKIP is a no-op in post-order (children already visited). */
+ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root,
+                        ixs_visit_fn fn, void *userdata);
+```
+
+**Return value**:
+- `root` — walk completed, all reachable nodes visited.
+- other non-NULL — callback returned STOP on that node.
+- `NULL` — OOM (future iterative stack exhausted) or root was NULL.
+
+The caller distinguishes NULL-root from OOM because they know what they
+passed. The edge case where STOP fires on root itself (returns `root`,
+same as completion) is detectable via userdata if it matters.
+
+No dedup: the walk follows the tree shape, not the DAG. Hash-consed
+graphs with heavy sharing can have exponentially more tree paths than
+unique nodes, so callers doing exhaustive collection (e.g.
+`free_symbols`) should maintain their own visited set keyed on pointer
+identity. Callers that don't need dedup (printing, conversion) get the
+fast path without paying for a hash set.
+
+`ctx` is accepted for future use: the initial implementation is recursive,
+but a future version may switch to an iterative explicit stack on the
+scratch arena to avoid stack overflow on deep trees. If that allocation
+fails, the walk returns NULL. The recursive implementation never returns
+NULL for non-NULL root but is subject to stack depth limits on very deep
+trees (practical limit ~10k depth).
+
+Use cases:
+- `ixs_walk_pre`: top-down — pattern matching with subtree-skipping,
+  symbol-dependency checks ("does symbol X appear?" — stop early),
+  conversion to external representations. Replaces sympy's
+  `preorder_traversal`.
+- `ixs_walk_post`: bottom-up — numeric evaluation, size/depth
+  computation, any transform that needs children results first.
+
+#### Contracts
+
+- **NULL node**: passing NULL to any type-specific accessor is UB.
+- **Wrong tag**: calling a type-specific accessor on the wrong tag is UB
+  (same as `ixs_node_int_val`).
+- **Invalid index**: out-of-range index arguments are UB. Implementations
+  contain `assert()` for debug builds but no runtime checks in release.
+- **Walk preconditions**: `ctx` and `fn` must be non-NULL. `root` may be
+  NULL (returns NULL). The callback must not destroy `ctx`. All other
+  operations (constructors, simplify, subs, parse) are safe — nodes are
+  immutable, and scratch arena save/restore nests correctly via LIFO.
+
 ## Performance Design
 
 ### Why this can be 100-1000x faster than SymPy
