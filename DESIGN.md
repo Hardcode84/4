@@ -760,6 +760,7 @@ Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 
 (reverse direction, in simp_add)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)
+c*N*ceil(E/N) - c*E                     → c*Mod(-E, N)
 ```
 
 #### 4.6 Piecewise Rules

@@ -919,6 +919,39 @@ static void test_mod_recognition(void) {
                       ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))));
   CHECK(ixs_node_tag(e) == IXS_ADD);
 
+  /* Ceiling padding: N*ceil(x/N) - x -> Mod(-x, N) */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 32),
+                      ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))),
+              ixs_mul(ctx, ixs_int(ctx, -1), x));
+  CHECK(e == ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, -1), x), ixs_int(ctx, 32)));
+
+  /* Scaled ceiling: 3*32*ceil(x/32) - 3*x -> 3*Mod(-x, 32) */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 96),
+                      ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))),
+              ixs_mul(ctx, ixs_int(ctx, -3), x));
+  CHECK(e == ixs_mul(ctx, ixs_int(ctx, 3),
+                     ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, -1), x),
+                             ixs_int(ctx, 32))));
+
+  /* Extra terms with ceiling: y + 4*ceil(x/4) - x -> y + Mod(-x, 4) */
+  e = ixs_add(ctx,
+              ixs_add(ctx, y,
+                      ixs_mul(ctx, ixs_int(ctx, 4),
+                              ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))))),
+              ixs_mul(ctx, ixs_int(ctx, -1), x));
+  CHECK(e == ixs_add(ctx, y,
+                     ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, -1), x),
+                             ixs_int(ctx, 4))));
+
+  /* No false match: 32*ceil(x/32) - 5*x stays as is (5 != 1, 5*32 != 32) */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 32),
+                      ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)))),
+              ixs_mul(ctx, ixs_int(ctx, -5), x));
+  CHECK(ixs_node_tag(e) == IXS_ADD);
+
   ixs_ctx_destroy(ctx);
 }
 
