@@ -891,8 +891,11 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return NULL;
   if (ixs_node_is_sentinel(node))
     return node;
-  if (depth >= EXPAND_MAX_DEPTH)
+  if (depth >= EXPAND_MAX_DEPTH) {
+    ixs_ctx_push_error(ctx, "expand: recursion depth limit (%d) exceeded",
+                       EXPAND_MAX_DEPTH);
     return ctx->sentinel_error;
+  }
 
   switch (node->tag) {
   case IXS_INT:
@@ -919,9 +922,13 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     for (uint32_t i = 0; i < node->u.mul.nfactors; i++) {
       ixs_node *base = do_expand(ctx, node->u.mul.factors[i].base, depth + 1);
       int32_t exp = node->u.mul.factors[i].exp;
+      /* -INT32_MIN overflows; clamp to INT32_MAX */
       int32_t mag = (exp > 0) ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
-      if (mag > EXPAND_MAX_EXP)
+      if (mag > EXPAND_MAX_EXP) {
+        ixs_ctx_push_error(ctx, "expand: exponent magnitude (%d) exceeds limit",
+                           mag);
         return ctx->sentinel_error;
+      }
       if (exp > 0) {
         for (int32_t e = 0; e < exp; e++)
           result = mul_expand(ctx, result, base);
