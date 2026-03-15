@@ -228,4 +228,11 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
     if expr is sympy.false:
         return ctx.false_()
 
+    # Custom sympy.Function subclasses matched by name (e.g. Wave's xor).
+    if isinstance(expr, sympy.Function):
+        name = type(expr).__name__
+        if name == "xor":
+            args = [from_sympy(ctx, a) for a in expr.args]
+            return ixsimpl.xor_(args[0], args[1])
+
     raise ValueError(f"unsupported sympy expression type: {type(expr).__name__}: {expr}")

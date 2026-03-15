@@ -217,6 +217,16 @@ def test_from_sympy_huge_exponent(ctx: ixsimpl.Context, sp_syms: dict[str, sympy
         from_sympy(ctx, huge)
 
 
+def test_from_sympy_custom_xor(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
+    """Custom sympy.Function subclass named 'xor' maps to ixsimpl.xor_."""
+
+    class xor(sympy.Function):  # type: ignore[misc]
+        pass
+
+    e = from_sympy(ctx, xor(sp_syms["x"], sp_syms["y"]))
+    assert e.tag == ixsimpl.XOR
+
+
 def test_from_sympy_unsupported(ctx: ixsimpl.Context) -> None:
     with pytest.raises(ValueError, match="unsupported"):
         from_sympy(ctx, sympy.sin(sympy.Symbol("x")))
