@@ -295,6 +295,8 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
       return NULL;
     }
     n = PySequence_Size(assumptions_obj);
+    if (n < 0)
+      return NULL;
     if (n > 0) {
       assumptions = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
       if (!assumptions)
@@ -305,6 +307,13 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
           Py_XDECREF(item);
           PyMem_Free(assumptions);
           PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+          return NULL;
+        }
+        if (((ExprObject *)item)->ctx_obj != self->ctx_obj) {
+          Py_DECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_ValueError,
+                          "ixsimpl: assumption from different context");
           return NULL;
         }
         assumptions[i] = ((ExprObject *)item)->node;
@@ -651,28 +660,47 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
       PyErr_SetString(PyExc_TypeError, "each expr must be an Expr");
       return NULL;
     }
+    if (((ExprObject *)item)->ctx_obj != self) {
+      PyMem_Free(exprs);
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: expression from different context");
+      return NULL;
+    }
     exprs[i] = ((ExprObject *)item)->node;
   }
 
-  if (assumptions_obj && assumptions_obj != Py_None &&
-      PySequence_Size(assumptions_obj) > 0) {
+  if (assumptions_obj && assumptions_obj != Py_None) {
     n_assumptions = PySequence_Size(assumptions_obj);
-    assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
-    if (!assumptions) {
+    if (n_assumptions < 0) {
       PyMem_Free(exprs);
-      return PyErr_NoMemory();
+      return NULL;
     }
-    for (i = 0; i < n_assumptions; i++) {
-      PyObject *item = PySequence_GetItem(assumptions_obj, i);
-      if (!item || Py_TYPE(item) != &ExprType) {
-        Py_XDECREF(item);
+    if (n_assumptions > 0) {
+      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      if (!assumptions) {
         PyMem_Free(exprs);
-        PyMem_Free(assumptions);
-        PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
-        return NULL;
+        return PyErr_NoMemory();
       }
-      assumptions[i] = ((ExprObject *)item)->node;
-      Py_DECREF(item);
+      for (i = 0; i < n_assumptions; i++) {
+        PyObject *item = PySequence_GetItem(assumptions_obj, i);
+        if (!item || Py_TYPE(item) != &ExprType) {
+          Py_XDECREF(item);
+          PyMem_Free(exprs);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+          return NULL;
+        }
+        if (((ExprObject *)item)->ctx_obj != self) {
+          Py_DECREF(item);
+          PyMem_Free(exprs);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_ValueError,
+                          "ixsimpl: assumption from different context");
+          return NULL;
+        }
+        assumptions[i] = ((ExprObject *)item)->node;
+        Py_DECREF(item);
+      }
     }
   }
 
@@ -866,6 +894,10 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
                     "ixsimpl.pw() requires at least one (value, cond) pair");
     return NULL;
   }
+  if (n > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "ixsimpl.pw() too many branches");
+    return NULL;
+  }
 
   values = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
   conds = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
@@ -969,7 +1001,7 @@ static PyMethodDef module_methods[] = {
 static struct PyModuleDef ixsimpl_module = {
     .m_base = PyModuleDef_HEAD_INIT,
     .m_name = "ixsimpl",
-    .m_doc = "Index expression simplifier — fast symbolic integer arithmetic.",
+    .m_doc = "Index expression simplifier - fast symbolic integer arithmetic.",
     .m_size = -1,
     .m_methods = module_methods,
 };
