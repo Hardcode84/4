@@ -19,6 +19,7 @@ experimental = true
 
 [tool.scikit-build]
 cmake.build-type = "Release"
+cmake.define.USE_AMALGAMATION = "ON"
 
 [tool.black]
 line-length = 100
