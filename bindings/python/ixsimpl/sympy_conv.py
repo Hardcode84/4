@@ -117,12 +117,16 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         return ctx.sym(str(expr))
 
     if isinstance(expr, sympy.Add):
+        if not expr.args:
+            return ctx.int_(0)
         result: ixsimpl.Expr = from_sympy(ctx, expr.args[0])
         for arg in expr.args[1:]:
             result = result + from_sympy(ctx, arg)
         return result
 
     if isinstance(expr, sympy.Mul):
+        if not expr.args:
+            return ctx.int_(1)
         result = from_sympy(ctx, expr.args[0])
         for arg in expr.args[1:]:
             result = result * from_sympy(ctx, arg)
@@ -134,6 +138,8 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         if not isinstance(exp, sympy.Integer):
             raise ValueError(f"non-integer exponent: {exp}")
         e = int(exp)
+        if abs(e) > 1000:
+            raise ValueError(f"exponent too large: {e}")
         if e == 0:
             return ctx.int_(1)
         if e > 0:
@@ -141,7 +147,6 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
             for _ in range(e - 1):
                 result = result * base
             return result
-        # Negative exponent: base^(-n) = 1 / (base^n)
         pos = base
         for _ in range(-e - 1):
             pos = pos * base

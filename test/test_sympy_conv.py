@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import ixsimpl
 import pytest
 import sympy
@@ -149,13 +147,13 @@ def test_from_sympy_sym(ctx: ixsimpl.Context) -> None:
 def test_from_sympy_add(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
     sp = sp_syms["x"] + sp_syms["y"] + 3
     e = from_sympy(ctx, sp)
-    assert str(e) == "3 + y + x" or e.tag == ixsimpl.ADD
+    assert e.tag == ixsimpl.ADD
 
 
 def test_from_sympy_mul(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
     sp = 3 * sp_syms["x"]
     e = from_sympy(ctx, sp)
-    assert e.tag == ixsimpl.MUL or e.tag == ixsimpl.ADD
+    assert e.tag == ixsimpl.MUL
 
 
 def test_from_sympy_pow(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
@@ -211,6 +209,12 @@ def test_from_sympy_bool(ctx: ixsimpl.Context) -> None:
     assert from_sympy(ctx, sympy.false).tag == ixsimpl.FALSE
 
 
+def test_from_sympy_huge_exponent(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
+    huge = sympy.Pow(sp_syms["x"], sympy.Integer(10**9), evaluate=False)
+    with pytest.raises(ValueError, match="exponent too large"):
+        from_sympy(ctx, huge)
+
+
 def test_from_sympy_unsupported(ctx: ixsimpl.Context) -> None:
     with pytest.raises(ValueError, match="unsupported"):
         from_sympy(ctx, sympy.sin(sympy.Symbol("x")))
@@ -219,18 +223,6 @@ def test_from_sympy_unsupported(ctx: ixsimpl.Context) -> None:
 # ---------------------------------------------------------------------------
 #  Roundtrip tests
 # ---------------------------------------------------------------------------
-
-
-def _eval_both(
-    ixs_expr: ixsimpl.Expr,
-    sp_expr: Any,
-    env: dict[str, int],
-    sp_syms: dict[str, sympy.Symbol],
-) -> tuple[int, int]:
-    """Evaluate an ixsimpl expr and a sympy expr in the same environment."""
-    ixs_val = int(ixs_expr)
-    sp_val = int(sp_expr.subs({sp_syms[k]: v for k, v in env.items()}))
-    return ixs_val, sp_val
 
 
 def test_roundtrip_arithmetic(

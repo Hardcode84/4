@@ -78,11 +78,11 @@ jobs:
         run: |
           LD_PRELOAD=$(gcc -print-file-name=libasan.so) python test/test_python.py
 
-      - name: Accessor tests
+      - name: Python tests
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest test/test_accessors.py -v
+          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest test/test_accessors.py test/test_sympy_conv.py -v
 
   pre-commit:
     runs-on: ubuntu-latest
