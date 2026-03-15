@@ -19,6 +19,7 @@ import ixsimpl
 import sympy
 from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
+from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 
 ExprTree = str | int | tuple[Any, ...]
 CondTree = tuple[Any, ...]
@@ -28,6 +29,7 @@ _IN_CI = os.environ.get("CI") == "true"
 _SELF_CONSISTENCY_EXAMPLES = 500 if _IN_CI else 10000
 _SYMPY_CROSSCHECK_EXAMPLES = 200 if _IN_CI else 5000
 _DIVISIBILITY_EXAMPLES = 200 if _IN_CI else 2000
+_CONV_EXAMPLES = 500 if _IN_CI else 2000
 
 # ---------------------------------------------------------------------------
 #  Expression tree strategies
@@ -411,6 +413,39 @@ def test_simplify_with_divisibility(expr: ExprTree, div_sym: str, divisor: int) 
     assume(checked > 0)
 
 
+@given(expr=expressions(include_piecewise=False))
+@settings(max_examples=_CONV_EXAMPLES, deadline=None)
+def test_to_sympy_semantics(expr: ExprTree) -> None:
+    """conv.to_sympy produces a sympy expr that evaluates identically
+    to the ixsimpl expr at random integer points."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sp_converted = conv_to_sympy(ixs_expr)
+
+    for _ in range(10):
+        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+        try:
+            ixs_val = eval_ixs(ixs_expr, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        try:
+            sp_env = {sympy.Symbol(k, integer=True): v for k, v in env.items()}
+            sp_val = sp_converted.subs(sp_env)
+            if not sp_val.is_number:
+                continue
+            assert int(sp_val) == ixs_val, (
+                f"to_sympy mismatch at {env}: "
+                f"ixsimpl={ixs_val}, sympy={int(sp_val)}, expr={expr}"
+            )
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+
+
 if __name__ == "__main__":
     print(f"Running self-consistency test ({_SELF_CONSISTENCY_EXAMPLES} examples)...")
     test_simplify_self_consistency()
@@ -420,5 +455,8 @@ if __name__ == "__main__":
     print("PASSED")
     print(f"Running divisibility test ({_DIVISIBILITY_EXAMPLES} examples)...")
     test_simplify_with_divisibility()
+    print("PASSED")
+    print(f"Running to_sympy semantics test ({_CONV_EXAMPLES} examples)...")
+    test_to_sympy_semantics()
     print("PASSED")
     print("All fuzz tests passed!")

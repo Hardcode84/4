@@ -33,5 +33,5 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["sympy", "sympy.*", "numpy", "numpy.*", "_ixsimpl", "pytest"]
+module = ["sympy", "sympy.*", "numpy", "numpy.*", "_ixsimpl", "pytest", "ixsimpl", "ixsimpl.*"]
 ignore_missing_imports = true
