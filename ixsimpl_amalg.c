@@ -3784,29 +3784,163 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
   if (ixs_node_is_integer_valued(x))
     return x;
 
-  /* floor(x + n) where n is integer → floor(x) + n
-   * Applies when x is ADD and has an integer constant part. */
-  if (x->tag == IXS_ADD && x->u.add.coeff->tag == IXS_INT &&
-      x->u.add.coeff->u.ival != 0) {
-    int64_t n = x->u.add.coeff->u.ival;
-    /* Build the ADD without the integer constant. */
-    ixs_node *zero = ixs_node_int(ctx, 0);
-    if (!zero)
-      return NULL;
-    ixs_node *inner;
-    if (x->u.add.nterms == 1) {
+  /* floor(ADD): extract integer-valued terms.
+   * floor(n + intval_terms + rest) → n + intval_terms + floor(rest)
+   * Generalises the old "floor(x + n)" rule. */
+  if (x->tag == IXS_ADD) {
+    bool have_int = false;
+
+    if (x->u.add.coeff->tag == IXS_INT && x->u.add.coeff->u.ival != 0)
+      have_int = true;
+
+    uint32_t i;
+    for (i = 0; i < x->u.add.nterms && !have_int; i++) {
       int64_t cp, cq;
-      ixs_node_get_rat(x->u.add.terms[0].coeff, &cp, &cq);
-      if (ixs_rat_is_one(cp, cq))
-        inner = x->u.add.terms[0].term;
-      else
-        inner = ixs_node_add(ctx, zero, x->u.add.nterms, x->u.add.terms);
-    } else {
-      inner = ixs_node_add(ctx, zero, x->u.add.nterms, x->u.add.terms);
+      ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+      if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term))
+        have_int = true;
     }
-    if (!inner)
-      return NULL;
-    return simp_add(ctx, simp_floor(ctx, inner), ixs_node_int(ctx, n));
+
+    if (have_int) {
+      ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+      ixs_addterm *kept = ixs_arena_alloc(
+          &ctx->scratch, x->u.add.nterms * sizeof(*kept), sizeof(void *));
+      if (!kept) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      uint32_t nk = 0;
+      ixs_node *int_sum = (x->u.add.coeff->tag == IXS_INT)
+                              ? x->u.add.coeff
+                              : ixs_node_int(ctx, 0);
+      if (!int_sum) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      ixs_node *rem_coeff = (x->u.add.coeff->tag == IXS_INT)
+                                ? ixs_node_int(ctx, 0)
+                                : x->u.add.coeff;
+      for (i = 0; i < x->u.add.nterms; i++) {
+        int64_t cp, cq;
+        ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+        if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term)) {
+          int_sum = simp_add(
+              ctx, int_sum,
+              simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
+        } else {
+          kept[nk++] = x->u.add.terms[i];
+        }
+      }
+      ixs_node *remainder = rem_coeff;
+      for (i = 0; i < nk; i++)
+        remainder = simp_add(ctx, remainder,
+                             simp_mul(ctx, kept[i].coeff, kept[i].term));
+      ixs_arena_restore(&ctx->scratch, sm);
+      if (!int_sum || !remainder)
+        return NULL;
+      return simp_add(ctx, int_sum, simp_floor(ctx, remainder));
+    }
+  }
+
+  /* floor(MUL(c, ..., ADD^1)): distribute into the ADD and extract
+   * any terms that become integer-valued after multiplication.
+   * E.g. floor((256*K*X + rest) / (8*K)) → 32*X + floor(rest/(8*K)). */
+  if (x->tag == IXS_MUL) {
+    int add_idx = -1;
+    uint32_t j;
+    for (j = 0; j < x->u.mul.nfactors; j++) {
+      if (x->u.mul.factors[j].base->tag == IXS_ADD &&
+          x->u.mul.factors[j].exp == 1) {
+        add_idx = (int)j;
+        break;
+      }
+    }
+    if (add_idx >= 0) {
+      ixs_node *add_node = x->u.mul.factors[add_idx].base;
+      /* Build outer = coeff * product of non-ADD factors, decomposing
+       * any MUL-typed bases so K cancellation works properly. */
+      ixs_node *outer = x->u.mul.coeff;
+      for (j = 0; j < x->u.mul.nfactors; j++) {
+        if ((int)j == add_idx)
+          continue;
+        ixs_node *fbase = x->u.mul.factors[j].base;
+        int32_t fexp = x->u.mul.factors[j].exp;
+        if (fbase->tag == IXS_MUL) {
+          /* Decompose MUL base: (c * f1^e1 * ...)^fexp. */
+          int64_t cp, cq;
+          ixs_node_get_rat(fbase->u.mul.coeff, &cp, &cq);
+          if (fexp == -1 && cq == 1 && cp != 0) {
+            outer = simp_div(ctx, outer, make_const(ctx, cp, cq));
+            uint32_t k;
+            for (k = 0; k < fbase->u.mul.nfactors; k++) {
+              ixs_node *b = fbase->u.mul.factors[k].base;
+              int32_t be = fbase->u.mul.factors[k].exp;
+              int32_t eff = -be;
+              if (eff > 0) {
+                int32_t m;
+                for (m = 0; m < eff; m++)
+                  outer = simp_mul(ctx, outer, b);
+              } else if (eff < 0) {
+                int32_t m;
+                for (m = 0; m < -eff; m++)
+                  outer = simp_div(ctx, outer, b);
+              }
+            }
+          } else {
+            /* Fallback: treat as opaque factor. */
+            if (fexp > 0) {
+              int32_t m;
+              for (m = 0; m < fexp; m++)
+                outer = simp_mul(ctx, outer, fbase);
+            } else {
+              int32_t m;
+              for (m = 0; m < -fexp; m++)
+                outer = simp_div(ctx, outer, fbase);
+            }
+          }
+        } else {
+          if (fexp > 0) {
+            int32_t m;
+            for (m = 0; m < fexp; m++)
+              outer = simp_mul(ctx, outer, fbase);
+          } else {
+            int32_t m;
+            for (m = 0; m < -fexp; m++)
+              outer = simp_div(ctx, outer, fbase);
+          }
+        }
+      }
+      if (!outer)
+        return NULL;
+
+      /* Check each ADD term: if outer * ci * ti is integer-valued,
+       * it can be pulled out. */
+      bool any_int = false;
+      ixs_node *coeff_product = simp_mul(ctx, outer, add_node->u.add.coeff);
+      if (coeff_product && ixs_node_is_integer_valued(coeff_product))
+        any_int = true;
+      for (j = 0; j < add_node->u.add.nterms && !any_int; j++) {
+        ixs_node *tc = add_node->u.add.terms[j].coeff;
+        ixs_node *tt = add_node->u.add.terms[j].term;
+        ixs_node *product = simp_mul(ctx, outer, simp_mul(ctx, tc, tt));
+        if (product && ixs_node_is_integer_valued(product))
+          any_int = true;
+      }
+
+      if (any_int) {
+        /* Expand outer * ADD and recurse through simp_floor(ADD). */
+        ixs_node *expanded = simp_mul(ctx, outer, add_node->u.add.coeff);
+        for (j = 0; j < add_node->u.add.nterms; j++) {
+          ixs_node *tc = add_node->u.add.terms[j].coeff;
+          ixs_node *tt = add_node->u.add.terms[j].term;
+          expanded = simp_add(ctx, expanded,
+                              simp_mul(ctx, outer, simp_mul(ctx, tc, tt)));
+        }
+        if (!expanded)
+          return NULL;
+        return simp_floor(ctx, expanded);
+      }
+    }
   }
 
   /* floor(floor(y)/b) → floor(y/b) for positive integer b. */
@@ -3844,27 +3978,152 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
   if (ixs_node_is_integer_valued(x))
     return x;
 
-  /* ceiling(x + n) where n is integer → ceiling(x) + n */
-  if (x->tag == IXS_ADD && x->u.add.coeff->tag == IXS_INT &&
-      x->u.add.coeff->u.ival != 0) {
-    int64_t n = x->u.add.coeff->u.ival;
-    ixs_node *zero = ixs_node_int(ctx, 0);
-    if (!zero)
-      return NULL;
-    ixs_node *inner;
-    if (x->u.add.nterms == 1) {
+  /* ceil(ADD): extract integer-valued terms (mirrors simp_floor). */
+  if (x->tag == IXS_ADD) {
+    bool have_int = false;
+
+    if (x->u.add.coeff->tag == IXS_INT && x->u.add.coeff->u.ival != 0)
+      have_int = true;
+
+    uint32_t i;
+    for (i = 0; i < x->u.add.nterms && !have_int; i++) {
       int64_t cp, cq;
-      ixs_node_get_rat(x->u.add.terms[0].coeff, &cp, &cq);
-      if (ixs_rat_is_one(cp, cq))
-        inner = x->u.add.terms[0].term;
-      else
-        inner = ixs_node_add(ctx, zero, x->u.add.nterms, x->u.add.terms);
-    } else {
-      inner = ixs_node_add(ctx, zero, x->u.add.nterms, x->u.add.terms);
+      ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+      if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term))
+        have_int = true;
     }
-    if (!inner)
-      return NULL;
-    return simp_add(ctx, simp_ceil(ctx, inner), ixs_node_int(ctx, n));
+
+    if (have_int) {
+      ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+      ixs_addterm *kept = ixs_arena_alloc(
+          &ctx->scratch, x->u.add.nterms * sizeof(*kept), sizeof(void *));
+      if (!kept) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      uint32_t nk = 0;
+      ixs_node *int_sum = (x->u.add.coeff->tag == IXS_INT)
+                              ? x->u.add.coeff
+                              : ixs_node_int(ctx, 0);
+      if (!int_sum) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      ixs_node *rem_coeff = (x->u.add.coeff->tag == IXS_INT)
+                                ? ixs_node_int(ctx, 0)
+                                : x->u.add.coeff;
+      for (i = 0; i < x->u.add.nterms; i++) {
+        int64_t cp, cq;
+        ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+        if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term)) {
+          int_sum = simp_add(
+              ctx, int_sum,
+              simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
+        } else {
+          kept[nk++] = x->u.add.terms[i];
+        }
+      }
+      ixs_node *remainder = rem_coeff;
+      for (i = 0; i < nk; i++)
+        remainder = simp_add(ctx, remainder,
+                             simp_mul(ctx, kept[i].coeff, kept[i].term));
+      ixs_arena_restore(&ctx->scratch, sm);
+      if (!int_sum || !remainder)
+        return NULL;
+      return simp_add(ctx, int_sum, simp_ceil(ctx, remainder));
+    }
+  }
+
+  /* ceil(MUL(c, ..., ADD^1)): distribute and extract integer terms. */
+  if (x->tag == IXS_MUL) {
+    int add_idx = -1;
+    uint32_t j;
+    for (j = 0; j < x->u.mul.nfactors; j++) {
+      if (x->u.mul.factors[j].base->tag == IXS_ADD &&
+          x->u.mul.factors[j].exp == 1) {
+        add_idx = (int)j;
+        break;
+      }
+    }
+    if (add_idx >= 0) {
+      ixs_node *add_node = x->u.mul.factors[add_idx].base;
+      ixs_node *outer = x->u.mul.coeff;
+      for (j = 0; j < x->u.mul.nfactors; j++) {
+        if ((int)j == add_idx)
+          continue;
+        ixs_node *fbase = x->u.mul.factors[j].base;
+        int32_t fexp = x->u.mul.factors[j].exp;
+        if (fbase->tag == IXS_MUL) {
+          int64_t cp, cq;
+          ixs_node_get_rat(fbase->u.mul.coeff, &cp, &cq);
+          if (fexp == -1 && cq == 1 && cp != 0) {
+            outer = simp_div(ctx, outer, make_const(ctx, cp, cq));
+            uint32_t k;
+            for (k = 0; k < fbase->u.mul.nfactors; k++) {
+              ixs_node *b = fbase->u.mul.factors[k].base;
+              int32_t be = fbase->u.mul.factors[k].exp;
+              int32_t eff = -be;
+              if (eff > 0) {
+                int32_t m;
+                for (m = 0; m < eff; m++)
+                  outer = simp_mul(ctx, outer, b);
+              } else if (eff < 0) {
+                int32_t m;
+                for (m = 0; m < -eff; m++)
+                  outer = simp_div(ctx, outer, b);
+              }
+            }
+          } else {
+            if (fexp > 0) {
+              int32_t m;
+              for (m = 0; m < fexp; m++)
+                outer = simp_mul(ctx, outer, fbase);
+            } else {
+              int32_t m;
+              for (m = 0; m < -fexp; m++)
+                outer = simp_div(ctx, outer, fbase);
+            }
+          }
+        } else {
+          if (fexp > 0) {
+            int32_t m;
+            for (m = 0; m < fexp; m++)
+              outer = simp_mul(ctx, outer, fbase);
+          } else {
+            int32_t m;
+            for (m = 0; m < -fexp; m++)
+              outer = simp_div(ctx, outer, fbase);
+          }
+        }
+      }
+      if (!outer)
+        return NULL;
+
+      bool any_int = false;
+      ixs_node *coeff_product = simp_mul(ctx, outer, add_node->u.add.coeff);
+      if (coeff_product && ixs_node_is_integer_valued(coeff_product))
+        any_int = true;
+      for (j = 0; j < add_node->u.add.nterms && !any_int; j++) {
+        ixs_node *tc = add_node->u.add.terms[j].coeff;
+        ixs_node *tt = add_node->u.add.terms[j].term;
+        ixs_node *product = simp_mul(ctx, outer, simp_mul(ctx, tc, tt));
+        if (product && ixs_node_is_integer_valued(product))
+          any_int = true;
+      }
+
+      if (any_int) {
+        ixs_node *expanded = simp_mul(ctx, outer, add_node->u.add.coeff);
+        for (j = 0; j < add_node->u.add.nterms; j++) {
+          ixs_node *tc = add_node->u.add.terms[j].coeff;
+          ixs_node *tt = add_node->u.add.terms[j].term;
+          expanded = simp_add(ctx, expanded,
+                              simp_mul(ctx, outer, simp_mul(ctx, tc, tt)));
+        }
+        if (!expanded)
+          return NULL;
+        return simp_ceil(ctx, expanded);
+      }
+    }
   }
 
   /* ceiling(ceiling(y)/b) → ceiling(y/b) for positive integer b. */

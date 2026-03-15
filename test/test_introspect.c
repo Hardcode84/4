@@ -92,8 +92,8 @@ static void test_mul_accessors(void) {
 static void test_unary_accessors(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
-  ixs_node *half = ixs_rat(ctx, 1, 2);
-  ixs_node *arg = ixs_add(ctx, x, half);
+  /* x/2 is not integer-valued, so floor/ceil remain as FLOOR/CEIL nodes. */
+  ixs_node *arg = ixs_div(ctx, x, ixs_int(ctx, 2));
 
   ixs_node *fl = ixs_floor(ctx, arg);
   CHECK(ixs_node_tag(fl) == IXS_FLOOR);
@@ -257,8 +257,7 @@ static void test_nchildren_child_binary(void) {
 static void test_nchildren_child_unary(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
-  ixs_node *half = ixs_rat(ctx, 1, 2);
-  ixs_node *arg = ixs_add(ctx, x, half);
+  ixs_node *arg = ixs_div(ctx, x, ixs_int(ctx, 2));
 
   ixs_node *fl = ixs_floor(ctx, arg);
   CHECK(ixs_node_nchildren(fl) == 1);

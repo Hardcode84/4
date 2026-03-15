@@ -119,6 +119,53 @@ static void test_floor_rules(void) {
   ixs_node *fxp3_expected = ixs_add(ctx, ixs_floor(ctx, x), ixs_int(ctx, 3));
   CHECK(fxp3 == fxp3_expected);
 
+  /* floor(x + 1/2) → x  (x is integer-valued: SYM) */
+  CHECK(ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2))) == x);
+
+  /* floor extraction from ADD: floor(2*floor(x/3) + y/2)
+   * → 2*floor(x/3) + floor(y/2) */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *fx3 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fx3),
+                            ixs_div(ctx, y, ixs_int(ctx, 2)));
+    ixs_node *result = ixs_floor(ctx, sum);
+    ixs_node *expected =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fx3),
+                ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
+    CHECK(result == expected);
+  }
+
+  /* floor extraction from MUL*ADD:
+   * floor((4*floor(x/3) + y) / 2) → 2*floor(x/3) + floor(y/2) */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *fx3 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *sum = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), fx3), y);
+    ixs_node *result = ixs_floor(ctx, ixs_div(ctx, sum, ixs_int(ctx, 2)));
+    ixs_node *expected =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fx3),
+                ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
+    CHECK(result == expected);
+  }
+
+  /* floor extraction with symbolic denominator:
+   * floor((6*K*floor(x/3) + y) / (2*K)) → 3*floor(x/3) + floor(y/(2*K)) */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *K = ixs_sym(ctx, "K");
+    ixs_node *fx3 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *sum =
+        ixs_add(ctx, ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 6), K), fx3), y);
+    ixs_node *denom = ixs_mul(ctx, ixs_int(ctx, 2), K);
+    ixs_node *result = ixs_floor(ctx, ixs_div(ctx, sum, denom));
+    /* Build expected with decomposed form: (1/2)*K^(-1)*y */
+    ixs_node *y_over_2K = ixs_mul(ctx, ixs_rat(ctx, 1, 2), ixs_div(ctx, y, K));
+    ixs_node *expected = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), fx3),
+                                 ixs_floor(ctx, y_over_2K));
+    CHECK(result == expected);
+  }
+
   ixs_ctx_destroy(ctx);
 }
 
