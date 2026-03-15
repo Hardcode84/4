@@ -20,7 +20,7 @@ HEADER = """\
 """
 
 
-def main():
+def main() -> int:
     sources = sorted(SRC.glob("*.c"))
     if not sources:
         print("error: no .c files found in src/", file=sys.stderr)

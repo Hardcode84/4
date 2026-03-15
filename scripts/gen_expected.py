@@ -15,20 +15,35 @@ names for correct output.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sys
 from pathlib import Path
 
 import sympy
 
-
 # All 20 variables from DESIGN.md
 VARIABLES = (
-    "$T0", "$T1", "$T2", "$WG0", "$WG1", "$ARGK",
-    "$GPR_NUM", "$MMA_ACC", "$MMA_LHS_SCALE", "$MMA_RHS_SCALE", "$MMA_SCALE_FP4",
-    "$index0", "$index1",
-    "_M_div_32", "_N_div_32", "_K_div_256", "_aligned",
-    "M", "N", "K",
+    "$T0",
+    "$T1",
+    "$T2",
+    "$WG0",
+    "$WG1",
+    "$ARGK",
+    "$GPR_NUM",
+    "$MMA_ACC",
+    "$MMA_LHS_SCALE",
+    "$MMA_RHS_SCALE",
+    "$MMA_SCALE_FP4",
+    "$index0",
+    "$index1",
+    "_M_div_32",
+    "_N_div_32",
+    "_K_div_256",
+    "_aligned",
+    "M",
+    "N",
+    "K",
 )
 
 # Variables with nonnegative assumption (>= 0)
@@ -94,7 +109,10 @@ def _extract_expression(line: str) -> str | None:
 
 
 def _load_assumptions(path: Path, locals_: dict[str, sympy.Symbol]) -> list[sympy.Basic]:
-    """Parse assumption file into SymPy expressions. Build programmatically to avoid $ parse issues."""
+    """Parse assumption file into SymPy expressions.
+
+    Build programmatically to avoid $ parse issues.
+    """
     assumptions: list[sympy.Basic] = []
     op_map = {
         ">=": sympy.Ge,
@@ -156,10 +174,8 @@ def main() -> int:
         try:
             simplified = sympy.simplify(expr)
             if assumptions:
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     simplified = sympy.refine(simplified, assumption_and)
-                except (ValueError, TypeError):
-                    pass  # refine can fail on some expressions; keep simplify result
             simplified = _fix_mods(simplified)
             expressions.append(str(simplified))
         except Exception as e:

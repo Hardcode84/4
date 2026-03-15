@@ -28,6 +28,24 @@ repos:
       hooks:
       -   id: sort-cmake-lists
 
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-setuptools, hypothesis, sympy]
+        args: [--strict]
+
   - repo: local
     hooks:
       - id: amalgamate

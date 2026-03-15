@@ -8,15 +8,21 @@ Three properties:
    at evaluation points satisfying the assumption.
 """
 
+from __future__ import annotations
+
 import math
 import os
 import random
+from typing import Any
 
+import ixsimpl
 import sympy
 from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
-import ixsimpl
+ExprTree = str | int | tuple[Any, ...]
+CondTree = tuple[Any, ...]
+Env = dict[str, int]
 
 _IN_CI = os.environ.get("CI") == "true"
 _SELF_CONSISTENCY_EXAMPLES = 500 if _IN_CI else 10000
@@ -33,11 +39,11 @@ pos_ints = st.integers(min_value=1, max_value=32)
 
 
 _OPS_BASE = ["add", "mul", "div", "floor", "ceiling", "mod", "max", "min"]
-_OPS_WITH_PW = _OPS_BASE + ["piecewise"]
+_OPS_WITH_PW = [*_OPS_BASE, "piecewise"]
 
 
 @st.composite
-def expressions(draw, max_depth=4, include_piecewise=True):
+def expressions(draw: st.DrawFn, max_depth: int = 4, include_piecewise: bool = True) -> ExprTree:
     if max_depth <= 0 or draw(st.booleans()):
         return draw(st.one_of(sym_names, small_ints))
     ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
@@ -58,7 +64,7 @@ def expressions(draw, max_depth=4, include_piecewise=True):
 
 
 @st.composite
-def conditions(draw, max_depth=2):
+def conditions(draw: st.DrawFn, max_depth: int = 2) -> CondTree:
     if max_depth <= 0 or draw(st.booleans()):
         a = draw(expressions(max_depth=2))
         b = draw(expressions(max_depth=2))
@@ -79,7 +85,7 @@ def conditions(draw, max_depth=2):
 _sp_syms = {n: sympy.Symbol(n, integer=True) for n in ["x", "y", "z", "w"]}
 
 
-def to_sympy(tree):
+def to_sympy(tree: ExprTree) -> Any:
     if isinstance(tree, str):
         return _sp_syms[tree]
     if isinstance(tree, int):
@@ -104,13 +110,11 @@ def to_sympy(tree):
         return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]))
     if op == "piecewise":
         val, cond, default = tree[1], tree[2], tree[3]
-        return sympy.Piecewise(
-            (to_sympy(val), to_sympy_cond(cond)), (to_sympy(default), True)
-        )
+        return sympy.Piecewise((to_sympy(val), to_sympy_cond(cond)), (to_sympy(default), True))
     raise ValueError(f"unknown op: {op}")
 
 
-def to_sympy_cond(tree):
+def to_sympy_cond(tree: CondTree) -> Any:
     op = tree[0]
     if op == "cmp":
         _, cmp_op, a, b = tree
@@ -138,7 +142,7 @@ def to_sympy_cond(tree):
 # ---------------------------------------------------------------------------
 
 
-def to_ixsimpl(ctx, tree):
+def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
     if isinstance(tree, str):
         return ctx.sym(tree)
     if isinstance(tree, int):
@@ -170,7 +174,7 @@ def to_ixsimpl(ctx, tree):
     raise ValueError(f"unknown op: {op}")
 
 
-def to_ixsimpl_cond(ctx, tree):
+def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
     """Convert condition tree to ixsimpl Expr."""
     op = tree[0]
     if op == "cmp":
@@ -192,13 +196,9 @@ def to_ixsimpl_cond(ctx, tree):
     if op == "not":
         return ixsimpl.not_(to_ixsimpl_cond(ctx, tree[1]))
     if op == "and":
-        return ixsimpl.and_(
-            to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2])
-        )
+        return ixsimpl.and_(to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2]))
     if op == "or":
-        return ixsimpl.or_(
-            to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2])
-        )
+        return ixsimpl.or_(to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2]))
     raise ValueError(f"unknown cond op: {op}")
 
 
@@ -207,19 +207,19 @@ def to_ixsimpl_cond(ctx, tree):
 # ---------------------------------------------------------------------------
 
 
-def _floored_div(a, b):
+def _floored_div(a: Any, b: Any) -> int:
     if b == 0:
         raise ZeroDivisionError
-    return math.floor(a / b)
+    return int(math.floor(a / b))
 
 
-def _floored_mod(a, b):
+def _floored_mod(a: Any, b: Any) -> Any:
     if b == 0:
         raise ZeroDivisionError
     return a - b * math.floor(a / b)
 
 
-def eval_expr(tree, env):
+def eval_expr(tree: ExprTree, env: Env) -> Any:
     """Evaluate expression tree numerically using Python arithmetic."""
     if isinstance(tree, str):
         return env[tree]
@@ -237,10 +237,10 @@ def eval_expr(tree, env):
         return sympy.Rational(a, b)
     if op == "floor":
         v = eval_expr(tree[1], env)
-        return int(math.floor(v))
+        return math.floor(v)
     if op == "ceiling":
         v = eval_expr(tree[1], env)
-        return int(math.ceil(v))
+        return math.ceil(v)
     if op == "mod":
         return _floored_mod(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "max":
@@ -255,7 +255,7 @@ def eval_expr(tree, env):
     raise ValueError(f"unknown op: {op}")
 
 
-def eval_cond(tree, env):
+def eval_cond(tree: CondTree, env: Env) -> Any:
     """Evaluate condition tree to a bool."""
     op = tree[0]
     if op == "cmp":
@@ -282,7 +282,7 @@ def eval_cond(tree, env):
     raise ValueError(f"unknown cond op: {op}")
 
 
-def eval_ixs(expr, ctx, env):
+def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
     """Evaluate ixsimpl Expr by substituting all variables."""
     result = expr
     for name, val in env.items():
@@ -291,8 +291,8 @@ def eval_ixs(expr, ctx, env):
         raise ValueError("sentinel")
     try:
         return int(result)
-    except TypeError:
-        raise ValueError(f"result is not an integer constant: {result}")
+    except TypeError as e:
+        raise ValueError(f"result is not an integer constant: {result}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +302,7 @@ def eval_ixs(expr, ctx, env):
 
 @given(expr=expressions())
 @settings(max_examples=_SELF_CONSISTENCY_EXAMPLES, deadline=None)
-def test_simplify_self_consistency(expr):
+def test_simplify_self_consistency(expr: ExprTree) -> None:
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
     ctx = ixsimpl.Context()
@@ -330,7 +330,7 @@ def test_simplify_self_consistency(expr):
 @given(expr=expressions(include_piecewise=False))
 @settings(max_examples=_SYMPY_CROSSCHECK_EXAMPLES, deadline=None)
 @example(("mod", ("mul", 2, ("mod", "x", 3)), 5))
-def test_matches_sympy(expr):
+def test_matches_sympy(expr: ExprTree) -> None:
     """Cross-check against SymPy: both should produce numerically
     equivalent results. Uses Python eval_expr as ground truth to avoid
     SymPy Mod bug #28744 with evaluate=False."""
@@ -376,7 +376,7 @@ def test_matches_sympy(expr):
     divisor=st.integers(min_value=2, max_value=64),
 )
 @settings(max_examples=_DIVISIBILITY_EXAMPLES, deadline=None)
-def test_simplify_with_divisibility(expr, div_sym, divisor):
+def test_simplify_with_divisibility(expr: ExprTree, div_sym: str, divisor: int) -> None:
     """Simplification with a divisibility assumption preserves semantics
     when evaluated at points satisfying the assumption."""
     ctx = ixsimpl.Context()
