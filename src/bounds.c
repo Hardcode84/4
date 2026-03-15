@@ -122,6 +122,69 @@ static void extract_divisibility(ixs_bounds *b, ixs_node *a) {
     apply_divisor(b, dividend->u.name, modulus->u.ival);
 }
 
+static ixs_cmp_op flip_cmp(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GE:
+    return IXS_CMP_LE;
+  case IXS_CMP_GT:
+    return IXS_CMP_LT;
+  case IXS_CMP_LE:
+    return IXS_CMP_GE;
+  case IXS_CMP_LT:
+    return IXS_CMP_GT;
+  default:
+    return op;
+  }
+}
+
+/*
+ * Apply "sym op const" bound to the variable's interval.
+ */
+static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
+                                int64_t cp, int64_t cq) {
+  ixs_var_bound *v = get_or_create_var(b, name);
+  if (!v)
+    return;
+  switch (op) {
+  case IXS_CMP_GE:
+    if (ixs_rat_cmp(cp, cq, v->iv.lo_p, v->iv.lo_q) > 0) {
+      v->iv.lo_p = cp;
+      v->iv.lo_q = cq;
+    }
+    break;
+  case IXS_CMP_GT: {
+    int64_t lo = ixs_rat_floor(cp, cq) + 1;
+    if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+      v->iv.lo_p = lo;
+      v->iv.lo_q = 1;
+    }
+    break;
+  }
+  case IXS_CMP_LE:
+    if (ixs_rat_cmp(cp, cq, v->iv.hi_p, v->iv.hi_q) < 0) {
+      v->iv.hi_p = cp;
+      v->iv.hi_q = cq;
+    }
+    break;
+  case IXS_CMP_LT: {
+    int64_t hi = ixs_rat_ceil(cp, cq) - 1;
+    if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+      v->iv.hi_p = hi;
+      v->iv.hi_q = 1;
+    }
+    break;
+  }
+  case IXS_CMP_EQ:
+    v->iv.lo_p = cp;
+    v->iv.lo_q = cq;
+    v->iv.hi_p = cp;
+    v->iv.hi_q = cq;
+    break;
+  case IXS_CMP_NE:
+    break;
+  }
+}
+
 /*
  * Extract interval bounds and divisibility info from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, d) == 0, etc.
@@ -135,105 +198,18 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   ixs_node *lhs = a->u.binary.lhs;
   ixs_node *rhs = a->u.binary.rhs;
   ixs_cmp_op op = a->u.binary.cmp_op;
-  ixs_var_bound *v;
 
-  /* Pattern: sym op const */
+  /* Normalize to "sym op const" form. */
   if (lhs->tag == IXS_SYM && ixs_node_is_const(rhs)) {
     int64_t rp, rq;
     ixs_node_get_rat(rhs, &rp, &rq);
-    v = get_or_create_var(b, lhs->u.name);
-    if (!v)
-      return;
-    switch (op) {
-    case IXS_CMP_GE:
-      if (ixs_rat_cmp(rp, rq, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = rp;
-        v->iv.lo_q = rq;
-      }
-      break;
-    case IXS_CMP_GT: {
-      /* sym > p/q -> sym >= floor(p/q) + 1 (integer-valued sym) */
-      int64_t lo = ixs_rat_floor(rp, rq) + 1;
-      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = lo;
-        v->iv.lo_q = 1;
-      }
-      break;
-    }
-    case IXS_CMP_LE:
-      if (ixs_rat_cmp(rp, rq, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = rp;
-        v->iv.hi_q = rq;
-      }
-      break;
-    case IXS_CMP_LT: {
-      /* sym < p/q -> sym <= ceil(p/q) - 1 (integer-valued sym) */
-      int64_t hi = ixs_rat_ceil(rp, rq) - 1;
-      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = hi;
-        v->iv.hi_q = 1;
-      }
-      break;
-    }
-    case IXS_CMP_EQ:
-      v->iv.lo_p = rp;
-      v->iv.lo_q = rq;
-      v->iv.hi_p = rp;
-      v->iv.hi_q = rq;
-      break;
-    case IXS_CMP_NE:
-      break;
-    }
+    apply_sym_cmp_const(b, lhs->u.name, op, rp, rq);
     return;
   }
-
-  /* Pattern: const op sym (flip) */
   if (rhs->tag == IXS_SYM && ixs_node_is_const(lhs)) {
     int64_t lp, lq;
     ixs_node_get_rat(lhs, &lp, &lq);
-    v = get_or_create_var(b, rhs->u.name);
-    if (!v)
-      return;
-    switch (op) {
-    case IXS_CMP_GE: /* const >= sym -> sym <= const */
-      if (ixs_rat_cmp(lp, lq, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = lp;
-        v->iv.hi_q = lq;
-      }
-      break;
-    case IXS_CMP_GT: {
-      /* const > sym -> sym <= ceil(const) - 1 */
-      int64_t hi = ixs_rat_ceil(lp, lq) - 1;
-      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = hi;
-        v->iv.hi_q = 1;
-      }
-      break;
-    }
-    case IXS_CMP_LE:
-      if (ixs_rat_cmp(lp, lq, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = lp;
-        v->iv.lo_q = lq;
-      }
-      break;
-    case IXS_CMP_LT: {
-      /* const < sym -> sym >= floor(const) + 1 */
-      int64_t lo = ixs_rat_floor(lp, lq) + 1;
-      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = lo;
-        v->iv.lo_q = 1;
-      }
-      break;
-    }
-    case IXS_CMP_EQ:
-      v->iv.lo_p = lp;
-      v->iv.lo_q = lq;
-      v->iv.hi_p = lp;
-      v->iv.hi_q = lq;
-      break;
-    case IXS_CMP_NE:
-      break;
-    }
+    apply_sym_cmp_const(b, rhs->u.name, flip_cmp(op), lp, lq);
     return;
   }
 
@@ -263,62 +239,8 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     if (!ixs_rat_normalize(raw_p, raw_q, &rp2, &rq2))
       return;
 
-    /* Negative coefficient flips the comparison direction */
-    ixs_cmp_op eff_op = op;
-    if (ixs_rat_cmp(tp, tq, 0, 1) < 0) {
-      switch (op) {
-      case IXS_CMP_GE:
-        eff_op = IXS_CMP_LE;
-        break;
-      case IXS_CMP_GT:
-        eff_op = IXS_CMP_LT;
-        break;
-      case IXS_CMP_LE:
-        eff_op = IXS_CMP_GE;
-        break;
-      case IXS_CMP_LT:
-        eff_op = IXS_CMP_GT;
-        break;
-      default:
-        break;
-      }
-    }
-
-    v = get_or_create_var(b, lhs->u.add.terms[0].term->u.name);
-    if (!v)
-      return;
-    switch (eff_op) {
-    case IXS_CMP_GE:
-      if (ixs_rat_cmp(rp2, rq2, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = rp2;
-        v->iv.lo_q = rq2;
-      }
-      break;
-    case IXS_CMP_GT: {
-      int64_t lo = ixs_rat_floor(rp2, rq2) + 1;
-      if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
-        v->iv.lo_p = lo;
-        v->iv.lo_q = 1;
-      }
-      break;
-    }
-    case IXS_CMP_LE:
-      if (ixs_rat_cmp(rp2, rq2, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = rp2;
-        v->iv.hi_q = rq2;
-      }
-      break;
-    case IXS_CMP_LT: {
-      int64_t hi = ixs_rat_ceil(rp2, rq2) - 1;
-      if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
-        v->iv.hi_p = hi;
-        v->iv.hi_q = 1;
-      }
-      break;
-    }
-    default: /* EQ/NE: not useful here; EQ already handled by sym-op-const */
-      break;
-    }
+    ixs_cmp_op eff_op = (ixs_rat_cmp(tp, tq, 0, 1) < 0) ? flip_cmp(op) : op;
+    apply_sym_cmp_const(b, lhs->u.add.terms[0].term->u.name, eff_op, rp2, rq2);
     return;
   }
 

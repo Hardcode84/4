@@ -2,18 +2,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <ixsimpl.h>
-#include <stdio.h>
 #include <string.h>
 
-static int g_fail;
-
-#define CHECK(cond)                                                            \
-  do {                                                                         \
-    if (!(cond)) {                                                             \
-      fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond);         \
-      g_fail = 1;                                                              \
-    }                                                                          \
-  } while (0)
+#include "test_check.h"
 
 static void test_rat_accessors(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -482,10 +473,6 @@ int main(void) {
   test_walk_null_root();
   test_walk_leaf();
   test_walk_sentinel();
-  if (g_fail) {
-    printf("SOME TESTS FAILED\n");
-    return 1;
-  }
-  printf("all introspect tests passed\n");
-  return 0;
+  printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
+  return tests_passed == tests_run ? 0 : 1;
 }

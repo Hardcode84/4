@@ -9,21 +9,9 @@
 
 #include <ixsimpl.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define CHECK(cond)                                                            \
-  do {                                                                         \
-    tests_run++;                                                               \
-    if (!(cond)) {                                                             \
-      fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond);         \
-    } else {                                                                   \
-      tests_passed++;                                                          \
-    }                                                                          \
-  } while (0)
+#include "test_check.h"
 
 static char buf[4096];
 

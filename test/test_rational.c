@@ -4,7 +4,8 @@
 #include "rational.h"
 #include <assert.h>
 #include <limits.h>
-#include <stdio.h>
+
+#include "test_check.h"
 
 #ifndef INT64_MIN
 #define INT64_MIN (-9223372036854775807LL - 1)
@@ -12,19 +13,6 @@
 #ifndef INT64_MAX
 #define INT64_MAX 9223372036854775807LL
 #endif
-
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define CHECK(cond)                                                            \
-  do {                                                                         \
-    tests_run++;                                                               \
-    if (!(cond)) {                                                             \
-      fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond);         \
-    } else {                                                                   \
-      tests_passed++;                                                          \
-    }                                                                          \
-  } while (0)
 
 static void test_gcd(void) {
   CHECK(ixs_gcd(12, 8) == 4);

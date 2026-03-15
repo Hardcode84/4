@@ -108,6 +108,109 @@ static int nodeptr_cmp(const void *a, const void *b) {
 /*  simp_add                                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Mod recognition pass over additive terms.
+ *
+ *   floor: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N)
+ *   ceil:  c*E + d*ceil(E/N)  where d == -c*N  -> -c*Mod(-E, N)
+ *
+ * Scans for FLOOR/CEIL terms whose arg is MUL(1/N, [(B, exp=1)]) and a
+ * matching base term B with the right coefficient ratio.  Matched
+ * terms are NULLed and the result is rebuilt through simp_add.
+ * Returns the simplified node, or NULL if no pattern matched.
+ */
+static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
+                               uint32_t nterms, int64_t const_p,
+                               int64_t const_q) {
+  bool found = false;
+  uint32_t i, j;
+
+  for (i = 0; i < nterms; i++) {
+    int64_t fp, fq, N;
+    ixs_node *farg, *fbase;
+    bool is_ceil;
+    if (!terms[i].term)
+      continue;
+    if (terms[i].term->tag == IXS_FLOOR)
+      is_ceil = false;
+    else if (terms[i].term->tag == IXS_CEIL)
+      is_ceil = true;
+    else
+      continue;
+    farg = terms[i].term->u.unary.arg;
+    if (farg->tag != IXS_MUL)
+      continue;
+    ixs_node_get_rat(farg->u.mul.coeff, &fp, &fq);
+    if (fp != 1 || fq <= 1)
+      continue;
+    N = fq;
+    if (farg->u.mul.nfactors == 1 && farg->u.mul.factors[0].exp == 1) {
+      fbase = farg->u.mul.factors[0].base;
+    } else {
+      fbase = ixs_node_mul(ctx, ixs_node_int(ctx, 1), farg->u.mul.nfactors,
+                           farg->u.mul.factors);
+      if (!fbase)
+        continue;
+    }
+    if (N == INT64_MIN)
+      continue;
+    for (j = 0; j < nterms; j++) {
+      int64_t bp, bq, rp, rq, want_p, want_q;
+      ixs_node *mod_node;
+      if (j == i || !terms[j].term || terms[j].term != fbase)
+        continue;
+      ixs_node_get_rat(terms[j].coeff, &bp, &bq);
+      ixs_node_get_rat(terms[i].coeff, &rp, &rq);
+      if (!ixs_rat_mul(-N, 1, bp, bq, &want_p, &want_q))
+        continue;
+      if (rp != want_p || rq != want_q)
+        continue;
+      if (is_ceil) {
+        ixs_node *neg_base;
+        if (bp == INT64_MIN)
+          continue;
+        neg_base = simp_mul(ctx, ixs_node_int(ctx, -1), fbase);
+        if (!neg_base)
+          return NULL;
+        mod_node = simp_mod(ctx, neg_base, ixs_node_int(ctx, N));
+        if (!mod_node)
+          return NULL;
+        terms[j].term = mod_node;
+        terms[j].coeff = make_const(ctx, -bp, bq);
+        if (!terms[j].coeff)
+          return NULL;
+      } else {
+        mod_node = simp_mod(ctx, fbase, ixs_node_int(ctx, N));
+        if (!mod_node)
+          return NULL;
+        terms[j].term = mod_node;
+      }
+      terms[i].term = NULL;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found)
+    return NULL;
+
+  ixs_node *result = make_const(ctx, const_p, const_q);
+  if (!result)
+    return NULL;
+  for (i = 0; i < nterms; i++) {
+    ixs_node *t;
+    if (!terms[i].term)
+      continue;
+    t = simp_mul(ctx, terms[i].coeff, terms[i].term);
+    if (!t)
+      return NULL;
+    result = simp_add(ctx, result, t);
+    if (!result)
+      return NULL;
+  }
+  return result;
+}
+
 static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop;
   int64_t const_p = 0, const_q = 1;
@@ -195,96 +298,10 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
   nterms = j;
 
-  /* Mod recognition:
-   *   floor: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N)
-   *   ceil:  c*E + d*ceil(E/N)  where d == -c*N  -> -c*Mod(-E, N)
-   * Scan for FLOOR/CEIL terms whose arg is MUL(1/N, [(B, exp=1)]) and a
-   * matching base term B with the right coefficient ratio.  Matched
-   * terms are NULLed and the result is rebuilt through simp_add. */
   {
-    bool found_mod = false;
-    for (i = 0; i < nterms; i++) {
-      int64_t fp, fq, N;
-      ixs_node *farg, *fbase;
-      bool is_ceil;
-      if (!terms[i].term)
-        continue;
-      if (terms[i].term->tag == IXS_FLOOR)
-        is_ceil = false;
-      else if (terms[i].term->tag == IXS_CEIL)
-        is_ceil = true;
-      else
-        continue;
-      farg = terms[i].term->u.unary.arg;
-      if (farg->tag != IXS_MUL)
-        continue;
-      ixs_node_get_rat(farg->u.mul.coeff, &fp, &fq);
-      if (fp != 1 || fq <= 1)
-        continue;
-      N = fq;
-      if (farg->u.mul.nfactors == 1 && farg->u.mul.factors[0].exp == 1) {
-        fbase = farg->u.mul.factors[0].base;
-      } else {
-        fbase = ixs_node_mul(ctx, ixs_node_int(ctx, 1), farg->u.mul.nfactors,
-                             farg->u.mul.factors);
-        if (!fbase)
-          continue;
-      }
-      if (N == INT64_MIN)
-        continue;
-      for (j = 0; j < nterms; j++) {
-        int64_t bp, bq, rp, rq, want_p, want_q;
-        ixs_node *mod_node;
-        if (j == i || !terms[j].term || terms[j].term != fbase)
-          continue;
-        ixs_node_get_rat(terms[j].coeff, &bp, &bq);
-        ixs_node_get_rat(terms[i].coeff, &rp, &rq);
-        if (!ixs_rat_mul(-N, 1, bp, bq, &want_p, &want_q))
-          continue;
-        if (rp != want_p || rq != want_q)
-          continue;
-        if (is_ceil) {
-          ixs_node *neg_base;
-          if (bp == INT64_MIN)
-            continue;
-          neg_base = simp_mul(ctx, ixs_node_int(ctx, -1), fbase);
-          if (!neg_base)
-            return NULL;
-          mod_node = simp_mod(ctx, neg_base, ixs_node_int(ctx, N));
-          if (!mod_node)
-            return NULL;
-          terms[j].term = mod_node;
-          terms[j].coeff = make_const(ctx, -bp, bq);
-          if (!terms[j].coeff)
-            return NULL;
-        } else {
-          mod_node = simp_mod(ctx, fbase, ixs_node_int(ctx, N));
-          if (!mod_node)
-            return NULL;
-          terms[j].term = mod_node;
-        }
-        terms[i].term = NULL;
-        found_mod = true;
-        break;
-      }
-    }
-    if (found_mod) {
-      ixs_node *result = make_const(ctx, const_p, const_q);
-      if (!result)
-        return NULL;
-      for (i = 0; i < nterms; i++) {
-        ixs_node *t;
-        if (!terms[i].term)
-          continue;
-        t = simp_mul(ctx, terms[i].coeff, terms[i].term);
-        if (!t)
-          return NULL;
-        result = simp_add(ctx, result, t);
-        if (!result)
-          return NULL;
-      }
-      return result;
-    }
+    ixs_node *mod_result = recognize_mod(ctx, terms, nterms, const_p, const_q);
+    if (mod_result)
+      return mod_result;
   }
 
   /* Result cases. */
@@ -667,40 +684,39 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   return rnd(ctx, expanded);
 }
 
-ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
+typedef int64_t (*rat_fold_fn)(int64_t p, int64_t q);
+typedef ixs_node *(*node_ctor)(ixs_ctx *, ixs_node *);
+
+static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
+                            rat_fold_fn fold, round_fn rnd, node_ctor ctor) {
   ixs_node *prop = ixs_propagate1(x);
   if (prop)
     return prop;
 
-  /* floor(integer) -> identity */
   if (x->tag == IXS_INT)
     return x;
 
-  /* floor(p/q) -> constant fold */
   if (x->tag == IXS_RAT)
-    return ixs_node_int(ctx, ixs_rat_floor(x->u.rat.p, x->u.rat.q));
+    return ixs_node_int(ctx, fold(x->u.rat.p, x->u.rat.q));
 
-  /* floor(floor(x)) -> floor(x), floor(ceil(x)) -> ceil(x) */
   if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
     return x;
 
   if (ixs_node_is_integer_valued(x))
     return x;
 
-  /* Extract integer-valued addends from floor(ADD). */
-  ixs_node *r = round_extract_add(ctx, x, simp_floor);
+  ixs_node *r = round_extract_add(ctx, x, rnd);
   if (r != x)
     return r;
 
-  /* Distribute into floor(MUL(..., ADD^1)) and extract. */
-  r = round_extract_mul_add(ctx, x, simp_floor);
+  r = round_extract_mul_add(ctx, x, rnd);
   if (r != x)
     return r;
 
-  /* floor(floor(y)/b) -> floor(y/b) for positive integer b. */
+  /* rnd(rnd(y)/b) -> rnd(y/b) for positive integer b. */
   if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
-      x->u.mul.factors[0].base->tag == IXS_FLOOR) {
+      x->u.mul.factors[0].base->tag == self_tag) {
     int64_t cp, cq;
     ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
     if (cp == 1 && cq > 1) {
@@ -708,11 +724,11 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
       ixs_node *scaled = simp_mul(ctx, x->u.mul.coeff, inner_arg);
       if (!scaled)
         return NULL;
-      return simp_floor(ctx, scaled);
+      return rnd(ctx, scaled);
     }
   }
 
-  /* floor(Mod(X, M) / K) -> Mod(floor(X / K), M / K) when K | M. */
+  /* rnd(Mod(X, M) / K) -> Mod(rnd(X / K), M / K) when K | M. */
   if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_MOD) {
@@ -720,85 +736,27 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
     ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
     if (cp == 1 && cq > 1) {
       ixs_node *mod = x->u.mul.factors[0].base;
-      ixs_node *rhs = mod->u.binary.rhs;
-      if (rhs->tag == IXS_INT && rhs->u.ival > 0 && rhs->u.ival % cq == 0) {
+      ixs_node *mrhs = mod->u.binary.rhs;
+      if (mrhs->tag == IXS_INT && mrhs->u.ival > 0 && mrhs->u.ival % cq == 0) {
         ixs_node *inner =
-            simp_floor(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
+            rnd(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
         if (!inner)
           return NULL;
-        return simp_mod(ctx, inner, ixs_node_int(ctx, rhs->u.ival / cq));
+        return simp_mod(ctx, inner, ixs_node_int(ctx, mrhs->u.ival / cq));
       }
     }
   }
 
-  return ixs_node_floor(ctx, x);
+  return ctor(ctx, x);
+}
+
+ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
+  return simp_round(ctx, x, IXS_FLOOR, ixs_rat_floor, simp_floor,
+                    ixs_node_floor);
 }
 
 ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
-  ixs_node *prop = ixs_propagate1(x);
-  if (prop)
-    return prop;
-
-  /* ceil(integer) -> identity */
-  if (x->tag == IXS_INT)
-    return x;
-
-  /* ceil(p/q) -> constant fold */
-  if (x->tag == IXS_RAT)
-    return ixs_node_int(ctx, ixs_rat_ceil(x->u.rat.p, x->u.rat.q));
-
-  /* ceil(ceil(x)) -> ceil(x), ceil(floor(x)) -> floor(x) */
-  if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
-    return x;
-
-  if (ixs_node_is_integer_valued(x))
-    return x;
-
-  /* Extract integer-valued addends from ceil(ADD). */
-  ixs_node *r = round_extract_add(ctx, x, simp_ceil);
-  if (r != x)
-    return r;
-
-  /* Distribute into ceil(MUL(..., ADD^1)) and extract. */
-  r = round_extract_mul_add(ctx, x, simp_ceil);
-  if (r != x)
-    return r;
-
-  /* ceil(ceil(y)/b) -> ceiling(y/b) for positive integer b. */
-  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
-      x->u.mul.factors[0].exp == 1 &&
-      x->u.mul.factors[0].base->tag == IXS_CEIL) {
-    int64_t cp, cq;
-    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
-    if (cp == 1 && cq > 1) {
-      ixs_node *inner_arg = x->u.mul.factors[0].base->u.unary.arg;
-      ixs_node *scaled = simp_mul(ctx, x->u.mul.coeff, inner_arg);
-      if (!scaled)
-        return NULL;
-      return simp_ceil(ctx, scaled);
-    }
-  }
-
-  /* ceil(Mod(X, M) / K) -> Mod(ceil(X / K), M / K) when K | M. */
-  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
-      x->u.mul.factors[0].exp == 1 &&
-      x->u.mul.factors[0].base->tag == IXS_MOD) {
-    int64_t cp, cq;
-    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
-    if (cp == 1 && cq > 1) {
-      ixs_node *mod = x->u.mul.factors[0].base;
-      ixs_node *rhs = mod->u.binary.rhs;
-      if (rhs->tag == IXS_INT && rhs->u.ival > 0 && rhs->u.ival % cq == 0) {
-        ixs_node *inner =
-            simp_ceil(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
-        if (!inner)
-          return NULL;
-        return simp_mod(ctx, inner, ixs_node_int(ctx, rhs->u.ival / cq));
-      }
-    }
-  }
-
-  return ixs_node_ceil(ctx, x);
+  return simp_round(ctx, x, IXS_CEIL, ixs_rat_ceil, simp_ceil, ixs_node_ceil);
 }
 
 /* ------------------------------------------------------------------ */

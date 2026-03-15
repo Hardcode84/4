@@ -150,6 +150,25 @@ static ixs_node *parse_func_1(parser *p, const char *name) {
   return arg;
 }
 
+typedef ixs_node *(*binary_ctor)(ixs_ctx *, ixs_node *, ixs_node *);
+
+static ixs_node *parse_func_2(parser *p, const char *name, binary_ctor ctor) {
+  if (!match_char(p, '('))
+    return parse_error(p, "expected '(' after function name");
+  ixs_node *a = parse_expr(p);
+  if (!a)
+    return NULL;
+  if (!match_char(p, ','))
+    return parse_error(p, "expected ',' in function call");
+  ixs_node *b = parse_expr(p);
+  if (!b)
+    return NULL;
+  if (!match_char(p, ')'))
+    return parse_error(p, "expected ')' after function arguments");
+  (void)name;
+  return ctor(p->ctx, a, b);
+}
+
 static ixs_node *parse_piecewise_impl(parser *p) {
   size_t cap = 16;
   ixs_node **values =
@@ -262,108 +281,24 @@ static ixs_node *parse_atom(parser *p) {
     return result ? simp_ceil(p->ctx, result) : NULL;
   }
   if (match_str(p, "Mod")) {
-    if (!match_char(p, '(')) {
-      depth_pop(p);
-      return parse_error(p, "expected '(' after Mod");
-    }
-    ixs_node *a = parse_expr(p);
-    if (!a) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ',')) {
-      depth_pop(p);
-      return parse_error(p, "expected ',' in Mod");
-    }
-    ixs_node *b = parse_expr(p);
-    if (!b) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ')')) {
-      depth_pop(p);
-      return parse_error(p, "expected ')' after Mod");
-    }
+    result = parse_func_2(p, "Mod", simp_mod);
     depth_pop(p);
-    return simp_mod(p->ctx, a, b);
+    return result;
   }
   if (match_str(p, "Max")) {
-    if (!match_char(p, '(')) {
-      depth_pop(p);
-      return parse_error(p, "expected '(' after Max");
-    }
-    ixs_node *a = parse_expr(p);
-    if (!a) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ',')) {
-      depth_pop(p);
-      return parse_error(p, "expected ',' in Max");
-    }
-    ixs_node *b = parse_expr(p);
-    if (!b) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ')')) {
-      depth_pop(p);
-      return parse_error(p, "expected ')' after Max");
-    }
+    result = parse_func_2(p, "Max", simp_max);
     depth_pop(p);
-    return simp_max(p->ctx, a, b);
+    return result;
   }
   if (match_str(p, "Min")) {
-    if (!match_char(p, '(')) {
-      depth_pop(p);
-      return parse_error(p, "expected '(' after Min");
-    }
-    ixs_node *a = parse_expr(p);
-    if (!a) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ',')) {
-      depth_pop(p);
-      return parse_error(p, "expected ',' in Min");
-    }
-    ixs_node *b = parse_expr(p);
-    if (!b) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ')')) {
-      depth_pop(p);
-      return parse_error(p, "expected ')' after Min");
-    }
+    result = parse_func_2(p, "Min", simp_min);
     depth_pop(p);
-    return simp_min(p->ctx, a, b);
+    return result;
   }
   if (match_str(p, "xor")) {
-    if (!match_char(p, '(')) {
-      depth_pop(p);
-      return parse_error(p, "expected '(' after xor");
-    }
-    ixs_node *a = parse_expr(p);
-    if (!a) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ',')) {
-      depth_pop(p);
-      return parse_error(p, "expected ',' in xor");
-    }
-    ixs_node *b = parse_expr(p);
-    if (!b) {
-      depth_pop(p);
-      return NULL;
-    }
-    if (!match_char(p, ')')) {
-      depth_pop(p);
-      return parse_error(p, "expected ')' after xor");
-    }
+    result = parse_func_2(p, "xor", simp_xor);
     depth_pop(p);
-    return simp_xor(p->ctx, a, b);
+    return result;
   }
   if (match_str(p, "Piecewise")) {
     result = parse_piecewise(p);
