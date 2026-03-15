@@ -222,6 +222,33 @@ ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
 uint32_t ixs_node_logic_nargs(ixs_node *node);
 ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
 
+/* --- Tree walk --------------------------------------------------------- */
+
+typedef enum {
+  IXS_WALK_CONTINUE,
+  IXS_WALK_SKIP,
+  IXS_WALK_STOP
+} ixs_walk_action;
+
+/* Callback must return exactly one of the three values above.
+ * Any other return value is undefined behavior. */
+typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
+
+/* Pre-order: visit node, then recurse into children.
+ * Returns root on completion, the stopping node on STOP, NULL on OOM.
+ * NULL root returns NULL (no-op).
+ * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
+ * must check ixs_node_tag before using type-specific accessors.
+ * SKIP prevents descent into children. */
+ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+                       void *userdata);
+
+/* Post-order: recurse into children, then visit node.
+ * Same return/NULL/sentinel semantics as ixs_walk_pre.
+ * SKIP is a no-op in post-order (children already visited). */
+ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+                        void *userdata);
+
 #ifdef __cplusplus
 }
 #endif

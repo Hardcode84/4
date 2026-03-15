@@ -190,6 +190,154 @@ static void test_logic_accessors(void) {
   printf("  logic_accessors: OK\n");
 }
 
+/* ---- Walk tests ---- */
+
+typedef struct {
+  ixs_tag *tags;
+  uint32_t count;
+  uint32_t cap;
+} tag_log;
+
+static ixs_walk_action log_tags(ixs_node *node, void *ud) {
+  tag_log *log = (tag_log *)ud;
+  if (log->count < log->cap)
+    log->tags[log->count] = ixs_node_tag(node);
+  log->count++;
+  return IXS_WALK_CONTINUE;
+}
+
+static void test_walk_pre_order(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  /* 5*x: MUL(coeff=5, factors=[{x,1}]) */
+  ixs_node *expr = ixs_mul(ctx, ixs_int(ctx, 5), x);
+
+  ixs_tag buf[16];
+  tag_log log = {buf, 0, 16};
+  ixs_node *res = ixs_walk_pre(ctx, expr, log_tags, &log);
+
+  CHECK(res == expr);
+  CHECK(log.count == 3);
+  CHECK(buf[0] == IXS_MUL);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_pre_order: OK\n");
+}
+
+static void test_walk_post_order(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *expr = ixs_mul(ctx, ixs_int(ctx, 5), x);
+
+  ixs_tag buf[16];
+  tag_log log = {buf, 0, 16};
+  ixs_node *res = ixs_walk_post(ctx, expr, log_tags, &log);
+
+  CHECK(res == expr);
+  CHECK(log.count == 3);
+  CHECK(buf[log.count - 1] == IXS_MUL);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_post_order: OK\n");
+}
+
+static ixs_walk_action stop_on_sym(ixs_node *node, void *ud) {
+  (void)ud;
+  if (ixs_node_tag(node) == IXS_SYM)
+    return IXS_WALK_STOP;
+  return IXS_WALK_CONTINUE;
+}
+
+static void test_walk_stop(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  ixs_node *expr = ixs_add(ctx, a, b);
+
+  ixs_node *res = ixs_walk_pre(ctx, expr, stop_on_sym, NULL);
+  CHECK(res != NULL);
+  CHECK(res != expr);
+  CHECK(ixs_node_tag(res) == IXS_SYM);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_stop: OK\n");
+}
+
+static ixs_walk_action skip_add(ixs_node *node, void *ud) {
+  tag_log *log = (tag_log *)ud;
+  if (log->count < log->cap)
+    log->tags[log->count] = ixs_node_tag(node);
+  log->count++;
+  if (ixs_node_tag(node) == IXS_ADD)
+    return IXS_WALK_SKIP;
+  return IXS_WALK_CONTINUE;
+}
+
+static void test_walk_skip(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  /* mod(a + b, 3): MOD(lhs=ADD(a,b), rhs=3) */
+  ixs_node *sum = ixs_add(ctx, a, b);
+  ixs_node *expr = ixs_mod(ctx, sum, ixs_int(ctx, 3));
+
+  ixs_tag buf[32];
+  tag_log log = {buf, 0, 32};
+  ixs_node *res = ixs_walk_pre(ctx, expr, skip_add, &log);
+  CHECK(res == expr);
+
+  uint32_t i;
+  int found_sym = 0;
+  for (i = 0; i < log.count; i++) {
+    if (buf[i] == IXS_SYM)
+      found_sym = 1;
+  }
+  CHECK(!found_sym);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_skip: OK\n");
+}
+
+static void test_walk_null_root(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *res = ixs_walk_pre(ctx, NULL, log_tags, NULL);
+  CHECK(res == NULL);
+  res = ixs_walk_post(ctx, NULL, log_tags, NULL);
+  CHECK(res == NULL);
+  ixs_ctx_destroy(ctx);
+  printf("  walk_null_root: OK\n");
+}
+
+static void test_walk_leaf(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *n = ixs_int(ctx, 42);
+
+  ixs_tag buf[4];
+  tag_log log = {buf, 0, 4};
+  ixs_node *res = ixs_walk_pre(ctx, n, log_tags, &log);
+  CHECK(res == n);
+  CHECK(log.count == 1);
+  CHECK(buf[0] == IXS_INT);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_leaf: OK\n");
+}
+
+static void test_walk_sentinel(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *err = ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 0));
+  CHECK(ixs_is_error(err));
+
+  ixs_tag buf[4];
+  tag_log log = {buf, 0, 4};
+  ixs_node *res = ixs_walk_pre(ctx, err, log_tags, &log);
+  CHECK(res == err);
+  CHECK(log.count == 1);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_sentinel: OK\n");
+}
+
 int main(void) {
   printf("test_introspect:\n");
   test_rat_accessors();
@@ -200,6 +348,13 @@ int main(void) {
   test_binary_accessors();
   test_pw_accessors();
   test_logic_accessors();
+  test_walk_pre_order();
+  test_walk_post_order();
+  test_walk_stop();
+  test_walk_skip();
+  test_walk_null_root();
+  test_walk_leaf();
+  test_walk_sentinel();
   if (g_fail) {
     printf("SOME TESTS FAILED\n");
     return 1;

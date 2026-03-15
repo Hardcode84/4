@@ -29,6 +29,7 @@ else()
         src/print.c
         src/rational.c
         src/simplify.c
+        src/walk.c
     )
 endif()
 
