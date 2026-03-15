@@ -1223,6 +1223,36 @@ ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
 ~20 functions, all trivial one-liners into the internal union fields
 (except `ixs_node_unary_arg` which branches on tag internally).
 
+#### Generic child access
+
+```c
+/* Number of child node pointers.  Leaves return 0. */
+uint32_t ixs_node_nchildren(ixs_node *node);
+
+/* i-th child node.  i must be < ixs_node_nchildren(node). */
+ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
+```
+
+Single point of truth for "which child-node pointers does this node
+have?" — used by the walk and available to FFI callers for custom
+traversal without callbacks.  Child order matches the type-specific
+accessors:
+
+| Tag | nchildren | order |
+|-----|-----------|-------|
+| ADD | 1 + 2*nterms | coeff, (term_coeff[0], term[0]), ... |
+| MUL | 1 + nfactors | coeff, base[0], base[1], ... |
+| binary | 2 | lhs, rhs |
+| unary | 1 | arg |
+| PW | 2*ncases | (value[0], cond[0]), ... |
+| AND/OR | nargs | arg[0], arg[1], ... |
+| leaves | 0 | — |
+
+Non-node data (MUL exponents, CMP operator) is not exposed through
+this API — use the type-specific accessors for that.  The generic
+child API is intended for traversal, not for structural operations
+like hashing, equality, or printing.
+
 #### Tree walk
 
 ```c

@@ -299,6 +299,10 @@ static void test_nchildren_child_logic(void) {
 
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_nchildren(and_node) == 2);
+  CHECK(ixs_same_node(ixs_node_child(and_node, 0),
+                      ixs_node_logic_arg(and_node, 0)));
+  CHECK(ixs_same_node(ixs_node_child(and_node, 1),
+                      ixs_node_logic_arg(and_node, 1)));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_logic: OK\n");
