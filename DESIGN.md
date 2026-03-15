@@ -1749,7 +1749,10 @@ met (< 50ms total).
    - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
 5. **Fuzz testing**: Hypothesis-based (see below).
 6. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
-   Track regressions in CI.
+   Track regressions in CI.  `bench/bench_sympy.py` runs ixsimpl vs
+   `sympy.simplify` and `sympy.cancel` on the full corpus.  Typical
+   results: ixsimpl ~23 ms total vs sympy.cancel ~25 s (~1000x) and
+   sympy.simplify ~1000 s (~45000x).
 
 ### Fuzz Testing with Hypothesis
 
