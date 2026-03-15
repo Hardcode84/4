@@ -3728,7 +3728,7 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (ixs_node_is_zero(b))
     return simp_err(ctx, "division by zero");
 
-  /* Constant / constant → rational fold */
+  /* Constant / constant -> rational fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
     int64_t ap, aq, bp, bq, rp, rq;
     ixs_node_get_rat(a, &ap, &aq);
@@ -3738,7 +3738,7 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return make_const(ctx, rp, rq);
   }
 
-  /* expr / constant → multiply by reciprocal */
+  /* expr / constant -> multiply by reciprocal */
   if (ixs_node_is_const(b)) {
     int64_t bp, bq, rp, rq;
     ixs_node_get_rat(b, &bp, &bq);
@@ -3766,13 +3766,16 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 typedef ixs_node *(*round_fn)(ixs_ctx *, ixs_node *);
 
 /* Multiply acc by base^exp via repeated simp_mul/simp_div.
- * Guards against -INT32_MIN overflow.  Returns NULL on OOM. */
+ * Caps magnitude at 64 (matching EXPAND_MAX_EXP) to prevent runaway
+ * loops on degenerate exponents.  Returns NULL on OOM or overflow. */
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp) {
   if (!acc || exp == 0)
     return acc;
   bool pos = (exp > 0);
   int32_t mag = pos ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
+  if (mag > 64)
+    return NULL;
   int32_t i;
   for (i = 0; i < mag && acc; i++)
     acc = pos ? simp_mul(ctx, acc, base) : simp_div(ctx, acc, base);
@@ -3937,15 +3940,15 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
   if (prop)
     return prop;
 
-  /* floor(integer) → identity */
+  /* floor(integer) -> identity */
   if (x->tag == IXS_INT)
     return x;
 
-  /* floor(p/q) → constant fold */
+  /* floor(p/q) -> constant fold */
   if (x->tag == IXS_RAT)
     return ixs_node_int(ctx, ixs_rat_floor(x->u.rat.p, x->u.rat.q));
 
-  /* floor(floor(x)) → floor(x), floor(ceil(x)) → ceil(x) */
+  /* floor(floor(x)) -> floor(x), floor(ceil(x)) -> ceil(x) */
   if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
     return x;
 
@@ -3962,7 +3965,7 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
   if (r != x)
     return r;
 
-  /* floor(floor(y)/b) → floor(y/b) for positive integer b. */
+  /* floor(floor(y)/b) -> floor(y/b) for positive integer b. */
   if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_FLOOR) {
@@ -3985,12 +3988,15 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
   if (prop)
     return prop;
 
+  /* ceil(integer) -> identity */
   if (x->tag == IXS_INT)
     return x;
 
+  /* ceil(p/q) -> constant fold */
   if (x->tag == IXS_RAT)
     return ixs_node_int(ctx, ixs_rat_ceil(x->u.rat.p, x->u.rat.q));
 
+  /* ceil(ceil(x)) -> ceil(x), ceil(floor(x)) -> floor(x) */
   if (x->tag == IXS_FLOOR || x->tag == IXS_CEIL)
     return x;
 
@@ -4007,7 +4013,7 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
   if (r != x)
     return r;
 
-  /* ceil(ceil(y)/b) → ceiling(y/b) for positive integer b. */
+  /* ceil(ceil(y)/b) -> ceiling(y/b) for positive integer b. */
   if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_CEIL) {
@@ -4036,11 +4042,11 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (prop)
     return prop;
 
-  /* Mod(x, 0) → error */
+  /* Mod(x, 0) -> error */
   if (ixs_node_is_zero(b))
     return simp_err(ctx, "Mod: divisor is zero");
 
-  /* Mod(c1, c2) → constant fold */
+  /* Mod(c1, c2) -> constant fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
     int64_t ap, aq, bp, bq, rp, rq;
     ixs_node_get_rat(a, &ap, &aq);
@@ -4052,11 +4058,11 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return make_const(ctx, rp, rq);
   }
 
-  /* Mod(x, 1) → 0 when x is known integer-valued. */
+  /* Mod(x, 1) -> 0 when x is known integer-valued. */
   if (ixs_node_is_one(b) && ixs_node_is_integer_valued(a))
     return ixs_node_int(ctx, 0);
 
-  /* Mod(c*t, m) → 0 when t is integer-valued and m divides c.
+  /* Mod(c*t, m) -> 0 when t is integer-valued and m divides c.
    * Catches Mod(a*floor(x/a), a) and similar. */
   if (a->tag == IXS_MUL && b->tag == IXS_INT && b->u.ival > 0) {
     int64_t cp, cq;
@@ -4076,7 +4082,7 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     }
   }
 
-  /* Mod(Mod(x, m), m) → Mod(x, m) */
+  /* Mod(Mod(x, m), m) -> Mod(x, m) */
   if (a->tag == IXS_MOD && a->u.binary.rhs == b)
     return a;
 
@@ -4149,7 +4155,7 @@ ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
    * coefficient divides the modulus.  Corrected from the Wave compiler:
    * use gcd(|ci|) not min(|ci|) for the bound on the extractable constant.
    *
-   *   Mod(4*floor(a) + 3, 16)  →  Mod(4*floor(a), 16) + 3
+   *   Mod(4*floor(a) + 3, 16)  ->  Mod(4*floor(a), 16) + 3
    *
    * Proof: each |ci| | q, so sum = Σ ci*ti is a multiple of g = gcd(|ci|).
    * Then (sum mod q) ∈ {0, g, 2g, ..., q-g}.  If 0 < c < g, then
@@ -4314,7 +4320,7 @@ ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
     return result ? ctx->node_true : ctx->node_false;
   }
 
-  /* a op a → fold */
+  /* a op a -> fold */
   if (a == b) {
     switch (op) {
     case IXS_CMP_GE:
@@ -4328,7 +4334,7 @@ ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
     }
   }
 
-  /* Normalize: (a op b) → ((a - b) op 0) */
+  /* Normalize: (a op b) -> ((a - b) op 0) */
   if (!ixs_node_is_zero(b)) {
     ixs_node *diff = simp_sub(ctx, a, b);
     if (!diff)
@@ -4355,11 +4361,11 @@ ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
   if (a->tag == IXS_FALSE)
     return ctx->node_true;
 
-  /* ~~x → x */
+  /* ~~x -> x */
   if (a->tag == IXS_NOT)
     return a->u.unary_bool.arg;
 
-  /* ~(a > b) → a <= b, etc. */
+  /* ~(a > b) -> a <= b, etc. */
   if (a->tag == IXS_CMP) {
     ixs_cmp_op flipped;
     switch (a->u.binary.cmp_op) {
@@ -5005,14 +5011,14 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       if (collapsed)
         return collapsed;
 
-      /* floor(x) → x when x is provably integer via divisibility */
+      /* floor(x) -> x when x is provably integer via divisibility */
       if (is_integer_with_divinfo(bnds, arg))
         return arg;
 
       /* Drop a small rational constant from floor's argument when every
        * term is a non-negative-integer-valued multiple of 1/qi.
        *
-       *   floor(floor(a)/3 + 1/6)  →  floor(floor(a)/3)
+       *   floor(floor(a)/3 + 1/6)  ->  floor(floor(a)/3)
        *
        * Each ti/qi has fractional part in {0, 1/L, ..., (L-1)/L} where
        * L = lcm(qi).  If 0 < r < 1/L, adding r can't cross an integer
@@ -5077,7 +5083,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       if (collapsed)
         return collapsed;
 
-      /* ceil(x) → x when x is provably integer via divisibility */
+      /* ceil(x) -> x when x is provably integer via divisibility */
       if (is_integer_with_divinfo(bnds, arg))
         return arg;
     }
@@ -5090,13 +5096,13 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       return NULL;
 
     if (bnds && r->tag == IXS_INT && r->u.ival > 0) {
-      /* Mod(x, m) where 0 <= x < m → x */
+      /* Mod(x, m) where 0 <= x < m -> x */
       ixs_interval iv = ixs_bounds_get(bnds, l);
       if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
           iv.hi_p < r->u.ival)
         return l;
 
-      /* Mod(x, m) → 0 when x is known divisible by m */
+      /* Mod(x, m) -> 0 when x is known divisible by m */
       if (is_known_divisible(bnds, l, r->u.ival))
         return ixs_node_int(ctx, 0);
     }
