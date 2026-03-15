@@ -4080,23 +4080,17 @@ static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
     }
   }
 
-  /* floor(Mod(X, M) / K) -> Mod(floor(X / K), M / K) when K | M.
-   * Floor-only: ceil(r/K) can reach M/K, making Mod wrap to 0. */
+  /* floor(Mod(X, M) / K) -> 0 when K >= M > 0.
+   * Proof: 0 <= Mod(X, M) < M <= K, so 0 <= Mod(X, M)/K < 1. */
   if (self_tag == IXS_FLOOR && x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_MOD) {
     int64_t cp, cq;
     ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
     if (cp == 1 && cq > 1) {
-      ixs_node *mod = x->u.mul.factors[0].base;
-      ixs_node *mrhs = mod->u.binary.rhs;
-      if (mrhs->tag == IXS_INT && mrhs->u.ival > 0 && mrhs->u.ival % cq == 0) {
-        ixs_node *inner =
-            rnd(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
-        if (!inner)
-          return NULL;
-        return simp_mod(ctx, inner, ixs_node_int(ctx, mrhs->u.ival / cq));
-      }
+      ixs_node *mrhs = x->u.mul.factors[0].base->u.binary.rhs;
+      if (mrhs->tag == IXS_INT && mrhs->u.ival > 0 && mrhs->u.ival <= cq)
+        return ixs_node_int(ctx, 0);
     }
   }
 

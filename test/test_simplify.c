@@ -816,12 +816,11 @@ static void test_mod_floor_regression(void) {
   /* ceiling(Mod(x, n)) -> Mod(x, n) */
   CHECK(ixs_ceil(ctx, mx16) == mx16);
 
-  /* floor(Mod(x, 64)/16) -> Mod(floor(x/16), 4) when 16 | 64. */
+  /* floor(Mod(x, 64)/16) stays as-is (mod-then-divide is the preferred form).
+   */
   ixs_node *subfield = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(subfield == ixs_mod(ctx,
-                            ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
-                            ixs_int(ctx, 4)));
+  CHECK(ixs_node_tag(subfield) == IXS_FLOOR);
 
   /* floor(x + 1/2) -> x for integer-valued x (fractional part drops) */
   ixs_node *fhalf = ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
@@ -947,27 +946,19 @@ static void test_floor_mod_divisor(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
 
-  /* floor(Mod(x, 64) / 16) -> Mod(floor(x / 16), 4) */
+  /* floor(Mod(x, 64) / 16) stays: the "mod-then-divide" form is the natural
+   * hardware idiom for GPU thread index decomposition and maps directly to
+   * two affine ops.  Rewriting to Mod(floor(x/16), 4) is complexity-neutral
+   * and obscures the hardware mapping. */
   ixs_node *e = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(e == ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
-                     ixs_int(ctx, 4)));
+  CHECK(ixs_node_tag(e) == IXS_FLOOR);
 
-  /* ceil(Mod(x, 64) / 16) stays — identity only holds for floor. */
-  e = ixs_ceil(
-      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(e == ixs_ceil(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
-                                   ixs_int(ctx, 16))));
-
-  /* floor(Mod(x, 32) / 32) -> 0 (M/K == 1, Mod(..., 1) -> 0) */
+  /* floor(Mod(x, 32) / 32) -> 0 (range of Mod is [0, 31], divided by 32 < 1,
+   * floor rounds to 0). */
   e = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 32)));
   CHECK(e == ixs_int(ctx, 0));
-
-  /* No match when K does not divide M: floor(Mod(x, 64) / 5) stays */
-  e = ixs_floor(
-      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 5)));
-  CHECK(ixs_node_tag(e) == IXS_FLOOR);
 
   ixs_ctx_destroy(ctx);
 }
