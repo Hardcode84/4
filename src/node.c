@@ -462,11 +462,14 @@ ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
 
 ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
                        ixs_addterm *terms) {
-  ixs_addterm *a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
-                                   sizeof(void *));
-  if (!a && nterms > 0)
-    return NULL;
-  memcpy(a, terms, nterms * sizeof(ixs_addterm));
+  ixs_addterm *a = NULL;
+  if (nterms > 0) {
+    a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
+                        sizeof(void *));
+    if (!a)
+      return NULL;
+    memcpy(a, terms, nterms * sizeof(ixs_addterm));
+  }
 
   ixs_node *n = alloc_node(ctx);
   if (!n)
@@ -481,11 +484,14 @@ ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
 
 ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
                        ixs_mulfactor *factors) {
-  ixs_mulfactor *f = ixs_arena_alloc(
-      &ctx->arena, nfactors * sizeof(ixs_mulfactor), sizeof(void *));
-  if (!f && nfactors > 0)
-    return NULL;
-  memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+  ixs_mulfactor *f = NULL;
+  if (nfactors > 0) {
+    f = ixs_arena_alloc(&ctx->arena, nfactors * sizeof(ixs_mulfactor),
+                        sizeof(void *));
+    if (!f)
+      return NULL;
+    memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+  }
 
   ixs_node *n = alloc_node(ctx);
   if (!n)

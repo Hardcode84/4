@@ -176,6 +176,7 @@ bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   return b->vars != NULL;
 }
 
+/* All bounds storage lives in the scratch arena; no per-object cleanup. */
 void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
 
 bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
@@ -899,6 +900,8 @@ ixs_node *ixs_false(ixs_ctx *ctx) { return ctx->node_false; }
 /* ------------------------------------------------------------------ */
 
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len) {
+  if (!input)
+    return ctx->sentinel_parse_error;
   return ixs_parse_impl(ctx, input, len);
 }
 
@@ -1588,11 +1591,14 @@ ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
 
 ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
                        ixs_addterm *terms) {
-  ixs_addterm *a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
-                                   sizeof(void *));
-  if (!a && nterms > 0)
-    return NULL;
-  memcpy(a, terms, nterms * sizeof(ixs_addterm));
+  ixs_addterm *a = NULL;
+  if (nterms > 0) {
+    a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
+                        sizeof(void *));
+    if (!a)
+      return NULL;
+    memcpy(a, terms, nterms * sizeof(ixs_addterm));
+  }
 
   ixs_node *n = alloc_node(ctx);
   if (!n)
@@ -1607,11 +1613,14 @@ ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
 
 ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
                        ixs_mulfactor *factors) {
-  ixs_mulfactor *f = ixs_arena_alloc(
-      &ctx->arena, nfactors * sizeof(ixs_mulfactor), sizeof(void *));
-  if (!f && nfactors > 0)
-    return NULL;
-  memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+  ixs_mulfactor *f = NULL;
+  if (nfactors > 0) {
+    f = ixs_arena_alloc(&ctx->arena, nfactors * sizeof(ixs_mulfactor),
+                        sizeof(void *));
+    if (!f)
+      return NULL;
+    memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+  }
 
   ixs_node *n = alloc_node(ctx);
   if (!n)
@@ -3281,6 +3290,8 @@ bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
 
 bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
                  int64_t *rq) {
+  if (aq == 0 || bq == 0)
+    return false;
   /*
    * a/aq + b/bq = (a*bq + b*aq) / (aq*bq)
    * Reduce first to limit overflow: divide by gcd(aq, bq).
@@ -3312,6 +3323,8 @@ bool ixs_rat_sub(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
 
 bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
                  int64_t *rq) {
+  if (aq == 0 || bq == 0)
+    return false;
   /* Cross-reduce to limit overflow: gcd(ap, bq) and gcd(bp, aq) */
   int64_t g1 = ixs_gcd(ap, bq);
   int64_t g2 = ixs_gcd(bp, aq);

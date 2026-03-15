@@ -203,10 +203,11 @@ def speedup_str(slow: float, fast: float) -> str:
 
 
 def geo_mean(values: list[float]) -> float:
-    if not values:
+    positive = [v for v in values if v > 0]
+    if not positive:
         return 0.0
-    log_sum = sum(math.log2(v) for v in values if v > 0)
-    return 2 ** (log_sum / len(values)) if values else 0.0
+    log_sum = sum(math.log2(v) for v in positive)
+    return 2 ** (log_sum / len(positive))
 
 
 def _speedup_line(label: str, total: float, ixs_total: float, speedups: list[float]) -> str:

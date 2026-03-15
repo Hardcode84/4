@@ -163,6 +163,8 @@ bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
 
 bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
                  int64_t *rq) {
+  if (aq == 0 || bq == 0)
+    return false;
   /*
    * a/aq + b/bq = (a*bq + b*aq) / (aq*bq)
    * Reduce first to limit overflow: divide by gcd(aq, bq).
@@ -194,6 +196,8 @@ bool ixs_rat_sub(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
 
 bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
                  int64_t *rq) {
+  if (aq == 0 || bq == 0)
+    return false;
   /* Cross-reduce to limit overflow: gcd(ap, bq) and gcd(bp, aq) */
   int64_t g1 = ixs_gcd(ap, bq);
   int64_t g2 = ixs_gcd(bp, aq);

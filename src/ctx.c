@@ -201,6 +201,8 @@ ixs_node *ixs_false(ixs_ctx *ctx) { return ctx->node_false; }
 /* ------------------------------------------------------------------ */
 
 ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len) {
+  if (!input)
+    return ctx->sentinel_parse_error;
   return ixs_parse_impl(ctx, input, len);
 }
 

@@ -259,7 +259,12 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         name = type(expr).__name__
         if name == "xor":
             args = [from_sympy(ctx, a) for a in expr.args]
-            return ixsimpl.xor_(args[0], args[1])
+            if len(args) < 2:
+                raise ValueError(f"xor requires at least 2 arguments, got {len(args)}")
+            result = ixsimpl.xor_(args[0], args[1])
+            for a in args[2:]:
+                result = ixsimpl.xor_(result, a)
+            return result
 
     raise ValueError(f"unsupported sympy expression type: {type(expr).__name__}: {expr}")
 

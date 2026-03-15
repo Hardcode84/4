@@ -26,6 +26,7 @@ bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   return b->vars != NULL;
 }
 
+/* All bounds storage lives in the scratch arena; no per-object cleanup. */
 void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
 
 bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
