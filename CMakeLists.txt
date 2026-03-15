@@ -73,6 +73,10 @@ target_link_libraries(test_arena ixsimpl)
 target_include_directories(test_arena PRIVATE src)
 add_test(NAME test_arena COMMAND test_arena)
 
+add_executable(test_introspect test/test_introspect.c)
+target_link_libraries(test_introspect ixsimpl)
+add_test(NAME test_introspect COMMAND test_introspect)
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)

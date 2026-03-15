@@ -1,4 +1,5 @@
 #include "node.h"
+#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -719,4 +720,116 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
   default:
     return false;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Type-specific accessors                                           */
+/* ------------------------------------------------------------------ */
+
+int64_t ixs_node_rat_num(ixs_node *node) {
+  assert(node && node->tag == IXS_RAT);
+  return node->u.rat.p;
+}
+
+int64_t ixs_node_rat_den(ixs_node *node) {
+  assert(node && node->tag == IXS_RAT);
+  return node->u.rat.q;
+}
+
+const char *ixs_node_sym_name(ixs_node *node) {
+  assert(node && node->tag == IXS_SYM);
+  return node->u.name;
+}
+
+ixs_node *ixs_node_add_coeff(ixs_node *node) {
+  assert(node && node->tag == IXS_ADD);
+  return node->u.add.coeff;
+}
+
+uint32_t ixs_node_add_nterms(ixs_node *node) {
+  assert(node && node->tag == IXS_ADD);
+  return node->u.add.nterms;
+}
+
+ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_ADD && i < node->u.add.nterms);
+  return node->u.add.terms[i].term;
+}
+
+ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_ADD && i < node->u.add.nterms);
+  return node->u.add.terms[i].coeff;
+}
+
+ixs_node *ixs_node_mul_coeff(ixs_node *node) {
+  assert(node && node->tag == IXS_MUL);
+  return node->u.mul.coeff;
+}
+
+uint32_t ixs_node_mul_nfactors(ixs_node *node) {
+  assert(node && node->tag == IXS_MUL);
+  return node->u.mul.nfactors;
+}
+
+ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_MUL && i < node->u.mul.nfactors);
+  return node->u.mul.factors[i].base;
+}
+
+int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_MUL && i < node->u.mul.nfactors);
+  return node->u.mul.factors[i].exp;
+}
+
+ixs_node *ixs_node_unary_arg(ixs_node *node) {
+  assert(node && (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
+                  node->tag == IXS_NOT));
+  if (node->tag == IXS_NOT)
+    return node->u.unary_bool.arg;
+  return node->u.unary.arg;
+}
+
+ixs_node *ixs_node_binary_lhs(ixs_node *node) {
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  return node->u.binary.lhs;
+}
+
+ixs_node *ixs_node_binary_rhs(ixs_node *node) {
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  return node->u.binary.rhs;
+}
+
+ixs_cmp_op ixs_node_cmp_op(ixs_node *node) {
+  assert(node && node->tag == IXS_CMP);
+  return node->u.binary.cmp_op;
+}
+
+uint32_t ixs_node_pw_ncases(ixs_node *node) {
+  assert(node && node->tag == IXS_PIECEWISE);
+  return node->u.pw.ncases;
+}
+
+ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
+  return node->u.pw.cases[i].value;
+}
+
+ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i) {
+  assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
+  return node->u.pw.cases[i].cond;
+}
+
+uint32_t ixs_node_logic_nargs(ixs_node *node) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR));
+  return node->u.logic.nargs;
+}
+
+ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
+         i < node->u.logic.nargs);
+  return node->u.logic.args[i];
 }

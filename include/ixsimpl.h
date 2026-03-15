@@ -181,6 +181,47 @@ int64_t ixs_node_int_val(ixs_node *node);
  * external hash tables; not guaranteed stable across library versions. */
 uint32_t ixs_node_hash(ixs_node *node);
 
+/* Only valid when tag is IXS_RAT. */
+int64_t ixs_node_rat_num(ixs_node *node);
+int64_t ixs_node_rat_den(ixs_node *node);
+
+/* Only valid when tag is IXS_SYM.  Pointer valid for ctx lifetime. */
+const char *ixs_node_sym_name(ixs_node *node);
+
+/* Only valid when tag is IXS_ADD.  i must be < nterms.
+ * ADD = coeff + sum(term_coeff[i] * term[i]). */
+ixs_node *ixs_node_add_coeff(ixs_node *node);
+uint32_t ixs_node_add_nterms(ixs_node *node);
+ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_MUL.  i must be < nfactors.
+ * MUL = coeff * product(base[i] ^ exp[i]). */
+ixs_node *ixs_node_mul_coeff(ixs_node *node);
+uint32_t ixs_node_mul_nfactors(ixs_node *node);
+ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i);
+int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
+ixs_node *ixs_node_unary_arg(ixs_node *node);
+
+/* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
+ * IXS_XOR, or IXS_CMP. */
+ixs_node *ixs_node_binary_lhs(ixs_node *node);
+ixs_node *ixs_node_binary_rhs(ixs_node *node);
+
+/* Only valid when tag is IXS_CMP. */
+ixs_cmp_op ixs_node_cmp_op(ixs_node *node);
+
+/* Only valid when tag is IXS_PIECEWISE.  i must be < ncases. */
+uint32_t ixs_node_pw_ncases(ixs_node *node);
+ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
+uint32_t ixs_node_logic_nargs(ixs_node *node);
+ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
+
 #ifdef __cplusplus
 }
 #endif
