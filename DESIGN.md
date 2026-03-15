@@ -1917,6 +1917,17 @@ Concrete workarounds for the fuzz test oracle:
 | Hash-consing table becomes bottleneck | Low | Linear probing with power-of-2 sizing; rehash threshold 70% |
 | Simplification rules interact badly (infinite loops) | Medium | Fixed-point iteration limit (64); monotonically size-reducing rules |
 
+## Future Ideas
+
+- **Arena-backed hash table.** Replace the `calloc`/`free`-managed hash
+  table with arena-allocated non-contiguous blocks (sizes S, S, 2S, 4S,
+  8S, ...).  Old blocks remain live after resize (total capacity doubles by
+  appending one new block), so there is zero arena waste.  Linear index
+  decomposition to (block, offset) is O(1) via highest-bit.  Trade-off:
+  extra indirection per probe and cross-block cache misses on long chains.
+  Enables a fully `malloc`-free library where `ixs_ctx_destroy` is just
+  two `ixs_arena_destroy` calls.
+
 ## Non-Goals
 
 - General symbolic algebra (polynomial factoring, GCD, etc.)
