@@ -828,11 +828,12 @@ static void test_mod_floor_regression(void) {
   /* ceiling(Mod(x, n)) -> Mod(x, n) */
   CHECK(ixs_ceil(ctx, mx16) == mx16);
 
-  /* floor(Mod(x, 64)/16): sub-field extraction pattern (Wave thread index).
-   * Should NOT collapse further without bounds (stays as floor). */
+  /* floor(Mod(x, 64)/16) -> Mod(floor(x/16), 4) when 16 | 64. */
   ixs_node *subfield = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(ixs_node_tag(subfield) == IXS_FLOOR);
+  CHECK(subfield == ixs_mod(ctx,
+                            ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
+                            ixs_int(ctx, 4)));
 
   /* floor(x + 1/2) -> x for integer-valued x (fractional part drops) */
   ixs_node *fhalf = ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
@@ -921,6 +922,35 @@ static void test_mod_recognition(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_mod_divisor(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* floor(Mod(x, 64) / 16) -> Mod(floor(x / 16), 4) */
+  ixs_node *e = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
+  CHECK(e == ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
+                     ixs_int(ctx, 4)));
+
+  /* ceil(Mod(x, 64) / 16) -> Mod(ceil(x / 16), 4) */
+  e = ixs_ceil(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
+  CHECK(e == ixs_mod(ctx, ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
+                     ixs_int(ctx, 4)));
+
+  /* floor(Mod(x, 32) / 32) -> 0 (M/K == 1, Mod(..., 1) -> 0) */
+  e = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 32)));
+  CHECK(e == ixs_int(ctx, 0));
+
+  /* No match when K does not divide M: floor(Mod(x, 64) / 5) stays */
+  e = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 5)));
+  CHECK(ixs_node_tag(e) == IXS_FLOOR);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -943,6 +973,7 @@ int main(void) {
   test_bounds_many_vars();
   test_mod_floor_regression();
   test_mod_recognition();
+  test_floor_mod_divisor();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

@@ -687,6 +687,25 @@ ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
     }
   }
 
+  /* floor(Mod(X, M) / K) -> Mod(floor(X / K), M / K) when K | M. */
+  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
+      x->u.mul.factors[0].exp == 1 &&
+      x->u.mul.factors[0].base->tag == IXS_MOD) {
+    int64_t cp, cq;
+    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+    if (cp == 1 && cq > 1) {
+      ixs_node *mod = x->u.mul.factors[0].base;
+      ixs_node *rhs = mod->u.binary.rhs;
+      if (rhs->tag == IXS_INT && rhs->u.ival > 0 && rhs->u.ival % cq == 0) {
+        ixs_node *inner =
+            simp_floor(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
+        if (!inner)
+          return NULL;
+        return simp_mod(ctx, inner, ixs_node_int(ctx, rhs->u.ival / cq));
+      }
+    }
+  }
+
   return ixs_node_floor(ctx, x);
 }
 
@@ -732,6 +751,25 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
       if (!scaled)
         return NULL;
       return simp_ceil(ctx, scaled);
+    }
+  }
+
+  /* ceil(Mod(X, M) / K) -> Mod(ceil(X / K), M / K) when K | M. */
+  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
+      x->u.mul.factors[0].exp == 1 &&
+      x->u.mul.factors[0].base->tag == IXS_MOD) {
+    int64_t cp, cq;
+    ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+    if (cp == 1 && cq > 1) {
+      ixs_node *mod = x->u.mul.factors[0].base;
+      ixs_node *rhs = mod->u.binary.rhs;
+      if (rhs->tag == IXS_INT && rhs->u.ival > 0 && rhs->u.ival % cq == 0) {
+        ixs_node *inner =
+            simp_ceil(ctx, simp_mul(ctx, x->u.mul.coeff, mod->u.binary.lhs));
+        if (!inner)
+          return NULL;
+        return simp_mod(ctx, inner, ixs_node_int(ctx, rhs->u.ival / cq));
+      }
     }
   }
 
