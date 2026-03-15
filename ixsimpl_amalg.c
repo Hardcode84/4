@@ -163,12 +163,13 @@ void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
 
 #define BOUNDS_INIT_CAP 16
 
-void ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
+bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->scratch = scratch;
   b->nvars = 0;
   b->cap = BOUNDS_INIT_CAP;
   b->vars = ixs_arena_alloc(scratch, BOUNDS_INIT_CAP * sizeof(*b->vars),
                             sizeof(void *));
+  return b->vars != NULL;
 }
 
 void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
@@ -273,7 +274,7 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
       }
       break;
     case IXS_CMP_GT: {
-      /* sym > p/q → sym >= floor(p/q) + 1 (integer-valued sym) */
+      /* sym > p/q -> sym >= floor(p/q) + 1 (integer-valued sym) */
       int64_t lo = ixs_rat_floor(rp, rq) + 1;
       if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
         v->iv.lo_p = lo;
@@ -288,7 +289,7 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
       }
       break;
     case IXS_CMP_LT: {
-      /* sym < p/q → sym <= ceil(p/q) - 1 (integer-valued sym) */
+      /* sym < p/q -> sym <= ceil(p/q) - 1 (integer-valued sym) */
       int64_t hi = ixs_rat_ceil(rp, rq) - 1;
       if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
         v->iv.hi_p = hi;
@@ -316,14 +317,14 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     if (!v)
       return;
     switch (op) {
-    case IXS_CMP_GE: /* const >= sym → sym <= const */
+    case IXS_CMP_GE: /* const >= sym -> sym <= const */
       if (ixs_rat_cmp(lp, lq, v->iv.hi_p, v->iv.hi_q) < 0) {
         v->iv.hi_p = lp;
         v->iv.hi_q = lq;
       }
       break;
     case IXS_CMP_GT: {
-      /* const > sym → sym <= ceil(const) - 1 */
+      /* const > sym -> sym <= ceil(const) - 1 */
       int64_t hi = ixs_rat_ceil(lp, lq) - 1;
       if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
         v->iv.hi_p = hi;
@@ -338,7 +339,7 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
       }
       break;
     case IXS_CMP_LT: {
-      /* const < sym → sym >= floor(const) + 1 */
+      /* const < sym -> sym >= floor(const) + 1 */
       int64_t lo = ixs_rat_floor(lp, lq) + 1;
       if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
         v->iv.lo_p = lo;
@@ -517,7 +518,7 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
     return ixs_interval_unknown();
   }
   case IXS_MOD: {
-    /* Mod(x, m) ∈ [0, m-1] only when x is integer-valued and m is a
+    /* Mod(x, m) in [0, m-1] only when x is integer-valued and m is a
      * positive integer.  For non-integer dividends the range is the
      * half-open [0, m) which we cannot represent tightly. */
     ixs_node *m = expr->u.binary.rhs;
@@ -5325,9 +5326,10 @@ static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-static void build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
+static bool build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
                          ixs_node *const *assumptions, size_t n_assumptions) {
-  ixs_bounds_init(bnds, scratch);
+  if (!ixs_bounds_init(bnds, scratch))
+    return false;
   if (assumptions) {
     size_t i;
     for (i = 0; i < n_assumptions; i++) {
@@ -5337,13 +5339,17 @@ static void build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
       ixs_bounds_add_assumption(bnds, a);
     }
   }
+  return true;
 }
 
 ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                         ixs_node *const *assumptions, size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
+  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+    ixs_arena_restore(&ctx->scratch, m);
+    return NULL;
+  }
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
   ixs_arena_restore(&ctx->scratch, m);
@@ -5355,7 +5361,12 @@ void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   size_t i;
-  build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions);
+  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+    for (i = 0; i < n; i++)
+      exprs[i] = NULL;
+    ixs_arena_restore(&ctx->scratch, m);
+    return;
+  }
   for (i = 0; i < n; i++) {
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;

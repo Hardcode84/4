@@ -14,7 +14,7 @@
  * The var table is a growable array on the scratch arena.  Lookup is
  * linear by pointer equality (symbol names are interned).  If this
  * ever becomes a bottleneck, swap the array for an open-addressing
- * hash map keyed on the interned name pointer — the interface is
+ * hash map keyed on the interned name pointer -- the interface is
  * already designed to make that a drop-in replacement.
  */
 
@@ -25,7 +25,7 @@ typedef struct {
 } ixs_interval;
 
 typedef struct {
-  const char *name; /* interned pointer — identity compare only */
+  const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
   int64_t divisor; /* known divisor (0 = no info, >0 = sym is multiple of d) */
 } ixs_var_bound;
@@ -37,7 +37,10 @@ typedef struct {
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
-void ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
+/* Returns false on OOM (arena exhausted). */
+bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
+
+/* No-op; bounds memory is reclaimed by scratch arena restore. */
 void ixs_bounds_destroy(ixs_bounds *b);
 
 /* Extract variable bounds from an assumption (e.g., $T0 >= 0). */
