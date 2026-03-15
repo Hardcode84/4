@@ -97,7 +97,7 @@ def conditions(draw: st.DrawFn, max_depth: int = 2) -> CondTree:
 #  Tree -> SymPy
 # ---------------------------------------------------------------------------
 
-_sp_syms = {n: sympy.Symbol(n, integer=True) for n in ["x", "y", "z", "w"]}
+_sp_syms = {n: sympy.Symbol(n, integer=True) for n in _VARS}
 
 
 def to_sympy(tree: ExprTree) -> Any:

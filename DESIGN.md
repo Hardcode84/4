@@ -1829,9 +1829,14 @@ def eval_ixs(expr, ctx, env):
     except TypeError:
         raise ValueError(f"result is not an integer constant: {result}")
 
-@given(expr=expressions())
+_VARS = ["x", "y", "z", "w"]
+
+def _env_st(lo=1, hi=100):
+    return st.fixed_dictionaries({v: st.integers(lo, hi) for v in _VARS})
+
+@given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
 @settings(max_examples=10000)
-def test_simplify_matches_numerical(expr):
+def test_simplify_matches_numerical(expr, envs):
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
     ctx = ixsimpl.Context()
@@ -1840,8 +1845,7 @@ def test_simplify_matches_numerical(expr):
     ixs_simplified = ixs_expr.simplify()
     assume(not ixs_simplified.is_error)  # skip if simplification hit error
 
-    for _ in range(10):
-        env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             orig = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
@@ -1849,9 +1853,9 @@ def test_simplify_matches_numerical(expr):
         simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}"
 
-@given(expr=expressions())
+@given(expr=expressions(), envs=st.lists(_env_st(), min_size=1, max_size=10))
 @settings(max_examples=5000)
-def test_matches_sympy(expr):
+def test_matches_sympy(expr, envs):
     """Cross-check against SymPy: both should produce numerically
     equivalent results."""
     ctx = ixsimpl.Context()
@@ -1861,8 +1865,7 @@ def test_matches_sympy(expr):
     sp_expr = to_sympy(expr)
     sp_result = sympy.simplify(sp_expr)
 
-    for _ in range(10):
-        env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             ixs_val = eval_ixs(ixs_result, ctx, env)
             sp_val = int(sp_result.subs({sympy.Symbol(k): v for k, v in env.items()}))
