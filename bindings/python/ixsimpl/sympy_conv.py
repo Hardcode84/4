@@ -8,6 +8,8 @@ import sympy
 
 import ixsimpl
 
+_MAX_POW_EXPONENT = 1000
+
 _CMP_TO_SYMPY: dict[int, type[sympy.core.relational.Relational]] = {
     ixsimpl.CMP_GT: sympy.Gt,
     ixsimpl.CMP_GE: sympy.Ge,
@@ -70,7 +72,7 @@ def to_sympy(expr: ixsimpl.Expr) -> sympy.Basic:
     if tag == ixsimpl.CMP:
         rel = _CMP_TO_SYMPY.get(expr.cmp_op)
         if rel is None:
-            raise ValueError(f"unknown cmp_op: {expr.cmp_op}")
+            raise ValueError(f"unsupported cmp_op: {expr.cmp_op}")
         return rel(to_sympy(expr.child(0)), to_sympy(expr.child(1)))
 
     if tag == ixsimpl.AND:
@@ -98,7 +100,7 @@ def to_sympy(expr: ixsimpl.Expr) -> sympy.Basic:
     if tag == ixsimpl.FALSE:
         return sympy.false
 
-    raise ValueError(f"unknown ixsimpl tag: {tag}")
+    raise ValueError(f"unsupported ixsimpl tag: {tag}")
 
 
 def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
@@ -138,7 +140,7 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         if not isinstance(exp, sympy.Integer):
             raise ValueError(f"non-integer exponent: {exp}")
         e = int(exp)
-        if abs(e) > 1000:
+        if abs(e) > _MAX_POW_EXPONENT:
             raise ValueError(f"exponent too large: {e}")
         if e == 0:
             return ctx.int_(1)

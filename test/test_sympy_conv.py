@@ -225,10 +225,7 @@ def test_from_sympy_unsupported(ctx: ixsimpl.Context) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_roundtrip_arithmetic(
-    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
-) -> None:
-    """Build expr in ixsimpl, convert to sympy, back to ixsimpl, simplify both."""
+def test_roundtrip_arithmetic(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
     x, y = syms["x"], syms["y"]
     e = (x * 3 + y + 1).simplify()
     sp = to_sympy(e)
@@ -237,9 +234,7 @@ def test_roundtrip_arithmetic(
     assert sympy.simplify(sp - sp2) == 0
 
 
-def test_roundtrip_floor(
-    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
-) -> None:
+def test_roundtrip_floor(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
     e = ixsimpl.floor((syms["x"] + syms["y"]) / 3)
     sp = to_sympy(e)
     e2 = from_sympy(ctx, sp)
