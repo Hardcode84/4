@@ -207,6 +207,10 @@ ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len) {
 /*  Simplification                                                    */
 /* ------------------------------------------------------------------ */
 
+ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr) {
+  return expand_impl(ctx, expr);
+}
+
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions) {
   return simp_simplify(ctx, expr, assumptions, n_assumptions);

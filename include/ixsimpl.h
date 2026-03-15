@@ -128,6 +128,11 @@ ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
+/* Distribute MUL over ADD (expand products of sums into sums of products).
+ * Recurses into subexpressions (floor args, piecewise branches, etc.).
+ * Does not expand powers with exponent > 1.  NULL-safe. */
+ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
+
 /* --- Comparison and substitution --------------------------------------- */
 
 /* Pointer equality on hash-consed nodes.  Safe to call with NULL. */

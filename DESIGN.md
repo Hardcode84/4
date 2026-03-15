@@ -691,8 +691,8 @@ Construction rules:
 - If `coeff == 0`, return `0`
 - `expr * 1` → `expr`
 - Pull constant factors out of ADD: `2 * (a + b)` is kept as-is (don't
-  distribute). Distribution is not performed by the simplifier. A future
-  `ixs_expand` API could be added if needed.
+  distribute). Distribution is not performed by the simplifier.
+  Use `ixs_expand` to distribute on demand.
 
 #### 4.4 Floor / Ceiling Rules
 
@@ -1110,6 +1110,12 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 // non-NULL when n_assumptions > 0. No-op when n == 0.
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions);
+
+// Expand: distribute MUL over ADD recursively (sum-of-products form).
+// Recurses into subexpressions (floor args, piecewise branches, etc.).
+// The canonical form keeps products factored; call this when you need
+// expanded form for term-by-term analysis.  NULL-safe.
+ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
 ```
 
 Usage pattern:

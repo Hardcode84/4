@@ -332,6 +332,11 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
+static PyObject *Expr_expand(ExprObject *self, PyObject *Py_UNUSED(args)) {
+  ixs_node *result = ixs_expand(self->ctx_obj->ctx, self->node);
+  return (PyObject *)Expr_wrap(self->ctx_obj, result);
+}
+
 static PyObject *Expr_to_c(ExprObject *self, PyObject *Py_UNUSED(args)) {
   if (ixs_is_error(self->node))
     return PyUnicode_FromString("/* error */");
@@ -527,6 +532,8 @@ static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
      "Simplify expression with optional assumptions."},
+    {"expand", (PyCFunction)Expr_expand, METH_NOARGS,
+     "Distribute MUL over ADD (expand products of sums)."},
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,

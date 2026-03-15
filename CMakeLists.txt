@@ -16,6 +16,7 @@ else()
         src/arena.c
         src/bounds.c
         src/ctx.c
+        src/expand.c
         src/node.c
         src/parser.c
         src/print.c
@@ -98,6 +99,10 @@ add_test(NAME test_arena COMMAND test_arena)
 add_executable(test_introspect test/test_introspect.c)
 target_link_libraries(test_introspect ixsimpl)
 add_test(NAME test_introspect COMMAND test_introspect)
+
+add_executable(test_expand test/test_expand.c)
+target_link_libraries(test_expand ixsimpl)
+add_test(NAME test_expand COMMAND test_expand)
 
 # --- Benchmark ---
 
