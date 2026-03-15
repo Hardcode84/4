@@ -951,6 +951,34 @@ static void test_floor_mod_divisor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_piecewise_branch_bounds(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *modx = ixs_mod(ctx, x, ixs_int(ctx, 32));
+
+  /* Piecewise((Max(1, Mod(x,32)), Mod(x,32) > 0), (1, True))
+   * With x >= 0 assumption, the first branch should collapse Max -> Mod. */
+  ixs_node *cond = ixs_cmp(ctx, modx, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *v1 = ixs_max(ctx, ixs_int(ctx, 1), modx);
+  ixs_node *v2 = ixs_int(ctx, 1);
+  ixs_node *vals[] = {v1, v2};
+  ixs_node *cds[] = {cond, ixs_true(ctx)};
+  ixs_node *pw = ixs_pw(ctx, 2, vals, cds);
+
+  ixs_node *assume = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *result = ixs_simplify(ctx, pw, &assume, 1);
+  CHECK(result != NULL);
+
+  /* Verify Max(1, ...) no longer appears in the result. */
+  {
+    char buf[512];
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strstr(buf, "Max(") == NULL);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -974,6 +1002,7 @@ int main(void) {
   test_mod_floor_regression();
   test_mod_recognition();
   test_floor_mod_divisor();
+  test_piecewise_branch_bounds();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

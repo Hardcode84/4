@@ -31,9 +31,17 @@ typedef struct {
 } ixs_var_bound;
 
 typedef struct {
+  ixs_node *expr; /* expression pointer -- identity compare only */
+  ixs_interval iv;
+} ixs_expr_bound;
+
+typedef struct {
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
+  ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
+  size_t nexprs;
+  size_t expr_cap;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
@@ -42,6 +50,9 @@ bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 
 /* No-op; bounds memory is reclaimed by scratch arena restore. */
 void ixs_bounds_destroy(ixs_bounds *b);
+
+/* Deep-copy bounds onto the scratch arena. Returns false on OOM. */
+bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
 /* Extract variable bounds from an assumption (e.g., $T0 >= 0). */
 void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);

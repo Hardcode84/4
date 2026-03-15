@@ -1564,6 +1564,18 @@ typedef struct {
   ixs_node *val;
 } rewrite_memo_slot;
 
+static void add_cond_to_bounds(ixs_bounds *bnds, ixs_node *cond) {
+  if (cond->tag == IXS_CMP) {
+    ixs_bounds_add_assumption(bnds, cond);
+  } else if (cond->tag == IXS_AND) {
+    uint32_t j;
+    for (j = 0; j < cond->u.logic.nargs; j++) {
+      if (cond->u.logic.args[j]->tag == IXS_CMP)
+        ixs_bounds_add_assumption(bnds, cond->u.logic.args[j]);
+    }
+  }
+}
+
 static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                               rewrite_memo_slot *memo);
 
@@ -1983,9 +1995,35 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       return NULL;
     }
     for (i = 0; i < nc; i++) {
-      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
       cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo);
-      if (!vals[i] || !cds[i]) {
+      if (!cds[i]) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      /* For guarded branches, fork bounds with condition assumptions so
+       * that e.g. Max(1, E) collapses when the condition proves E >= 1. */
+      if (bnds && cds[i] != ctx->node_true && cds[i] != ctx->node_false) {
+        ixs_arena_mark bm = ixs_arena_save(&ctx->scratch);
+        ixs_bounds bbnds;
+        if (ixs_bounds_fork(&bbnds, bnds)) {
+          rewrite_memo_slot *bmemo =
+              ixs_arena_alloc(&ctx->scratch, REWRITE_MEMO_SIZE * sizeof(*bmemo),
+                              sizeof(void *));
+          if (bmemo) {
+            add_cond_to_bounds(&bbnds, cds[i]);
+            memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
+            vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo);
+          } else {
+            vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+          }
+        } else {
+          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+        }
+        ixs_arena_restore(&ctx->scratch, bm);
+      } else {
+        vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+      }
+      if (!vals[i]) {
         ixs_arena_restore(&ctx->scratch, sm);
         return NULL;
       }

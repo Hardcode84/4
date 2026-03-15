@@ -153,6 +153,7 @@ void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
  */
 #include "bounds.h"
 #include <limits.h>
+#include <string.h>
 
 #ifndef INT64_MIN
 #define INT64_MIN (-9223372036854775807LL - 1)
@@ -169,10 +170,36 @@ bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->cap = BOUNDS_INIT_CAP;
   b->vars = ixs_arena_alloc(scratch, BOUNDS_INIT_CAP * sizeof(*b->vars),
                             sizeof(void *));
+  b->nexprs = 0;
+  b->expr_cap = 0;
+  b->exprs = NULL;
   return b->vars != NULL;
 }
 
 void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
+
+bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
+  dst->scratch = src->scratch;
+  dst->nvars = src->nvars;
+  dst->cap = src->nvars ? src->nvars : 1;
+  dst->vars = ixs_arena_alloc(dst->scratch, dst->cap * sizeof(*dst->vars),
+                              sizeof(void *));
+  if (!dst->vars)
+    return false;
+  if (src->nvars)
+    memcpy(dst->vars, src->vars, src->nvars * sizeof(*src->vars));
+  dst->nexprs = src->nexprs;
+  dst->expr_cap = src->nexprs ? src->nexprs : 0;
+  dst->exprs = NULL;
+  if (src->nexprs) {
+    dst->exprs = ixs_arena_alloc(
+        dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
+    if (!dst->exprs)
+      return false;
+    memcpy(dst->exprs, src->exprs, src->nexprs * sizeof(*src->exprs));
+  }
+  return true;
+}
 
 static ixs_var_bound *find_var(ixs_bounds *b, const char *name) {
   size_t i;
@@ -441,6 +468,36 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     default: /* EQ/NE: not useful here; EQ already handled by sym-op-const */
       break;
     }
+    return;
+  }
+
+  /* Fallback: expr op 0 for non-symbol lhs. Store as expression bound. */
+  if (ixs_node_is_zero(rhs) && ixs_node_is_integer_valued(lhs) &&
+      (op == IXS_CMP_GT || op == IXS_CMP_GE)) {
+    ixs_expr_bound *eb;
+    if (b->nexprs >= b->expr_cap) {
+      size_t new_cap = b->expr_cap ? b->expr_cap * 2 : 4;
+      ixs_expr_bound *new_arr = ixs_arena_alloc(
+          b->scratch, new_cap * sizeof(*new_arr), sizeof(void *));
+      if (!new_arr)
+        return;
+      if (b->nexprs)
+        memcpy(new_arr, b->exprs, b->nexprs * sizeof(*b->exprs));
+      b->exprs = new_arr;
+      b->expr_cap = new_cap;
+    }
+    eb = &b->exprs[b->nexprs++];
+    eb->expr = lhs;
+    eb->iv.valid = true;
+    eb->iv.hi_p = INT64_MAX;
+    eb->iv.hi_q = 1;
+    if (op == IXS_CMP_GT) {
+      eb->iv.lo_p = 1;
+      eb->iv.lo_q = 1;
+    } else {
+      eb->iv.lo_p = 0;
+      eb->iv.lo_q = 1;
+    }
   }
 }
 
@@ -479,7 +536,31 @@ static ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
   return r;
 }
 
-ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
+static ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
+  ixs_interval r;
+  if (!a.valid)
+    return b;
+  if (!b.valid)
+    return a;
+  r.valid = true;
+  if (ixs_rat_cmp(a.lo_p, a.lo_q, b.lo_p, b.lo_q) >= 0) {
+    r.lo_p = a.lo_p;
+    r.lo_q = a.lo_q;
+  } else {
+    r.lo_p = b.lo_p;
+    r.lo_q = b.lo_q;
+  }
+  if (ixs_rat_cmp(a.hi_p, a.hi_q, b.hi_p, b.hi_q) <= 0) {
+    r.hi_p = a.hi_p;
+    r.hi_q = a.hi_q;
+  } else {
+    r.hi_p = b.hi_p;
+    r.hi_q = b.hi_q;
+  }
+  return r;
+}
+
+static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
   if (!expr)
     return ixs_interval_unknown();
@@ -592,6 +673,18 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   default:
     return ixs_interval_unknown();
   }
+}
+
+ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval iv = bounds_get_propagated(b, expr);
+  if (b->nexprs && expr) {
+    size_t j;
+    for (j = 0; j < b->nexprs; j++) {
+      if (b->exprs[j].expr == expr)
+        iv = iv_intersect(iv, b->exprs[j].iv);
+    }
+  }
+  return iv;
 }
 
 int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
@@ -4941,6 +5034,18 @@ typedef struct {
   ixs_node *val;
 } rewrite_memo_slot;
 
+static void add_cond_to_bounds(ixs_bounds *bnds, ixs_node *cond) {
+  if (cond->tag == IXS_CMP) {
+    ixs_bounds_add_assumption(bnds, cond);
+  } else if (cond->tag == IXS_AND) {
+    uint32_t j;
+    for (j = 0; j < cond->u.logic.nargs; j++) {
+      if (cond->u.logic.args[j]->tag == IXS_CMP)
+        ixs_bounds_add_assumption(bnds, cond->u.logic.args[j]);
+    }
+  }
+}
+
 static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                               rewrite_memo_slot *memo);
 
@@ -5360,9 +5465,35 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       return NULL;
     }
     for (i = 0; i < nc; i++) {
-      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
       cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo);
-      if (!vals[i] || !cds[i]) {
+      if (!cds[i]) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      /* For guarded branches, fork bounds with condition assumptions so
+       * that e.g. Max(1, E) collapses when the condition proves E >= 1. */
+      if (bnds && cds[i] != ctx->node_true && cds[i] != ctx->node_false) {
+        ixs_arena_mark bm = ixs_arena_save(&ctx->scratch);
+        ixs_bounds bbnds;
+        if (ixs_bounds_fork(&bbnds, bnds)) {
+          rewrite_memo_slot *bmemo =
+              ixs_arena_alloc(&ctx->scratch, REWRITE_MEMO_SIZE * sizeof(*bmemo),
+                              sizeof(void *));
+          if (bmemo) {
+            add_cond_to_bounds(&bbnds, cds[i]);
+            memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
+            vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo);
+          } else {
+            vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+          }
+        } else {
+          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+        }
+        ixs_arena_restore(&ctx->scratch, bm);
+      } else {
+        vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+      }
+      if (!vals[i]) {
         ixs_arena_restore(&ctx->scratch, sm);
         return NULL;
       }

@@ -790,6 +790,13 @@ simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
 
+**Branch-aware bounds**: During bounds-aware rewriting, each non-default
+Piecewise branch gets a forked copy of the current bounds augmented with
+the branch condition.  Conditions like `E > 0` tighten the lower bound of
+`E` to 1, letting `Max(1, E)` collapse inside that branch.  Expression-level
+bounds are stored alongside per-symbol bounds and intersected during
+interval queries.
+
 **Sentinel handling**: Sentinels do not eagerly propagate through Piecewise
 (see Error Model). A sentinel value in a branch whose condition folds to
 `False` is silently dropped. A sentinel condition in an unreachable branch
