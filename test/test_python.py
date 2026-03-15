@@ -17,12 +17,11 @@ Properties tested:
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 import ixsimpl
 import sympy
-from hypothesis import assume, example, given, settings
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
 from ixsimpl.sympy_conv import from_sympy as conv_from_sympy
 from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
@@ -30,12 +29,6 @@ from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 ExprTree = str | int | tuple[Any, ...]
 CondTree = tuple[Any, ...]
 Env = dict[str, int]
-
-_IN_CI = os.environ.get("CI") == "true"
-_SELF_CONSISTENCY_EXAMPLES = 500 if _IN_CI else 10000
-_SYMPY_CROSSCHECK_EXAMPLES = 200 if _IN_CI else 5000
-_DIVISIBILITY_EXAMPLES = 200 if _IN_CI else 2000
-_CONV_EXAMPLES = 500 if _IN_CI else 2000
 
 _VARS = ["x", "y", "z", "w"]
 
@@ -316,7 +309,6 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
 
 
 @given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
-@settings(max_examples=_SELF_CONSISTENCY_EXAMPLES, deadline=None)
 def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
@@ -345,7 +337,6 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     expr=expressions(include_piecewise=False),
     envs=st.lists(_env_st(), min_size=1, max_size=10),
 )
-@settings(max_examples=_SYMPY_CROSSCHECK_EXAMPLES, deadline=None)
 @example(
     expr=("mod", ("mul", 2, ("mod", "x", 3)), 5),
     envs=[{v: 50 for v in _VARS}],
@@ -399,7 +390,6 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
         max_size=10,
     ),
 )
-@settings(max_examples=_DIVISIBILITY_EXAMPLES, deadline=None)
 def test_simplify_with_divisibility(
     expr: ExprTree,
     div_sym: str,
@@ -443,7 +433,6 @@ def test_simplify_with_divisibility(
     expr=expressions(include_piecewise=False),
     envs=st.lists(_env_st(), min_size=1, max_size=10),
 )
-@settings(max_examples=_CONV_EXAMPLES, deadline=None)
 def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
     """ixsimpl.sympy_conv.to_sympy produces a SymPy expression that
     evaluates identically to the ixsimpl expression at random points."""
@@ -481,7 +470,6 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
     expr=expressions(include_piecewise=False),
     envs=st.lists(_env_st(), min_size=1, max_size=10),
 )
-@settings(max_examples=_CONV_EXAMPLES, deadline=None)
 def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
     """ixsimpl.sympy_conv.from_sympy produces an ixsimpl expression that
     evaluates identically to the original tree at random points."""
@@ -521,7 +509,6 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
     expr=expressions(include_piecewise=False),
     envs=st.lists(_env_st(), min_size=1, max_size=10),
 )
-@settings(max_examples=_CONV_EXAMPLES, deadline=None)
 def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
     """ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves numerical
     semantics at random integer points."""

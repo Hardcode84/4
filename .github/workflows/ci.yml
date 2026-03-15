@@ -76,7 +76,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest -n auto
+          LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest --quick -n auto
 
   pre-commit:
     runs-on: ubuntu-latest
