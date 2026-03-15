@@ -1663,6 +1663,76 @@ ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i) {
   return node->u.logic.args[i];
 }
 
+/* ------------------------------------------------------------------ */
+/*  Generic child access                                              */
+/* ------------------------------------------------------------------ */
+
+uint32_t ixs_node_nchildren(ixs_node *node) {
+  assert(node);
+  switch (node->tag) {
+  case IXS_ADD:
+    return 1 + 2 * node->u.add.nterms;
+  case IXS_MUL:
+    return 1 + node->u.mul.nfactors;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_NOT:
+    return 1;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return 2;
+  case IXS_PIECEWISE:
+    return 2 * node->u.pw.ncases;
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.logic.nargs;
+  default:
+    return 0;
+  }
+}
+
+ixs_node *ixs_node_child(ixs_node *node, uint32_t i) {
+  assert(node && i < ixs_node_nchildren(node));
+  switch (node->tag) {
+  case IXS_ADD:
+    if (i == 0)
+      return node->u.add.coeff;
+    {
+      uint32_t j = i - 1;
+      if (j % 2 == 0)
+        return node->u.add.terms[j / 2].coeff;
+      return node->u.add.terms[j / 2].term;
+    }
+  case IXS_MUL:
+    if (i == 0)
+      return node->u.mul.coeff;
+    return node->u.mul.factors[i - 1].base;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    return node->u.unary.arg;
+  case IXS_NOT:
+    return node->u.unary_bool.arg;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return i == 0 ? node->u.binary.lhs : node->u.binary.rhs;
+  case IXS_PIECEWISE:
+    if (i % 2 == 0)
+      return node->u.pw.cases[i / 2].value;
+    return node->u.pw.cases[i / 2].cond;
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.logic.args[i];
+  default:
+    return NULL;
+  }
+}
+
 /* ==================================================================== */
 /* parser.c                                                           */
 /* ==================================================================== */
@@ -4947,149 +5017,23 @@ static ixs_node *walk_pre(ixs_node *node, ixs_visit_fn fn, void *ud) {
   if (act == IXS_WALK_SKIP)
     return NULL;
 
+  uint32_t n = ixs_node_nchildren(node);
   uint32_t i;
-  ixs_node *stopped;
-  switch (node->tag) {
-  case IXS_ADD:
-    stopped = walk_pre(node->u.add.coeff, fn, ud);
+  for (i = 0; i < n; i++) {
+    ixs_node *stopped = walk_pre(ixs_node_child(node, i), fn, ud);
     if (stopped)
       return stopped;
-    for (i = 0; i < node->u.add.nterms; i++) {
-      stopped = walk_pre(node->u.add.terms[i].coeff, fn, ud);
-      if (stopped)
-        return stopped;
-      stopped = walk_pre(node->u.add.terms[i].term, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_MUL:
-    stopped = walk_pre(node->u.mul.coeff, fn, ud);
-    if (stopped)
-      return stopped;
-    for (i = 0; i < node->u.mul.nfactors; i++) {
-      stopped = walk_pre(node->u.mul.factors[i].base, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_FLOOR:
-  case IXS_CEIL:
-    stopped = walk_pre(node->u.unary.arg, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_NOT:
-    stopped = walk_pre(node->u.unary_bool.arg, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
-  case IXS_CMP:
-    stopped = walk_pre(node->u.binary.lhs, fn, ud);
-    if (stopped)
-      return stopped;
-    stopped = walk_pre(node->u.binary.rhs, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_PIECEWISE:
-    for (i = 0; i < node->u.pw.ncases; i++) {
-      stopped = walk_pre(node->u.pw.cases[i].value, fn, ud);
-      if (stopped)
-        return stopped;
-      stopped = walk_pre(node->u.pw.cases[i].cond, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_AND:
-  case IXS_OR:
-    for (i = 0; i < node->u.logic.nargs; i++) {
-      stopped = walk_pre(node->u.logic.args[i], fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  default:
-    break;
   }
   return NULL;
 }
 
 static ixs_node *walk_post(ixs_node *node, ixs_visit_fn fn, void *ud) {
+  uint32_t n = ixs_node_nchildren(node);
   uint32_t i;
-  ixs_node *stopped;
-  switch (node->tag) {
-  case IXS_ADD:
-    stopped = walk_post(node->u.add.coeff, fn, ud);
+  for (i = 0; i < n; i++) {
+    ixs_node *stopped = walk_post(ixs_node_child(node, i), fn, ud);
     if (stopped)
       return stopped;
-    for (i = 0; i < node->u.add.nterms; i++) {
-      stopped = walk_post(node->u.add.terms[i].coeff, fn, ud);
-      if (stopped)
-        return stopped;
-      stopped = walk_post(node->u.add.terms[i].term, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_MUL:
-    stopped = walk_post(node->u.mul.coeff, fn, ud);
-    if (stopped)
-      return stopped;
-    for (i = 0; i < node->u.mul.nfactors; i++) {
-      stopped = walk_post(node->u.mul.factors[i].base, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_FLOOR:
-  case IXS_CEIL:
-    stopped = walk_post(node->u.unary.arg, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_NOT:
-    stopped = walk_post(node->u.unary_bool.arg, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
-  case IXS_CMP:
-    stopped = walk_post(node->u.binary.lhs, fn, ud);
-    if (stopped)
-      return stopped;
-    stopped = walk_post(node->u.binary.rhs, fn, ud);
-    if (stopped)
-      return stopped;
-    break;
-  case IXS_PIECEWISE:
-    for (i = 0; i < node->u.pw.ncases; i++) {
-      stopped = walk_post(node->u.pw.cases[i].value, fn, ud);
-      if (stopped)
-        return stopped;
-      stopped = walk_post(node->u.pw.cases[i].cond, fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  case IXS_AND:
-  case IXS_OR:
-    for (i = 0; i < node->u.logic.nargs; i++) {
-      stopped = walk_post(node->u.logic.args[i], fn, ud);
-      if (stopped)
-        return stopped;
-    }
-    break;
-  default:
-    break;
   }
 
   ixs_walk_action act = fn(node, ud);

@@ -833,3 +833,73 @@ ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i) {
          i < node->u.logic.nargs);
   return node->u.logic.args[i];
 }
+
+/* ------------------------------------------------------------------ */
+/*  Generic child access                                              */
+/* ------------------------------------------------------------------ */
+
+uint32_t ixs_node_nchildren(ixs_node *node) {
+  assert(node);
+  switch (node->tag) {
+  case IXS_ADD:
+    return 1 + 2 * node->u.add.nterms;
+  case IXS_MUL:
+    return 1 + node->u.mul.nfactors;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_NOT:
+    return 1;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return 2;
+  case IXS_PIECEWISE:
+    return 2 * node->u.pw.ncases;
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.logic.nargs;
+  default:
+    return 0;
+  }
+}
+
+ixs_node *ixs_node_child(ixs_node *node, uint32_t i) {
+  assert(node && i < ixs_node_nchildren(node));
+  switch (node->tag) {
+  case IXS_ADD:
+    if (i == 0)
+      return node->u.add.coeff;
+    {
+      uint32_t j = i - 1;
+      if (j % 2 == 0)
+        return node->u.add.terms[j / 2].coeff;
+      return node->u.add.terms[j / 2].term;
+    }
+  case IXS_MUL:
+    if (i == 0)
+      return node->u.mul.coeff;
+    return node->u.mul.factors[i - 1].base;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    return node->u.unary.arg;
+  case IXS_NOT:
+    return node->u.unary_bool.arg;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return i == 0 ? node->u.binary.lhs : node->u.binary.rhs;
+  case IXS_PIECEWISE:
+    if (i % 2 == 0)
+      return node->u.pw.cases[i / 2].value;
+    return node->u.pw.cases[i / 2].cond;
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.logic.args[i];
+  default:
+    return NULL;
+  }
+}

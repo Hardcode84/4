@@ -189,6 +189,121 @@ static void test_logic_accessors(void) {
   printf("  logic_accessors: OK\n");
 }
 
+/* ---- Generic child access tests ---- */
+
+static void test_nchildren_leaves(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  CHECK(ixs_node_nchildren(ixs_int(ctx, 0)) == 0);
+  CHECK(ixs_node_nchildren(ixs_rat(ctx, 1, 3)) == 0);
+  CHECK(ixs_node_nchildren(ixs_sym(ctx, "x")) == 0);
+  CHECK(ixs_node_nchildren(ixs_true(ctx)) == 0);
+  CHECK(ixs_node_nchildren(ixs_false(ctx)) == 0);
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_leaves: OK\n");
+}
+
+static void test_nchildren_child_add(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  ixs_node *expr = ixs_add(ctx, ixs_int(ctx, 3), ixs_add(ctx, a, b));
+
+  CHECK(ixs_node_tag(expr) == IXS_ADD);
+  /* coeff + 2 terms * 2 (coeff,term) each = 5 children */
+  CHECK(ixs_node_nchildren(expr) == 5);
+  /* child 0 = coeff */
+  CHECK(ixs_same_node(ixs_node_child(expr, 0), ixs_node_add_coeff(expr)));
+  /* children match type-specific accessors */
+  CHECK(
+      ixs_same_node(ixs_node_child(expr, 1), ixs_node_add_term_coeff(expr, 0)));
+  CHECK(ixs_same_node(ixs_node_child(expr, 2), ixs_node_add_term(expr, 0)));
+  CHECK(
+      ixs_same_node(ixs_node_child(expr, 3), ixs_node_add_term_coeff(expr, 1)));
+  CHECK(ixs_same_node(ixs_node_child(expr, 4), ixs_node_add_term(expr, 1)));
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_add: OK\n");
+}
+
+static void test_nchildren_child_mul(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *expr = ixs_mul(ctx, ixs_int(ctx, 5), x);
+
+  CHECK(ixs_node_tag(expr) == IXS_MUL);
+  CHECK(ixs_node_nchildren(expr) == 2);
+  CHECK(ixs_same_node(ixs_node_child(expr, 0), ixs_node_mul_coeff(expr)));
+  CHECK(ixs_same_node(ixs_node_child(expr, 1),
+                      ixs_node_mul_factor_base(expr, 0)));
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_mul: OK\n");
+}
+
+static void test_nchildren_child_binary(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  ixs_node *mod = ixs_mod(ctx, a, b);
+
+  CHECK(ixs_node_nchildren(mod) == 2);
+  CHECK(ixs_same_node(ixs_node_child(mod, 0), a));
+  CHECK(ixs_same_node(ixs_node_child(mod, 1), b));
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_binary: OK\n");
+}
+
+static void test_nchildren_child_unary(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *half = ixs_rat(ctx, 1, 2);
+  ixs_node *arg = ixs_add(ctx, x, half);
+
+  ixs_node *fl = ixs_floor(ctx, arg);
+  CHECK(ixs_node_nchildren(fl) == 1);
+  CHECK(ixs_same_node(ixs_node_child(fl, 0), arg));
+
+  ixs_node *xr = ixs_xor(ctx, ixs_sym(ctx, "a"), ixs_sym(ctx, "b"));
+  ixs_node *nt = ixs_not(ctx, xr);
+  CHECK(ixs_node_nchildren(nt) == 1);
+  CHECK(ixs_same_node(ixs_node_child(nt, 0), xr));
+
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_unary: OK\n");
+}
+
+static void test_nchildren_child_pw(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *v0 = ixs_int(ctx, 10);
+  ixs_node *c0 = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *v1 = ixs_int(ctx, 20);
+  ixs_node *c1 = ixs_true(ctx);
+  ixs_node *vals[] = {v0, v1};
+  ixs_node *conds[] = {c0, c1};
+  ixs_node *pw = ixs_pw(ctx, 2, vals, conds);
+
+  CHECK(ixs_node_nchildren(pw) == 4);
+  CHECK(ixs_same_node(ixs_node_child(pw, 0), v0));
+  CHECK(ixs_same_node(ixs_node_child(pw, 1), c0));
+  CHECK(ixs_same_node(ixs_node_child(pw, 2), v1));
+  CHECK(ixs_same_node(ixs_node_child(pw, 3), c1));
+
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_pw: OK\n");
+}
+
+static void test_nchildren_child_logic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *c1 = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *c2 = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 10));
+
+  ixs_node *and_node = ixs_and(ctx, c1, c2);
+  CHECK(ixs_node_nchildren(and_node) == 2);
+
+  ixs_ctx_destroy(ctx);
+  printf("  nchildren_child_logic: OK\n");
+}
+
 /* ---- Walk tests ---- */
 
 typedef struct {
@@ -347,6 +462,13 @@ int main(void) {
   test_binary_accessors();
   test_pw_accessors();
   test_logic_accessors();
+  test_nchildren_leaves();
+  test_nchildren_child_add();
+  test_nchildren_child_mul();
+  test_nchildren_child_binary();
+  test_nchildren_child_unary();
+  test_nchildren_child_pw();
+  test_nchildren_child_logic();
   test_walk_pre_order();
   test_walk_post_order();
   test_walk_stop();

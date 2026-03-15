@@ -222,6 +222,21 @@ ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
 uint32_t ixs_node_logic_nargs(ixs_node *node);
 ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
 
+/* --- Generic child access ----------------------------------------------- */
+
+/* Number of child node pointers.  Leaves return 0. */
+uint32_t ixs_node_nchildren(ixs_node *node);
+
+/* i-th child node.  i must be < ixs_node_nchildren(node).
+ * Child order matches the type-specific accessors:
+ *   ADD: coeff, (term_coeff[0], term[0]), (term_coeff[1], term[1]), ...
+ *   MUL: coeff, base[0], base[1], ...   (exponents are int32_t, not nodes)
+ *   binary: lhs, rhs
+ *   unary: arg
+ *   PW:  (value[0], cond[0]), (value[1], cond[1]), ...
+ *   AND/OR: arg[0], arg[1], ... */
+ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
+
 /* --- Tree walk --------------------------------------------------------- */
 
 typedef enum {
