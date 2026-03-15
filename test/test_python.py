@@ -461,7 +461,11 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
         assume(False)
     assume(not ixs_expr.is_error)
 
-    sp_converted = conv_to_sympy(ixs_expr)
+    # SymPy Max/Min reject unevaluated Mod nodes as "not comparable".
+    try:
+        sp_converted = conv_to_sympy(ixs_expr)
+    except (ValueError, TypeError):
+        assume(False)
 
     checked = 0
     for env in envs:
@@ -470,8 +474,9 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
         except (ValueError, TypeError):
             continue
         try:
-            sp_env = {sympy.Symbol(k, integer=True): v for k, v in env.items()}
-            sp_val = sp_converted.subs(sp_env)
+            # xreplace avoids SymPy 1.14 .subs() bug with nested Mod.
+            sp_env = {sympy.Symbol(k, integer=True): sympy.Integer(v) for k, v in env.items()}
+            sp_val = sp_converted.xreplace(sp_env)
             if not sp_val.is_number:
                 continue
             assert int(sp_val) == ixs_val, (
@@ -537,7 +542,11 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
         assume(False)
     assume(not original.is_error)
 
-    sp_expr = conv_to_sympy(original)
+    # SymPy Max/Min reject unevaluated Mod nodes as "not comparable".
+    try:
+        sp_expr = conv_to_sympy(original)
+    except (ValueError, TypeError):
+        assume(False)
     try:
         roundtripped = conv_from_sympy(ctx, sp_expr)
     except (ValueError, TypeError):

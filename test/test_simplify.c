@@ -953,11 +953,11 @@ static void test_floor_mod_divisor(void) {
   CHECK(e == ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
                      ixs_int(ctx, 4)));
 
-  /* ceil(Mod(x, 64) / 16) -> Mod(ceil(x / 16), 4) */
+  /* ceil(Mod(x, 64) / 16) stays — identity only holds for floor. */
   e = ixs_ceil(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(e == ixs_mod(ctx, ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
-                     ixs_int(ctx, 4)));
+  CHECK(e == ixs_ceil(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
+                                   ixs_int(ctx, 16))));
 
   /* floor(Mod(x, 32) / 32) -> 0 (M/K == 1, Mod(..., 1) -> 0) */
   e = ixs_floor(

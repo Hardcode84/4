@@ -4080,8 +4080,9 @@ static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
     }
   }
 
-  /* rnd(Mod(X, M) / K) -> Mod(rnd(X / K), M / K) when K | M. */
-  if (x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
+  /* floor(Mod(X, M) / K) -> Mod(floor(X / K), M / K) when K | M.
+   * Floor-only: ceil(r/K) can reach M/K, making Mod wrap to 0. */
+  if (self_tag == IXS_FLOOR && x->tag == IXS_MUL && x->u.mul.nfactors == 1 &&
       x->u.mul.factors[0].exp == 1 &&
       x->u.mul.factors[0].base->tag == IXS_MOD) {
     int64_t cp, cq;

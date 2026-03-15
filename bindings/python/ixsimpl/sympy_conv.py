@@ -85,6 +85,8 @@ def to_sympy(
         return sympy.ceiling(_convert(expr.child(0)))
 
     if tag == ixsimpl.MOD:
+        # evaluate=False: SymPy 1.14 Mod evaluation is buggy on some
+        # factored forms, e.g. Mod(x*(2*x+2*y), 6) -> 0.
         return sympy.Mod(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
 
     if tag == ixsimpl.MAX:
