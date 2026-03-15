@@ -773,6 +773,78 @@ static void test_large_expressions(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_mod_floor_regression(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *K = ixs_sym(ctx, "K");
+
+  /* Mod(x + k*d, d) -> Mod(x, d): constant multiple of modulus absorbed */
+  CHECK(ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 16)) ==
+        ixs_mod(ctx, x, ixs_int(ctx, 16)));
+  CHECK(ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 48)), ixs_int(ctx, 16)) ==
+        ixs_mod(ctx, x, ixs_int(ctx, 16)));
+
+  /* Mod(n*x, n) -> 0 for integer-valued x */
+  CHECK(ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 16), x), ixs_int(ctx, 16)) ==
+        ixs_int(ctx, 0));
+  CHECK(ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 32), x), ixs_int(ctx, 16)) ==
+        ixs_int(ctx, 0));
+
+  /* floor(Mod(x, n)) -> Mod(x, n): Mod of integers is integer-valued */
+  ixs_node *mx16 = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  CHECK(ixs_floor(ctx, mx16) == mx16);
+
+  /* ceiling(Mod(x, n)) -> Mod(x, n) */
+  CHECK(ixs_ceil(ctx, mx16) == mx16);
+
+  /* floor(Mod(x, 64)/16): sub-field extraction pattern (Wave thread index).
+   * Should NOT collapse further without bounds (stays as floor). */
+  ixs_node *subfield = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
+  CHECK(ixs_node_tag(subfield) == IXS_FLOOR);
+
+  /* floor(x + 1/2) -> x for integer-valued x (fractional part drops) */
+  ixs_node *fhalf = ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
+  CHECK(fhalf == x);
+
+  /* ceil(x + 1/2) -> x + 1 for integer-valued x */
+  ixs_node *chalf = ixs_ceil(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
+  CHECK(chalf == ixs_add(ctx, x, ixs_int(ctx, 1)));
+
+  /* floor((4*floor(x/3) + y) / 2) -> 2*floor(x/3) + floor(y/2)
+   * MUL-over-ADD extraction with integer-valued product. */
+  ixs_node *fx3 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *e = ixs_floor(
+      ctx, ixs_div(ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), fx3), y),
+                   ixs_int(ctx, 2)));
+  ixs_node *expected =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fx3),
+              ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
+  CHECK(e == expected);
+
+  /* floor((6*K*floor(x/3) + y) / (2*K)) -> 3*floor(x/3) + floor(y/(2*K))
+   * Symbolic denominator cancellation. */
+  ixs_node *outer_num =
+      ixs_add(ctx, ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 6), K), fx3), y);
+  ixs_node *outer_den = ixs_mul(ctx, ixs_int(ctx, 2), K);
+  e = ixs_floor(ctx, ixs_div(ctx, outer_num, outer_den));
+  CHECK(strcmp(pr(e), "3*floor(1/3*x) + floor(1/2*y*1/K)") == 0);
+
+  /* Mod(8*floor(x/4), 4) -> 0: coefficient is multiple of modulus */
+  ixs_node *fx4 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  CHECK(ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 8), fx4), ixs_int(ctx, 4)) ==
+        ixs_int(ctx, 0));
+
+  /* Mod(Mod(x, 32), 16): nested Mod where inner > outer.
+   * Currently not collapsed; verify it doesn't crash or produce garbage. */
+  ixs_node *nested =
+      ixs_mod(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 16));
+  CHECK(nested != NULL && !ixs_is_error(nested));
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -792,6 +864,7 @@ int main(void) {
   test_print_roundtrip();
   test_divisibility_assumptions();
   test_large_expressions();
+  test_mod_floor_regression();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
