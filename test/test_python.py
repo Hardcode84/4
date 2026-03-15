@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import math
 import os
-import random
 from typing import Any
 
 import ixsimpl
@@ -38,11 +37,18 @@ _SYMPY_CROSSCHECK_EXAMPLES = 200 if _IN_CI else 5000
 _DIVISIBILITY_EXAMPLES = 200 if _IN_CI else 2000
 _CONV_EXAMPLES = 500 if _IN_CI else 2000
 
+_VARS = ["x", "y", "z", "w"]
+
+
+def _env_st(lo: int = 1, hi: int = 100) -> st.SearchStrategy[Env]:
+    return st.fixed_dictionaries({v: st.integers(lo, hi) for v in _VARS})
+
+
 # ---------------------------------------------------------------------------
 #  Expression tree strategies
 # ---------------------------------------------------------------------------
 
-sym_names = st.sampled_from(["x", "y", "z", "w"])
+sym_names = st.sampled_from(_VARS)
 small_ints = st.integers(min_value=-64, max_value=64)
 pos_ints = st.integers(min_value=1, max_value=32)
 
@@ -309,9 +315,9 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
 # ---------------------------------------------------------------------------
 
 
-@given(expr=expressions())
+@given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
 @settings(max_examples=_SELF_CONSISTENCY_EXAMPLES, deadline=None)
-def test_simplify_self_consistency(expr: ExprTree) -> None:
+def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
     ctx = ixsimpl.Context()
@@ -323,8 +329,7 @@ def test_simplify_self_consistency(expr: ExprTree) -> None:
     ixs_simplified = ixs_expr.simplify()
     assume(not ixs_simplified.is_error)
 
-    for _ in range(10):
-        env = {v: random.randint(0, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             orig = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
@@ -336,10 +341,16 @@ def test_simplify_self_consistency(expr: ExprTree) -> None:
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
 
 
-@given(expr=expressions(include_piecewise=False))
+@given(
+    expr=expressions(include_piecewise=False),
+    envs=st.lists(_env_st(), min_size=1, max_size=10),
+)
 @settings(max_examples=_SYMPY_CROSSCHECK_EXAMPLES, deadline=None)
-@example(("mod", ("mul", 2, ("mod", "x", 3)), 5))
-def test_matches_sympy(expr: ExprTree) -> None:
+@example(
+    expr=("mod", ("mul", 2, ("mod", "x", 3)), 5),
+    envs=[{v: 50 for v in _VARS}],
+)
+def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
     """Cross-check against SymPy: both should produce numerically
     equivalent results. Uses Python eval_expr as ground truth to avoid
     SymPy Mod bug #28744 with evaluate=False."""
@@ -357,8 +368,7 @@ def test_matches_sympy(expr: ExprTree) -> None:
     except (ValueError, TypeError):
         assume(False)
 
-    for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             ground_truth = eval_expr(expr, env)
             ixs_val = eval_ixs(ixs_simplified, ctx, env)
@@ -381,11 +391,21 @@ def test_matches_sympy(expr: ExprTree) -> None:
 
 @given(
     expr=expressions(),
-    div_sym=st.sampled_from(["x", "y", "z", "w"]),
+    div_sym=st.sampled_from(_VARS),
     divisor=st.integers(min_value=2, max_value=64),
+    env_mults=st.lists(
+        st.tuples(_env_st(1, 50), st.integers(-25, 25)),
+        min_size=1,
+        max_size=10,
+    ),
 )
 @settings(max_examples=_DIVISIBILITY_EXAMPLES, deadline=None)
-def test_simplify_with_divisibility(expr: ExprTree, div_sym: str, divisor: int) -> None:
+def test_simplify_with_divisibility(
+    expr: ExprTree,
+    div_sym: str,
+    divisor: int,
+    env_mults: list[tuple[Env, int]],
+) -> None:
     """Simplification with a divisibility assumption preserves semantics
     when evaluated at points satisfying the assumption."""
     ctx = ixsimpl.Context()
@@ -401,9 +421,8 @@ def test_simplify_with_divisibility(expr: ExprTree, div_sym: str, divisor: int) 
     assume(not ixs_simplified.is_error)
 
     checked = 0
-    for _ in range(10):
-        env = {v: random.randint(1, 50) for v in ["x", "y", "z", "w"]}
-        env[div_sym] = random.randint(-25, 25) * divisor
+    for base_env, mult in env_mults:
+        env = {**base_env, div_sym: mult * divisor}
         try:
             orig = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
@@ -420,11 +439,14 @@ def test_simplify_with_divisibility(expr: ExprTree, div_sym: str, divisor: int) 
     assume(checked > 0)
 
 
-@given(expr=expressions(include_piecewise=False))
+@given(
+    expr=expressions(include_piecewise=False),
+    envs=st.lists(_env_st(), min_size=1, max_size=10),
+)
 @settings(max_examples=_CONV_EXAMPLES, deadline=None)
-def test_to_sympy_semantics(expr: ExprTree) -> None:
-    """conv.to_sympy produces a sympy expr that evaluates identically
-    to the ixsimpl expr at random integer points."""
+def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
+    """ixsimpl.sympy_conv.to_sympy produces a SymPy expression that
+    evaluates identically to the ixsimpl expression at random points."""
     ctx = ixsimpl.Context()
     try:
         ixs_expr = to_ixsimpl(ctx, expr)
@@ -435,8 +457,7 @@ def test_to_sympy_semantics(expr: ExprTree) -> None:
     sp_converted = conv_to_sympy(ixs_expr)
 
     checked = 0
-    for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             ixs_val = eval_ixs(ixs_expr, ctx, env)
         except (ValueError, TypeError):
@@ -456,11 +477,14 @@ def test_to_sympy_semantics(expr: ExprTree) -> None:
     assume(checked > 0)
 
 
-@given(expr=expressions(include_piecewise=False))
+@given(
+    expr=expressions(include_piecewise=False),
+    envs=st.lists(_env_st(), min_size=1, max_size=10),
+)
 @settings(max_examples=_CONV_EXAMPLES, deadline=None)
-def test_from_sympy_semantics(expr: ExprTree) -> None:
-    """conv.from_sympy produces an ixsimpl Expr that evaluates identically
-    to the original tree at random integer points."""
+def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
+    """ixsimpl.sympy_conv.from_sympy produces an ixsimpl expression that
+    evaluates identically to the original tree at random points."""
     try:
         sp_expr = to_sympy(expr)
     except (ValueError, TypeError):
@@ -474,8 +498,7 @@ def test_from_sympy_semantics(expr: ExprTree) -> None:
     assume(not ixs_converted.is_error)
 
     checked = 0
-    for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             ground_truth = eval_expr(expr, env)
             if not isinstance(ground_truth, int):
@@ -494,11 +517,14 @@ def test_from_sympy_semantics(expr: ExprTree) -> None:
     assume(checked > 0)
 
 
-@given(expr=expressions(include_piecewise=False))
+@given(
+    expr=expressions(include_piecewise=False),
+    envs=st.lists(_env_st(), min_size=1, max_size=10),
+)
 @settings(max_examples=_CONV_EXAMPLES, deadline=None)
-def test_sympy_roundtrip_semantics(expr: ExprTree) -> None:
-    """ixsimpl -> conv.to_sympy -> conv.from_sympy -> ixsimpl preserves
-    numerical semantics at random integer points."""
+def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
+    """ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves numerical
+    semantics at random integer points."""
     ctx = ixsimpl.Context()
     try:
         original = to_ixsimpl(ctx, expr)
@@ -514,8 +540,7 @@ def test_sympy_roundtrip_semantics(expr: ExprTree) -> None:
     assume(not roundtripped.is_error)
 
     checked = 0
-    for _ in range(10):
-        env = {v: random.randint(1, 100) for v in ["x", "y", "z", "w"]}
+    for env in envs:
         try:
             orig_val = eval_ixs(original, ctx, env)
         except (ValueError, TypeError, OverflowError):
