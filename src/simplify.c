@@ -714,6 +714,50 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   return rnd(ctx, expanded);
 }
 
+/*
+ * Drop a small positive constant from floor(ADD(c, [ci*bi, ...])) when
+ * every bi is integer-valued and 0 < c < 1/lcm(qi).
+ *
+ * Proof: each ci*bi lies on a grid with spacing 1/qi.  Their sum lies
+ * on a grid with spacing 1/L where L = lcm(qi).  Adding c < 1/L cannot
+ * push past the next grid point, so floor is unchanged.
+ *
+ * Returns the ADD rebuilt without c, x unchanged if rule doesn't apply,
+ * or NULL on OOM.
+ */
+static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_node *x) {
+  if (x->tag != IXS_ADD || x->u.add.nterms == 0)
+    return x;
+  int64_t cp, cq;
+  ixs_node_get_rat(x->u.add.coeff, &cp, &cq);
+  if (cp <= 0 || cq <= 0)
+    return x;
+  int64_t lcm = 1;
+  uint32_t i;
+  for (i = 0; i < x->u.add.nterms; i++) {
+    if (!ixs_node_is_integer_valued(x->u.add.terms[i].term))
+      return x;
+    int64_t tp, tq;
+    ixs_node_get_rat(x->u.add.terms[i].coeff, &tp, &tq);
+    if (tq <= 0)
+      return x;
+    int64_t g = ixs_gcd(lcm, tq);
+    if (tq / g > (1LL << 30) / lcm) /* cap lcm to avoid overflow */
+      return x;
+    lcm = lcm / g * tq;
+  }
+  /* c < 1/lcm  <=>  cp * lcm < cq (guarded against overflow) */
+  int64_t cl;
+  if (!ixs_safe_mul(cp, lcm, &cl) || cl >= cq)
+    return x;
+  ixs_node *sum = ixs_node_int(ctx, 0);
+  for (i = 0; i < x->u.add.nterms && sum; i++)
+    sum = simp_add(
+        ctx, sum,
+        simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
+  return sum;
+}
+
 typedef int64_t (*rat_fold_fn)(int64_t p, int64_t q);
 typedef ixs_node *(*node_ctor)(ixs_ctx *, ixs_node *);
 
@@ -758,50 +802,12 @@ static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
     }
   }
 
-  /* floor(c + sum(ci*bi)) -> floor(sum(ci*bi)) when every bi is
-   * integer-valued and 0 < c < 1/lcm(denominators of ci).
-   *
-   * Proof: each ci*bi lies on a grid with spacing 1/qi.  Their sum
-   * lies on a grid with spacing 1/L where L = lcm(qi).  Adding c < 1/L
-   * cannot push past the next grid point, so floor is unchanged. */
   if (self_tag == IXS_FLOOR && x->tag == IXS_ADD) {
-    int64_t cp, cq;
-    ixs_node_get_rat(x->u.add.coeff, &cp, &cq);
-    if (cp > 0 && cq > 0 && x->u.add.nterms > 0) {
-      int64_t lcm = 1;
-      bool ok = true;
-      uint32_t ti;
-      for (ti = 0; ti < x->u.add.nterms && ok; ti++) {
-        if (!ixs_node_is_integer_valued(x->u.add.terms[ti].term)) {
-          ok = false;
-          break;
-        }
-        int64_t tp, tq;
-        ixs_node_get_rat(x->u.add.terms[ti].coeff, &tp, &tq);
-        if (tq <= 0) {
-          ok = false;
-          break;
-        }
-        int64_t g = ixs_gcd(lcm, tq);
-        if (tq / g > (1LL << 30) / lcm) { /* cap lcm to avoid overflow */
-          ok = false;
-          break;
-        }
-        lcm = lcm / g * tq;
-      }
-      /* c < 1/lcm  <=>  cp * lcm < cq (guarded against overflow) */
-      int64_t cl;
-      if (ok && ixs_safe_mul(cp, lcm, &cl) && cl < cq) {
-        ixs_node *stripped = ixs_node_int(ctx, 0);
-        for (ti = 0; ti < x->u.add.nterms && stripped; ti++)
-          stripped = simp_add(
-              ctx, stripped,
-              simp_mul(ctx, x->u.add.terms[ti].coeff, x->u.add.terms[ti].term));
-        if (!stripped)
-          return NULL;
-        return rnd(ctx, stripped);
-      }
-    }
+    ixs_node *dropped = floor_drop_const(ctx, x);
+    if (!dropped)
+      return NULL;
+    if (dropped != x)
+      return rnd(ctx, dropped);
   }
 
   /* floor(Mod(X, M) / K) -> 0 when K >= M > 0.
@@ -1826,60 +1832,12 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       if (is_integer_with_divinfo(bnds, arg))
         return arg;
 
-      /* Drop a small rational constant from floor's argument when every
-       * term is a non-negative-integer-valued multiple of 1/qi.
-       *
-       *   floor(floor(a)/3 + 1/6)  ->  floor(floor(a)/3)
-       *
-       * Each ti/qi has fractional part in {0, 1/L, ..., (L-1)/L} where
-       * L = lcm(qi).  If 0 < r < 1/L, adding r can't cross an integer
-       * boundary, so floor(sum + r) = floor(sum). */
-      if (arg->tag == IXS_ADD && arg->u.add.coeff->tag == IXS_RAT &&
-          arg->u.add.nterms > 0) {
-        int64_t rp = arg->u.add.coeff->u.rat.p;
-        int64_t rq = arg->u.add.coeff->u.rat.q;
-
-        if (rp > 0 && rq > 1) {
-          int64_t L = 1;
-          bool ok = true;
-          uint32_t j;
-
-          for (j = 0; j < arg->u.add.nterms; j++) {
-            int64_t cp, cq;
-            ixs_node_get_rat(arg->u.add.terms[j].coeff, &cp, &cq);
-            if (cq <= 1) {
-              ok = false;
-              break;
-            }
-            if (!ixs_node_is_integer_valued(arg->u.add.terms[j].term)) {
-              ok = false;
-              break;
-            }
-            ixs_interval ti = ixs_bounds_get(bnds, arg->u.add.terms[j].term);
-            if (!ti.valid || ti.lo_q != 1 || ti.lo_p < 0) {
-              ok = false;
-              break;
-            }
-            int64_t g = ixs_gcd(L, cq);
-            if (g == 0 || L > INT64_MAX / (cq / g)) {
-              ok = false;
-              break;
-            }
-            L = L / g * cq;
-          }
-
-          /* r < 1/L  ⟺  rp * L < rq  (since rp, rq, L > 0) */
-          if (ok && L > 0 && rp <= INT64_MAX / L && rp * L < rq) {
-            ixs_node *zero = ixs_node_int(ctx, 0);
-            if (!zero)
-              return NULL;
-            ixs_node *inner =
-                ixs_node_add(ctx, zero, arg->u.add.nterms, arg->u.add.terms);
-            if (!inner)
-              return NULL;
-            return simp_floor(ctx, inner);
-          }
-        }
+      {
+        ixs_node *dropped = floor_drop_const(ctx, arg);
+        if (!dropped)
+          return NULL;
+        if (dropped != arg)
+          return simp_floor(ctx, dropped);
       }
     }
     return simp_floor(ctx, arg);

@@ -668,6 +668,8 @@ Construction rules:
 
 - `ADD(... + ADD(c + Σ di*ui) ...)` → flatten: merge `c` into coeff, merge
   all `di*ui` terms
+- `ADD(... + k * ADD(c + Σ di*ui) ...)` → distribute `k` and flatten
+  (enables `(x+y) - (x+y) → 0` by flattening `MUL(-1, ADD(x, y))`)
 - Collect like terms: if `ti == tj`, merge `ci + cj`
 - Drop terms with `ci == 0`
 - If all terms vanish, return `coeff`
@@ -726,6 +728,16 @@ The ADD and MUL-over-ADD extraction rules share implementation via
 `round_extract_add` and `round_extract_mul_add`, parameterized by a
 `round_fn` function pointer to avoid duplication between floor and ceiling.
 
+```
+floor(c + sum(ci*bi))  → floor(sum(ci*bi))
+    when every bi is integer-valued and 0 < c < 1/lcm(qi)
+    (the sum lies on a 1/L grid; c < 1/L can't cross a grid point)
+floor(Mod(X, M) / K)  → 0   when K >= M > 0
+```
+
+The constant-drop rule is implemented in `floor_drop_const`, shared
+between `simp_round` and `rewrite_impl`.
+
 More advanced rules (applied when domain info is available):
 
 ```
@@ -734,8 +746,6 @@ floor(x / n) where x = n*q + r, 0 <= r < n
 
 floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer
 ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer
-floor(Mod(X, M) / K)    → Mod(floor(X/K), M/K)  when K | M
-ceiling(Mod(X, M) / K)  → Mod(ceiling(X/K), M/K) when K | M
 Mod(a*floor(x/a), a)     → 0
 Mod(x, n) where 0 <= x < n is provable → x
 ```
