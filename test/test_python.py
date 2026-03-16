@@ -48,7 +48,7 @@ small_ints = st.integers(min_value=-64, max_value=64)
 pos_ints = st.integers(min_value=1, max_value=32)
 
 
-_OPS_BASE = ["add", "mul", "div", "floor", "ceiling", "mod", "max", "min"]
+_OPS_BASE = ["add", "sub", "mul", "neg", "div", "floor", "ceiling", "mod", "max", "min"]
 _OPS_WITH_PW = [*_OPS_BASE, "piecewise"]
 
 
@@ -59,7 +59,7 @@ def expressions(draw: st.DrawFn, max_depth: int = 4, include_piecewise: bool = T
     ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
     op = draw(st.sampled_from(ops))
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op in ("floor", "ceiling"):
+    if op in ("floor", "ceiling", "neg"):
         return (op, a)
     if op == "piecewise":
         cond = draw(conditions(max_depth=1))
@@ -103,6 +103,10 @@ def to_sympy(tree: ExprTree) -> Any:
     op = tree[0]
     if op == "add":
         return to_sympy(tree[1]) + to_sympy(tree[2])
+    if op == "sub":
+        return to_sympy(tree[1]) - to_sympy(tree[2])
+    if op == "neg":
+        return -to_sympy(tree[1])
     if op == "mul":
         return to_sympy(tree[1]) * to_sympy(tree[2])
     if op == "div":
@@ -160,6 +164,10 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
     op = tree[0]
     if op == "add":
         return to_ixsimpl(ctx, tree[1]) + to_ixsimpl(ctx, tree[2])
+    if op == "sub":
+        return to_ixsimpl(ctx, tree[1]) - to_ixsimpl(ctx, tree[2])
+    if op == "neg":
+        return -to_ixsimpl(ctx, tree[1])
     if op == "mul":
         return to_ixsimpl(ctx, tree[1]) * to_ixsimpl(ctx, tree[2])
     if op == "div":
@@ -238,6 +246,10 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     op = tree[0]
     if op == "add":
         return eval_expr(tree[1], env) + eval_expr(tree[2], env)
+    if op == "sub":
+        return eval_expr(tree[1], env) - eval_expr(tree[2], env)
+    if op == "neg":
+        return -eval_expr(tree[1], env)
     if op == "mul":
         return eval_expr(tree[1], env) * eval_expr(tree[2], env)
     if op == "div":
@@ -283,6 +295,7 @@ def eval_cond(tree: CondTree, env: Env) -> Any:
             return va == vb
         if cmp_op == "!=":
             return va != vb
+        raise ValueError(f"unknown cmp_op: {cmp_op}")
     if op == "not":
         return not eval_cond(tree[1], env)
     if op == "and":
@@ -339,6 +352,7 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     ixs_simplified = ixs_expr.simplify()
     assume(not ixs_simplified.is_error)
 
+    checked = 0
     for env in envs:
         try:
             orig = eval_expr(expr, env)
@@ -349,6 +363,8 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
         except (ValueError, TypeError):
             continue
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
+        checked += 1
+    assume(checked > 0)
 
 
 @given(
@@ -377,6 +393,7 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
     except (ValueError, TypeError):
         assume(False)
 
+    checked = 0
     for env in envs:
         try:
             ground_truth = eval_expr(expr, env)
@@ -387,6 +404,7 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
             f"ixsimpl diverges from ground truth at {env}: "
             f"expected={ground_truth}, got={ixs_val}, expr={expr}"
         )
+        checked += 1
         try:
             sp_env = {sympy.Symbol(k, integer=True): v for k, v in env.items()}
             sp_val = sp_expr.subs(sp_env)
@@ -396,6 +414,7 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
                     pass  # SymPy bug, not ours
         except (ZeroDivisionError, ValueError, TypeError):
             pass
+    assume(checked > 0)
 
 
 @given(
@@ -566,6 +585,57 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
         assert orig_val == rt_val, (
             f"roundtrip mismatch at {env}: "
             f"original={orig_val}, roundtripped={rt_val}, expr={expr}"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    expr=expressions(),
+    bound_sym=st.sampled_from(_VARS),
+    lo=st.integers(min_value=0, max_value=50),
+    hi=st.integers(min_value=51, max_value=200),
+    envs=st.lists(
+        st.fixed_dictionaries({v: st.integers(0, 200) for v in _VARS}),
+        min_size=1,
+        max_size=10,
+    ),
+)
+def test_simplify_with_bounds(
+    expr: ExprTree,
+    bound_sym: str,
+    lo: int,
+    hi: int,
+    envs: list[Env],
+) -> None:
+    """Simplification with bound assumptions (lo <= sym < hi) preserves
+    semantics when evaluated at points satisfying the bounds."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sym_node = ctx.sym(bound_sym)
+    assumptions = [sym_node >= ctx.int_(lo), sym_node < ctx.int_(hi)]
+    ixs_simplified = ixs_expr.simplify(assumptions=assumptions)
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for base_env in envs:
+        env = {**base_env, bound_sym: max(lo, min(hi - 1, base_env[bound_sym]))}
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        try:
+            simp = eval_ixs(ixs_simplified, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        assert orig == simp, (
+            f"Bounds mismatch: {orig} != {simp} at {env}, "
+            f"expr={expr}, bounds={lo} <= {bound_sym} < {hi}"
         )
         checked += 1
     assume(checked > 0)
