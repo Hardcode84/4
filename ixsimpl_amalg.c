@@ -1484,6 +1484,21 @@ static bool htab_rehash(ixs_ctx *ctx) {
   return true;
 }
 
+/* Probe the hash table without inserting.  Returns the existing node
+ * on hit, or NULL on miss.  The probe node may live on the stack. */
+static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
+  size_t mask = ctx->htab_cap - 1;
+  size_t idx = probe->hash & mask;
+  for (;;) {
+    ixs_node *slot = ctx->htab[idx];
+    if (!slot)
+      return NULL;
+    if (slot->hash == probe->hash && ixs_node_equal(slot, probe))
+      return slot;
+    idx = (idx + 1) & mask;
+  }
+}
+
 ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
   size_t mask = ctx->htab_cap - 1;
   size_t idx = node->hash & mask;
@@ -1523,24 +1538,17 @@ static ixs_node *alloc_node(ixs_ctx *ctx) {
 
 ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
   ixs_node tmp;
+  ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_INT;
   tmp.u.ival = val;
   tmp.hash = compute_hash(&tmp);
 
-  /* Check hash table first to avoid redundant arena alloc. */
-  size_t mask = ctx->htab_cap - 1;
-  size_t idx = tmp.hash & mask;
-  for (;;) {
-    ixs_node *slot = ctx->htab[idx];
-    if (!slot)
-      break;
-    if (slot->hash == tmp.hash && ixs_node_equal(slot, &tmp))
-      return slot;
-    idx = (idx + 1) & mask;
-  }
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
   *n = tmp;
@@ -1548,19 +1556,30 @@ ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
 }
 
 ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
+  ixs_node tmp;
+  ixs_node *found, *n;
   if (q == 1)
     return ixs_node_int(ctx, p);
 
-  ixs_node *n = alloc_node(ctx);
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_RAT;
+  tmp.u.rat.p = p;
+  tmp.u.rat.q = q;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_RAT;
-  n->u.rat.p = p;
-  n->u.rat.q = q;
-  n->hash = compute_hash(n);
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
+/* Cannot use htab_lookup: name may not be NUL-terminated, and
+ * ixs_node_equal uses strcmp, so we probe with memcmp directly. */
 ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   uint32_t sym_hash;
   ixs_node *n;
@@ -1599,7 +1618,21 @@ ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
 
 ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
                        ixs_addterm *terms) {
-  ixs_addterm *a = NULL;
+  ixs_node tmp;
+  ixs_node *found, *n;
+  ixs_addterm *a;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_ADD;
+  tmp.u.add.coeff = coeff;
+  tmp.u.add.nterms = nterms;
+  tmp.u.add.terms = terms;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  a = NULL;
   if (nterms > 0) {
     a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
                         sizeof(void *));
@@ -1608,20 +1641,31 @@ ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
     memcpy(a, terms, nterms * sizeof(ixs_addterm));
   }
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_ADD;
-  n->u.add.coeff = coeff;
-  n->u.add.nterms = nterms;
-  n->u.add.terms = a;
-  n->hash = compute_hash(n);
+  tmp.u.add.terms = a;
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
                        ixs_mulfactor *factors) {
-  ixs_mulfactor *f = NULL;
+  ixs_node tmp;
+  ixs_node *found, *n;
+  ixs_mulfactor *f;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_MUL;
+  tmp.u.mul.coeff = coeff;
+  tmp.u.mul.nfactors = nfactors;
+  tmp.u.mul.factors = factors;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  f = NULL;
   if (nfactors > 0) {
     f = ixs_arena_alloc(&ctx->arena, nfactors * sizeof(ixs_mulfactor),
                         sizeof(void *));
@@ -1630,92 +1674,145 @@ ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
     memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
   }
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_MUL;
-  n->u.mul.coeff = coeff;
-  n->u.mul.nfactors = nfactors;
-  n->u.mul.factors = f;
-  n->hash = compute_hash(n);
+  tmp.u.mul.factors = f;
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node *n = alloc_node(ctx);
+  ixs_node tmp;
+  ixs_node *found, *n;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_FLOOR;
+  tmp.u.unary.arg = arg;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_FLOOR;
-  n->u.unary.arg = arg;
-  n->hash = compute_hash(n);
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node *n = alloc_node(ctx);
+  ixs_node tmp;
+  ixs_node *found, *n;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_CEIL;
+  tmp.u.unary.arg = arg;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_CEIL;
-  n->u.unary.arg = arg;
-  n->hash = compute_hash(n);
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                           ixs_node *rhs, ixs_cmp_op op) {
-  ixs_node *n = alloc_node(ctx);
+  ixs_node tmp;
+  ixs_node *found, *n;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = tag;
+  tmp.u.binary.lhs = lhs;
+  tmp.u.binary.rhs = rhs;
+  tmp.u.binary.cmp_op = op;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = tag;
-  n->u.binary.lhs = lhs;
-  n->u.binary.rhs = rhs;
-  n->u.binary.cmp_op = op;
-  n->hash = compute_hash(n);
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
-  ixs_pwcase *c =
-      ixs_arena_alloc(&ctx->arena, ncases * sizeof(ixs_pwcase), sizeof(void *));
+  ixs_node tmp;
+  ixs_node *found, *n;
+  ixs_pwcase *c;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_PIECEWISE;
+  tmp.u.pw.ncases = ncases;
+  tmp.u.pw.cases = cases;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  c = ixs_arena_alloc(&ctx->arena, ncases * sizeof(ixs_pwcase), sizeof(void *));
   if (!c && ncases > 0)
     return NULL;
   memcpy(c, cases, ncases * sizeof(ixs_pwcase));
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_PIECEWISE;
-  n->u.pw.ncases = ncases;
-  n->u.pw.cases = c;
-  n->hash = compute_hash(n);
+  tmp.u.pw.cases = c;
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
                          ixs_node **args) {
-  ixs_node **a =
-      ixs_arena_alloc(&ctx->arena, nargs * sizeof(ixs_node *), sizeof(void *));
+  ixs_node tmp;
+  ixs_node *found, *n;
+  ixs_node **a;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = tag;
+  tmp.u.logic.nargs = nargs;
+  tmp.u.logic.args = args;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  a = ixs_arena_alloc(&ctx->arena, nargs * sizeof(ixs_node *), sizeof(void *));
   if (!a && nargs > 0)
     return NULL;
   memcpy(a, args, nargs * sizeof(ixs_node *));
 
-  ixs_node *n = alloc_node(ctx);
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = tag;
-  n->u.logic.nargs = nargs;
-  n->u.logic.args = a;
-  n->hash = compute_hash(n);
+  tmp.u.logic.args = a;
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
 ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node *n = alloc_node(ctx);
+  ixs_node tmp;
+  ixs_node *found, *n;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_NOT;
+  tmp.u.unary_bool.arg = arg;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
   if (!n)
     return NULL;
-  n->tag = IXS_NOT;
-  n->u.unary_bool.arg = arg;
-  n->hash = compute_hash(n);
+  *n = tmp;
   return ixs_htab_intern(ctx, n);
 }
 
