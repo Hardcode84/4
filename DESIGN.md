@@ -187,12 +187,8 @@ Typical working set for one expression is < 64 KB.
 
 Smart constructors (`simp_add`, `simp_mul`, `simp_and`, `simp_or`, `simp_pw`)
 and the parser flatten variadic children into temporary arrays before building
-the final hash-consed node. Currently these are fixed-size stack arrays bounded
-by `MAX_TERMS` (256). This is a hard cap — expressions with more terms hit an
-error. While 256 is generous for the target domain, a hard compile-time limit
-is architecturally limiting.
-
-**Solution**: A second arena (`ixs_arena scratch`) in `ixs_ctx`, used
+the final hash-consed node. These temporaries live on the scratch arena —
+a second arena (`ixs_arena scratch`) in `ixs_ctx`, used
 exclusively for short-lived temporary allocations. A save/restore API lets
 callers rewind the scratch arena after the temporary data is consumed:
 
@@ -495,11 +491,15 @@ remains valid for the lifetime of the context regardless of whether the caller
 frees the original input string.
 
 **Hash-consing**: A global (per-context) hash table maps
-`(tag, hash_of_children)` → `ixs_node*`. Before creating any node, look it
-up. On hash match, perform a **full structural comparison** (tag + all
-children/fields) before returning the existing pointer. This guarantees that
-pointer equality implies structural equality despite hash collisions. The
-table uses open addressing with linear probing and rehashes at 70% load.
+`(tag, hash_of_children)` → `ixs_node*`. The table uses open addressing
+with linear probing and rehashes at 70% load.
+
+**Probe-before-allocate**: Each node constructor builds a stack-local
+`ixs_node tmp`, populates its fields and hash, and probes the hash table
+via `htab_lookup`. On hit (full structural comparison confirms match), the
+existing pointer is returned with zero arena allocation. On miss, the
+constructor arena-allocates the node, copies `tmp` into it, and inserts it
+into the table. This avoids wasting arena memory on duplicate nodes.
 
 **Canonical ordering**: Children of `IXS_ADD` and `IXS_MUL` are sorted by a
 total order on nodes (by tag, then by content). This ensures `a + b` and
