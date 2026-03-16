@@ -738,6 +738,22 @@ floor(Mod(X, M) / K)  → 0   when K >= M > 0
 The constant-drop rule is implemented in `floor_drop_const`, shared
 between `simp_round` and `rewrite_impl`.
 
+`round_extract_add` splits rational constants into integer + fractional
+parts (e.g. `65/32 → 2 + 1/32`) before testing the drop condition,
+so `floor(65/32 + 1/2*floor(x/16))` reduces to `2 + floor(1/2*floor(x/16))`.
+
+```
+floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
+    when every ti is integer-valued, D is symbolic, all terms share D^{-1},
+    and C' = C - (C mod gcd(g, L)) where g = gcd of base numerator
+    coefficients and L = lcm of rational coefficient denominators.
+    (Proof: N = sum(ni*ti) is always a multiple of g; adding
+    r < gcd(g, L) to N cannot push past the next floor boundary.)
+```
+
+The symbolic-denominator constant-drop rule is implemented in
+`floor_drop_const_sym`, also shared between `simp_round` and `rewrite_impl`.
+
 More advanced rules (applied when domain info is available):
 
 ```

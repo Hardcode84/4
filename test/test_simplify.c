@@ -1118,6 +1118,94 @@ static void test_floor_drop_fractional_const(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_round_extract_rat_split(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* floor(65/32 + 1/2*floor(x/16))  ->  2 + floor(1/32 + 1/2*floor(x/16))
+   * then floor_drop_const fires on 1/32 < 1/2 => 2 + floor(1/2*floor(x/16))
+   * i.e. overall result: 2 + floor(floor(x/16) / 2) */
+  ixs_node *fl_x16 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16)));
+  ixs_node *a = ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, 65, 32),
+                                       ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  ixs_node *expected_a =
+      ixs_add(ctx, ixs_int(ctx, 2),
+              ixs_floor(ctx, ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  CHECK(a == expected_a);
+
+  /* floor(7/3 + floor(x/5) / 3) -> 2 + floor(1/3 + floor(x/5)/3)
+   * 1/3 >= 1/3 so const is NOT dropped; verify integer part extracted. */
+  ixs_node *fl_x5 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 5)));
+  ixs_node *b = ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, 7, 3),
+                                       ixs_div(ctx, fl_x5, ixs_int(ctx, 3))));
+  /* Constant is 7/3=2+1/3. After split, integer 2 is extracted.
+   * 1/3 is NOT dropped (1/3 >= 1/lcm where lcm=3).
+   * Result: 2 + floor(1/3 + floor(x/5)/3) */
+  ixs_node *inner =
+      ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, 1, 3),
+                             ixs_div(ctx, fl_x5, ixs_int(ctx, 3))));
+  ixs_node *expected_b = ixs_add(ctx, ixs_int(ctx, 2), inner);
+  CHECK(b == expected_b);
+
+  /* floor(1/32 + floor(x/16) / 2) -> floor(floor(x/16) / 2)
+   * RAT coeff with fl==0: no split needed, const drops directly. */
+  ixs_node *c = ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, 1, 32),
+                                       ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  ixs_node *expected_c = ixs_floor(ctx, ixs_div(ctx, fl_x16, ixs_int(ctx, 2)));
+  CHECK(c == expected_c);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_floor_drop_const_sym(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *D = ixs_sym(ctx, "D");
+  ixs_node *dinv = ixs_div(ctx, ixs_int(ctx, 1), D);
+
+  /* floor(x*D^{-1} + (1/32)*D^{-1}):
+   * Both terms share D^{-1}. base: x has scaled num=32. const: num=1.
+   * g_bases=32, lcm=32, gcd(32,32)=32, 1%32=1>0 => drop constant. */
+  ixs_node *xD = ixs_mul(ctx, x, dinv);
+  ixs_node *cD = ixs_mul(ctx, ixs_rat(ctx, 1, 32), dinv);
+  ixs_node *e1 = ixs_floor(ctx, ixs_add(ctx, xD, cD));
+  ixs_node *assume_d = ixs_cmp(ctx, D, IXS_CMP_GE, ixs_int(ctx, 1));
+  ixs_node *expected1 = ixs_floor(ctx, xD);
+  ixs_node *r1 = ixs_simplify(ctx, e1, &assume_d, 1);
+  CHECK(r1 == expected1);
+
+  /* floor(x*D^{-1} + 1*D^{-1}): const scaled=32, gcd(32,32)=32,
+   * 32%32=0 => no fire (the 1/D matters). */
+  ixs_node *e2 = ixs_floor(ctx, ixs_add(ctx, xD, dinv));
+  ixs_node *r2 = ixs_simplify(ctx, e2, &assume_d, 1);
+  CHECK(r2 == e2);
+
+  /* floor(32*x*D^{-1} + (5/32)*D^{-1}):
+   * base: scaled num = 32*32=1024. const: 5.
+   * g_bases=1024, lcm=32, gcd(1024,32)=32, 5%32=5>0 => drop. */
+  ixs_node *x32D = ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 32), x), dinv);
+  ixs_node *c5D = ixs_mul(ctx, ixs_rat(ctx, 5, 32), dinv);
+  ixs_node *e3 = ixs_floor(ctx, ixs_add(ctx, x32D, c5D));
+  ixs_node *r3 = ixs_simplify(ctx, e3, &assume_d, 1);
+  ixs_node *expected3 = ixs_floor(ctx, x32D);
+  CHECK(r3 == expected3);
+
+  /* floor(x*D^{-1} + (17/32)*D^{-1}): 17%32=17>0 => drop. */
+  ixs_node *c17D = ixs_mul(ctx, ixs_rat(ctx, 17, 32), dinv);
+  ixs_node *e4 = ixs_floor(ctx, ixs_add(ctx, xD, c17D));
+  ixs_node *r4 = ixs_simplify(ctx, e4, &assume_d, 1);
+  CHECK(r4 == expected1);
+
+  /* Partial: floor(x*D^{-1} + (33/32)*D^{-1}).
+   * const=33, gcd=32, 33%32=1>0 => reduce to floor(x/D + 1/D). */
+  ixs_node *c33D = ixs_mul(ctx, ixs_rat(ctx, 33, 32), dinv);
+  ixs_node *e5 = ixs_floor(ctx, ixs_add(ctx, xD, c33D));
+  ixs_node *r5 = ixs_simplify(ctx, e5, &assume_d, 1);
+  CHECK(r5 == e2);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_add_flatten_neg(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1166,6 +1254,8 @@ int main(void) {
   test_simplify_batch();
   test_print_c();
   test_floor_drop_fractional_const();
+  test_round_extract_rat_split();
+  test_floor_drop_const_sym();
   test_add_flatten_neg();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);

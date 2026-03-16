@@ -4014,8 +4014,14 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
     return x;
 
   bool have_int = false;
+  int64_t rat_fl = 0;
   if (x->u.add.coeff->tag == IXS_INT && x->u.add.coeff->u.ival != 0)
     have_int = true;
+  if (!have_int && x->u.add.coeff->tag == IXS_RAT) {
+    rat_fl = ixs_rat_floor(x->u.add.coeff->u.rat.p, x->u.add.coeff->u.rat.q);
+    if (rat_fl != 0)
+      have_int = true;
+  }
 
   uint32_t i;
   for (i = 0; i < x->u.add.nterms && !have_int; i++) {
@@ -4036,14 +4042,39 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
   }
 
   uint32_t nk = 0;
-  ixs_node *int_sum =
-      (x->u.add.coeff->tag == IXS_INT) ? x->u.add.coeff : ixs_node_int(ctx, 0);
-  if (!int_sum) {
+  ixs_node *int_sum;
+  ixs_node *rem_coeff;
+  if (x->u.add.coeff->tag == IXS_INT) {
+    int_sum = x->u.add.coeff;
+    rem_coeff = ixs_node_int(ctx, 0);
+  } else if (x->u.add.coeff->tag == IXS_RAT && rat_fl != 0) {
+    int64_t p = x->u.add.coeff->u.rat.p;
+    int64_t q = x->u.add.coeff->u.rat.q;
+    int64_t prod;
+    if (ixs_safe_mul(rat_fl, q, &prod)) {
+      int64_t rem_p = p - prod;
+      int64_t rp, rq;
+      int_sum = ixs_node_int(ctx, rat_fl);
+      if (rem_p == 0) {
+        rem_coeff = ixs_node_int(ctx, 0);
+      } else if (ixs_rat_normalize(rem_p, q, &rp, &rq)) {
+        rem_coeff = make_const(ctx, rp, rq);
+      } else {
+        int_sum = ixs_node_int(ctx, 0);
+        rem_coeff = x->u.add.coeff;
+      }
+    } else {
+      int_sum = ixs_node_int(ctx, 0);
+      rem_coeff = x->u.add.coeff;
+    }
+  } else {
+    int_sum = ixs_node_int(ctx, 0);
+    rem_coeff = x->u.add.coeff;
+  }
+  if (!int_sum || !rem_coeff) {
     ixs_arena_restore(&ctx->scratch, m);
     return NULL;
   }
-  ixs_node *rem_coeff =
-      (x->u.add.coeff->tag == IXS_INT) ? ixs_node_int(ctx, 0) : x->u.add.coeff;
 
   for (i = 0; i < x->u.add.nterms; i++) {
     int64_t cp, cq;
@@ -4200,6 +4231,232 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_node *x) {
   return sum;
 }
 
+static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr);
+
+/*
+ * Drop a small positive constant from floor(ADD) when all terms share
+ * a common symbolic denominator D^-1.
+ *
+ * Given floor(c1*t1/D + c2*t2/D + ... + k/D) where the ti are
+ * integer-valued: clear rational denominators to get integer numerator
+ * coefficients ni, compute g = gcd(|ni|) for the non-constant terms,
+ * and reduce the constant modulo gcd(g, lcm_of_rational_denoms).
+ *
+ * Proof sketch: let N = sum(ni*ti).  N is always a multiple of g.
+ * The effective denominator is L*D (concrete L, symbolic D).  Since
+ * gcd(g, L*D) >= gcd(g, L) for any positive integer D, adding r < gcd(g,L)
+ * to N cannot push past the next multiple of gcd(g,L*D), so the floor
+ * is unchanged.  Therefore floor((N+C)/(L*D)) = floor((N+C')/(L*D))
+ * whenever C ≡ C' (mod gcd(g, L)).
+ */
+static ixs_node *floor_drop_const_sym(ixs_ctx *ctx, ixs_node *x,
+                                      ixs_bounds *bnds) {
+  uint32_t i, j;
+
+  if (x->tag != IXS_ADD || x->u.add.nterms < 2)
+    return x;
+  if (!ixs_node_is_zero(x->u.add.coeff))
+    return x;
+
+  ixs_node *first = x->u.add.terms[0].term;
+  if (first->tag != IXS_MUL)
+    return x;
+
+  for (j = 0; j < first->u.mul.nfactors; j++) {
+    ixs_node *denom;
+    bool all_have, ok;
+    int64_t lcm_denom, const_num, g_bases;
+    uint32_t n_const_terms;
+
+    if (first->u.mul.factors[j].exp != -1)
+      continue;
+    if (ixs_node_is_const(first->u.mul.factors[j].base))
+      continue;
+
+    denom = first->u.mul.factors[j].base;
+
+    /* Every term must contain denom^-1. */
+    all_have = true;
+    for (i = 1; i < x->u.add.nterms; i++) {
+      ixs_node *t = x->u.add.terms[i].term;
+      uint32_t k;
+      bool found = false;
+      if (t->tag != IXS_MUL) {
+        all_have = false;
+        break;
+      }
+      for (k = 0; k < t->u.mul.nfactors; k++) {
+        if (t->u.mul.factors[k].base == denom &&
+            t->u.mul.factors[k].exp == -1) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        all_have = false;
+        break;
+      }
+    }
+    if (!all_have)
+      continue;
+
+    /* Compute lcm of effective rational coefficient denominators. */
+    lcm_denom = 1;
+    ok = true;
+    for (i = 0; i < x->u.add.nterms; i++) {
+      int64_t cp, cq, mp, mq, ep, eq, g;
+      ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+      ixs_node_get_rat(x->u.add.terms[i].term->u.mul.coeff, &mp, &mq);
+      if (!ixs_rat_mul(cp, cq, mp, mq, &ep, &eq)) {
+        ok = false;
+        break;
+      }
+      if (eq <= 0) {
+        ok = false;
+        break;
+      }
+      g = ixs_gcd(lcm_denom, eq);
+      /* Cap lcm to avoid overflow. */
+      if (eq / g > (1LL << 30) / lcm_denom) {
+        ok = false;
+        break;
+      }
+      lcm_denom = lcm_denom / g * eq;
+    }
+    if (!ok)
+      continue;
+
+    /* Classify terms: "base" (has symbolic factors beyond denom^-1) vs
+     * "const" (only denom^-1).  Compute integer numerator coefficients. */
+    const_num = 0;
+    g_bases = 0;
+    n_const_terms = 0;
+
+    for (i = 0; i < x->u.add.nterms; i++) {
+      int64_t cp, cq, mp, mq, ep, eq, scale, num;
+      ixs_node *t;
+      bool has_other_sym, other_ok;
+      uint32_t k;
+
+      ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
+      ixs_node_get_rat(x->u.add.terms[i].term->u.mul.coeff, &mp, &mq);
+      if (!ixs_rat_mul(cp, cq, mp, mq, &ep, &eq)) {
+        ok = false;
+        break;
+      }
+      scale = lcm_denom / eq;
+      if (!ixs_safe_mul(ep, scale, &num)) {
+        ok = false;
+        break;
+      }
+
+      t = x->u.add.terms[i].term;
+      has_other_sym = false;
+      other_ok = true;
+      for (k = 0; k < t->u.mul.nfactors; k++) {
+        bool iv;
+        if (t->u.mul.factors[k].base == denom)
+          continue;
+        has_other_sym = true;
+        if (t->u.mul.factors[k].exp < 0) {
+          other_ok = false;
+          break;
+        }
+        iv = bnds ? is_integer_with_divinfo(bnds, t->u.mul.factors[k].base)
+                  : ixs_node_is_integer_valued(t->u.mul.factors[k].base);
+        if (!iv) {
+          other_ok = false;
+          break;
+        }
+      }
+      if (!other_ok) {
+        ok = false;
+        break;
+      }
+
+      if (has_other_sym) {
+        int64_t anum = (num > 0) ? num : ((num > -INT64_MAX) ? -num : 0);
+        if (anum == 0) {
+          ok = false;
+          break;
+        }
+        g_bases = (g_bases == 0) ? anum : ixs_gcd(g_bases, anum);
+      } else {
+        if (!ixs_safe_add(const_num, num, &const_num)) {
+          ok = false;
+          break;
+        }
+        n_const_terms++;
+      }
+    }
+
+    if (!ok || g_bases == 0 || n_const_terms == 0 || const_num <= 0)
+      continue;
+
+    /* Reduce const_num modulo gcd(g_bases, lcm_denom). */
+    {
+      int64_t gc = ixs_gcd(g_bases, lcm_denom);
+      int64_t k_drop, new_const;
+      ixs_node *result;
+
+      if (gc <= 0)
+        continue;
+      k_drop = const_num % gc;
+      if (k_drop <= 0)
+        continue;
+
+      new_const = const_num - k_drop;
+
+      /* Rebuild ADD: keep non-constant terms, replace constant. */
+      result = x->u.add.coeff;
+      for (i = 0; i < x->u.add.nterms; i++) {
+        ixs_node *t = x->u.add.terms[i].term;
+        bool has_other_sym = false;
+        uint32_t k;
+        for (k = 0; k < t->u.mul.nfactors; k++) {
+          if (t->u.mul.factors[k].base != denom) {
+            has_other_sym = true;
+            break;
+          }
+        }
+        if (!has_other_sym)
+          continue;
+        result =
+            simp_add(ctx, result, simp_mul(ctx, x->u.add.terms[i].coeff, t));
+        if (!result)
+          return NULL;
+      }
+
+      /* Add reduced constant term if non-zero. */
+      if (new_const != 0) {
+        int64_t rp, rq;
+        ixs_node *cnode;
+        ixs_mulfactor f;
+        ixs_node *dinv, *cterm;
+        if (!ixs_rat_normalize(new_const, lcm_denom, &rp, &rq))
+          continue;
+        cnode = make_const(ctx, rp, rq);
+        if (!cnode)
+          return NULL;
+        f.base = denom;
+        f.exp = -1;
+        dinv = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
+        if (!dinv)
+          return NULL;
+        cterm = simp_mul(ctx, cnode, dinv);
+        if (!cterm)
+          return NULL;
+        result = simp_add(ctx, result, cterm);
+        if (!result)
+          return NULL;
+      }
+      return result;
+    }
+  }
+
+  return x;
+}
+
 typedef int64_t (*rat_fold_fn)(int64_t p, int64_t q);
 typedef ixs_node *(*node_ctor)(ixs_ctx *, ixs_node *);
 
@@ -4246,6 +4503,12 @@ static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
 
   if (self_tag == IXS_FLOOR && x->tag == IXS_ADD) {
     ixs_node *dropped = floor_drop_const(ctx, x);
+    if (!dropped)
+      return NULL;
+    if (dropped != x)
+      return rnd(ctx, dropped);
+
+    dropped = floor_drop_const_sym(ctx, x, NULL);
     if (!dropped)
       return NULL;
     if (dropped != x)
@@ -5276,6 +5539,14 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 
       {
         ixs_node *dropped = floor_drop_const(ctx, arg);
+        if (!dropped)
+          return NULL;
+        if (dropped != arg)
+          return simp_floor(ctx, dropped);
+      }
+
+      {
+        ixs_node *dropped = floor_drop_const_sym(ctx, arg, bnds);
         if (!dropped)
           return NULL;
         if (dropped != arg)
