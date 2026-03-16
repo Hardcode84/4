@@ -1202,7 +1202,24 @@ void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 // The canonical form keeps products factored; call this when you need
 // expanded form for term-by-term analysis.  NULL-safe.
 ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
+
+// Rule-hit statistics (requires -DIXS_STATS at compile time).
+// When disabled, nstats returns 0, stat returns 0/NULL, reset is a no-op.
+// Stats are per-context and not thread-safe for a shared context.
+size_t   ixs_ctx_nstats(ixs_ctx *ctx);      // distinct rules that fired
+uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
+void     ixs_ctx_stats_reset(ixs_ctx *ctx);  // zero all counters
 ```
+
+**Rule-hit statistics** (`-DIXS_STATS`): When compiled with `IXS_STATS`,
+each simplification rule records a hit count in a per-context
+open-addressing hash table (128 slots, keyed on `__func__` pointer
+identity). The `IXS_STAT_HIT(ctx)` macro in each rule function expands
+to a single pointer-compare probe; when `IXS_STATS` is not defined it
+expands to `((void)(ctx))`. CMake: `-DENABLE_STATS=ON`. The Python
+binding exposes `ctx.stats()` (returns a `{name: count}` dict) and
+`ctx.stats_reset()`. The Python wheel does not enable stats by default;
+build from source with `-DENABLE_STATS=ON` for profiling.
 
 Usage pattern:
 
