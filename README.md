@@ -8,12 +8,13 @@ compilers.
 ## Performance
 
 On a representative workload of 609 expressions from a single kernel
-compilation:
+compilation (vs `sympy.cancel`, best of 3 iterations):
 
 | | SymPy | ixsimpl | Speedup |
 |---|---|---|---|
-| Total | 41.4 s | ~45 ms | **~900x** |
-| Per expression (avg) | 68 ms | 74 us | **~900x** |
+| Total | 23.7 s | 30 ms | **~790x** |
+| Per expression (avg) | 39 ms | 49 us | **~790x** |
+| Median speedup | | | **625x** |
 
 ## Features
 
