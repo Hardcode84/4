@@ -501,11 +501,13 @@ ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
 
   a = NULL;
   if (nterms > 0) {
-    a = ixs_arena_alloc(&ctx->arena, nterms * sizeof(ixs_addterm),
-                        sizeof(void *));
+    size_t sz = (size_t)nterms * sizeof(ixs_addterm);
+    if (sz / sizeof(ixs_addterm) != nterms)
+      return NULL;
+    a = ixs_arena_alloc(&ctx->arena, sz, sizeof(void *));
     if (!a)
       return NULL;
-    memcpy(a, terms, nterms * sizeof(ixs_addterm));
+    memcpy(a, terms, sz);
   }
 
   n = alloc_node(ctx);
@@ -534,11 +536,13 @@ ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
 
   f = NULL;
   if (nfactors > 0) {
-    f = ixs_arena_alloc(&ctx->arena, nfactors * sizeof(ixs_mulfactor),
-                        sizeof(void *));
+    size_t sz = (size_t)nfactors * sizeof(ixs_mulfactor);
+    if (sz / sizeof(ixs_mulfactor) != nfactors)
+      return NULL;
+    f = ixs_arena_alloc(&ctx->arena, sz, sizeof(void *));
     if (!f)
       return NULL;
-    memcpy(f, factors, nfactors * sizeof(ixs_mulfactor));
+    memcpy(f, factors, sz);
   }
 
   n = alloc_node(ctx);
@@ -623,10 +627,16 @@ ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
   if (found)
     return found;
 
-  c = ixs_arena_alloc(&ctx->arena, ncases * sizeof(ixs_pwcase), sizeof(void *));
-  if (!c && ncases > 0)
-    return NULL;
-  memcpy(c, cases, ncases * sizeof(ixs_pwcase));
+  c = NULL;
+  if (ncases > 0) {
+    size_t sz = (size_t)ncases * sizeof(ixs_pwcase);
+    if (sz / sizeof(ixs_pwcase) != ncases)
+      return NULL;
+    c = ixs_arena_alloc(&ctx->arena, sz, sizeof(void *));
+    if (!c)
+      return NULL;
+    memcpy(c, cases, sz);
+  }
 
   n = alloc_node(ctx);
   if (!n)
@@ -651,10 +661,16 @@ ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
   if (found)
     return found;
 
-  a = ixs_arena_alloc(&ctx->arena, nargs * sizeof(ixs_node *), sizeof(void *));
-  if (!a && nargs > 0)
-    return NULL;
-  memcpy(a, args, nargs * sizeof(ixs_node *));
+  a = NULL;
+  if (nargs > 0) {
+    size_t sz = (size_t)nargs * sizeof(ixs_node *);
+    if (sz / sizeof(ixs_node *) != nargs)
+      return NULL;
+    a = ixs_arena_alloc(&ctx->arena, sz, sizeof(void *));
+    if (!a)
+      return NULL;
+    memcpy(a, args, sz);
+  }
 
   n = alloc_node(ctx);
   if (!n)
