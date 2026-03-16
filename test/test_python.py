@@ -65,7 +65,12 @@ _OPS_WITH_PW = [*_OPS_BASE, "piecewise"]
 
 @st.composite
 def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = True) -> ExprTree:
-    if max_depth <= 0 or (max_depth <= 3 and draw(st.booleans())):
+    # 30% early exit at depth>3, 50% at depth<=3.  Keeps deep trees possible
+    # without dominating runtime: expression generation is the bottleneck at
+    # depth 6 (65% of wall time at 50/50), and 30/70 cuts it roughly in half.
+    if max_depth <= 0 or draw(
+        st.sampled_from([True] * 3 + [False] * 7 if max_depth > 3 else [True, False])
+    ):
         return draw(st.one_of(sym_names, small_ints, small_rats))
     ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
     op = draw(st.sampled_from(ops))
