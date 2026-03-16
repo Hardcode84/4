@@ -1863,6 +1863,14 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_MIN:
     return ixs_node_is_integer_valued(n->u.binary.lhs) &&
            ixs_node_is_integer_valued(n->u.binary.rhs);
+  case IXS_PIECEWISE: {
+    uint32_t i;
+    for (i = 0; i < n->u.pw.ncases; i++) {
+      if (!ixs_node_is_integer_valued(n->u.pw.cases[i].value))
+        return false;
+    }
+    return n->u.pw.ncases > 0;
+  }
   default:
     return false;
   }
@@ -4143,7 +4151,10 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   if (!outer)
     return NULL;
 
-  /* Check whether distributing outer makes any ADD term integer-valued. */
+  /* Check whether distributing outer makes any ADD term integer-valued,
+   * OR whether the ADD has a nonzero integer constant and outer is
+   * non-integer (distribution exposes the constant for floor_drop_const
+   * or floor_drop_const_sym). */
   bool any_int = false;
   ixs_node *coeff_product = simp_mul(ctx, outer, add_node->u.add.coeff);
   if (coeff_product && ixs_node_is_integer_valued(coeff_product))
@@ -4155,8 +4166,14 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
     if (product && ixs_node_is_integer_valued(product))
       any_int = true;
   }
-  if (!any_int)
-    return x;
+  if (!any_int) {
+    int64_t ac_p, ac_q;
+    ixs_node_get_rat(add_node->u.add.coeff, &ac_p, &ac_q);
+    if (ac_p == 0)
+      return x;
+    if (ixs_node_is_integer_valued(outer))
+      return x;
+  }
 
   /* Expand outer * ADD and recurse through rnd(ADD). */
   ixs_node *expanded = simp_mul(ctx, outer, add_node->u.add.coeff);
@@ -4316,6 +4333,12 @@ static sym_term_info classify_sym_terms(ixs_node *x, ixs_node *denom,
       bool iv;
       if (t->u.mul.factors[k].base == denom)
         continue;
+      if (t->u.mul.factors[k].base->tag == IXS_INT) {
+        int64_t vp, vq;
+        ixs_node_get_rat(t->u.mul.factors[k].base, &vp, &vq);
+        if (vp == 1 && vq == 1)
+          continue;
+      }
       has_other_sym = true;
       if (t->u.mul.factors[k].exp < 0) {
         other_ok = false;
@@ -4362,10 +4385,13 @@ static ixs_node *rebuild_reduced_add(ixs_ctx *ctx, ixs_node *x, ixs_node *denom,
     bool has_other_sym = false;
     uint32_t k;
     for (k = 0; k < t->u.mul.nfactors; k++) {
-      if (t->u.mul.factors[k].base != denom) {
-        has_other_sym = true;
-        break;
-      }
+      if (t->u.mul.factors[k].base == denom)
+        continue;
+      if (t->u.mul.factors[k].base->tag == IXS_INT &&
+          t->u.mul.factors[k].base->u.ival == 1)
+        continue;
+      has_other_sym = true;
+      break;
     }
     if (!has_other_sym)
       continue;

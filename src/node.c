@@ -726,6 +726,14 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_MIN:
     return ixs_node_is_integer_valued(n->u.binary.lhs) &&
            ixs_node_is_integer_valued(n->u.binary.rhs);
+  case IXS_PIECEWISE: {
+    uint32_t i;
+    for (i = 0; i < n->u.pw.ncases; i++) {
+      if (!ixs_node_is_integer_valued(n->u.pw.cases[i].value))
+        return false;
+    }
+    return n->u.pw.ncases > 0;
+  }
   default:
     return false;
   }

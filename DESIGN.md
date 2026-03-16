@@ -754,6 +754,14 @@ floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
 The symbolic-denominator constant-drop rule is implemented in
 `floor_drop_const_sym`, also shared between `simp_round` and `rewrite_impl`.
 
+`round_extract_mul_add` also distributes `floor(outer * (const + terms))`
+when `outer` is non-integer and the ADD has a nonzero constant, even if no
+distributed term is integer-valued.  This converts factored forms into the
+distributed form expected by `floor_drop_const_sym`.
+
+`ixs_node_is_integer_valued` recognises `IXS_PIECEWISE` nodes as
+integer-valued when all value branches are integer-valued.
+
 More advanced rules (applied when domain info is available):
 
 ```
