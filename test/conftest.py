@@ -14,6 +14,12 @@ def pytest_addoption(parser):  # type: ignore[no-untyped-def]
         default=False,
         help="Run Hypothesis tests with fewer examples (for CI).",
     )
+    parser.addoption(
+        "--torture",
+        action="store_true",
+        default=False,
+        help="Run Hypothesis tests with many more examples and no shrinking limit.",
+    )
 
 
 def pytest_configure(config):  # type: ignore[no-untyped-def]
@@ -28,7 +34,15 @@ def pytest_configure(config):  # type: ignore[no-untyped-def]
         max_examples=2000,
         deadline=None,
     )
-    if config.getoption("--quick", default=False):
+    settings.register_profile(
+        "torture",
+        max_examples=50_000,
+        deadline=None,
+        suppress_health_check=list(HealthCheck),
+    )
+    if config.getoption("--torture", default=False):
+        settings.load_profile("torture")
+    elif config.getoption("--quick", default=False):
         settings.load_profile("quick")
     else:
         settings.load_profile("full")
