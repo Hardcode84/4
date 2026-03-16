@@ -1508,8 +1508,10 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c              # MUL-over-ADD distribution
 │   ├── expand.h
-│   ├── bounds.c              # interval/bound analysis
+│   ├── bounds.c              # bound storage, propagation, assumption extraction
 │   ├── bounds.h
+│   ├── interval.c            # interval arithmetic (add, mul, recip, intersect)
+│   ├── interval.h
 │   ├── print.c               # output formatters
 │   ├── print.h
 │   └── ctx.c                 # context management, public API impl

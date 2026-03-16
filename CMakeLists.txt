@@ -17,6 +17,7 @@ else()
         src/bounds.c
         src/ctx.c
         src/expand.c
+        src/interval.c
         src/node.c
         src/parser.c
         src/print.c
