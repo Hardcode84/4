@@ -991,6 +991,48 @@ static void test_piecewise_branch_bounds(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_symbolic_denom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *K = ixs_sym(ctx, "K");
+
+  /* floor(x / (128*K)) -> 0 when 0 <= x <= 127, K >= 1.
+   * Bounds: x in [0,127], 128*K in [128, inf), so x/(128*K) in [0, 127/128). */
+  ixs_node *e =
+      ixs_floor(ctx, ixs_div(ctx, x, ixs_mul(ctx, ixs_int(ctx, 128), K)));
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 127)),
+      ixs_cmp(ctx, K, IXS_CMP_GE, ixs_int(ctx, 1)),
+  };
+  ixs_node *r = ixs_simplify(ctx, e, assumes, 3);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* floor(Mod(x, 16) / (128*K)) -> 0 with K >= 1 (Mod range [0,15]). */
+  ixs_node *e2 = ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                        ixs_mul(ctx, ixs_int(ctx, 128), K)));
+  ixs_node *assume_k = ixs_cmp(ctx, K, IXS_CMP_GE, ixs_int(ctx, 1));
+  r = ixs_simplify(ctx, e2, &assume_k, 1);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* Difference: floor(A/D) - floor((A+1)/D) = 0 when A in [0,15], D >= 128. */
+  ixs_node *A = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *D = ixs_mul(ctx, ixs_int(ctx, 128), K);
+  ixs_node *diff = ixs_sub(
+      ctx, ixs_floor(ctx, ixs_div(ctx, A, D)),
+      ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, A, ixs_int(ctx, 1)), D)));
+  r = ixs_simplify(ctx, diff, &assume_k, 1);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* Negative test: floor(x/K) with x in [0,127], K in [1,...] does NOT
+   * collapse to 0 (127/1 = 127, floor could be up to 127). */
+  ixs_node *e3 = ixs_floor(ctx, ixs_div(ctx, x, K));
+  r = ixs_simplify(ctx, e3, assumes, 3);
+  CHECK(r != ixs_int(ctx, 0));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_simplify_batch(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1120,6 +1162,7 @@ int main(void) {
   test_mod_recognition();
   test_floor_mod_divisor();
   test_piecewise_branch_bounds();
+  test_floor_symbolic_denom();
   test_simplify_batch();
   test_print_c();
   test_floor_drop_fractional_const();

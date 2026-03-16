@@ -446,14 +446,25 @@ static ixs_interval iv_add(ixs_interval a, ixs_interval b) {
   return r;
 }
 
+/* Widen one endpoint to +/-infinity based on the sign of the product. */
+static void iv_endpoint_widen(int64_t ap, int64_t cp, int64_t *rp,
+                              int64_t *rq) {
+  bool neg = (ap < 0) != ixs_rat_is_neg(cp);
+  *rp = neg ? INT64_MIN : INT64_MAX;
+  *rq = 1;
+}
+
 static ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
   ixs_interval r;
   if (!a.valid)
     return ixs_interval_unknown();
+  if (cp == 0)
+    return ixs_interval_exact(0, 1);
   r.valid = true;
-  if (!ixs_rat_mul(a.lo_p, a.lo_q, cp, cq, &r.lo_p, &r.lo_q) ||
-      !ixs_rat_mul(a.hi_p, a.hi_q, cp, cq, &r.hi_p, &r.hi_q))
-    return ixs_interval_unknown();
+  if (!ixs_rat_mul(a.lo_p, a.lo_q, cp, cq, &r.lo_p, &r.lo_q))
+    iv_endpoint_widen(a.lo_p, cp, &r.lo_p, &r.lo_q);
+  if (!ixs_rat_mul(a.hi_p, a.hi_q, cp, cq, &r.hi_p, &r.hi_q))
+    iv_endpoint_widen(a.hi_p, cp, &r.hi_p, &r.hi_q);
   /* If multiplier is negative, swap lo and hi. */
   if (ixs_rat_is_neg(cp)) {
     int64_t tmp_p = r.lo_p, tmp_q = r.lo_q;
@@ -462,6 +473,71 @@ static ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
     r.hi_p = tmp_p;
     r.hi_q = tmp_q;
   }
+  return r;
+}
+
+/* Pairs: (a.lo, b.lo), (a.lo, b.hi), (a.hi, b.lo), (a.hi, b.hi). */
+static ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
+  ixs_interval r;
+  int64_t ap[4], aq[4], bp[4], bq[4], rp[4], rq[4];
+  uint32_t i;
+  if (!a.valid || !b.valid)
+    return ixs_interval_unknown();
+  ap[0] = a.lo_p;
+  aq[0] = a.lo_q;
+  bp[0] = b.lo_p;
+  bq[0] = b.lo_q;
+  ap[1] = a.lo_p;
+  aq[1] = a.lo_q;
+  bp[1] = b.hi_p;
+  bq[1] = b.hi_q;
+  ap[2] = a.hi_p;
+  aq[2] = a.hi_q;
+  bp[2] = b.lo_p;
+  bq[2] = b.lo_q;
+  ap[3] = a.hi_p;
+  aq[3] = a.hi_q;
+  bp[3] = b.hi_p;
+  bq[3] = b.hi_q;
+  for (i = 0; i < 4; i++) {
+    if (!ixs_rat_mul(ap[i], aq[i], bp[i], bq[i], &rp[i], &rq[i]))
+      iv_endpoint_widen(ap[i], bp[i], &rp[i], &rq[i]);
+  }
+  r.valid = true;
+  r.lo_p = rp[0];
+  r.lo_q = rq[0];
+  r.hi_p = rp[0];
+  r.hi_q = rq[0];
+  for (i = 1; i < 4; i++) {
+    if (ixs_rat_cmp(rp[i], rq[i], r.lo_p, r.lo_q) < 0) {
+      r.lo_p = rp[i];
+      r.lo_q = rq[i];
+    }
+    if (ixs_rat_cmp(rp[i], rq[i], r.hi_p, r.hi_q) > 0) {
+      r.hi_p = rp[i];
+      r.hi_q = rq[i];
+    }
+  }
+  return r;
+}
+
+/* Reciprocal of a strictly positive interval: 1/[a,b] = [1/b, 1/a].
+ * When the upper bound is effectively infinite (INT64_MAX), use 0 as
+ * the lower bound of the reciprocal (safe over-approximation). */
+static ixs_interval iv_recip(ixs_interval a) {
+  if (!a.valid || ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) <= 0)
+    return ixs_interval_unknown();
+  ixs_interval r;
+  r.valid = true;
+  if (a.hi_p == INT64_MAX && a.hi_q == 1) {
+    r.lo_p = 0;
+    r.lo_q = 1;
+  } else {
+    r.lo_p = a.hi_q;
+    r.lo_q = a.hi_p;
+  }
+  r.hi_p = a.lo_q;
+  r.hi_q = a.lo_p;
   return r;
 }
 
@@ -520,14 +596,26 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
     return result;
   }
   case IXS_MUL: {
-    /* Only handle simple cases: const * single factor. */
-    if (expr->u.mul.nfactors == 1 && expr->u.mul.factors[0].exp == 1) {
-      int64_t cp, cq;
-      ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
-      ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[0].base);
-      return iv_mul_const(fi, cp, cq);
+    int64_t cp, cq;
+    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+    ixs_interval result = ixs_interval_exact(cp, cq);
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[i].base);
+      if (!fi.valid)
+        return ixs_interval_unknown();
+      int32_t exp = expr->u.mul.factors[i].exp;
+      if (exp == 1) {
+        result = iv_mul(result, fi);
+      } else if (exp == -1) {
+        ixs_interval ri = iv_recip(fi);
+        if (!ri.valid)
+          return ixs_interval_unknown();
+        result = iv_mul(result, ri);
+      } else {
+        return ixs_interval_unknown();
+      }
     }
-    return ixs_interval_unknown();
+    return result;
   }
   case IXS_MOD: {
     /* Mod(x, m) in [0, m-1] only when x is integer-valued and m is a

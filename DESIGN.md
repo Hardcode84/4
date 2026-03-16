@@ -923,6 +923,52 @@ This enables rules like:
   non-negative integer (verified via bounds), `0 < r < 1/lcm(denoms)`,
   so `r` is too small to shift the floor past an integer boundary.
 
+**Interval propagation through symbolic MUL/DIV**:
+
+The bounds engine propagates intervals through `IXS_MUL` nodes with
+arbitrary numbers of factors and negative exponents (division by symbolic
+expressions).  This enables proving `floor(A/D) = 0` when `A` has a
+concrete upper bound and `D` has a symbolic lower bound that guarantees
+`A/D < 1`.
+
+- **Interval multiplication** (`iv_mul`): computes the tightest enclosing
+  interval for `[a,b] * [c,d]` by evaluating all four corner products
+  `{a*c, a*d, b*c, b*d}` and selecting the min/max.  Handles mixed-sign
+  intervals correctly.
+- **Interval reciprocal** (`iv_recip`): for a strictly positive interval
+  `[a,b]` with `a > 0`, returns `[1/b, 1/a]`.  When the upper bound
+  is effectively infinite (`INT64_MAX`), the lower bound of the reciprocal
+  is `0` (safe over-approximation: `1/+inf → 0`).
+- **Overflow widening** (`iv_endpoint_widen`): when `ixs_rat_mul` overflows
+  during interval arithmetic, the endpoint is widened to `INT64_MIN` or
+  `INT64_MAX` (representing −∞ or +∞) based on the sign of the factors.
+  This trades precision for soundness: the interval is always a correct
+  over-approximation.
+
+The `IXS_MUL` propagation rule in `bounds_get_propagated`:
+
+```
+MUL(coeff, f1^e1, f2^e2, ...) where each ei ∈ {-1, +1}:
+  result = interval(coeff)
+  for each factor fi:
+    if ei == +1:  result = iv_mul(result, bounds(fi))
+    if ei == -1:  result = iv_mul(result, iv_recip(bounds(fi)))
+```
+
+Example: `floor(x / (128*K))` with `x ∈ [0,127], K ≥ 1`.
+Internal representation is `floor(MUL(1/128, x^1, K^-1))`.
+Propagation: `[1/128, 1/128] * [0, 127] * iv_recip([1, +inf))`
+= `[0, 127/128] * [0, 1]` = `[0, 127/128]`.
+Then `floor([0, 127/128]) = [0, 0]`, collapsing to constant `0`.
+
+**Limitation**: independent interval propagation cannot handle relational
+constraints between variables.  For `floor(x/K)` with `x < K-1, K >= 2`,
+the bounds engine sees `x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]`
+independently, so `x/K` has an unbounded interval.  Proving `floor(x/K) = 0`
+from `x < K` requires tracking cross-variable relationships, which is a
+non-goal for the current bounds engine.  The planned alternative is
+divisibility-aware floor reasoning (see beads tracker).
+
 ## Error Model
 
 The library uses a three-tier error model: NULL, and two distinct sentinel
