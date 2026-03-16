@@ -138,6 +138,30 @@ API. Key functions:
 | `ixs_same_node` | Pointer equality (hash-consed) |
 | `ixs_walk_pre` / `ixs_walk_post` | Pre- and post-order tree traversal |
 | `ixs_node_tag`, `ixs_node_child`, ... | Node introspection and generic child access |
+| `ixs_ctx_nstats`, `ixs_ctx_stat` | Rule-hit statistics (requires `-DIXS_STATS`) |
+
+## Rule-Hit Statistics
+
+Build with `-DENABLE_STATS=ON` to count how many times each
+simplification rule fires:
+
+```bash
+cmake -B build -DENABLE_STATS=ON
+cmake --build build
+```
+
+```c
+ixs_node *result = ixs_simplify(ctx, expr, assumptions, n);
+for (size_t i = 0; i < ixs_ctx_nstats(ctx); i++) {
+    const char *name;
+    uint64_t count = ixs_ctx_stat(ctx, i, &name);
+    printf("%-30s %llu\n", name, (unsigned long long)count);
+}
+ixs_ctx_stats_reset(ctx);  /* zero all counters */
+```
+
+Python: `ctx.stats()` returns a `{rule_name: count}` dict.
+Zero overhead when compiled without the flag.
 
 ## Error Handling
 
