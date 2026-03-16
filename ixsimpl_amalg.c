@@ -231,11 +231,13 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   return v;
 }
 
-/* Record sym ≡ rem (mod m).  Merges with existing info via CRT. */
+/* Record sym ≡ rem (mod m).  Merges with existing info via CRT.
+ * Contradictory or overflowing constraints are silently ignored
+ * (best-effort, consistent with the interval contradiction policy). */
 static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
                          int64_t rem) {
   ixs_var_bound *v;
-  int64_t g, new_mod, old_mod, step, mod2g, target, k;
+  int64_t g, new_mod, old_mod, step, m_div_g, target, k;
   if (m <= 0)
     return;
   rem = ((rem % m) + m) % m;
@@ -250,21 +252,21 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   old_mod = v->modulus;
   g = ixs_gcd(old_mod, m);
   if (((rem - v->remainder) % g + g) % g != 0)
-    return; /* contradictory constraints */
+    return;
   if (old_mod > INT64_MAX / (m / g))
-    return; /* lcm overflow */
+    return;
   new_mod = old_mod / g * m;
   /* Solve old_mod/g * k ≡ (rem - v->remainder)/g  (mod m/g) by brute search.
    * gcd(old_mod/g, m/g) == 1 guarantees a unique solution.  Moduli are
    * small in practice (thread tile sizes), so the linear scan is fine. */
   step = old_mod / g;
-  mod2g = m / g;
-  target = ((((rem - v->remainder) / g) % mod2g) + mod2g) % mod2g;
-  for (k = 0; k < mod2g; k++) {
-    if ((step * k) % mod2g == target)
+  m_div_g = m / g;
+  target = ((((rem - v->remainder) / g) % m_div_g) + m_div_g) % m_div_g;
+  for (k = 0; k < m_div_g; k++) {
+    if (((uint64_t)step * (uint64_t)k) % (uint64_t)m_div_g == (uint64_t)target)
       break;
   }
-  if (k >= mod2g)
+  if (k >= m_div_g)
     return;
   v->modulus = new_mod;
   v->remainder =
@@ -274,8 +276,10 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
 
 /* Recognize Mod(sym, M) == R as a modular congruence.
  *
- * The CMP normalizer rewrites "Mod(sym,M) == R" into "(Mod(sym,M) - R) == 0"
- * (an ADD node), so we must handle both direct and normalized forms. */
+ * Depends on the CMP normalizer in simp_cmp (cmp_normalize_to_zero):
+ * "Mod(sym,M) == R" is rewritten to "(Mod(sym,M) - R) == 0", producing an
+ * ADD node.  We must handle both the direct form (R == 0, no normalization)
+ * and the normalized ADD form (R != 0). */
 static void extract_modrem(ixs_bounds *b, ixs_node *a) {
   ixs_node *mod_node;
   int64_t rem_val;
@@ -303,17 +307,21 @@ static void extract_modrem(ixs_bounds *b, ixs_node *a) {
     ixs_node_get_rat(lhs->u.add.coeff, &kp, &kq);
     if (cq != 1 || kq != 1)
       return;
-    if (cp == 1)
+    if (cp == 1) {
+      if (kp == INT64_MIN)
+        return;
       rem_val = -kp;
-    else if (cp == -1)
+    } else if (cp == -1) {
       rem_val = kp;
-    else
+    } else {
       return;
+    }
     mod_node = lhs->u.add.terms[0].term;
   } else {
     return;
   }
 
+  /* Validate Mod operands and record the congruence. */
   {
     ixs_node *dividend = mod_node->u.binary.lhs;
     ixs_node *modulus = mod_node->u.binary.rhs;
@@ -628,7 +636,10 @@ int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
 
 bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name, int64_t *mod,
                            int64_t *rem) {
-  ixs_var_bound *v = find_var(b, name);
+  ixs_var_bound *v;
+  if (!mod || !rem)
+    return false;
+  v = find_var(b, name);
   if (!v || v->modulus <= 0)
     return false;
   *mod = v->modulus;

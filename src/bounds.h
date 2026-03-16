@@ -23,7 +23,7 @@ typedef struct {
   const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
   int64_t modulus;   /* 0 = no info, >0 = sym ≡ remainder (mod modulus) */
-  int64_t remainder; /* in [0, modulus) when modulus > 0 */
+  int64_t remainder; /* in [0, modulus) when modulus > 0                */
 } ixs_var_bound;
 
 typedef struct {
@@ -56,8 +56,9 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 /* Get the interval for an expression using propagation rules. */
 ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 
-/* Return the known divisor of a symbol (0 if none).
- * Only returns nonzero when remainder == 0 (pure divisibility). */
+/* Legacy: return the known divisor of a symbol (0 if none).
+ * Only returns nonzero when remainder == 0 (pure divisibility).
+ * Prefer ixs_bounds_get_modrem for new code. */
 int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name);
 
 /* Full modulus/remainder query.  Returns true when info is available.
