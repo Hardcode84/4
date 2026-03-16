@@ -1484,41 +1484,45 @@ static bool htab_rehash(ixs_ctx *ctx) {
   return true;
 }
 
-/* Probe the hash table without inserting.  Returns the existing node
- * on hit, or NULL on miss.  The probe node may live on the stack. */
-static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
+/* Single probe loop shared by lookup and intern.  Returns the index of
+ * either the matching slot or the first empty slot.  Sets *found to the
+ * matching node, or NULL if the slot is empty. */
+static size_t htab_find_slot(ixs_ctx *ctx, const ixs_node *probe,
+                             ixs_node **found) {
   size_t mask = ctx->htab_cap - 1;
   size_t idx = probe->hash & mask;
   for (;;) {
     ixs_node *slot = ctx->htab[idx];
-    if (!slot)
-      return NULL;
-    if (slot->hash == probe->hash && ixs_node_equal(slot, probe))
-      return slot;
+    if (!slot) {
+      *found = NULL;
+      return idx;
+    }
+    if (slot->hash == probe->hash && ixs_node_equal(slot, probe)) {
+      *found = slot;
+      return idx;
+    }
     idx = (idx + 1) & mask;
   }
 }
 
-ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
-  size_t mask = ctx->htab_cap - 1;
-  size_t idx = node->hash & mask;
+static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
+  ixs_node *found;
+  htab_find_slot(ctx, probe, &found);
+  return found;
+}
 
-  for (;;) {
-    ixs_node *slot = ctx->htab[idx];
-    if (!slot) {
-      ctx->htab[idx] = node;
-      ctx->htab_used++;
-      if (ctx->htab_used * IXS_HTAB_LOAD_DEN >
-          ctx->htab_cap * IXS_HTAB_LOAD_NUM) {
-        if (!htab_rehash(ctx))
-          return NULL;
-      }
-      return node;
-    }
-    if (slot->hash == node->hash && ixs_node_equal(slot, node))
-      return slot;
-    idx = (idx + 1) & mask;
+ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
+  ixs_node *found;
+  size_t idx = htab_find_slot(ctx, node, &found);
+  if (found)
+    return found;
+  ctx->htab[idx] = node;
+  ctx->htab_used++;
+  if (ctx->htab_used * IXS_HTAB_LOAD_DEN > ctx->htab_cap * IXS_HTAB_LOAD_NUM) {
+    if (!htab_rehash(ctx))
+      return NULL;
   }
+  return node;
 }
 
 /* ------------------------------------------------------------------ */
