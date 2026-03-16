@@ -38,7 +38,7 @@ def pytest_configure(config):  # type: ignore[no-untyped-def]
         "torture",
         max_examples=50_000,
         deadline=None,
-        suppress_health_check=list(HealthCheck),
+        suppress_health_check=[h for h in HealthCheck if h != HealthCheck.too_slow],
     )
     if config.getoption("--torture", default=False):
         settings.load_profile("torture")

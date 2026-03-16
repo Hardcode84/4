@@ -19,6 +19,7 @@ Properties tested:
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 from typing import Any
 
 import ixsimpl
@@ -32,11 +33,18 @@ ExprTree = str | int | tuple[Any, ...]
 CondTree = tuple[Any, ...]
 Env = dict[str, int]
 
-_VARS = ["x", "y", "z", "w"]
+_VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 
 
 def _env_st(lo: int = 1, hi: int = 100) -> st.SearchStrategy[Env]:
     return st.fixed_dictionaries({v: st.integers(lo, hi) for v in _VARS})
+
+
+def _wide_env_st() -> st.SearchStrategy[Env]:
+    """Env strategy mixing negative, zero, and positive values."""
+    return st.fixed_dictionaries(
+        {v: st.one_of(st.integers(-100, -1), st.just(0), st.integers(1, 100)) for v in _VARS}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -46,20 +54,28 @@ def _env_st(lo: int = 1, hi: int = 100) -> st.SearchStrategy[Env]:
 sym_names = st.sampled_from(_VARS)
 small_ints = st.integers(min_value=-64, max_value=64)
 pos_ints = st.integers(min_value=1, max_value=32)
+small_rats = st.tuples(st.integers(min_value=-64, max_value=64), pos_ints).map(
+    lambda pq: ("rat", pq[0], pq[1])
+)
 
 
-_OPS_BASE = ["add", "sub", "mul", "neg", "div", "floor", "ceiling", "mod", "max", "min"]
+_OPS_BASE = ["add", "sub", "mul", "neg", "div", "floor", "ceiling", "mod", "max", "min", "xor"]
 _OPS_WITH_PW = [*_OPS_BASE, "piecewise"]
 
 
 @st.composite
-def expressions(draw: st.DrawFn, max_depth: int = 4, include_piecewise: bool = True) -> ExprTree:
-    if max_depth <= 0 or draw(st.booleans()):
-        return draw(st.one_of(sym_names, small_ints))
+def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = True) -> ExprTree:
+    if max_depth <= 0 or (max_depth <= 3 and draw(st.booleans())):
+        return draw(st.one_of(sym_names, small_ints, small_rats))
     ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
     op = draw(st.sampled_from(ops))
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op in ("floor", "ceiling", "neg"):
+    if op in ("floor", "ceiling"):
+        if draw(st.booleans()):
+            rat_leaf = draw(small_rats)
+            return (op, ("add", rat_leaf, a))
+        return (op, a)
+    if op == "neg":
         return (op, a)
     if op == "piecewise":
         cond = draw(conditions(max_depth=1))
@@ -70,6 +86,9 @@ def expressions(draw: st.DrawFn, max_depth: int = 4, include_piecewise: bool = T
         b = draw(pos_ints)
     if op == "div":
         b = draw(pos_ints)
+    if op == "xor":
+        a = draw(st.integers(min_value=0, max_value=255))
+        b = draw(st.integers(min_value=0, max_value=255))
     return (op, a, b)
 
 
@@ -101,6 +120,8 @@ def to_sympy(tree: ExprTree) -> Any:
     if isinstance(tree, int):
         return sympy.Integer(tree)
     op = tree[0]
+    if op == "rat":
+        return sympy.Rational(tree[1], tree[2])
     if op == "add":
         return to_sympy(tree[1]) + to_sympy(tree[2])
     if op == "sub":
@@ -122,6 +143,8 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.Max(to_sympy(tree[1]), to_sympy(tree[2]))
     if op == "min":
         return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]))
+    if op == "xor":
+        raise ValueError("xor not supported in SymPy conversion")
     if op == "piecewise":
         val, cond, default = tree[1], tree[2], tree[3]
         return sympy.Piecewise((to_sympy(val), to_sympy_cond(cond)), (to_sympy(default), True))
@@ -162,6 +185,8 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
     if isinstance(tree, int):
         return ctx.int_(tree)
     op = tree[0]
+    if op == "rat":
+        return ctx.rat(tree[1], tree[2])
     if op == "add":
         return to_ixsimpl(ctx, tree[1]) + to_ixsimpl(ctx, tree[2])
     if op == "sub":
@@ -182,6 +207,8 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
         return ixsimpl.max_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "min":
         return ixsimpl.min_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+    if op == "xor":
+        return ixsimpl.xor_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "piecewise":
         val, cond, default = tree[1], tree[2], tree[3]
         cond_expr = to_ixsimpl_cond(ctx, cond)
@@ -225,12 +252,6 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
 # ---------------------------------------------------------------------------
 
 
-def _floored_div(a: Any, b: Any) -> int:
-    if b == 0:
-        raise ZeroDivisionError
-    return int(math.floor(a / b))
-
-
 def _floored_mod(a: Any, b: Any) -> Any:
     if b == 0:
         raise ZeroDivisionError
@@ -244,6 +265,8 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if isinstance(tree, int):
         return tree
     op = tree[0]
+    if op == "rat":
+        return Fraction(tree[1], tree[2])
     if op == "add":
         return eval_expr(tree[1], env) + eval_expr(tree[2], env)
     if op == "sub":
@@ -256,7 +279,7 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
         a, b = eval_expr(tree[1], env), eval_expr(tree[2], env)
         if b == 0:
             raise ZeroDivisionError
-        return sympy.Rational(a, b)
+        return Fraction(a, b)
     if op == "floor":
         v = eval_expr(tree[1], env)
         return math.floor(v)
@@ -269,6 +292,8 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
         return max(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "min":
         return min(eval_expr(tree[1], env), eval_expr(tree[2], env))
+    if op == "xor":
+        return int(eval_expr(tree[1], env)) ^ int(eval_expr(tree[2], env))
     if op == "piecewise":
         val, cond, default = tree[1], tree[2], tree[3]
         if eval_cond(cond, env):
@@ -339,7 +364,10 @@ def test_expand_basic() -> None:
         assert term in s2, f"missing {term} in {s2}"
 
 
-@given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
+@given(
+    expr=expressions(),
+    envs=st.lists(st.one_of(_env_st(0, 100), _wide_env_st()), min_size=1, max_size=10),
+)
 def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""

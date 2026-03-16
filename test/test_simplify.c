@@ -1226,6 +1226,33 @@ static void test_add_flatten_neg(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_non_integer_min(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *r15 = ixs_rat(ctx, 1, 5);
+
+  /* floor(-Min(1/5, x)) must NOT simplify to -Min(1/5, x).
+   * At x=1: floor(-1/5) = -1, but -1/5 = -0.2.  */
+  ixs_node *m = ixs_min(ctx, x, r15);
+  ixs_node *neg_m = ixs_mul(ctx, ixs_int(ctx, -1), m);
+  ixs_node *fl = ixs_floor(ctx, neg_m);
+  ixs_node *s = ixs_simplify(ctx, fl, NULL, 0);
+  CHECK(ixs_node_tag(s) == IXS_FLOOR);
+
+  /* floor(Min(1/5, x)) also must not drop the floor. */
+  ixs_node *fl2 = ixs_floor(ctx, m);
+  ixs_node *s2 = ixs_simplify(ctx, fl2, NULL, 0);
+  CHECK(ixs_node_tag(s2) == IXS_FLOOR);
+
+  /* floor(-x) should still simplify to -x (x is integer). */
+  ixs_node *neg_x = ixs_mul(ctx, ixs_int(ctx, -1), x);
+  ixs_node *fl3 = ixs_floor(ctx, neg_x);
+  ixs_node *s3 = ixs_simplify(ctx, fl3, NULL, 0);
+  CHECK(s3 == neg_x);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1256,6 +1283,7 @@ int main(void) {
   test_floor_drop_fractional_const();
   test_round_extract_rat_split();
   test_floor_drop_const_sym();
+  test_floor_non_integer_min();
   test_add_flatten_neg();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);

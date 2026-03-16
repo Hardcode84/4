@@ -5443,7 +5443,7 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
     int64_t cp, cq;
     ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
     if (cq <= 1)
-      return true;
+      return is_integer_with_divinfo(bnds, expr->u.mul.factors[0].base);
     int64_t g = ixs_gcd(cp, cq);
     int64_t denom = cq / g;
     return is_known_divisible(bnds, expr->u.mul.factors[0].base, denom);
