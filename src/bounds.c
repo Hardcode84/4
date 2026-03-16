@@ -5,13 +5,6 @@
 #include <limits.h>
 #include <string.h>
 
-#ifndef INT64_MIN
-#define INT64_MIN (-9223372036854775807LL - 1)
-#endif
-#ifndef INT64_MAX
-#define INT64_MAX 9223372036854775807LL
-#endif
-
 #define BOUNDS_INIT_CAP 16
 
 bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
@@ -81,10 +74,8 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v = &b->vars[b->nvars++];
   v->name = name;
   v->iv.valid = true;
-  v->iv.lo_p = INT64_MIN;
-  v->iv.lo_q = 1;
-  v->iv.hi_p = INT64_MAX;
-  v->iv.hi_q = 1;
+  ixs_interval_set_neg_inf(&v->iv.lo_p, &v->iv.lo_q);
+  ixs_interval_set_pos_inf(&v->iv.hi_p, &v->iv.hi_q);
   v->divisor = 0;
   return v;
 }
@@ -268,8 +259,7 @@ void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     eb = &b->exprs[b->nexprs++];
     eb->expr = lhs;
     eb->iv.valid = true;
-    eb->iv.hi_p = INT64_MAX;
-    eb->iv.hi_q = 1;
+    ixs_interval_set_pos_inf(&eb->iv.hi_p, &eb->iv.hi_q);
     if (op == IXS_CMP_GT) {
       eb->iv.lo_p = 1;
       eb->iv.lo_q = 1;

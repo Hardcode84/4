@@ -14,6 +14,31 @@ typedef struct {
   bool valid;
 } ixs_interval;
 
+#ifndef INT64_MIN
+#define INT64_MIN (-9223372036854775807LL - 1)
+#endif
+#ifndef INT64_MAX
+#define INT64_MAX 9223372036854775807LL
+#endif
+
+static inline bool ixs_interval_is_neg_inf(int64_t p, int64_t q) {
+  return p == INT64_MIN && q == 1;
+}
+
+static inline bool ixs_interval_is_pos_inf(int64_t p, int64_t q) {
+  return p == INT64_MAX && q == 1;
+}
+
+static inline void ixs_interval_set_neg_inf(int64_t *p, int64_t *q) {
+  *p = INT64_MIN;
+  *q = 1;
+}
+
+static inline void ixs_interval_set_pos_inf(int64_t *p, int64_t *q) {
+  *p = INT64_MAX;
+  *q = 1;
+}
+
 static inline ixs_interval ixs_interval_unknown(void) {
   ixs_interval iv;
   iv.valid = false;

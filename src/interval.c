@@ -2,19 +2,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "interval.h"
-#include <limits.h>
-
-#ifndef INT64_MIN
-#define INT64_MIN (-9223372036854775807LL - 1)
-#endif
-#ifndef INT64_MAX
-#define INT64_MAX 9223372036854775807LL
-#endif
 
 void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp, int64_t *rq) {
   bool neg = (ap < 0) != ixs_rat_is_neg(bp);
-  *rp = neg ? INT64_MIN : INT64_MAX;
-  *rq = 1;
+  if (neg)
+    ixs_interval_set_neg_inf(rp, rq);
+  else
+    ixs_interval_set_pos_inf(rp, rq);
 }
 
 ixs_interval iv_add(ixs_interval a, ixs_interval b) {
@@ -99,7 +93,7 @@ ixs_interval iv_recip(ixs_interval a) {
   if (!a.valid || ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) <= 0)
     return ixs_interval_unknown();
   r.valid = true;
-  if (a.hi_p == INT64_MAX && a.hi_q == 1) {
+  if (ixs_interval_is_pos_inf(a.hi_p, a.hi_q)) {
     r.lo_p = 0;
     r.lo_q = 1;
   } else {
