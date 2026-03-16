@@ -3607,6 +3607,32 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       if (!base) {
         if (!ixs_rat_add(const_p, const_q, cp, cq, &const_p, &const_q))
           goto overflow;
+      } else if (base->tag == IXS_ADD) {
+        /* Distribute coefficient: cp/cq * ADD(c, [ci*bi, ...]) */
+        int64_t bp, bq;
+        ixs_node_get_rat(base->u.add.coeff, &bp, &bq);
+        int64_t rp, rq;
+        if (!ixs_rat_mul(cp, cq, bp, bq, &rp, &rq))
+          goto overflow;
+        if (!ixs_rat_add(const_p, const_q, rp, rq, &const_p, &const_q))
+          goto overflow;
+        for (j = 0; j < base->u.add.nterms; j++) {
+          int64_t tp, tq;
+          ixs_node_get_rat(base->u.add.terms[j].coeff, &tp, &tq);
+          int64_t np, nq;
+          if (!ixs_rat_mul(cp, cq, tp, tq, &np, &nq))
+            goto overflow;
+          if (nterms >= cap) {
+            terms = scratch_grow(&ctx->scratch, terms, &cap, sizeof(*terms));
+            if (!terms)
+              return NULL;
+          }
+          terms[nterms].term = base->u.add.terms[j].term;
+          terms[nterms].coeff = make_const(ctx, np, nq);
+          if (!terms[nterms].coeff)
+            return NULL;
+          nterms++;
+        }
       } else {
         if (nterms >= cap) {
           terms = scratch_grow(&ctx->scratch, terms, &cap, sizeof(*terms));
@@ -4077,6 +4103,52 @@ static ixs_node *simp_round(ixs_ctx *ctx, ixs_node *x, ixs_tag self_tag,
       if (!scaled)
         return NULL;
       return rnd(ctx, scaled);
+    }
+  }
+
+  /* floor(c + sum(ci*bi)) -> floor(sum(ci*bi)) when every bi is
+   * integer-valued and 0 < c < 1/lcm(denominators of ci).
+   *
+   * Proof: each ci*bi lies on a grid with spacing 1/qi.  Their sum
+   * lies on a grid with spacing 1/L where L = lcm(qi).  Adding c < 1/L
+   * cannot push past the next grid point, so floor is unchanged. */
+  if (self_tag == IXS_FLOOR && x->tag == IXS_ADD) {
+    int64_t cp, cq;
+    ixs_node_get_rat(x->u.add.coeff, &cp, &cq);
+    if (cp > 0 && cq > 0 && x->u.add.nterms > 0) {
+      int64_t lcm = 1;
+      bool ok = true;
+      uint32_t ti;
+      for (ti = 0; ti < x->u.add.nterms && ok; ti++) {
+        if (!ixs_node_is_integer_valued(x->u.add.terms[ti].term)) {
+          ok = false;
+          break;
+        }
+        int64_t tp, tq;
+        ixs_node_get_rat(x->u.add.terms[ti].coeff, &tp, &tq);
+        if (tq <= 0) {
+          ok = false;
+          break;
+        }
+        int64_t g = ixs_gcd(lcm, tq);
+        if (tq / g > (1LL << 30) / lcm) { /* cap lcm to avoid overflow */
+          ok = false;
+          break;
+        }
+        lcm = lcm / g * tq;
+      }
+      /* c < 1/lcm  <=>  cp * lcm < cq (guarded against overflow) */
+      int64_t cl;
+      if (ok && ixs_safe_mul(cp, lcm, &cl) && cl < cq) {
+        ixs_node *stripped = ixs_node_int(ctx, 0);
+        for (ti = 0; ti < x->u.add.nterms && stripped; ti++)
+          stripped = simp_add(
+              ctx, stripped,
+              simp_mul(ctx, x->u.add.terms[ti].coeff, x->u.add.terms[ti].term));
+        if (!stripped)
+          return NULL;
+        return rnd(ctx, stripped);
+      }
     }
   }
 

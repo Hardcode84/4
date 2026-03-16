@@ -1037,6 +1037,65 @@ static void test_print_c(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_drop_fractional_const(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *fl_x = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+
+  /* floor(1/2 * floor(x/3) + 1/4)  ->  floor(1/2 * floor(x/3))
+   * 1/4 < 1/2 = 1/lcm(denom) */
+  ixs_node *a = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
+                                       ixs_rat(ctx, 1, 4)));
+  ixs_node *expected = ixs_floor(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)));
+  CHECK(a == expected);
+
+  /* floor(1/2 * floor(x/3) + 15/32) also drops (15/32 < 1/2) */
+  ixs_node *b = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
+                                       ixs_rat(ctx, 15, 32)));
+  CHECK(b == expected);
+
+  /* floor(1/2 * floor(x/3) + 1/2) does NOT drop (1/2 >= 1/2) */
+  ixs_node *c = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
+                                       ixs_rat(ctx, 1, 2)));
+  CHECK(c != expected);
+
+  /* Multi-term: floor(1/2*fl_x + 1/3*fl_y + 1/7)
+   * lcm(2,3)=6, 1/7 < 1/6 => drop constant */
+  ixs_node *fl_y = ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *d =
+      ixs_floor(ctx, ixs_add(ctx,
+                             ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
+                                     ixs_div(ctx, fl_y, ixs_int(ctx, 3))),
+                             ixs_rat(ctx, 1, 7)));
+  ixs_node *d_exp =
+      ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
+                             ixs_div(ctx, fl_y, ixs_int(ctx, 3))));
+  CHECK(d == d_exp);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_add_flatten_neg(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+
+  /* (x + y) - (x + y) = 0: negated ADD must flatten */
+  ixs_node *s = ixs_add(ctx, x, y);
+  CHECK(ixs_sub(ctx, s, s) == ixs_int(ctx, 0));
+
+  /* (2*x + 3*y) - (2*x + 3*y) = 0 */
+  ixs_node *s2 = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x),
+                         ixs_mul(ctx, ixs_int(ctx, 3), y));
+  CHECK(ixs_sub(ctx, s2, s2) == ixs_int(ctx, 0));
+
+  /* 2*(x + y) - (x + y) = x + y */
+  CHECK(ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 2), s), s) == s);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1063,6 +1122,8 @@ int main(void) {
   test_piecewise_branch_bounds();
   test_simplify_batch();
   test_print_c();
+  test_floor_drop_fractional_const();
+  test_add_flatten_neg();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
