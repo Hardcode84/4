@@ -27,8 +27,13 @@ compilation (vs `sympy.cancel`, best of 3 iterations):
   `ixs_ctx_destroy`
 - **Exact rational arithmetic** using `int64_t` numerator/denominator
   with overflow-safe operations
-- **Assumption-aware simplification** -- variable bounds and
-  relationships feed into rewrite rules
+- **Two-phase simplification** -- construction-time canonicalization
+  via smart constructors, then a rewrite pass with interval analysis
+  and assumption-driven rules
+- **Expand/distribute** -- `ixs_expand` converts factored form to
+  sum-of-products on demand
+- **Tree walk API** -- `ixs_walk_pre` / `ixs_walk_post` for generic
+  pre- and post-order traversal with visitor callbacks
 - **SymPy-compatible parser** -- reads the same expression format
 - **No global state** -- safe to use from multiple threads with
   separate contexts
@@ -111,6 +116,10 @@ int main() {
 }
 ```
 
+```bash
+g++ -o demo demo.cpp -Iinclude -Ibindings/cpp -Lbuild -lixsimpl
+```
+
 ## API Overview
 
 See [`include/ixsimpl.h`](include/ixsimpl.h) for the full documented
@@ -123,9 +132,12 @@ API. Key functions:
 | `ixs_int`, `ixs_sym`, `ixs_add`, ... | Build expressions programmatically |
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
+| `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |
 | `ixs_print` / `ixs_print_c` | Output as SymPy or C syntax |
 | `ixs_same_node` | Pointer equality (hash-consed) |
+| `ixs_walk_pre` / `ixs_walk_post` | Pre- and post-order tree traversal |
+| `ixs_node_tag`, `ixs_node_child`, ... | Node introspection and generic child access |
 
 ## Error Handling
 
@@ -136,19 +148,20 @@ Three tiers, in priority order:
 2. **PARSE_ERROR** -- malformed input. Propagates through arithmetic.
 3. **ERROR** -- domain error (division by zero, etc.). Same propagation.
 
-Check with `ixs_is_error()`. Human-readable messages accumulate in the
-context error list (`ixs_ctx_nerrors`, `ixs_ctx_error`).
+Check with `ixs_is_error()` (either sentinel),
+`ixs_is_parse_error()`, or `ixs_is_domain_error()` for specific
+kinds. Human-readable messages accumulate in the context error list
+(`ixs_ctx_nerrors`, `ixs_ctx_error`).
 
 ## Testing
 
 ```bash
-# C tests
+# C tests (ASAN-enabled by default)
 ctest --test-dir build
 
-# Python fuzz tests (requires ixsimpl, hypothesis, sympy)
-pip install .
-pip install hypothesis sympy
-python test/test_python.py
+# Python tests (installs all test deps: pytest, xdist, hypothesis, sympy)
+pip install -e ".[test]"
+pytest test/
 ```
 
 The test suite includes:
@@ -156,8 +169,10 @@ The test suite includes:
 - 609-expression corpus regression test
 - Edge-case tests (overflow, division by zero, deep nesting, sentinel
   propagation, etc.)
-- Hypothesis-based fuzz tests (10,000 self-consistency + 5,000 SymPy
-  cross-checks)
+- Hypothesis-based property tests (2,000 examples per test by default;
+  use `--torture` for 50,000)
+
+Reproduce the SymPy benchmark: `python bench/bench_sympy.py`
 
 ## Project Structure
 
@@ -168,7 +183,10 @@ src/                        Core library
   rational.c                Exact int64 rational arithmetic
   node.c                    Hash-consed DAG nodes
   simplify.c                Rewrite engine + smart constructors
-  bounds.c                  Interval analysis for assumptions
+  bounds.c                  Bound storage and assumption propagation
+  interval.c                Interval arithmetic for bounds
+  expand.c                  MUL-over-ADD distribution
+  walk.c                    Pre/post-order tree traversal
   parser.c                  Recursive descent parser
   print.c                   SymPy and C output formatters
   ctx.c                     Context management + public API dispatch
