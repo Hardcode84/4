@@ -1253,6 +1253,84 @@ static void test_floor_non_integer_min(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_modrem_congruence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *r;
+
+  /* Mod(x, 8) == 3  ⟹  Mod(x, 8) → 3 */
+  ixs_node *cong_x_8_3[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
+              ixs_int(ctx, 3)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), cong_x_8_3, 1);
+  CHECK(ixs_node_int_val(r) == 3);
+
+  /* Mod(x, 4) → 3 (since 8 % 4 == 0, remainder 3 % 4 == 3) */
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)), cong_x_8_3, 1);
+  CHECK(ixs_node_int_val(r) == 3);
+
+  /* Mod(x, 2) → 1 (since 8 % 2 == 0, remainder 3 % 2 == 1) */
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), cong_x_8_3, 1);
+  CHECK(ixs_node_int_val(r) == 1);
+
+  /* Mod(x, 16) cannot be resolved (8 % 16 != 0) */
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)), cong_x_8_3, 1);
+  CHECK(ixs_node_tag(r) == IXS_MOD);
+
+  /* Mod(x, 3) cannot be resolved (8 % 3 != 0) */
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 3)), cong_x_8_3, 1);
+  CHECK(ixs_node_tag(r) == IXS_MOD);
+
+  /* Divisibility still works: Mod(x, 8) == 0 ⟹ Mod(x, 4) → 0 */
+  ixs_node *div_x_8[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)), div_x_8, 1);
+  CHECK(ixs_node_int_val(r) == 0);
+
+  /* floor(x/4) when x ≡ 0 (mod 8) still drops floor */
+  r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))),
+                   div_x_8, 1);
+  CHECK(strcmp(pr(r), "1/4*x") == 0);
+
+  /* x ≡ 4 (mod 8): x is divisible by 4 (4%4==0) but NOT by 8 */
+  ixs_node *cong_x_8_4[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
+              ixs_int(ctx, 4)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)), cong_x_8_4, 1);
+  CHECK(ixs_node_int_val(r) == 0);
+  r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), cong_x_8_4, 1);
+  CHECK(ixs_node_int_val(r) == 4);
+  r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))),
+                   cong_x_8_4, 1);
+  CHECK(strcmp(pr(r), "1/4*x") == 0);
+
+  /* floor(x/8) should NOT drop when x ≡ 4 (mod 8) */
+  r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 8))),
+                   cong_x_8_4, 1);
+  CHECK(strstr(pr(r), "floor") != NULL);
+
+  /* CRT merge: Mod(y, 4)==1 and Mod(y, 6)==3 ⟹ y ≡ 9 (mod 12) */
+  ixs_node *crt_ys[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 4)), IXS_CMP_EQ,
+              ixs_int(ctx, 1)),
+      ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 6)), IXS_CMP_EQ,
+              ixs_int(ctx, 3)),
+  };
+  r = ixs_simplify(ctx, ixs_mod(ctx, y, ixs_int(ctx, 12)), crt_ys, 2);
+  CHECK(ixs_node_int_val(r) == 9);
+  r = ixs_simplify(ctx, ixs_mod(ctx, y, ixs_int(ctx, 4)), crt_ys, 2);
+  CHECK(ixs_node_int_val(r) == 1);
+  r = ixs_simplify(ctx, ixs_mod(ctx, y, ixs_int(ctx, 2)), crt_ys, 2);
+  CHECK(ixs_node_int_val(r) == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1285,6 +1363,7 @@ int main(void) {
   test_floor_drop_const_sym();
   test_floor_non_integer_min();
   test_add_flatten_neg();
+  test_modrem_congruence();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

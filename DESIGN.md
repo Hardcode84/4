@@ -879,9 +879,10 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   drop-in replacement.
 - **Interval bounds**: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
   extracts interval bounds from comparison assumptions automatically
-- **Divisibility**: `Mod(K, 32) == 0` — the simplifier recognizes this as
-  "K is divisible by 32" and stores the known divisor per symbol.  Multiple
-  assumptions combine via lcm.  `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`.
+- **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
+  `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
+  (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
+  special case; `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
@@ -904,13 +905,15 @@ This enables rules like:
 - `Mod(x, m)` bounds tightened to dividend's bounds when `0 <= x < m`
 - `Max(1, expr)` where `expr >= 1` → `expr`
 
-**Divisibility-gated rewrites** (requires `Mod(sym, d) == 0` assumption):
+**Congruence-gated rewrites** (requires `Mod(sym, M) == R` assumption):
 
-- `Mod(sym, m)` → `0` when `m` divides the known divisor of `sym`
-- `floor(sym / m)` → `sym / m` when `m` divides the known divisor
+- `Mod(sym, m)` → `R % m` when `M % m == 0` (generalizes divisibility to
+  nonzero remainders; for `R == 0` this gives `→ 0`)
+- `floor(sym / m)` → `sym / m` when `M % m == 0` and `R % m == 0`
+  (divisibility: the known congruence absorbs `m`)
 - `Mod(c*sym, m)` → `0` when `m` divides `c * divisor(sym)`
 - `floor(expr)` / `ceiling(expr)` → `expr` when `expr` is provably
-  integer-valued using divisibility (e.g., `floor(K/32)` → `K/32`
+  integer-valued using congruence (e.g., `floor(K/32)` → `K/32`
   when `Mod(K, 32) == 0`)
 
 **Algebraic rewrites** (no bounds needed):

@@ -226,43 +226,103 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v->iv.valid = true;
   ixs_interval_set_neg_inf(&v->iv.lo_p, &v->iv.lo_q);
   ixs_interval_set_pos_inf(&v->iv.hi_p, &v->iv.hi_q);
-  v->divisor = 0;
+  v->modulus = 0;
+  v->remainder = 0;
   return v;
 }
 
-/* Record that sym is divisible by d (combine with lcm if existing). */
-static void apply_divisor(ixs_bounds *b, const char *name, int64_t d) {
-  ixs_var_bound *v = get_or_create_var(b, name);
+/* Record sym ≡ rem (mod m).  Merges with existing info via CRT. */
+static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
+                         int64_t rem) {
+  ixs_var_bound *v;
+  int64_t g, new_mod, old_mod, step, mod2g, target, k;
+  if (m <= 0)
+    return;
+  rem = ((rem % m) + m) % m;
+  v = get_or_create_var(b, name);
   if (!v)
     return;
-  if (v->divisor == 0) {
-    v->divisor = d;
-  } else {
-    int64_t g = ixs_gcd(v->divisor, d);
-    if (g > 0 && v->divisor <= INT64_MAX / (d / g))
-      v->divisor = v->divisor / g * d;
+  if (v->modulus == 0) {
+    v->modulus = m;
+    v->remainder = rem;
+    return;
   }
+  old_mod = v->modulus;
+  g = ixs_gcd(old_mod, m);
+  if (((rem - v->remainder) % g + g) % g != 0)
+    return; /* contradictory constraints */
+  if (old_mod > INT64_MAX / (m / g))
+    return; /* lcm overflow */
+  new_mod = old_mod / g * m;
+  /* Solve old_mod/g * k ≡ (rem - v->remainder)/g  (mod m/g) by brute search.
+   * gcd(old_mod/g, m/g) == 1 guarantees a unique solution.  Moduli are
+   * small in practice (thread tile sizes), so the linear scan is fine. */
+  step = old_mod / g;
+  mod2g = m / g;
+  target = ((((rem - v->remainder) / g) % mod2g) + mod2g) % mod2g;
+  for (k = 0; k < mod2g; k++) {
+    if ((step * k) % mod2g == target)
+      break;
+  }
+  if (k >= mod2g)
+    return;
+  v->modulus = new_mod;
+  v->remainder =
+      (int64_t)(((uint64_t)v->remainder + (uint64_t)old_mod * (uint64_t)k) %
+                (uint64_t)new_mod);
 }
 
-/* Recognize Mod(sym, const) == 0 as a divisibility assumption. */
-static void extract_divisibility(ixs_bounds *b, ixs_node *a) {
+/* Recognize Mod(sym, M) == R as a modular congruence.
+ *
+ * The CMP normalizer rewrites "Mod(sym,M) == R" into "(Mod(sym,M) - R) == 0"
+ * (an ADD node), so we must handle both direct and normalized forms. */
+static void extract_modrem(ixs_bounds *b, ixs_node *a) {
   ixs_node *mod_node;
+  int64_t rem_val;
 
   if (a->tag != IXS_CMP || a->u.binary.cmp_op != IXS_CMP_EQ)
     return;
 
-  if (a->u.binary.lhs->tag == IXS_MOD && ixs_node_is_zero(a->u.binary.rhs))
-    mod_node = a->u.binary.lhs;
-  else if (a->u.binary.rhs->tag == IXS_MOD && ixs_node_is_zero(a->u.binary.lhs))
-    mod_node = a->u.binary.rhs;
-  else
-    return;
+  ixs_node *lhs = a->u.binary.lhs;
+  ixs_node *rhs = a->u.binary.rhs;
 
-  ixs_node *dividend = mod_node->u.binary.lhs;
-  ixs_node *modulus = mod_node->u.binary.rhs;
-  if (dividend->tag == IXS_SYM && modulus->tag == IXS_INT &&
-      modulus->u.ival > 0)
-    apply_divisor(b, dividend->u.name, modulus->u.ival);
+  /* Direct: Mod(sym, M) == 0 */
+  if (lhs->tag == IXS_MOD && ixs_node_is_zero(rhs)) {
+    mod_node = lhs;
+    rem_val = 0;
+  } else if (rhs->tag == IXS_MOD && ixs_node_is_zero(lhs)) {
+    mod_node = rhs;
+    rem_val = 0;
+  }
+  /* Normalized: ADD(k, c*Mod(sym, M)) == 0, where c = ±1 and k is integer.
+   * c=1:  Mod(sym,M) == -k;   c=-1: Mod(sym,M) == k. */
+  else if (ixs_node_is_zero(rhs) && lhs->tag == IXS_ADD &&
+           lhs->u.add.nterms == 1 && lhs->u.add.terms[0].term->tag == IXS_MOD) {
+    int64_t cp, cq, kp, kq;
+    ixs_node_get_rat(lhs->u.add.terms[0].coeff, &cp, &cq);
+    ixs_node_get_rat(lhs->u.add.coeff, &kp, &kq);
+    if (cq != 1 || kq != 1)
+      return;
+    if (cp == 1)
+      rem_val = -kp;
+    else if (cp == -1)
+      rem_val = kp;
+    else
+      return;
+    mod_node = lhs->u.add.terms[0].term;
+  } else {
+    return;
+  }
+
+  {
+    ixs_node *dividend = mod_node->u.binary.lhs;
+    ixs_node *modulus = mod_node->u.binary.rhs;
+    if (dividend->tag != IXS_SYM || modulus->tag != IXS_INT ||
+        modulus->u.ival <= 0)
+      return;
+    rem_val = ((rem_val % modulus->u.ival) + modulus->u.ival) % modulus->u.ival;
+    apply_modrem(b, dividend->u.name, modulus->u.ival, rem_val);
+  }
 }
 
 static ixs_cmp_op flip_cmp(ixs_cmp_op op) {
@@ -333,14 +393,14 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
 }
 
 /*
- * Extract interval bounds and divisibility info from a comparison.
- * Patterns: sym >= 0, sym < N, Mod(sym, d) == 0, etc.
+ * Extract interval bounds and modular congruence from a comparison.
+ * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
  */
 void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   if (a->tag != IXS_CMP)
     return;
 
-  extract_divisibility(b, a);
+  extract_modrem(b, a);
 
   ixs_node *lhs = a->u.binary.lhs;
   ixs_node *rhs = a->u.binary.rhs;
@@ -561,7 +621,19 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
 
 int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
   ixs_var_bound *v = find_var(b, name);
-  return v ? v->divisor : 0;
+  if (v && v->modulus > 0 && v->remainder == 0)
+    return v->modulus;
+  return 0;
+}
+
+bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name, int64_t *mod,
+                           int64_t *rem) {
+  ixs_var_bound *v = find_var(b, name);
+  if (!v || v->modulus <= 0)
+    return false;
+  *mod = v->modulus;
+  *rem = v->remainder;
+  return true;
 }
 
 /* ==================================================================== */
@@ -5635,7 +5707,7 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
 }
 
 /* True when expr is provably divisible by m (m > 0) given bounds.
- * Handles: sym with known divisor, c*sym, sums of divisible terms. */
+ * Handles: sym with known congruence, c*sym, sums of divisible terms. */
 static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   if (!bnds || m <= 0)
     return false;
@@ -5644,10 +5716,13 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   if (expr->tag == IXS_INT)
     return expr->u.ival % m == 0;
 
-  /* Symbol with known divisor d: m | d */
+  /* Symbol with known congruence: x ≡ r (mod M), divisible by m iff
+   * M % m == 0 && r % m == 0. */
   if (expr->tag == IXS_SYM) {
-    int64_t d = ixs_bounds_get_divisor(bnds, expr->u.name);
-    return d > 0 && d % m == 0;
+    int64_t sym_mod, sym_rem;
+    if (!ixs_bounds_get_modrem(bnds, expr->u.name, &sym_mod, &sym_rem))
+      return false;
+    return sym_mod % m == 0 && sym_rem % m == 0;
   }
 
   /* c * base^1: m | (c * divisor(base)) when c is integer */
@@ -5685,16 +5760,16 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   return false;
 }
 
-/* True when expr is provably integer-valued given divisibility info.
- * Extends ixs_node_is_integer_valued with divisibility reasoning:
- * p/q * sym is integer when q divides the known divisor of sym. */
+/* True when expr is provably integer-valued given congruence info.
+ * Extends ixs_node_is_integer_valued with modular reasoning:
+ * p/q * sym is integer when the symbol's known congruence absorbs q. */
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   if (ixs_node_is_integer_valued(expr))
     return true;
   if (!bnds)
     return false;
 
-  /* MUL: p/q * base^1 is integer if base's divisor absorbs q */
+  /* MUL: p/q * base^1 is integer if base's congruence absorbs q */
   if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
       expr->u.mul.factors[0].exp == 1) {
     int64_t cp, cq;
@@ -5731,8 +5806,8 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   return false;
 }
 
-/* Mod(x, m) -> x when 0 <= x < m; -> 0 when m | x.  Returns NULL if
- * bounds don't resolve. */
+/* Mod(x, M) -> x when 0 <= x < M; -> r when x ≡ r (mod m) and m % M == 0;
+ * -> 0 when M | x.  Returns NULL if bounds don't resolve. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
                                  ixs_node *r) {
   if (!bnds || r->tag != IXS_INT || r->u.ival <= 0)
@@ -5743,6 +5818,16 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
       iv.hi_p < r->u.ival) {
     IXS_STAT_HIT(ctx);
     return l;
+  }
+
+  /* x ≡ rem (mod m) with m % M == 0  ⟹  Mod(x, M) == rem % M */
+  if (l->tag == IXS_SYM) {
+    int64_t sym_mod, sym_rem;
+    if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
+        sym_mod % r->u.ival == 0) {
+      IXS_STAT_HIT(ctx);
+      return ixs_node_int(ctx, sym_rem % r->u.ival);
+    }
   }
 
   if (is_known_divisible(bnds, l, r->u.ival)) {

@@ -2026,7 +2026,7 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
 }
 
 /* True when expr is provably divisible by m (m > 0) given bounds.
- * Handles: sym with known divisor, c*sym, sums of divisible terms. */
+ * Handles: sym with known congruence, c*sym, sums of divisible terms. */
 static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   if (!bnds || m <= 0)
     return false;
@@ -2035,10 +2035,13 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   if (expr->tag == IXS_INT)
     return expr->u.ival % m == 0;
 
-  /* Symbol with known divisor d: m | d */
+  /* Symbol with known congruence: x ≡ r (mod M), divisible by m iff
+   * M % m == 0 && r % m == 0. */
   if (expr->tag == IXS_SYM) {
-    int64_t d = ixs_bounds_get_divisor(bnds, expr->u.name);
-    return d > 0 && d % m == 0;
+    int64_t sym_mod, sym_rem;
+    if (!ixs_bounds_get_modrem(bnds, expr->u.name, &sym_mod, &sym_rem))
+      return false;
+    return sym_mod % m == 0 && sym_rem % m == 0;
   }
 
   /* c * base^1: m | (c * divisor(base)) when c is integer */
@@ -2076,16 +2079,16 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   return false;
 }
 
-/* True when expr is provably integer-valued given divisibility info.
- * Extends ixs_node_is_integer_valued with divisibility reasoning:
- * p/q * sym is integer when q divides the known divisor of sym. */
+/* True when expr is provably integer-valued given congruence info.
+ * Extends ixs_node_is_integer_valued with modular reasoning:
+ * p/q * sym is integer when the symbol's known congruence absorbs q. */
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   if (ixs_node_is_integer_valued(expr))
     return true;
   if (!bnds)
     return false;
 
-  /* MUL: p/q * base^1 is integer if base's divisor absorbs q */
+  /* MUL: p/q * base^1 is integer if base's congruence absorbs q */
   if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
       expr->u.mul.factors[0].exp == 1) {
     int64_t cp, cq;
@@ -2122,8 +2125,8 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   return false;
 }
 
-/* Mod(x, m) -> x when 0 <= x < m; -> 0 when m | x.  Returns NULL if
- * bounds don't resolve. */
+/* Mod(x, M) -> x when 0 <= x < M; -> r when x ≡ r (mod m) and m % M == 0;
+ * -> 0 when M | x.  Returns NULL if bounds don't resolve. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
                                  ixs_node *r) {
   if (!bnds || r->tag != IXS_INT || r->u.ival <= 0)
@@ -2134,6 +2137,16 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
       iv.hi_p < r->u.ival) {
     IXS_STAT_HIT(ctx);
     return l;
+  }
+
+  /* x ≡ rem (mod m) with m % M == 0  ⟹  Mod(x, M) == rem % M */
+  if (l->tag == IXS_SYM) {
+    int64_t sym_mod, sym_rem;
+    if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
+        sym_mod % r->u.ival == 0) {
+      IXS_STAT_HIT(ctx);
+      return ixs_node_int(ctx, sym_rem % r->u.ival);
+    }
   }
 
   if (is_known_divisible(bnds, l, r->u.ival)) {
