@@ -66,6 +66,37 @@ struct ixs_node {
   } u;
 };
 
+/* --- Rule-hit statistics (compile with -DIXS_STATS to enable) --- */
+
+#ifdef IXS_STATS
+#include <stdint.h>
+#define IXS_STATS_CAP 128
+typedef struct {
+  const char *name; /* __func__ pointer; NULL = empty slot */
+  uint64_t count;
+} ixs_stat_entry;
+
+static inline void ixs_stat_hit(ixs_stat_entry *stats, const char *fn) {
+  size_t mask = IXS_STATS_CAP - 1;
+  size_t idx = ((uintptr_t)fn >> 3) & mask;
+  for (;;) {
+    if (!stats[idx].name) {
+      stats[idx].name = fn;
+      stats[idx].count = 1;
+      return;
+    }
+    if (stats[idx].name == fn) {
+      stats[idx].count++;
+      return;
+    }
+    idx = (idx + 1) & mask;
+  }
+}
+#define IXS_STAT_HIT(ctx) ixs_stat_hit((ctx)->stats, __func__)
+#else
+#define IXS_STAT_HIT(ctx) ((void)(ctx))
+#endif
+
 /* --- Internal context --- */
 
 struct ixs_ctx {
@@ -89,6 +120,10 @@ struct ixs_ctx {
   ixs_node *node_false;
   ixs_node *node_zero;
   ixs_node *node_one;
+
+#ifdef IXS_STATS
+  ixs_stat_entry *stats;
+#endif
 };
 
 /* --- Hash-consing --- */

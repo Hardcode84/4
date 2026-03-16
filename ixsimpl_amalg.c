@@ -632,6 +632,14 @@ ixs_ctx *ixs_ctx_create(void) {
   if (!tmp.node_zero || !tmp.node_one)
     goto fail;
 
+#ifdef IXS_STATS
+  tmp.stats = ixs_arena_alloc(
+      &tmp.arena, IXS_STATS_CAP * sizeof(ixs_stat_entry), sizeof(void *));
+  if (!tmp.stats)
+    goto fail;
+  memset(tmp.stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
+#endif
+
   /* Emplace ctx into its own arena — one fewer heap allocation. */
   ctx = ixs_arena_alloc(&tmp.arena, sizeof(ixs_ctx), sizeof(void *));
   if (!ctx)
@@ -669,6 +677,56 @@ const char *ixs_ctx_error(ixs_ctx *ctx, size_t index) {
 }
 
 void ixs_ctx_clear_errors(ixs_ctx *ctx) { ctx->nerrors = 0; }
+
+/* ------------------------------------------------------------------ */
+/*  Rule-hit statistics                                                */
+/* ------------------------------------------------------------------ */
+
+size_t ixs_ctx_nstats(ixs_ctx *ctx) {
+#ifdef IXS_STATS
+  size_t n = 0;
+  size_t i;
+  for (i = 0; i < IXS_STATS_CAP; i++) {
+    if (ctx->stats[i].name)
+      n++;
+  }
+  return n;
+#else
+  (void)ctx;
+  return 0;
+#endif
+}
+
+uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name) {
+#ifdef IXS_STATS
+  size_t seen = 0;
+  size_t i;
+  for (i = 0; i < IXS_STATS_CAP; i++) {
+    if (ctx->stats[i].name) {
+      if (seen == index) {
+        if (name)
+          *name = ctx->stats[i].name;
+        return ctx->stats[i].count;
+      }
+      seen++;
+    }
+  }
+#else
+  (void)ctx;
+  (void)index;
+#endif
+  if (name)
+    *name = NULL;
+  return 0;
+}
+
+void ixs_ctx_stats_reset(ixs_ctx *ctx) {
+#ifdef IXS_STATS
+  memset(ctx->stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
+#else
+  (void)ctx;
+#endif
+}
 
 /* ------------------------------------------------------------------ */
 /*  Sentinel checks                                                   */
@@ -3733,6 +3791,7 @@ static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
   if (!found)
     return NULL;
 
+  IXS_STAT_HIT(ctx);
   ixs_node *result = make_const(ctx, const_p, const_q);
   if (!result)
     return NULL;
@@ -4192,6 +4251,7 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
   ixs_arena_restore(&ctx->scratch, m);
   if (!remainder)
     return NULL;
+  IXS_STAT_HIT(ctx);
   return simp_add(ctx, int_sum, rnd(ctx, remainder));
 }
 
@@ -4286,6 +4346,7 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   }
   if (!expanded)
     return NULL;
+  IXS_STAT_HIT(ctx);
   return rnd(ctx, expanded);
 }
 
@@ -4325,6 +4386,7 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_node *x) {
   int64_t cl;
   if (!ixs_safe_mul(cp, lcm, &cl) || cl >= cq)
     return x;
+  IXS_STAT_HIT(ctx);
   ixs_node *sum = ixs_node_int(ctx, 0);
   for (i = 0; i < x->u.add.nterms && sum; i++)
     sum = simp_add(
@@ -4570,6 +4632,7 @@ static ixs_node *floor_drop_const_sym(ixs_ctx *ctx, ixs_node *x,
       continue;
 
     new_const = info.const_num - k_drop;
+    IXS_STAT_HIT(ctx);
     return rebuild_reduced_add(ctx, x, denom, new_const, lcm);
   }
 
@@ -4596,6 +4659,7 @@ static ixs_node *round_pull_in_denom(ixs_ctx *ctx, ixs_node *x,
   ixs_node *scaled = simp_mul(ctx, x->u.mul.coeff, inner_arg);
   if (!scaled)
     return NULL;
+  IXS_STAT_HIT(ctx);
   return rnd(ctx, scaled);
 }
 
@@ -4612,8 +4676,10 @@ static ixs_node *floor_mod_div_zero(ixs_ctx *ctx, ixs_node *x) {
     return x;
 
   ixs_node *mrhs = x->u.mul.factors[0].base->u.binary.rhs;
-  if (mrhs->tag == IXS_INT && mrhs->u.ival > 0 && mrhs->u.ival <= cq)
+  if (mrhs->tag == IXS_INT && mrhs->u.ival > 0 && mrhs->u.ival <= cq) {
+    IXS_STAT_HIT(ctx);
     return ixs_node_int(ctx, 0);
+  }
 
   return x;
 }
@@ -4700,6 +4766,7 @@ static ixs_node *mod_mul_zero(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         !ixs_node_is_integer_valued(a->u.mul.factors[i].base))
       return NULL;
   }
+  IXS_STAT_HIT(ctx);
   return ixs_node_int(ctx, 0);
 }
 
@@ -4769,6 +4836,7 @@ static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_arena_restore(&ctx->scratch, sm);
   if (!new_a)
     return NULL;
+  IXS_STAT_HIT(ctx);
   return simp_mod(ctx, new_a, b);
 }
 
@@ -4820,6 +4888,7 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *a,
   ixs_node *moded = simp_mod(ctx, inner, b);
   if (!moded)
     return NULL;
+  IXS_STAT_HIT(ctx);
   return simp_add(ctx, moded, ixs_node_int(ctx, const_p));
 }
 
@@ -4959,6 +5028,7 @@ static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op,
     return diff; /* propagate NULL */
   if (ixs_node_is_sentinel(diff))
     return diff;
+  IXS_STAT_HIT(ctx);
   return simp_cmp(ctx, diff, op, ixs_node_int(ctx, 0));
 }
 
@@ -5051,6 +5121,7 @@ static ixs_node *not_cmp_flip(ixs_ctx *ctx, ixs_node *a) {
     flipped = a->u.binary.cmp_op;
     break;
   }
+  IXS_STAT_HIT(ctx);
   return ixs_node_binary(ctx, IXS_CMP, a->u.binary.lhs, a->u.binary.rhs,
                          flipped);
 }
@@ -5540,8 +5611,10 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                    : ixs_rat_floor(iv.lo_p, iv.lo_q);
   hi_val = is_ceil ? ixs_rat_ceil(iv.hi_p, iv.hi_q)
                    : ixs_rat_floor(iv.hi_p, iv.hi_q);
-  if (lo_val == hi_val)
+  if (lo_val == hi_val) {
+    IXS_STAT_HIT(ctx);
     return ixs_node_int(ctx, lo_val);
+  }
   return NULL;
 }
 
@@ -5651,18 +5724,22 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
 
   ixs_interval iv = ixs_bounds_get(bnds, l);
   if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
-      iv.hi_p < r->u.ival)
+      iv.hi_p < r->u.ival) {
+    IXS_STAT_HIT(ctx);
     return l;
+  }
 
-  if (is_known_divisible(bnds, l, r->u.ival))
+  if (is_known_divisible(bnds, l, r->u.ival)) {
+    IXS_STAT_HIT(ctx);
     return ixs_node_int(ctx, 0);
+  }
 
   return NULL;
 }
 
 /* max(l, r) -> l or r when bounds prove one always dominates. */
-static ixs_node *max_bounds_collapse(ixs_bounds *bnds, ixs_node *l,
-                                     ixs_node *r) {
+static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
+                                     ixs_node *l, ixs_node *r) {
   ixs_interval il, ir;
   if (!bnds)
     return NULL;
@@ -5670,16 +5747,20 @@ static ixs_node *max_bounds_collapse(ixs_bounds *bnds, ixs_node *l,
   ir = ixs_bounds_get(bnds, r);
   if (!il.valid || !ir.valid)
     return NULL;
-  if (ixs_rat_cmp(il.lo_p, il.lo_q, ir.hi_p, ir.hi_q) >= 0)
+  if (ixs_rat_cmp(il.lo_p, il.lo_q, ir.hi_p, ir.hi_q) >= 0) {
+    IXS_STAT_HIT(ctx);
     return l;
-  if (ixs_rat_cmp(ir.lo_p, ir.lo_q, il.hi_p, il.hi_q) >= 0)
+  }
+  if (ixs_rat_cmp(ir.lo_p, ir.lo_q, il.hi_p, il.hi_q) >= 0) {
+    IXS_STAT_HIT(ctx);
     return r;
+  }
   return NULL;
 }
 
 /* min(l, r) -> l or r when bounds prove one always dominates. */
-static ixs_node *min_bounds_collapse(ixs_bounds *bnds, ixs_node *l,
-                                     ixs_node *r) {
+static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
+                                     ixs_node *l, ixs_node *r) {
   ixs_interval il, ir;
   if (!bnds)
     return NULL;
@@ -5687,10 +5768,14 @@ static ixs_node *min_bounds_collapse(ixs_bounds *bnds, ixs_node *l,
   ir = ixs_bounds_get(bnds, r);
   if (!il.valid || !ir.valid)
     return NULL;
-  if (ixs_rat_cmp(il.hi_p, il.hi_q, ir.lo_p, ir.lo_q) <= 0)
+  if (ixs_rat_cmp(il.hi_p, il.hi_q, ir.lo_p, ir.lo_q) <= 0) {
+    IXS_STAT_HIT(ctx);
     return l;
-  if (ixs_rat_cmp(ir.hi_p, ir.hi_q, il.lo_p, il.lo_q) <= 0)
+  }
+  if (ixs_rat_cmp(ir.hi_p, ir.hi_q, il.lo_p, il.lo_q) <= 0) {
+    IXS_STAT_HIT(ctx);
     return r;
+  }
   return NULL;
 }
 
@@ -5765,8 +5850,10 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
     }
     break;
   }
-  if (known)
+  if (known) {
+    IXS_STAT_HIT(ctx);
     return val ? ctx->node_true : ctx->node_false;
+  }
   return NULL;
 }
 
@@ -5884,7 +5971,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     if (!l || !r)
       return NULL;
 
-    resolved = max_bounds_collapse(bnds, l, r);
+    resolved = max_bounds_collapse(ctx, bnds, l, r);
     if (resolved)
       return resolved;
 
@@ -5896,7 +5983,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     if (!l || !r)
       return NULL;
 
-    resolved = min_bounds_collapse(bnds, l, r);
+    resolved = min_bounds_collapse(ctx, bnds, l, r);
     if (resolved)
       return resolved;
 

@@ -62,6 +62,14 @@ ixs_ctx *ixs_ctx_create(void) {
   if (!tmp.node_zero || !tmp.node_one)
     goto fail;
 
+#ifdef IXS_STATS
+  tmp.stats = ixs_arena_alloc(
+      &tmp.arena, IXS_STATS_CAP * sizeof(ixs_stat_entry), sizeof(void *));
+  if (!tmp.stats)
+    goto fail;
+  memset(tmp.stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
+#endif
+
   /* Emplace ctx into its own arena — one fewer heap allocation. */
   ctx = ixs_arena_alloc(&tmp.arena, sizeof(ixs_ctx), sizeof(void *));
   if (!ctx)
@@ -99,6 +107,56 @@ const char *ixs_ctx_error(ixs_ctx *ctx, size_t index) {
 }
 
 void ixs_ctx_clear_errors(ixs_ctx *ctx) { ctx->nerrors = 0; }
+
+/* ------------------------------------------------------------------ */
+/*  Rule-hit statistics                                                */
+/* ------------------------------------------------------------------ */
+
+size_t ixs_ctx_nstats(ixs_ctx *ctx) {
+#ifdef IXS_STATS
+  size_t n = 0;
+  size_t i;
+  for (i = 0; i < IXS_STATS_CAP; i++) {
+    if (ctx->stats[i].name)
+      n++;
+  }
+  return n;
+#else
+  (void)ctx;
+  return 0;
+#endif
+}
+
+uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name) {
+#ifdef IXS_STATS
+  size_t seen = 0;
+  size_t i;
+  for (i = 0; i < IXS_STATS_CAP; i++) {
+    if (ctx->stats[i].name) {
+      if (seen == index) {
+        if (name)
+          *name = ctx->stats[i].name;
+        return ctx->stats[i].count;
+      }
+      seen++;
+    }
+  }
+#else
+  (void)ctx;
+  (void)index;
+#endif
+  if (name)
+    *name = NULL;
+  return 0;
+}
+
+void ixs_ctx_stats_reset(ixs_ctx *ctx) {
+#ifdef IXS_STATS
+  memset(ctx->stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
+#else
+  (void)ctx;
+#endif
+}
 
 /* ------------------------------------------------------------------ */
 /*  Sentinel checks                                                   */

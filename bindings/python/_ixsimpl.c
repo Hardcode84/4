@@ -889,6 +889,37 @@ static PyObject *Context_clear_errors(ContextObject *self,
   Py_RETURN_NONE;
 }
 
+static PyObject *Context_stats(ContextObject *self, PyObject *Py_UNUSED(args)) {
+  size_t n = ixs_ctx_nstats(self->ctx);
+  size_t i;
+  PyObject *dict = PyDict_New();
+  if (!dict)
+    return NULL;
+  for (i = 0; i < n; i++) {
+    const char *name = NULL;
+    uint64_t count = ixs_ctx_stat(self->ctx, i, &name);
+    if (!name)
+      break;
+    PyObject *key = PyUnicode_FromString(name);
+    PyObject *val = PyLong_FromUnsignedLongLong(count);
+    if (!key || !val || PyDict_SetItem(dict, key, val) < 0) {
+      Py_XDECREF(key);
+      Py_XDECREF(val);
+      Py_DECREF(dict);
+      return NULL;
+    }
+    Py_DECREF(key);
+    Py_DECREF(val);
+  }
+  return dict;
+}
+
+static PyObject *Context_stats_reset(ContextObject *self,
+                                     PyObject *Py_UNUSED(args)) {
+  ixs_ctx_stats_reset(self->ctx);
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef Context_methods[] = {
     {"sym", (PyCFunction)Context_sym, METH_VARARGS,
      "Create a symbol: ctx.sym('x')."},
@@ -908,6 +939,11 @@ static PyMethodDef Context_methods[] = {
      METH_VARARGS | METH_KEYWORDS, "Simplify a list of Expr in-place."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,
      "Clear the error list."},
+    {"stats", (PyCFunction)Context_stats, METH_NOARGS,
+     "Rule-hit statistics as {name: count} dict (empty if not compiled with "
+     "IXS_STATS)."},
+    {"stats_reset", (PyCFunction)Context_stats_reset, METH_NOARGS,
+     "Reset all rule-hit counters to zero."},
     {NULL}};
 
 /* --- Context properties --- */

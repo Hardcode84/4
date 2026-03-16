@@ -56,6 +56,11 @@ if(ENABLE_ASAN)
     add_link_options(-fsanitize=address)
 endif()
 
+option(ENABLE_STATS "Build with rule-hit statistics (IXS_STATS)" OFF)
+if(ENABLE_STATS)
+    add_compile_definitions(IXS_STATS)
+endif()
+
 add_library(ixsimpl STATIC ${LIB_SOURCES})
 target_include_directories(ixsimpl
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include

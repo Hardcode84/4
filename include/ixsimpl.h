@@ -246,6 +246,20 @@ uint32_t ixs_node_nchildren(ixs_node *node);
  *   AND/OR: arg[0], arg[1], ... */
 ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
 
+/* --- Rule-hit statistics (requires -DIXS_STATS at compile time) -------- */
+
+/* Number of distinct rules that have fired.  Returns 0 if compiled
+ * without IXS_STATS. */
+size_t ixs_ctx_nstats(ixs_ctx *ctx);
+
+/* Retrieve the i-th stat entry (arbitrary order, 0-based).
+ * Sets *name to the rule function name and returns the hit count.
+ * Returns 0 with *name = NULL for out-of-range indices. */
+uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
+
+/* Reset all counters to zero. */
+void ixs_ctx_stats_reset(ixs_ctx *ctx);
+
 /* --- Tree walk --------------------------------------------------------- */
 
 typedef enum {
