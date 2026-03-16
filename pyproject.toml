@@ -11,6 +11,14 @@ description = "Fast index expression simplifier for integer arithmetic"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-xdist",
+    "hypothesis",
+    "sympy",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["bindings/python/ixsimpl"]
 
@@ -37,7 +45,7 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
-addopts = "-v"
+addopts = "-v -n auto"
 
 [[tool.mypy.overrides]]
 module = ["sympy", "sympy.*", "numpy", "numpy.*", "_ixsimpl", "pytest", "ixsimpl", "ixsimpl.*"]
