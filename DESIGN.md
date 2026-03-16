@@ -381,31 +381,10 @@ mark. The scratch arena never leaks across wrapper boundaries.
 **Lifecycle**: Initialized in `ixs_ctx_create`, destroyed in
 `ixs_ctx_destroy`. No other management needed.
 
-**Implementation plan** (incremental):
-
-1. Add `ixs_arena_save`, `ixs_arena_restore`, `ixs_arena_grow` to
-   `arena.c`/`arena.h`. Add `ixs_arena scratch` to `ixs_ctx`. Unit tests
-   for save/restore nesting and grow fast/slow paths.
-2. Migrate `simp_add` and `simp_mul` to scratch (wrapper/impl split).
-   Corpus and benchmarks must stay green.
-3. Migrate `simp_and`, `simp_or`, `simp_pw`, and `parse_piecewise`.
-4. Migrate remaining `MAX_TERMS` sites: `simp_mod` (`reduced[]` array),
-   `ixs_subs` (IXS_PIECEWISE case: `vals[]`/`cds[]`), and `rewrite_impl`
-   (IXS_PIECEWISE case: `vals[]`/`cds[]`). `subs_rec` and `rewrite` must
-   be split so the wrapper (not the impl) is the recursive entry point —
-   child calls go through the wrapper to get their own save/restore scope.
-5. Remove `MAX_TERMS` and `ixs_limits.h`.
-
-Each step is a separate commit (or PR) — tests and benchmarks must pass
-after every step, and each is independently revertible.
-
-**Testing**: Unit tests must cover: expressions with >256 terms (the old
-limit), nested constructors (add-of-mul-of-add) exercising LIFO
-save/restore, and the `ixs_arena_grow` slow path (alloc something else
-between the initial alloc and the grow to defeat the in-place fast path).
-OOM testing requires a general-purpose OOM injection mechanism for the
-arena (e.g. a configurable allocation cap or a fail-after-N-bytes mode);
-this is tracked separately and deferred.
+**Status**: Fully implemented. All smart constructors, the parser, `subs`,
+and `rewrite_impl` use the scratch arena with wrapper/impl split.
+`MAX_TERMS` and `ixs_limits.h` have been removed. OOM injection for
+arena testing is tracked separately (bead 4-96o).
 
 ### Layer 1: Expression Representation — Hash-Consed DAG
 
@@ -1402,7 +1381,8 @@ ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root,
 **Return value**:
 - `root` — walk completed, all reachable nodes visited.
 - other non-NULL — callback returned STOP on that node.
-- `NULL` — OOM (future iterative stack exhausted) or root was NULL.
+- `NULL` — root was NULL (or OOM if a future iterative implementation
+  exhausts its scratch stack).
 
 The caller distinguishes NULL-root from OOM because they know what they
 passed. The edge case where STOP fires on root itself (returns `root`,
@@ -1415,12 +1395,11 @@ unique nodes, so callers doing exhaustive collection (e.g.
 identity. Callers that don't need dedup (printing, conversion) get the
 fast path without paying for a hash set.
 
-`ctx` is accepted for future use: the initial implementation is recursive,
-but a future version may switch to an iterative explicit stack on the
-scratch arena to avoid stack overflow on deep trees. If that allocation
-fails, the walk returns NULL. The recursive implementation never returns
-NULL for non-NULL root but is subject to stack depth limits on very deep
-trees (practical limit ~10k depth).
+`ctx` is accepted so that a future iterative implementation can use the
+scratch arena for an explicit stack, avoiding stack overflow on deep trees.
+The current implementation is recursive and never returns NULL for non-NULL
+root, but is subject to stack depth limits on very deep trees (practical
+limit ~10k depth). Bead 4-3j0 tracks bounding recursion depth.
 
 Use cases:
 - `ixs_walk_pre`: top-down — pattern matching with subtree-skipping,
