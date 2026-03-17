@@ -2025,6 +2025,7 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
 
 #define SUBS_MEMO_SIZE 256u
 #define SUBS_MEMO_MASK (SUBS_MEMO_SIZE - 1u)
+#define SUBS_MAX_FOLD_EXP 64
 
 typedef struct {
   ixs_node *key;
@@ -2108,7 +2109,7 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       if (e == 1) {
         power = nb;
       } else if ((nb->tag == IXS_INT || nb->tag == IXS_RAT) && e > 0 &&
-                 e <= 64) {
+                 e <= SUBS_MAX_FOLD_EXP) {
         int32_t j;
         power = ixs_node_int(ctx, 1);
         for (j = 0; j < e && power && !ixs_node_is_sentinel(power); j++)
