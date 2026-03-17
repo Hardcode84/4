@@ -1218,8 +1218,8 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
 /* ---- Floor/ceil rule tables -------------------------------------- */
 
 static const ixs_rule floor_rules[] = {
-    {rule_floor_collapse, "try_floor_ceil_collapse", true},
-    {rule_round_integer_divinfo, "is_integer_with_divinfo", true},
+    {rule_floor_collapse, "floor_collapse", true},
+    {rule_round_integer_divinfo, "round_integer_divinfo", true},
     {rule_round_extract_add, "round_extract_add", false},
     {rule_round_extract_mul_add, "round_extract_mul_add", false},
     {rule_round_pull_in_denom, "round_pull_in_denom", false},
@@ -1230,8 +1230,8 @@ static const ixs_rule floor_rules[] = {
 };
 
 static const ixs_rule ceil_rules[] = {
-    {rule_ceil_collapse, "try_floor_ceil_collapse", true},
-    {rule_round_integer_divinfo, "is_integer_with_divinfo", true},
+    {rule_ceil_collapse, "ceil_collapse", true},
+    {rule_round_integer_divinfo, "round_integer_divinfo", true},
     {rule_round_extract_add, "round_extract_add", false},
     {rule_round_extract_mul_add, "round_extract_mul_add", false},
     {rule_round_pull_in_denom, "round_pull_in_denom", false},
@@ -1760,7 +1760,7 @@ static ixs_node *rule_cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
 static const ixs_rule cmp_rules[] = {
     {rule_cmp_const_fold, "cmp_const_fold", false},
     {rule_cmp_identity, "cmp_identity", false},
-    {rule_cmp_normalize, "cmp_normalize_to_zero", false},
+    {rule_cmp_normalize, "cmp_normalize", false},
     {rule_cmp_bounds_resolve, "cmp_bounds_resolve", true},
     {NULL, NULL, false},
 };
