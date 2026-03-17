@@ -3701,8 +3701,15 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
-/* Each simplification rule: (ctx, bnds, node) -> node.               */
-/* Returns n unchanged = didn't fire; different node = fired; NULL=OOM */
+/* Each simplification rule: (ctx, bnds, node) -> node.
+ *   return n   = rule didn't fire (no change)
+ *   return new = rule fired, use new node
+ *   return NULL = OOM (propagated to caller)
+ *
+ * Thin wrappers use `r ? r : n` to map a helper's NULL-means-no-match
+ * convention.  This conflates OOM with "didn't fire" — acceptable for
+ * now since OOM is fatal shortly after, but a dedicated NO_MATCH
+ * sentinel would be cleaner (see bead 4-3or). */
 
 typedef ixs_node *(*ixs_rule_fn)(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 
@@ -4889,6 +4896,9 @@ static ixs_node *rule_floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds,
   return simp_floor(ctx, r);
 }
 
+/* needs_bounds = false: this rule fires on structure alone (symbolic
+ * denominator shared across addends) but uses bnds opportunistically
+ * to tighten the remainder when available. */
 static ixs_node *rule_floor_drop_const_sym(ixs_ctx *ctx, ixs_bounds *bnds,
                                            ixs_node *n) {
   ixs_node *x = n->u.unary.arg;
@@ -4912,6 +4922,10 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
 }
 
 /* ---- Floor/ceil rule tables -------------------------------------- */
+/* Order matters: bounds-dependent collapse first (cheapest), then
+ * structural rewrites from most specific to most general.
+ * round_extract_add/mul_add peel integer addends before pull_in_denom
+ * redistributes; drop_const/drop_const_sym handle the remainder. */
 
 static const ixs_rule floor_rules[] = {
     {rule_floor_collapse, "floor_collapse", true},
@@ -5193,6 +5207,7 @@ static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
   return r ? r : n;
 }
 
+/* Constant folds and identity first, then structural, bounds last. */
 static const ixs_rule mod_rules[] = {
     {rule_mod_const_fold, "mod_const_fold", false},
     {rule_mod_one, "mod_one", false},
@@ -5453,6 +5468,8 @@ static ixs_node *rule_cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
   return r ? r : n;
 }
 
+/* Normalize before bounds: canonicalize to `expr CMP 0` so bounds
+ * resolution sees a consistent form. */
 static const ixs_rule cmp_rules[] = {
     {rule_cmp_const_fold, "cmp_const_fold", false},
     {rule_cmp_identity, "cmp_identity", false},

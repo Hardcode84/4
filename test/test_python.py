@@ -88,6 +88,8 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
     if op == "neg":
         return (op, a)
     if op == "piecewise":
+        # Piecewise tuple layout: ("piecewise", val1, cond1, ..., valN, condN, default)
+        # ncases = (len - 2) // 2; default is always tree[-1].
         cond = draw(conditions(max_depth=2))
         default = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
         if draw(st.booleans()):
@@ -272,6 +274,10 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
 
 
 def _floored_mod(a: Any, b: Any) -> Any:
+    """Floored modulo: result has the sign of b (Python's native %).
+
+    Uses Python's built-in % which is exact for integers — an earlier
+    version using math.floor(a/b) lost precision for large values."""
     if b == 0:
         raise ZeroDivisionError
     return a % b
@@ -421,7 +427,7 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
         simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -434,8 +440,11 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
 )
 def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
     """Cross-check against SymPy: both should produce numerically
-    equivalent results. Uses Python eval_expr as ground truth to avoid
-    SymPy Mod bug #28744 with evaluate=False."""
+    equivalent results.  Python eval_expr is the ground truth; ixsimpl
+    must match it exactly.  SymPy is advisory — disagreements are
+    reported as warnings (not assertions) because SymPy 1.14's Mod
+    with evaluate=False has known bugs (#28744) that produce wrong
+    results for nested Mod expressions."""
     ctx = ixsimpl.Context()
     try:
         ixs_result = to_ixsimpl(ctx, expr)
@@ -480,7 +489,7 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             pass
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -529,7 +538,7 @@ def test_simplify_with_divisibility(
             f"expr={expr}, assumption=Mod({div_sym},{divisor})==0"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -571,7 +580,7 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
             checked += 1
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             continue
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -611,7 +620,7 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
             f"expected={ground_truth}, ixsimpl={ixs_val}, expr={expr}"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -620,7 +629,11 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
 )
 def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
     """ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves numerical
-    semantics at random integer points."""
+    semantics at random integer points.
+
+    Structural equality is intentionally not checked: SymPy may simplify
+    expressions (e.g. Max(0, x**2) -> x**2 for integer x) and the
+    roundtripped form can differ structurally while remaining equivalent."""
     ctx = ixsimpl.Context()
     try:
         original = to_ixsimpl(ctx, expr)
@@ -628,7 +641,9 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
         assume(False)
     assume(not original.is_error)
 
-    # SymPy Max/Min reject unevaluated Mod nodes as "not comparable".
+    # SymPy conversion can fail: Max/Min reject unevaluated Mod nodes
+    # as "not comparable", and some ixsimpl constructs have no SymPy
+    # equivalent.  Skip rather than fail.
     try:
         sp_expr = conv_to_sympy(original)
     except (ValueError, TypeError):
@@ -654,7 +669,7 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
             f"original={orig_val}, roundtripped={rt_val}, expr={expr}"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -705,7 +720,7 @@ def test_simplify_with_bounds(
             f"expr={expr}, bounds={lo} <= {bound_sym} < {hi}"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 _LARGE_VALS_MUL = [-(1 << 30), -(1 << 30) + 1, -1, 0, 1, (1 << 30) - 1, (1 << 30)]
@@ -771,10 +786,13 @@ def test_simplify_near_overflow(expr: ExprTree, envs: list[Env]) -> None:
         try:
             simp = eval_ixs(ixs_simplified, ctx, env)
         except (ValueError, TypeError):
+            # ixsimpl uses int64 internally; simplification may reorganize
+            # subexpressions so intermediates overflow even when the final
+            # Python result fits.  Skip rather than fail.
             continue
         assert orig == simp, f"Near-overflow mismatch: {orig} != {simp} at {env}, expr={expr}"
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -833,7 +851,7 @@ def test_divisibility_targeted(
             f"expr={expr}, assumption=Mod({div_sym},{divisor})==0"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
 @given(
@@ -894,4 +912,4 @@ def test_bounds_targeted(
             f"expr={expr}, bounds={lo} <= {bound_sym} < {hi}"
         )
         checked += 1
-    assume(checked > 0)
+    assume(checked > 0)  # reject vacuous passes (all envs skipped)
