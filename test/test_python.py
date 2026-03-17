@@ -90,11 +90,12 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
     if op == "piecewise":
         # Piecewise tuple layout: ("piecewise", val1, cond1, ..., valN, condN, default)
         # ncases = (len - 2) // 2; default is always tree[-1].
-        cond = draw(conditions(max_depth=2))
+        cond_depth = draw(st.integers(min_value=1, max_value=3))
+        cond = draw(conditions(max_depth=cond_depth))
         default = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
         if draw(st.booleans()):
             b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-            cond2 = draw(conditions(max_depth=2))
+            cond2 = draw(conditions(max_depth=cond_depth))
             return (op, a, cond, b, cond2, default)
         return (op, a, cond, default)
     b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
