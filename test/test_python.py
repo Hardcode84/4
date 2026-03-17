@@ -596,10 +596,11 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
     checked = 0
     for env in envs:
         try:
-            ground_truth = eval_expr(expr, env)
-            if not isinstance(ground_truth, int):
-                ground_truth = int(ground_truth)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            continue
+        ground_truth = _as_int(raw)
+        if ground_truth is None:
             continue
         try:
             ixs_val = eval_ixs(ixs_converted, ctx, env)
@@ -759,13 +760,12 @@ def test_simplify_near_overflow(expr: ExprTree, envs: list[Env]) -> None:
     checked = 0
     for env in envs:
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             continue
-        if isinstance(orig, Fraction):
-            if orig.denominator != 1:
-                continue
-            orig = int(orig)
+        orig = _as_int(raw)
+        if orig is None:
+            continue
         if not (-(1 << 62) <= orig <= (1 << 62)):
             continue
         try:
@@ -821,8 +821,11 @@ def test_divisibility_targeted(
     for base_env, mult in env_mults:
         env = {**base_env, div_sym: mult * divisor}
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
             continue
         simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, (
@@ -879,8 +882,11 @@ def test_bounds_targeted(
     for base_env in envs:
         env = {**base_env, bound_sym: max(lo, min(hi - 1, base_env[bound_sym]))}
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
             continue
         simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, (

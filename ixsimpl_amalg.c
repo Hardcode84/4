@@ -5803,8 +5803,14 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                  e <= 64) {
         int32_t j;
         power = ixs_node_int(ctx, 1);
-        for (j = 0; j < e && power; j++)
+        for (j = 0; j < e && power && !ixs_node_is_sentinel(power); j++)
           power = simp_mul(ctx, power, nb);
+        if (!power || ixs_node_is_sentinel(power)) {
+          ixs_mulfactor f;
+          f.base = nb;
+          f.exp = e;
+          power = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
+        }
       } else {
         ixs_mulfactor f;
         f.base = nb;
