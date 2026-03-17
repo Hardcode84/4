@@ -590,19 +590,23 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 
 typedef ixs_node *(*round_fn)(ixs_ctx *, ixs_node *);
 
+/* Max exponent magnitude for eager constant-power folding.
+ * Shared by apply_pow and subs_rec to cap repeated-multiply loops. */
+#define MAX_FOLD_EXP 64
+
 /* Multiply acc by base^exp via repeated simp_mul/simp_div.
- * Caps magnitude at 64 (matching EXPAND_MAX_EXP) to prevent runaway
- * loops on degenerate exponents.  Returns NULL on OOM or overflow. */
+ * Caps magnitude at MAX_FOLD_EXP to prevent runaway loops on
+ * degenerate exponents.  Returns NULL on OOM, sentinel on overflow. */
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp) {
   if (!acc || exp == 0)
     return acc;
   bool pos = (exp > 0);
   int32_t mag = pos ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
-  if (mag > 64)
+  if (mag > MAX_FOLD_EXP)
     return NULL;
   int32_t i;
-  for (i = 0; i < mag && acc; i++)
+  for (i = 0; i < mag && acc && !ixs_node_is_sentinel(acc); i++)
     acc = pos ? simp_mul(ctx, acc, base) : simp_div(ctx, acc, base);
   return acc;
 }
@@ -2025,7 +2029,6 @@ ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
 
 #define SUBS_MEMO_SIZE 256u
 #define SUBS_MEMO_MASK (SUBS_MEMO_SIZE - 1u)
-#define SUBS_MAX_FOLD_EXP 64
 
 typedef struct {
   ixs_node *key;
@@ -2109,11 +2112,8 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       if (e == 1) {
         power = nb;
       } else if ((nb->tag == IXS_INT || nb->tag == IXS_RAT) && e > 0 &&
-                 e <= SUBS_MAX_FOLD_EXP) {
-        int32_t j;
-        power = ixs_node_int(ctx, 1);
-        for (j = 0; j < e && power && !ixs_node_is_sentinel(power); j++)
-          power = simp_mul(ctx, power, nb);
+                 e <= MAX_FOLD_EXP) {
+        power = apply_pow(ctx, ixs_node_int(ctx, 1), nb, e);
         if (!power || ixs_node_is_sentinel(power)) {
           ixs_mulfactor f;
           f.base = nb;
