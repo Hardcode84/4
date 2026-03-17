@@ -2107,6 +2107,12 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       ixs_node *power;
       if (e == 1) {
         power = nb;
+      } else if ((nb->tag == IXS_INT || nb->tag == IXS_RAT) && e > 0 &&
+                 e <= 64) {
+        int32_t j;
+        power = ixs_node_int(ctx, 1);
+        for (j = 0; j < e && power; j++)
+          power = simp_mul(ctx, power, nb);
       } else {
         ixs_mulfactor f;
         f.base = nb;

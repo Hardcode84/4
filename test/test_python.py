@@ -19,6 +19,7 @@ Properties tested:
 from __future__ import annotations
 
 import math
+import warnings
 from fractions import Fraction
 from typing import Any
 
@@ -76,15 +77,23 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
     op = draw(st.sampled_from(ops))
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op in ("floor", "ceiling"):
-        if draw(st.booleans()):
+        choice = draw(st.sampled_from(["div", "rat_add", "plain"]))
+        if choice == "div":
+            d = draw(pos_ints)
+            return (op, ("div", a, d))
+        if choice == "rat_add":
             rat_leaf = draw(small_rats)
             return (op, ("add", rat_leaf, a))
         return (op, a)
     if op == "neg":
         return (op, a)
     if op == "piecewise":
-        cond = draw(conditions(max_depth=1))
+        cond = draw(conditions(max_depth=2))
         default = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+        if draw(st.booleans()):
+            b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+            cond2 = draw(conditions(max_depth=2))
+            return (op, a, cond, b, cond2, default)
         return (op, a, cond, default)
     b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op == "mod":
@@ -143,6 +152,8 @@ def to_sympy(tree: ExprTree) -> Any:
     if op == "ceiling":
         return sympy.ceiling(to_sympy(tree[1]))
     if op == "mod":
+        # evaluate=False avoids SymPy Mod bugs (e.g. #28744) that silently
+        # produce wrong results for certain inputs.
         return sympy.Mod(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "max":
         return sympy.Max(to_sympy(tree[1]), to_sympy(tree[2]))
@@ -151,8 +162,10 @@ def to_sympy(tree: ExprTree) -> Any:
     if op == "xor":
         raise ValueError("xor not supported in SymPy conversion")
     if op == "piecewise":
-        val, cond, default = tree[1], tree[2], tree[3]
-        return sympy.Piecewise((to_sympy(val), to_sympy_cond(cond)), (to_sympy(default), True))
+        ncases = (len(tree) - 2) // 2
+        cases = [(to_sympy(tree[1 + 2 * i]), to_sympy_cond(tree[2 + 2 * i])) for i in range(ncases)]
+        cases.append((to_sympy(tree[-1]), True))
+        return sympy.Piecewise(*cases)
     raise ValueError(f"unknown op: {op}")
 
 
@@ -215,12 +228,13 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
     if op == "xor":
         return ixsimpl.xor_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "piecewise":
-        val, cond, default = tree[1], tree[2], tree[3]
-        cond_expr = to_ixsimpl_cond(ctx, cond)
-        return ixsimpl.pw(
-            (to_ixsimpl(ctx, val), cond_expr),
-            (to_ixsimpl(ctx, default), ctx.true_()),
-        )
+        ncases = (len(tree) - 2) // 2
+        cases = [
+            (to_ixsimpl(ctx, tree[1 + 2 * i]), to_ixsimpl_cond(ctx, tree[2 + 2 * i]))
+            for i in range(ncases)
+        ]
+        cases.append((to_ixsimpl(ctx, tree[-1]), ctx.true_()))
+        return ixsimpl.pw(*cases)
     raise ValueError(f"unknown op: {op}")
 
 
@@ -260,7 +274,7 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
 def _floored_mod(a: Any, b: Any) -> Any:
     if b == 0:
         raise ZeroDivisionError
-    return a - b * math.floor(a / b)
+    return a % b
 
 
 def eval_expr(tree: ExprTree, env: Env) -> Any:
@@ -300,10 +314,11 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if op == "xor":
         return int(eval_expr(tree[1], env)) ^ int(eval_expr(tree[2], env))
     if op == "piecewise":
-        val, cond, default = tree[1], tree[2], tree[3]
-        if eval_cond(cond, env):
-            return eval_expr(val, env)
-        return eval_expr(default, env)
+        ncases = (len(tree) - 2) // 2
+        for i in range(ncases):
+            if eval_cond(tree[2 + 2 * i], env):
+                return eval_expr(tree[1 + 2 * i], env)
+        return eval_expr(tree[-1], env)
     raise ValueError(f"unknown op: {op}")
 
 
@@ -333,6 +348,15 @@ def eval_cond(tree: CondTree, env: Env) -> Any:
     if op == "or":
         return eval_cond(tree[1], env) or eval_cond(tree[2], env)
     raise ValueError(f"unknown cond op: {op}")
+
+
+def _as_int(val: Any) -> int | None:
+    """Coerce eval_expr result to int, or None if non-integer."""
+    if isinstance(val, int):
+        return val
+    if isinstance(val, Fraction):
+        return int(val) if val.denominator == 1 else None
+    return None
 
 
 def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
@@ -388,13 +412,13 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
     checked = 0
     for env in envs:
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
             continue
-        try:
-            simp = eval_ixs(ixs_simplified, ctx, env)
-        except (ValueError, TypeError):
+        orig = _as_int(raw)
+        if orig is None:
             continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
         checked += 1
     assume(checked > 0)
@@ -429,24 +453,33 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
     checked = 0
     for env in envs:
         try:
-            ground_truth = eval_expr(expr, env)
-            ixs_val = eval_ixs(ixs_simplified, ctx, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
             continue
+        ground_truth = _as_int(raw)
+        if ground_truth is None:
+            continue
+        ixs_val = eval_ixs(ixs_simplified, ctx, env)
         assert ground_truth == ixs_val, (
             f"ixsimpl diverges from ground truth at {env}: "
             f"expected={ground_truth}, got={ixs_val}, expr={expr}"
         )
-        checked += 1
         try:
             sp_env = {sympy.Symbol(k, integer=True): v for k, v in env.items()}
             sp_val = sp_expr.subs(sp_env)
-            if sp_val.is_number:
+            if sp_val.is_number and sp_val.is_integer:
                 sp_int = int(sp_val)
+                # Non-fatal: SymPy 1.14 has Mod evaluate=False bugs (#28744)
+                # that cause wrong results for nested Mod expressions.
                 if sp_int != ground_truth:
-                    pass  # SymPy bug, not ours
-        except (ZeroDivisionError, ValueError, TypeError):
+                    warnings.warn(
+                        f"SymPy disagrees with ground truth at {env}: "
+                        f"sympy={sp_int}, expected={ground_truth}, expr={expr}",
+                        stacklevel=1,
+                    )
+        except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             pass
+        checked += 1
     assume(checked > 0)
 
 
@@ -484,13 +517,13 @@ def test_simplify_with_divisibility(
     for base_env, mult in env_mults:
         env = {**base_env, div_sym: mult * divisor}
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
             continue
-        try:
-            simp = eval_ixs(ixs_simplified, ctx, env)
-        except (ValueError, TypeError):
+        orig = _as_int(raw)
+        if orig is None:
             continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, (
             f"Divisibility mismatch: {orig} != {simp} at {env}, "
             f"expr={expr}, assumption=Mod({div_sym},{divisor})==0"
@@ -659,15 +692,199 @@ def test_simplify_with_bounds(
     for base_env in envs:
         env = {**base_env, bound_sym: max(lo, min(hi - 1, base_env[bound_sym]))}
         try:
-            orig = eval_expr(expr, env)
+            raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
+            continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
+        assert orig == simp, (
+            f"Bounds mismatch: {orig} != {simp} at {env}, "
+            f"expr={expr}, bounds={lo} <= {bound_sym} < {hi}"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
+_LARGE_VALS_MUL = [-(1 << 30), -(1 << 30) + 1, -1, 0, 1, (1 << 30) - 1, (1 << 30)]
+_LARGE_VALS_I64 = [
+    -(1 << 62),
+    -(1 << 62) + 1,
+    -(1 << 31),
+    -(1 << 31) + 1,
+    -1,
+    0,
+    1,
+    (1 << 31) - 1,
+    (1 << 31),
+    (1 << 62) - 1,
+    (1 << 62),
+]
+
+
+@given(
+    expr=expressions(max_depth=3, include_piecewise=False),
+    envs=st.lists(
+        st.fixed_dictionaries(
+            {
+                v: st.one_of(
+                    st.sampled_from(_LARGE_VALS_MUL),
+                    st.sampled_from(_LARGE_VALS_I64),
+                    st.integers(-10, 10),
+                )
+                for v in _VARS
+            }
+        ),
+        min_size=1,
+        max_size=5,
+    ),
+)
+def test_simplify_near_overflow(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification with values near int64 overflow boundaries.
+
+    Two tiers: +/-2^30 (safe for x*x), +/-2^62 (near int64 boundary).
+    When the result fits in int64, it must match Python arbitrary-precision
+    arithmetic.  int64 overflow in ixsimpl is expected and skipped.
+    """
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    ixs_simplified = ixs_expr.simplify()
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for env in envs:
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            continue
+        if isinstance(orig, Fraction):
+            if orig.denominator != 1:
+                continue
+            orig = int(orig)
+        if not (-(1 << 62) <= orig <= (1 << 62)):
             continue
         try:
             simp = eval_ixs(ixs_simplified, ctx, env)
         except (ValueError, TypeError):
             continue
+        assert orig == simp, f"Near-overflow mismatch: {orig} != {simp} at {env}, expr={expr}"
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    div_sym=st.sampled_from(_VARS),
+    divisor=st.integers(min_value=2, max_value=64),
+    other=expressions(max_depth=3),
+    pattern=st.sampled_from(["floor_div", "ceil_div", "mod", "compound"]),
+    env_mults=st.lists(
+        st.tuples(_env_st(1, 50), st.integers(-25, 25)),
+        min_size=1,
+        max_size=10,
+    ),
+)
+def test_divisibility_targeted(
+    div_sym: str,
+    divisor: int,
+    other: ExprTree,
+    pattern: str,
+    env_mults: list[tuple[Env, int]],
+) -> None:
+    """Targeted: divisibility assumption with expressions that exercise it."""
+    if pattern == "floor_div":
+        expr: ExprTree = ("floor", ("div", div_sym, divisor))
+    elif pattern == "ceil_div":
+        expr = ("ceiling", ("div", div_sym, divisor))
+    elif pattern == "mod":
+        expr = ("mod", div_sym, divisor)
+    else:
+        expr = ("floor", ("div", ("add", div_sym, other), divisor))
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sym_node = ctx.sym(div_sym)
+    assumption = ctx.eq(ixsimpl.mod(sym_node, ctx.int_(divisor)), ctx.int_(0))
+    ixs_simplified = ixs_expr.simplify(assumptions=[assumption])
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for base_env, mult in env_mults:
+        env = {**base_env, div_sym: mult * divisor}
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
         assert orig == simp, (
-            f"Bounds mismatch: {orig} != {simp} at {env}, "
+            f"Targeted divisibility mismatch: {orig} != {simp} at {env}, "
+            f"expr={expr}, assumption=Mod({div_sym},{divisor})==0"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    bound_sym=st.sampled_from(_VARS),
+    lo=st.integers(min_value=0, max_value=50),
+    hi=st.integers(min_value=51, max_value=200),
+    pattern=st.sampled_from(["max_lo", "min_hi", "floor_div", "mod"]),
+    envs=st.lists(
+        st.fixed_dictionaries({v: st.integers(0, 200) for v in _VARS}),
+        min_size=1,
+        max_size=10,
+    ),
+)
+def test_bounds_targeted(
+    bound_sym: str,
+    lo: int,
+    hi: int,
+    pattern: str,
+    envs: list[Env],
+) -> None:
+    """Targeted: bound assumptions with expressions that exercise them."""
+    if pattern == "max_lo":
+        expr: ExprTree = ("max", bound_sym, lo)
+    elif pattern == "min_hi":
+        expr = ("min", bound_sym, hi - 1)
+    elif pattern == "floor_div":
+        d = max(1, hi - lo)
+        expr = ("floor", ("div", bound_sym, d))
+    else:
+        m = max(1, hi - lo)
+        expr = ("mod", bound_sym, m)
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sym_node = ctx.sym(bound_sym)
+    assumptions = [sym_node >= ctx.int_(lo), sym_node < ctx.int_(hi)]
+    ixs_simplified = ixs_expr.simplify(assumptions=assumptions)
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for base_env in envs:
+        env = {**base_env, bound_sym: max(lo, min(hi - 1, base_env[bound_sym]))}
+        try:
+            orig = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
+        assert orig == simp, (
+            f"Targeted bounds mismatch: {orig} != {simp} at {env}, "
             f"expr={expr}, bounds={lo} <= {bound_sym} < {hi}"
         )
         checked += 1
