@@ -604,12 +604,23 @@ The parser builds the DAG directly via the hash-consing table.
 
 ### Layer 4: Simplification Engine
 
-Simplification is driven by a single rule engine. Each public constructor
-(e.g., `ixs_add`, `ixs_floor`, `ixs_mod`) calls the rule engine bottom-up
-during DAG construction (canonicalize before hash-consing). The same rule
-engine is invoked top-down by `ixs_simplify()` when assumptions enable
-additional rewrites (e.g., bound-dependent rules). There is one rule
-implementation, not two.
+Simplification is **table-driven**. Each node type has an ordered array of
+`ixs_rule` entries (function pointer, name, needs-bounds flag). The
+`try_rules()` dispatch walks the array, tries each rule, records an
+`IXS_STATS` hit when one fires, and returns. Rules that require bounds
+are skipped when `bnds == NULL`.
+
+Each `simp_*` constructor (e.g., `simp_floor`, `simp_mod`) applies the
+fast pre-checks (sentinel propagation, const fold, identity) directly,
+constructs the node, then calls `try_rules(ctx, NULL, node, *_rules)`.
+For the top-down rewrite pass, each `simp_*_bnds` variant takes an
+optional `ixs_bounds *` and calls `try_rules(ctx, bnds, ...)` so
+bounds-dependent rules also fire. `rewrite_impl` is just:
+```c
+case IXS_FLOOR:
+    return simp_floor_bnds(ctx, bnds, rewrite(ctx, arg, ...));
+```
+There is one rule table per type, used by both construction and rewriting.
 
 **Termination guarantee**: The top-down rewrite pass in `ixs_simplify()` runs
 a fixed-point loop with a configurable iteration limit (default 64). Each
@@ -714,8 +725,8 @@ floor(c + sum(ci*bi))  → floor(sum(ci*bi))
 floor(Mod(X, M) / K)  → 0   when K >= M > 0
 ```
 
-The constant-drop rule is implemented in `floor_drop_const`, shared
-between `simp_round` and `rewrite_impl`.
+The constant-drop rule is implemented in `floor_drop_const` and registered
+in `floor_rules[]`.
 
 `round_extract_add` splits rational constants into integer + fractional
 parts (e.g. `65/32 → 2 + 1/32`) before testing the drop condition,
@@ -731,7 +742,7 @@ floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
 ```
 
 The symbolic-denominator constant-drop rule is implemented in
-`floor_drop_const_sym`, also shared between `simp_round` and `rewrite_impl`.
+`floor_drop_const_sym`, also registered in `floor_rules[]`.
 
 `round_extract_mul_add` also distributes `floor(outer * (const + terms))`
 when `outer` is non-integer and the ADD has a nonzero constant, even if no
@@ -1215,11 +1226,12 @@ void     ixs_ctx_stats_reset(ixs_ctx *ctx);  // zero all counters
 ```
 
 **Rule-hit statistics** (`-DIXS_STATS`): When compiled with `IXS_STATS`,
-each simplification rule records a hit count in a per-context
-open-addressing hash table (128 slots, keyed on `__func__` pointer
-identity). The `IXS_STAT_HIT(ctx)` macro in each rule function expands
-to a single pointer-compare probe; when `IXS_STATS` is not defined it
-expands to `((void)(ctx))`. CMake: `-DENABLE_STATS=ON`. The Python
+the `try_rules()` dispatch automatically records a hit count for each
+rule that fires, using the rule name from the `ixs_rule` table. Counts
+are stored in a per-context open-addressing hash table (128 slots, keyed
+on rule-name pointer identity). Rules not dispatched through `try_rules`
+(e.g., ADD/MUL canonicalization) use the `IXS_STAT_HIT(ctx)` macro
+directly. CMake: `-DENABLE_STATS=ON`. The Python
 binding exposes `ctx.stats()` (returns a `{name: count}` dict) and
 `ctx.stats_reset()`. The Python wheel does not enable stats by default;
 build from source with `-DENABLE_STATS=ON` for profiling.
