@@ -20,3 +20,7 @@ $MMA_SCALE_FP4 >= 0
 $index0 >= 0
 $index1 >= 0
 _aligned >= 0
+Mod(M, 32) == 0
+Mod(N, 32) == 0
+Mod(K, 256) == 0
+BLOCK_K >= 1

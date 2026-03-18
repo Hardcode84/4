@@ -1371,6 +1371,107 @@ static void test_subs_power_overflow(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* m*floor(E/m) + Mod(E, m) = E: integer and symbolic moduli. */
+static void test_floor_mod_cancel(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+
+  /* 4*floor(x/4) + Mod(x, 4) -> x */
+  ixs_node *e =
+      ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 4),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)))),
+              ixs_mod(ctx, x, ixs_int(ctx, 4)));
+  CHECK(e == x);
+
+  /* Scaled: 2*Mod(x, 4) + 8*floor(x/4) -> 2*x */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 2), ixs_mod(ctx, x, ixs_int(ctx, 4))),
+              ixs_mul(ctx, ixs_int(ctx, 8),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)))));
+  CHECK(e == ixs_mul(ctx, ixs_int(ctx, 2), x));
+
+  /* Subtracted pair: -Mod(x, 4) - 4*floor(x/4) -> -x */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, -1), ixs_mod(ctx, x, ixs_int(ctx, 4))),
+              ixs_mul(ctx, ixs_int(ctx, -4),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)))));
+  CHECK(e == ixs_mul(ctx, ixs_int(ctx, -1), x));
+
+  /* Extra terms: y + 4*floor(x/4) + Mod(x, 4) -> y + x */
+  e = ixs_add(ctx, y,
+              ixs_add(ctx,
+                      ixs_mul(ctx, ixs_int(ctx, 4),
+                              ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)))),
+                      ixs_mod(ctx, x, ixs_int(ctx, 4))));
+  CHECK(e == ixs_add(ctx, x, y));
+
+  /* Nested: 2*floor(floor(x/3)/2) + Mod(floor(x/3), 2) -> floor(x/3) */
+  {
+    ixs_node *fx3 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    e = ixs_add(ctx,
+                ixs_mul(ctx, ixs_int(ctx, 2),
+                        ixs_floor(ctx, ixs_div(ctx, fx3, ixs_int(ctx, 2)))),
+                ixs_mod(ctx, fx3, ixs_int(ctx, 2)));
+    CHECK(e == fx3);
+  }
+
+  /* No false match: 3*floor(x/4) + Mod(x, 4) should NOT cancel */
+  e = ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 3),
+                      ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)))),
+              ixs_mod(ctx, x, ixs_int(ctx, 4)));
+  CHECK(ixs_node_tag(e) == IXS_ADD);
+
+  /* No false match: Mod(x, 4) + 4*floor(y/4) - different lhs/arg */
+  e = ixs_add(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)),
+              ixs_mul(ctx, ixs_int(ctx, 4),
+                      ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 4)))));
+  CHECK(ixs_node_tag(e) == IXS_ADD);
+
+  ixs_ctx_destroy(ctx);
+}
+
+/* Floor-Mod cancellation with symbolic modulus: m*floor(E/m) + Mod(E, m). */
+static void test_floor_mod_cancel_symbolic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *half_K = ixs_div(ctx, K, ixs_int(ctx, 2));
+
+  /* K/2 * floor(x / (K/2)) + Mod(x, K/2) -> x */
+  ixs_node *fl = ixs_floor(ctx, ixs_div(ctx, x, half_K));
+  ixs_node *e = ixs_add(ctx, ixs_mul(ctx, half_K, fl), ixs_mod(ctx, x, half_K));
+  CHECK(e == x);
+
+  /* With constant offset: K/2*floor((x+5)/(K/2)) + Mod(x+5, K/2) -> x+5 */
+  {
+    ixs_node *x5 = ixs_add(ctx, x, ixs_int(ctx, 5));
+    ixs_node *fl5 = ixs_floor(ctx, ixs_div(ctx, x5, half_K));
+    e = ixs_add(ctx, ixs_mul(ctx, half_K, fl5), ixs_mod(ctx, x5, half_K));
+    CHECK(e == x5);
+  }
+
+  /* Difference of two pairs:
+   * K/2*floor((x+A)/(K/2)) + Mod(x+A, K/2)
+   * - K/2*floor((x+B)/(K/2)) - Mod(x+B, K/2) -> A - B */
+  {
+    ixs_node *xA = ixs_add(ctx, x, ixs_int(ctx, 100));
+    ixs_node *xB = ixs_add(ctx, x, ixs_int(ctx, 60));
+    ixs_node *pair_A = ixs_add(
+        ctx, ixs_mul(ctx, half_K, ixs_floor(ctx, ixs_div(ctx, xA, half_K))),
+        ixs_mod(ctx, xA, half_K));
+    ixs_node *pair_B = ixs_add(
+        ctx, ixs_mul(ctx, half_K, ixs_floor(ctx, ixs_div(ctx, xB, half_K))),
+        ixs_mod(ctx, xB, half_K));
+    e = ixs_sub(ctx, pair_A, pair_B);
+    CHECK(e && ixs_node_tag(e) == IXS_INT && ixs_node_int_val(e) == 40);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1405,6 +1506,8 @@ int main(void) {
   test_add_flatten_neg();
   test_modrem_congruence();
   test_subs_power_overflow();
+  test_floor_mod_cancel();
+  test_floor_mod_cancel_symbolic();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

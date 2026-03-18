@@ -3751,6 +3751,10 @@ static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *l, ixs_node *r);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *cmp_node);
+static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
+                           int32_t exp);
+ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
+ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -3960,6 +3964,239 @@ static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
   return result;
 }
 
+/*
+ * simp_mul with compound-base decomposition for inverse factors:
+ *   (c * g1^e1 * ...)^{-1}  ->  (1/c) * g1^{-e1} * ...
+ *
+ * Enables symbolic cancellation like K * (K/2)^{-1} -> 2 that plain
+ * simp_mul misses because it treats compound MUL bases as opaque.
+ * Restricted to exp == -1 to avoid exponent-overflow headaches.
+ */
+static ixs_node *simp_mul_decompose(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  ixs_node *r = simp_mul(ctx, a, b);
+  uint32_t i, j, k;
+  if (!r || r->tag != IXS_MUL)
+    return r;
+
+  for (i = 0; i < r->u.mul.nfactors; i++) {
+    ixs_node *mb, *acc;
+    int64_t cp, cq;
+    bool safe;
+
+    if (r->u.mul.factors[i].base->tag != IXS_MUL ||
+        r->u.mul.factors[i].exp != -1)
+      continue;
+
+    mb = r->u.mul.factors[i].base;
+    if (mb->u.mul.nfactors == 0)
+      continue;
+
+    safe = true;
+    for (k = 0; k < mb->u.mul.nfactors; k++) {
+      if (mb->u.mul.factors[k].exp == INT32_MIN) {
+        safe = false;
+        break;
+      }
+    }
+    if (!safe)
+      continue;
+
+    ixs_node_get_rat(mb->u.mul.coeff, &cp, &cq);
+    if (cp == 0)
+      continue;
+
+    acc = simp_div(ctx, r->u.mul.coeff, make_const(ctx, cp, cq));
+    if (!acc)
+      return NULL;
+
+    for (j = 0; j < r->u.mul.nfactors && acc; j++) {
+      if (j == i) {
+        for (k = 0; k < mb->u.mul.nfactors && acc; k++)
+          acc = apply_pow(ctx, acc, mb->u.mul.factors[k].base,
+                          -mb->u.mul.factors[k].exp);
+      } else {
+        acc = apply_pow(ctx, acc, r->u.mul.factors[j].base,
+                        r->u.mul.factors[j].exp);
+      }
+    }
+    return acc ? acc : r;
+  }
+  return r;
+}
+
+/*
+ * Distribute factor over an ADD with compound-base decomposition.
+ * factor * (c + sum ci*ti)  ->  factor*c + sum factor*ci*ti
+ *
+ * Uses simp_mul_decompose for each product so that symbolic factors
+ * cancel through compound MUL bases (e.g. (K/2) * (2/K)*term -> term).
+ * The individual simp_add calls may trigger cancel_floor_mod_pairs
+ * recursively, handling nested floor/Mod pairs that become exposed
+ * once compound bases are resolved.
+ */
+static ixs_node *distribute_mul_decompose(ixs_ctx *ctx, ixs_node *factor,
+                                          ixs_node *x) {
+  uint32_t i;
+  ixs_node *result;
+  if (x->tag != IXS_ADD)
+    return simp_mul_decompose(ctx, factor, x);
+  result = simp_mul_decompose(ctx, factor, x->u.add.coeff);
+  if (!result)
+    return NULL;
+  for (i = 0; i < x->u.add.nterms; i++) {
+    ixs_node *term =
+        simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term);
+    if (!term)
+      return NULL;
+    term = simp_mul_decompose(ctx, factor, term);
+    if (!term)
+      return NULL;
+    result = simp_add(ctx, result, term);
+    if (!result)
+      return NULL;
+  }
+  return result;
+}
+
+/*
+ * Cancel floor/Mod pairs in an ADD using the identity:
+ *   m * floor(E/m) + Mod(E, m) = E
+ *
+ * For each Mod(A, m) term with coefficient ci, searches for a
+ * floor-containing term whose total multiplier equals ci*m.  Two
+ * verification strategies are tried:
+ *
+ * 1. floor(A/m) == floor_node  (via simp_floor/simp_div).  Robust
+ *    against eager floor rewrites like round_pull_in_denom collapsing
+ *    floor(floor(x/3)/2) -> floor(x/6), because the same rules fire
+ *    during both construction and verification.
+ *
+ * 2. m * floor_arg == A  (via distribute_mul_decompose).  Handles
+ *    symbolic moduli with compound bases, e.g. K * (K/2)^{-1} -> 2,
+ *    where plain simp_mul treats the inverse base as opaque.
+ */
+static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
+                                        uint32_t nterms, int64_t const_p,
+                                        int64_t const_q) {
+  bool found = false;
+  uint32_t i, j, k;
+
+  for (i = 0; i < nterms; i++) {
+    ixs_node *A, *m, *ci_times_m, *expected_floor;
+    int64_t ci_p, ci_q;
+
+    if (!terms[i].term || terms[i].term->tag != IXS_MOD)
+      continue;
+
+    A = terms[i].term->u.binary.lhs;
+    m = terms[i].term->u.binary.rhs;
+    ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
+
+    ci_times_m = simp_mul(ctx, terms[i].coeff, m);
+    if (!ci_times_m || ixs_node_is_sentinel(ci_times_m))
+      continue;
+
+    expected_floor = simp_floor(ctx, simp_div(ctx, A, m));
+    if (!expected_floor || ixs_node_is_sentinel(expected_floor))
+      expected_floor = NULL;
+
+    for (j = 0; j < nterms; j++) {
+      ixs_node *floor_node, *floor_arg, *floor_mul;
+
+      if (j == i || !terms[j].term)
+        continue;
+
+      floor_node = NULL;
+      floor_arg = NULL;
+      floor_mul = NULL;
+
+      /* Case 1: bare floor node */
+      if (terms[j].term->tag == IXS_FLOOR) {
+        floor_node = terms[j].term;
+        floor_arg = terms[j].term->u.unary.arg;
+        floor_mul = terms[j].coeff;
+      }
+
+      /* Case 2: MUL(..., floor(X)^1, ...) */
+      if (!floor_node && terms[j].term->tag == IXS_MUL) {
+        int floor_idx = -1;
+        for (k = 0; k < terms[j].term->u.mul.nfactors; k++) {
+          if (terms[j].term->u.mul.factors[k].base->tag == IXS_FLOOR &&
+              terms[j].term->u.mul.factors[k].exp == 1) {
+            floor_idx = (int)k;
+            break;
+          }
+        }
+        if (floor_idx >= 0) {
+          ixs_node *mul_rest = terms[j].term->u.mul.coeff;
+          for (k = 0; k < terms[j].term->u.mul.nfactors && mul_rest; k++) {
+            if ((int)k == floor_idx)
+              continue;
+            mul_rest =
+                apply_pow(ctx, mul_rest, terms[j].term->u.mul.factors[k].base,
+                          terms[j].term->u.mul.factors[k].exp);
+          }
+          if (mul_rest) {
+            floor_node = terms[j].term->u.mul.factors[floor_idx].base;
+            floor_arg = floor_node->u.unary.arg;
+            floor_mul = simp_mul(ctx, terms[j].coeff, mul_rest);
+          }
+        }
+      }
+
+      if (!floor_node || !floor_mul)
+        continue;
+
+      /* Quick reject: coefficient mismatch. */
+      if (floor_mul != ci_times_m)
+        continue;
+
+      /* Strategy 1: floor(A/m) matches the floor node directly. */
+      if (expected_floor && expected_floor == floor_node)
+        goto matched;
+
+      /* Strategy 2: m * floor_arg reconstructs A via decomposition. */
+      {
+        ixs_node *E = distribute_mul_decompose(ctx, m, floor_arg);
+        if (E && !ixs_node_is_sentinel(E) && E == A)
+          goto matched;
+      }
+
+      continue;
+    matched:
+      terms[i].term = NULL;
+      terms[j].term = A;
+      terms[j].coeff = make_const(ctx, ci_p, ci_q);
+      if (!terms[j].coeff)
+        return NULL;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found)
+    return NULL;
+
+  IXS_STAT_HIT(ctx);
+  {
+    ixs_node *result = make_const(ctx, const_p, const_q);
+    if (!result)
+      return NULL;
+    for (i = 0; i < nterms; i++) {
+      ixs_node *t;
+      if (!terms[i].term)
+        continue;
+      t = simp_mul(ctx, terms[i].coeff, terms[i].term);
+      if (!t)
+        return NULL;
+      result = simp_add(ctx, result, t);
+      if (!result)
+        return NULL;
+    }
+    return result;
+  }
+}
+
 static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop;
   int64_t const_p = 0, const_q = 1;
@@ -4077,6 +4314,13 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     ixs_node *mod_result = recognize_mod(ctx, terms, nterms, const_p, const_q);
     if (mod_result)
       return mod_result;
+  }
+
+  {
+    ixs_node *fmc =
+        cancel_floor_mod_pairs(ctx, terms, nterms, const_p, const_q);
+    if (fmc)
+      return fmc;
   }
 
   /* Result cases. */
