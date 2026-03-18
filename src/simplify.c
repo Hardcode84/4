@@ -9,8 +9,15 @@
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
-/* Each simplification rule: (ctx, bnds, node) -> node.               */
-/* Returns n unchanged = didn't fire; different node = fired; NULL=OOM */
+/* Each simplification rule: (ctx, bnds, node) -> node.
+ *   return n   = rule didn't fire (no change)
+ *   return new = rule fired, use new node
+ *   return NULL = OOM (propagated to caller)
+ *
+ * Thin wrappers use `r ? r : n` to map a helper's NULL-means-no-match
+ * convention.  This conflates OOM with "didn't fire" — acceptable for
+ * now since OOM is fatal shortly after, but a dedicated NO_MATCH
+ * sentinel would be cleaner (see bead 4-3or). */
 
 typedef ixs_node *(*ixs_rule_fn)(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 
@@ -590,19 +597,23 @@ ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 
 typedef ixs_node *(*round_fn)(ixs_ctx *, ixs_node *);
 
+/* Max exponent magnitude for eager constant-power folding.
+ * Shared by apply_pow and subs_rec to cap repeated-multiply loops. */
+#define MAX_FOLD_EXP 64
+
 /* Multiply acc by base^exp via repeated simp_mul/simp_div.
- * Caps magnitude at 64 (matching EXPAND_MAX_EXP) to prevent runaway
- * loops on degenerate exponents.  Returns NULL on OOM or overflow. */
+ * Caps magnitude at MAX_FOLD_EXP to prevent runaway loops on
+ * degenerate exponents.  Returns NULL on OOM, sentinel on overflow. */
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp) {
   if (!acc || exp == 0)
     return acc;
   bool pos = (exp > 0);
   int32_t mag = pos ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
-  if (mag > 64)
+  if (mag > MAX_FOLD_EXP)
     return NULL;
   int32_t i;
-  for (i = 0; i < mag && acc; i++)
+  for (i = 0; i < mag && acc && !ixs_node_is_sentinel(acc); i++)
     acc = pos ? simp_mul(ctx, acc, base) : simp_div(ctx, acc, base);
   return acc;
 }
@@ -1193,6 +1204,9 @@ static ixs_node *rule_floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds,
   return simp_floor(ctx, r);
 }
 
+/* needs_bounds = false: this rule fires on structure alone (symbolic
+ * denominator shared across addends) but uses bnds opportunistically
+ * to tighten the remainder when available. */
 static ixs_node *rule_floor_drop_const_sym(ixs_ctx *ctx, ixs_bounds *bnds,
                                            ixs_node *n) {
   ixs_node *x = n->u.unary.arg;
@@ -1216,6 +1230,10 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
 }
 
 /* ---- Floor/ceil rule tables -------------------------------------- */
+/* Order matters: bounds-dependent collapse first (cheapest), then
+ * structural rewrites from most specific to most general.
+ * round_extract_add/mul_add peel integer addends before pull_in_denom
+ * redistributes; drop_const/drop_const_sym handle the remainder. */
 
 static const ixs_rule floor_rules[] = {
     {rule_floor_collapse, "floor_collapse", true},
@@ -1497,6 +1515,7 @@ static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
   return r ? r : n;
 }
 
+/* Constant folds and identity first, then structural, bounds last. */
 static const ixs_rule mod_rules[] = {
     {rule_mod_const_fold, "mod_const_fold", false},
     {rule_mod_one, "mod_one", false},
@@ -1757,6 +1776,8 @@ static ixs_node *rule_cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
   return r ? r : n;
 }
 
+/* Normalize before bounds: canonicalize to `expr CMP 0` so bounds
+ * resolution sees a consistent form. */
 static const ixs_rule cmp_rules[] = {
     {rule_cmp_const_fold, "cmp_const_fold", false},
     {rule_cmp_identity, "cmp_identity", false},
@@ -2107,6 +2128,15 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
       ixs_node *power;
       if (e == 1) {
         power = nb;
+      } else if ((nb->tag == IXS_INT || nb->tag == IXS_RAT) && e > 0 &&
+                 e <= MAX_FOLD_EXP) {
+        power = apply_pow(ctx, ixs_node_int(ctx, 1), nb, e);
+        if (!power || ixs_node_is_sentinel(power)) {
+          ixs_mulfactor f;
+          f.base = nb;
+          f.exp = e;
+          power = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
+        }
       } else {
         ixs_mulfactor f;
         f.base = nb;

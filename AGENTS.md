@@ -126,6 +126,10 @@ pytest test/ --torture          # stress: 50,000 examples, suppressed health che
 
 The torture profile is the go-to for validating refactors and new rules. It runs 50k examples per Hypothesis test across all available cores. Expect ~5 minutes on a beefy machine. Run it before declaring a non-trivial change done.
 
+## Code Review Follow-up
+
+After running reviewers (multi-perspective or external), go through every finding where a reviewer asked a question, expressed confusion, or had to work to understand the code. For each such finding, add a code comment at the relevant location explaining the non-obvious intent. If a reviewer misunderstood the code, the code needs a comment — the reviewer is the proxy for every future reader. Fix the confusion at the source, not in the review reply.
+
 ## Tone
 
 Code comments, docstrings, and commit messages share the same voice: terse, dry, informative. Wit is welcome, fluff is not. Say what the thing does, not what you wish it did. If a comment doesn't earn its line, delete it.

@@ -1331,6 +1331,46 @@ static void test_modrem_congruence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_subs_power_overflow(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* x*x with x=0 -> 0 (constant power folding, base case) */
+  ixs_node *x2 = ixs_mul(ctx, x, x);
+  ixs_node *r = ixs_subs(ctx, x2, x, ixs_int(ctx, 0));
+  CHECK(r && ixs_node_int_val(r) == 0);
+
+  /* x*x with x=3 -> 9 */
+  r = ixs_subs(ctx, x2, x, ixs_int(ctx, 3));
+  CHECK(r && ixs_node_int_val(r) == 9);
+
+  /* x*x with x=3/2 -> 9/4 (rational base folding) */
+  r = ixs_subs(ctx, x2, x, ixs_rat(ctx, 3, 2));
+  CHECK(r && ixs_node_tag(r) == IXS_RAT);
+  CHECK(ixs_node_rat_num(r) == 9 && ixs_node_rat_den(r) == 4);
+
+  /* x*x with x=2^40: (2^40)^2 overflows int64, must not error */
+  int64_t big = (int64_t)1 << 40;
+  r = ixs_subs(ctx, x2, x, ixs_int(ctx, big));
+  CHECK(r != NULL && !ixs_is_error(r));
+
+  /* x*x*x with x=2^30: (2^30)^3 = 2^90, overflows int64 */
+  ixs_node *x3 = ixs_mul(ctx, x2, x);
+  r = ixs_subs(ctx, x3, x, ixs_int(ctx, (int64_t)1 << 30));
+  CHECK(r != NULL && !ixs_is_error(r));
+
+  /* x*x with x=2^31: fits i64, (2^31)^2 = 2^62 fits too */
+  r = ixs_subs(ctx, x2, x, ixs_int(ctx, (int64_t)1 << 31));
+  CHECK(r && ixs_node_int_val(r) == ((int64_t)1 << 62));
+
+  /* (3/2)^3 via substitution */
+  r = ixs_subs(ctx, x3, x, ixs_rat(ctx, 3, 2));
+  CHECK(r && ixs_node_tag(r) == IXS_RAT);
+  CHECK(ixs_node_rat_num(r) == 27 && ixs_node_rat_den(r) == 8);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1364,6 +1404,7 @@ int main(void) {
   test_floor_non_integer_min();
   test_add_flatten_neg();
   test_modrem_congruence();
+  test_subs_power_overflow();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
