@@ -3739,7 +3739,7 @@ static ixs_node *try_rules(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n,
   return n;
 }
 
-/* Forward declarations: bounds-dependent helpers defined later. */
+/* Forward declarations for helpers defined later in this file. */
 static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *arg, bool is_ceil);
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr);
@@ -4119,24 +4119,26 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
 
       /* Case 2: MUL(..., floor(X)^1, ...) */
       if (!floor_node && terms[j].term->tag == IXS_MUL) {
-        int floor_idx = -1;
+        int32_t floor_idx = -1;
         for (k = 0; k < terms[j].term->u.mul.nfactors; k++) {
           if (terms[j].term->u.mul.factors[k].base->tag == IXS_FLOOR &&
               terms[j].term->u.mul.factors[k].exp == 1) {
-            floor_idx = (int)k;
+            floor_idx = (int32_t)k;
             break;
           }
         }
         if (floor_idx >= 0) {
           ixs_node *mul_rest = terms[j].term->u.mul.coeff;
-          for (k = 0; k < terms[j].term->u.mul.nfactors && mul_rest; k++) {
-            if ((int)k == floor_idx)
+          for (k = 0; k < terms[j].term->u.mul.nfactors && mul_rest &&
+                      !ixs_node_is_sentinel(mul_rest);
+               k++) {
+            if ((int32_t)k == floor_idx)
               continue;
             mul_rest =
                 apply_pow(ctx, mul_rest, terms[j].term->u.mul.factors[k].base,
                           terms[j].term->u.mul.factors[k].exp);
           }
-          if (mul_rest) {
+          if (mul_rest && !ixs_node_is_sentinel(mul_rest)) {
             floor_node = terms[j].term->u.mul.factors[floor_idx].base;
             floor_arg = floor_node->u.unary.arg;
             floor_mul = simp_mul(ctx, terms[j].coeff, mul_rest);
@@ -4163,7 +4165,7 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
       }
 
       continue;
-    matched:
+    matched: /* Cancel the pair: remove Mod, replace floor with A. */
       terms[i].term = NULL;
       terms[j].term = A;
       terms[j].coeff = make_const(ctx, ci_p, ci_q);

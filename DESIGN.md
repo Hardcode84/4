@@ -782,10 +782,24 @@ Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 
-(reverse direction, in simp_add)
+(reverse direction, in simp_add — recognize_mod)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)
 c*N*ceil(E/N) - c*E                     → c*Mod(-E, N)
+
+(forward direction, in simp_add — cancel_floor_mod_pairs)
+ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
 ```
+
+The forward cancellation uses two verification strategies:
+
+1. **floor(A/m) == floor_node** — reconstructs the expected floor via
+   `simp_floor(simp_div(A, m))` and checks hash-consed pointer equality.
+   Robust against eager floor rewrites (e.g. `round_pull_in_denom`
+   collapsing `floor(floor(x/3)/2)` into `floor(x/6)`).
+
+2. **m * floor_arg == A** — distributes `m` over the floor argument using
+   `distribute_mul_decompose`, which decomposes compound inverse MUL bases
+   (e.g. `K * (K/2)^{-1} → 2`) to enable symbolic cancellation.
 
 #### 4.6 Piecewise Rules
 
