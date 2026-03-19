@@ -1644,6 +1644,61 @@ static void test_flatten_mul_add_floor_mod(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_round_unwrap_inner(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *r;
+
+  /* floor(floor(x)/3) -> floor(x/3) */
+  {
+    ixs_node *e =
+        ixs_floor(ctx, ixs_div(ctx, ixs_floor(ctx, x), ixs_int(ctx, 3)));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "floor(1/3*x)") == 0);
+  }
+
+  /* floor(floor(1/7*x + 1/7*K*y) / K) -> floor(1/7*x/K + 1/7*y)
+   * Matches the corpus pattern: inner floor has non-integer coefficients
+   * so round_extract_add doesn't split it; divisor is symbolic. */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *inner =
+        ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 7)),
+                ixs_div(ctx, ixs_mul(ctx, K, y), ixs_int(ctx, 7)));
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, ixs_floor(ctx, inner), K));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strstr(pr(r), "floor(floor(") == NULL);
+  }
+
+  /* Negative: floor(floor(x) * 3) must NOT unwrap (D=1/3, not integer). */
+  {
+    ixs_node *e = ixs_floor(
+        ctx, ixs_mul(ctx, ixs_int(ctx, 3),
+                     ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 7)))));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strstr(pr(r), "floor(1/7*x)") != NULL);
+  }
+
+  /* Negative: floor(floor(x) / (-3)) must NOT unwrap (D negative). */
+  {
+    ixs_node *neg3 = ixs_mul(ctx, ixs_int(ctx, -1), ixs_int(ctx, 3));
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, ixs_floor(ctx, x), neg3));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strstr(pr(r), "floor(") != NULL);
+  }
+
+  /* ceiling(ceiling(x)/5) -> ceiling(x/5) */
+  {
+    ixs_node *e =
+        ixs_ceil(ctx, ixs_div(ctx, ixs_ceil(ctx, x), ixs_int(ctx, 5)));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "ceiling(1/5*x)") == 0);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1683,6 +1738,7 @@ int main(void) {
   test_floor_drop_const_divinfo();
   test_opposite_mul_add_cancel();
   test_flatten_mul_add_floor_mod();
+  test_round_unwrap_inner();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

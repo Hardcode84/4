@@ -723,7 +723,18 @@ floor(c + sum(ci*bi))  → floor(sum(ci*bi))
     when every bi is integer-valued and 0 < c < 1/lcm(qi)
     (the sum lies on a 1/L grid; c < 1/L can't cross a grid point)
 floor(Mod(X, M) / K)  → 0   when K >= M > 0
+round(round(A) / D)   → round(A / D)   when D is a positive integer
+                                        (round = floor or ceiling)
 ```
+
+The `round_unwrap_inner` helper applies the identity `round(round(a)/D) = round(a/D)`
+for positive integer D.  Proof (floor): let a = D*q + r + f where q = floor(a/D),
+0 <= r < D integer, 0 <= f < 1.  Then r + f < D, so both sides equal q.
+The ceiling proof is symmetric.  D must be positive; the identity fails for
+negative D (counterexample: `floor(floor(-5.5)/(-3)) = 2`, `floor(-5.5/(-3)) = 1`).
+The helper detects MUL nodes where one factor is FLOOR/CEIL^1 and computes
+D by inverting exponents and reciprocating the coefficient.  Registered as
+`floor_unwrap_inner` in `floor_rules[]` and `ceil_unwrap_inner` in `ceil_rules[]`.
 
 The constant-drop rule is implemented in `floor_drop_const` and registered
 in `floor_rules[]`.  When bounds are available, `floor_drop_const` refines

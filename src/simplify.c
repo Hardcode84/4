@@ -63,6 +63,7 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp);
 ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
+ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
 ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 
 /* ------------------------------------------------------------------ */
@@ -1798,6 +1799,86 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
   return (r == x) ? n : r;
 }
 
+/*
+ * round(round(A) / D) -> round(A / D)  for round in {floor, ceiling}
+ * when D is a positive integer.
+ *
+ * Proof (floor): let A = D*q + r + f where q = floor(A/D),
+ * 0 <= r < D integer, 0 <= f < 1.  Then floor(A) = D*q + r,
+ * floor(floor(A)/D) = q, and floor(A/D) = q  since r+f < D.
+ * The ceiling proof is symmetric.
+ *
+ * Detects MUL nodes where one factor is FLOOR/CEIL^1 and the
+ * remaining product is 1/D with D a positive integer.
+ * Returns the simplified arg, x unchanged if the rule doesn't apply,
+ * or NULL on OOM.
+ */
+static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *x,
+                                    ixs_tag inner_tag, round_fn rnd) {
+  if (x->tag != IXS_MUL)
+    return x;
+
+  int32_t fl_idx = -1;
+  uint32_t i;
+  for (i = 0; i < x->u.mul.nfactors; i++) {
+    if (x->u.mul.factors[i].base->tag == inner_tag &&
+        x->u.mul.factors[i].exp == 1) {
+      fl_idx = (int32_t)i;
+      break;
+    }
+  }
+  if (fl_idx < 0)
+    return x;
+
+  /* Build denom D = (1/coeff) * prod(fi^(-ei)) for all non-round factors.
+   * D must be a positive integer for the identity to hold. */
+  int64_t cp, cq;
+  ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+  if (cp <= 0)
+    return x;
+  ixs_node *denom = make_const(ctx, cq, cp);
+  if (!denom)
+    return NULL;
+  for (i = 0; i < x->u.mul.nfactors && denom; i++) {
+    if ((int32_t)i == fl_idx)
+      continue;
+    denom = apply_pow(ctx, denom, x->u.mul.factors[i].base,
+                      -x->u.mul.factors[i].exp);
+  }
+  if (!denom)
+    return NULL;
+  if (!ixs_node_is_integer_valued(denom))
+    return x;
+
+  ixs_node *inner_arg = x->u.mul.factors[fl_idx].base->u.unary.arg;
+  ixs_node *replaced = simp_div(ctx, inner_arg, denom);
+  if (!replaced)
+    return NULL;
+  return rnd(ctx, replaced);
+}
+
+static ixs_node *rule_floor_unwrap_inner(ixs_ctx *ctx, ixs_bounds *bnds,
+                                         ixs_node *n) {
+  ixs_node *x = n->u.unary.arg;
+  ixs_node *r;
+  (void)bnds;
+  r = round_unwrap_inner(ctx, x, IXS_FLOOR, simp_floor);
+  if (!r)
+    return NULL;
+  return (r == x) ? n : r;
+}
+
+static ixs_node *rule_ceil_unwrap_inner(ixs_ctx *ctx, ixs_bounds *bnds,
+                                        ixs_node *n) {
+  ixs_node *x = n->u.unary.arg;
+  ixs_node *r;
+  (void)bnds;
+  r = round_unwrap_inner(ctx, x, IXS_CEIL, simp_ceil);
+  if (!r)
+    return NULL;
+  return (r == x) ? n : r;
+}
+
 /* ---- Floor/ceil rule tables -------------------------------------- */
 /* Order matters: bounds-dependent collapse first (cheapest), then
  * structural rewrites from most specific to most general.
@@ -1810,6 +1891,7 @@ static const ixs_rule floor_rules[] = {
     {rule_round_extract_add, "round_extract_add", false},
     {rule_round_extract_mul_add, "round_extract_mul_add", false},
     {rule_round_pull_in_denom, "round_pull_in_denom", false},
+    {rule_floor_unwrap_inner, "floor_unwrap_inner", false},
     {rule_floor_drop_const, "floor_drop_const", false},
     {rule_floor_drop_const_sym, "floor_drop_const_sym", false},
     {rule_floor_mod_div_zero, "floor_mod_div_zero", false},
@@ -1822,6 +1904,7 @@ static const ixs_rule ceil_rules[] = {
     {rule_round_extract_add, "round_extract_add", false},
     {rule_round_extract_mul_add, "round_extract_mul_add", false},
     {rule_round_pull_in_denom, "round_pull_in_denom", false},
+    {rule_ceil_unwrap_inner, "ceil_unwrap_inner", false},
     {NULL, NULL, false},
 };
 
