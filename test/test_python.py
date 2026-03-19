@@ -369,11 +369,45 @@ def _as_int(val: Any) -> int | None:
     return None
 
 
-def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
-    """Evaluate ixsimpl Expr by substituting all variables."""
+def _subs_all(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> ixsimpl.Expr:
+    """Substitute all variables; return the raw ixsimpl expression."""
     result = expr
     for name, val in env.items():
         result = result.subs(name, ctx.int_(val))
+    return result
+
+
+def _assert_sentinel_on_py_error(
+    ixs_expr: ixsimpl.Expr,
+    ctx: ixsimpl.Context,
+    env: Env,
+    tree: ExprTree,
+) -> None:
+    """When Python eval raised an error, verify ixsimpl is consistent.
+
+    Must produce either a sentinel (both agree it's undefined) or a
+    concrete integer (simplifier legitimately eliminated the undefined
+    subexpression, e.g. 0*(1/0) -> 0).  A non-integer symbolic residue
+    would indicate a bug.
+    """
+    try:
+        result = _subs_all(ixs_expr, ctx, env)
+    except OverflowError:
+        return
+    if result.is_error:
+        return
+    try:
+        int(result)
+    except (TypeError, ValueError):
+        raise AssertionError(
+            f"Python eval errored but ixsimpl returned non-integer "
+            f"non-sentinel: {result} at {env}, expr={tree}"
+        ) from None
+
+
+def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
+    """Evaluate ixsimpl Expr by substituting all variables."""
+    result = _subs_all(expr, ctx, env)
     if result.is_error:
         raise ValueError("sentinel")
     try:
@@ -424,6 +458,7 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -468,6 +503,7 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         ground_truth = _as_int(raw)
         if ground_truth is None:
@@ -532,6 +568,7 @@ def test_simplify_with_divisibility(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -611,6 +648,7 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            _assert_sentinel_on_py_error(ixs_converted, ctx, env, expr)
             continue
         ground_truth = _as_int(raw)
         if ground_truth is None:
@@ -714,6 +752,7 @@ def test_simplify_with_bounds(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -781,6 +820,7 @@ def test_simplify_near_overflow(expr: ExprTree, envs: list[Env]) -> None:
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -845,6 +885,7 @@ def test_divisibility_targeted(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -906,6 +947,7 @@ def test_bounds_targeted(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -1018,6 +1060,7 @@ def test_subs_correctness(
         try:
             expected = eval_expr(expr, full_env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(substituted, ctx, full_env, expr)
             continue
         exp_int = _as_int(expected)
         if exp_int is None:
@@ -1082,6 +1125,7 @@ def test_combined_divisibility_and_bounds(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(ixs_simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -1128,6 +1172,7 @@ def test_recognize_mod_targeted(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -1167,6 +1212,7 @@ def test_cancel_floor_mod_pairs_targeted(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
@@ -1207,6 +1253,7 @@ def test_floor_drop_const_sym_targeted(
         try:
             raw = eval_expr(expr, env)
         except (ZeroDivisionError, ValueError, TypeError):
+            _assert_sentinel_on_py_error(simplified, ctx, env, expr)
             continue
         orig = _as_int(raw)
         if orig is None:
