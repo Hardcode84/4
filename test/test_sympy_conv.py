@@ -96,6 +96,33 @@ def test_to_sympy_floor_ceil(
     assert to_sympy(ixsimpl.ceil(syms["x"])) == sympy.ceiling(sp_syms["x"])
 
 
+def test_to_sympy_floor_ceil_max_min(ctx: ixsimpl.Context) -> None:
+    """Regression: SymPy drops floor/ceiling on Max/Min-containing args.
+
+    sympy.ceiling(Max(0, 2*x)/6) incorrectly simplifies to Max(0, 2*x)/6.
+    to_sympy must use evaluate=False to prevent this.
+    """
+    x = ctx.sym("x")
+    sx = sympy.Symbol("x", integer=True)
+
+    def _sp_eval(ixs_expr: ixsimpl.Expr, val: int) -> int:
+        sp = to_sympy(ixs_expr)
+        return int(sp.xreplace({sx: sympy.Integer(val)}))
+
+    # ceiling(Max(0, 2*x)/6) at x=1: ceiling(1/3) = 1
+    # Without ceiling: int(1/3) = 0 — detects the bug.
+    ceil_max = ixsimpl.ceil(ixsimpl.max_(ctx.int_(0), x + x) / ctx.int_(6))
+    assert _sp_eval(ceil_max, 1) == 1, "ceiling(Max) lost"
+
+    # -ceiling(Max(0, 2*x)/6) at x=1: -1 (the original failing case)
+    assert _sp_eval(-ceil_max, 1) == -1, "-ceiling(Max) lost"
+
+    # floor(Min(0, 2*x)/6) at x=-1: floor(-1/3) = -1
+    # Without floor: int(-1/3) = 0 — detects the bug.
+    floor_min = ixsimpl.floor(ixsimpl.min_(ctx.int_(0), x + x) / ctx.int_(6))
+    assert _sp_eval(floor_min, -1) == -1, "floor(Min) lost"
+
+
 def test_to_sympy_mod(
     ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
 ) -> None:

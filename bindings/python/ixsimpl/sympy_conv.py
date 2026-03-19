@@ -79,10 +79,13 @@ def to_sympy(
         return result
 
     if tag == ixsimpl.FLOOR:
-        return sympy.floor(_convert(expr.child(0)))
+        # evaluate=False: SymPy incorrectly drops floor() on some
+        # Max/Min-containing arguments, e.g. floor(Max(0, 2*x)/6) -> Max(0, 2*x)/6.
+        return sympy.floor(_convert(expr.child(0)), evaluate=False)
 
     if tag == ixsimpl.CEIL:
-        return sympy.ceiling(_convert(expr.child(0)))
+        # Same SymPy evaluation bug as floor; see above.
+        return sympy.ceiling(_convert(expr.child(0)), evaluate=False)
 
     if tag == ixsimpl.MOD:
         # evaluate=False: SymPy 1.14 Mod evaluation is buggy on some
