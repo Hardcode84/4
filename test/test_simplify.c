@@ -1587,6 +1587,63 @@ static void test_opposite_mul_add_cancel(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* Flatten MUL-over-ADD exposes floor terms for cancel_floor_mod_pairs.
+ * K*(floor(A/m) - floor(B/m)) + c*Mod(A,m) - c*Mod(B,m)
+ * distributes to K*floor(A/m) - K*floor(B/m) + Mod terms,
+ * then floor-Mod identity fires: c*Mod(X,m) + c*m*floor(X/m) = c*X. */
+static void test_flatten_mul_add_floor_mod(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *r;
+
+  /* 4*Mod(x+192, K/128) - 4*Mod(x+64, K/128)
+   * + K/32 * (floor((x+192)/(K/128)) - floor((x+64)/(K/128)))
+   * = 4*(x+192) - 4*(x+64) = 512 */
+  {
+    ixs_node *m = ixs_div(ctx, K, ixs_int(ctx, 128));
+    ixs_node *x64 = ixs_add(ctx, x, ixs_int(ctx, 64));
+    ixs_node *x192 = ixs_add(ctx, x, ixs_int(ctx, 192));
+    ixs_node *mod1 = ixs_mod(ctx, x64, m);
+    ixs_node *mod2 = ixs_mod(ctx, x192, m);
+    ixs_node *fl1 = ixs_floor(ctx, ixs_div(ctx, x64, m));
+    ixs_node *fl2 = ixs_floor(ctx, ixs_div(ctx, x192, m));
+    ixs_node *floor_diff =
+        ixs_add(ctx, fl2, ixs_mul(ctx, ixs_int(ctx, -1), fl1));
+    ixs_node *k32 = ixs_div(ctx, K, ixs_int(ctx, 32));
+    ixs_node *e = ixs_add(ctx,
+                          ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), mod2),
+                                  ixs_mul(ctx, ixs_int(ctx, -4), mod1)),
+                          ixs_mul(ctx, k32, floor_diff));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(r == ixs_int(ctx, 512));
+  }
+
+  /* Same with a single pair: Mod(A, m) + m*floor(A/m) = A,
+   * but floor is inside K*floor(A/K) and Mod modulus is K. */
+  {
+    ixs_node *m = K;
+    ixs_node *fl = ixs_floor(ctx, ixs_div(ctx, x, m));
+    ixs_node *e = ixs_add(ctx, ixs_mod(ctx, x, m), ixs_mul(ctx, m, fl));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(r == x);
+  }
+
+  /* Negative: no Mod present, distribution should NOT fire,
+   * keeping the factored form. */
+  {
+    ixs_node *fa = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *fb = ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)));
+    ixs_node *e =
+        ixs_mul(ctx, K, ixs_add(ctx, fa, ixs_mul(ctx, ixs_int(ctx, -1), fb)));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "K*(floor(1/3*x) - floor(1/3*y))") == 0);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1625,6 +1682,7 @@ int main(void) {
   test_floor_mod_cancel_symbolic();
   test_floor_drop_const_divinfo();
   test_opposite_mul_add_cancel();
+  test_flatten_mul_add_floor_mod();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
