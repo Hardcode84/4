@@ -98,14 +98,17 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
             cond2 = draw(conditions(max_depth=cond_depth))
             return (op, a, cond, b, cond2, default)
         return (op, a, cond, default)
-    b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op == "mod":
+    if op == "mod" or op == "div":
         b = draw(pos_ints)
-    if op == "div":
-        b = draw(pos_ints)
-    if op == "xor":
-        a = draw(st.integers(min_value=0, max_value=255))
-        b = draw(st.integers(min_value=0, max_value=255))
+    elif op == "xor":
+        if draw(st.integers(min_value=0, max_value=3)) == 0:
+            a = draw(st.one_of(sym_names, small_ints))
+            b = draw(st.one_of(sym_names, small_ints))
+        else:
+            a = draw(st.integers(min_value=0, max_value=255))
+            b = draw(st.integers(min_value=0, max_value=255))
+    else:
+        b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     return (op, a, b)
 
 
@@ -914,3 +917,292 @@ def test_bounds_targeted(
         )
         checked += 1
     assume(checked > 0)  # reject vacuous passes (all envs skipped)
+
+
+# --- Priority 1: cheap, high-ROI fuzz tests ---
+
+
+@given(
+    expr=expressions(),
+    envs=st.lists(st.one_of(_env_st(0, 100), _wide_env_st()), min_size=1, max_size=10),
+)
+def test_expand_semantics(expr: ExprTree, envs: list[Env]) -> None:
+    """expand() preserves numerical semantics."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    expanded = ixs_expr.expand()
+    assume(not expanded.is_error)
+
+    checked = 0
+    for env in envs:
+        try:
+            orig = eval_ixs(ixs_expr, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        exp_val = eval_ixs(expanded, ctx, env)
+        assert orig == exp_val, f"expand mismatch: {orig} != {exp_val} at {env}, expr={expr}"
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    exprs=st.lists(expressions(max_depth=4), min_size=1, max_size=5),
+    envs=st.lists(_env_st(0, 100), min_size=1, max_size=5),
+)
+def test_simplify_batch_matches_individual(exprs: list[ExprTree], envs: list[Env]) -> None:
+    """simplify_batch produces the same results as individual simplify calls."""
+    ctx = ixsimpl.Context()
+    ixs_exprs = []
+    for tree in exprs:
+        try:
+            ixs_exprs.append(to_ixsimpl(ctx, tree))
+        except ValueError:
+            assume(False)
+    assume(all(not e.is_error for e in ixs_exprs))
+
+    individual = [e.simplify() for e in ixs_exprs]
+    batch_copy = list(ixs_exprs)
+    ctx.simplify_batch(batch_copy)
+
+    for env in envs:
+        for j in range(len(ixs_exprs)):
+            if individual[j].is_error or batch_copy[j].is_error:
+                continue
+            try:
+                ind_val = eval_ixs(individual[j], ctx, env)
+            except (ValueError, TypeError):
+                continue
+            try:
+                bat_val = eval_ixs(batch_copy[j], ctx, env)
+            except (ValueError, TypeError):
+                continue
+            assert ind_val == bat_val, (
+                f"batch vs individual mismatch: {ind_val} != {bat_val} "
+                f"at {env}, expr[{j}]={exprs[j]}"
+            )
+
+
+@given(
+    expr=expressions(max_depth=4),
+    sub_sym=st.sampled_from(_VARS),
+    sub_val=st.integers(min_value=-50, max_value=50),
+    envs=st.lists(_env_st(1, 50), min_size=1, max_size=10),
+)
+def test_subs_correctness(
+    expr: ExprTree,
+    sub_sym: str,
+    sub_val: int,
+    envs: list[Env],
+) -> None:
+    """subs(sym, val) then eval == eval with sym=val in the environment."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    substituted = ixs_expr.subs(sub_sym, ctx.int_(sub_val))
+    assume(not substituted.is_error)
+
+    checked = 0
+    for base_env in envs:
+        full_env = {**base_env, sub_sym: sub_val}
+        try:
+            expected = eval_expr(expr, full_env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        exp_int = _as_int(expected)
+        if exp_int is None:
+            continue
+        try:
+            got = eval_ixs(substituted, ctx, full_env)
+        except (ValueError, TypeError):
+            continue
+        assert exp_int == got, (
+            f"subs mismatch: {exp_int} != {got} at {full_env}, "
+            f"expr={expr}, subs({sub_sym}={sub_val})"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    expr=expressions(),
+    div_sym=st.sampled_from(_VARS),
+    divisor=st.integers(min_value=2, max_value=64),
+    bound_sym=st.sampled_from(_VARS),
+    lo=st.integers(min_value=0, max_value=50),
+    hi=st.integers(min_value=51, max_value=200),
+    env_mults=st.lists(
+        st.tuples(_env_st(1, 50), st.integers(0, 25)),
+        min_size=1,
+        max_size=10,
+    ),
+)
+def test_combined_divisibility_and_bounds(
+    expr: ExprTree,
+    div_sym: str,
+    divisor: int,
+    bound_sym: str,
+    lo: int,
+    hi: int,
+    env_mults: list[tuple[Env, int]],
+) -> None:
+    """Simplification with both divisibility and bound assumptions."""
+    assume(div_sym != bound_sym)
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    sym_d = ctx.sym(div_sym)
+    sym_b = ctx.sym(bound_sym)
+    assumptions = [
+        ctx.eq(ixsimpl.mod(sym_d, ctx.int_(divisor)), ctx.int_(0)),
+        sym_b >= ctx.int_(lo),
+        sym_b < ctx.int_(hi),
+    ]
+    ixs_simplified = ixs_expr.simplify(assumptions=assumptions)
+    assume(not ixs_simplified.is_error)
+
+    checked = 0
+    for base_env, mult in env_mults:
+        env = {**base_env, div_sym: mult * divisor}
+        env[bound_sym] = max(lo, min(hi - 1, env[bound_sym]))
+        try:
+            raw = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
+            continue
+        simp = eval_ixs(ixs_simplified, ctx, env)
+        assert orig == simp, (
+            f"Combined mismatch: {orig} != {simp} at {env}, expr={expr}, "
+            f"Mod({div_sym},{divisor})==0, {lo}<={bound_sym}<{hi}"
+        )
+        checked += 1
+    assume(checked > 0)
+
+
+# --- Priority 2: targeted rule-exercising tests ---
+
+
+@given(
+    sym=st.sampled_from(_VARS),
+    N=st.integers(min_value=2, max_value=32),
+    envs=st.lists(_env_st(1, 100), min_size=1, max_size=10),
+)
+def test_recognize_mod_targeted(
+    sym: str,
+    N: int,
+    envs: list[Env],
+) -> None:
+    """x + (-N)*floor(x/N) should simplify to Mod(x, N)."""
+    expr: ExprTree = ("add", sym, ("mul", ("neg", N), ("floor", ("div", sym, N))))
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    simplified = ixs_expr.simplify()
+    assume(not simplified.is_error)
+
+    s = str(simplified)
+    assert "floor" not in s, f"recognize_mod should have fired: {s}"
+
+    for env in envs:
+        try:
+            raw = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
+            continue
+        simp = eval_ixs(simplified, ctx, env)
+        assert orig == simp, f"recognize_mod mismatch: {orig} != {simp} at {env}"
+
+
+@given(
+    sym=st.sampled_from(_VARS),
+    m=st.integers(min_value=2, max_value=32),
+    envs=st.lists(_env_st(1, 100), min_size=1, max_size=10),
+)
+def test_cancel_floor_mod_pairs_targeted(
+    sym: str,
+    m: int,
+    envs: list[Env],
+) -> None:
+    """m*floor(x/m) + Mod(x, m) should simplify to x."""
+    expr: ExprTree = ("add", ("mul", m, ("floor", ("div", sym, m))), ("mod", sym, m))
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    simplified = ixs_expr.simplify()
+    assume(not simplified.is_error)
+
+    assert str(simplified) == sym, f"Expected {sym}, got {simplified}"
+
+    for env in envs:
+        try:
+            raw = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
+            continue
+        simp = eval_ixs(simplified, ctx, env)
+        assert orig == simp
+
+
+@given(
+    sym=st.sampled_from(_VARS[:4]),
+    other_sym=st.sampled_from(_VARS[4:]),
+    c=st.integers(min_value=1, max_value=15),
+    K_val=st.integers(min_value=16, max_value=50),
+    other_val=st.integers(min_value=0, max_value=100),
+)
+def test_floor_drop_const_sym_targeted(
+    sym: str,
+    other_sym: str,
+    c: int,
+    K_val: int,
+    other_val: int,
+) -> None:
+    """floor((other + c) / K) with 0 <= c < K: exercises floor_drop_const."""
+    assume(c < K_val)
+    expr: ExprTree = ("floor", ("div", ("add", other_sym, c), K_val))
+
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    simplified = ixs_expr.simplify()
+    assume(not simplified.is_error)
+
+    env = {v: 10 for v in _VARS}
+    env[sym] = K_val
+    env[other_sym] = other_val
+    try:
+        raw = eval_expr(expr, env)
+    except (ZeroDivisionError, ValueError, TypeError):
+        assume(False)
+    orig = _as_int(raw)
+    assume(orig is not None)
+    simp = eval_ixs(simplified, ctx, env)
+    assert orig == simp, f"floor_drop_const_sym mismatch: {orig} != {simp}"
