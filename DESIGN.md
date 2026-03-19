@@ -726,7 +726,12 @@ floor(Mod(X, M) / K)  → 0   when K >= M > 0
 ```
 
 The constant-drop rule is implemented in `floor_drop_const` and registered
-in `floor_rules[]`.
+in `floor_rules[]`.  When bounds are available, `floor_drop_const` refines
+the effective denominator per-term: if `Mod(K, M) == 0` is known for a
+symbol `K`, then `|coeff|*M` replaces `|coeff|` in the LCM calculation,
+widening the grid (e.g. `floor(7/8 + K/256)` -> `K/256` under `256|K`
+because the effective grid is 1, not 1/256).  For non-structurally-integer
+terms, `is_known_divisible` checks whether the denominator divides out.
 
 `round_extract_add` splits rational constants into integer + fractional
 parts (e.g. `65/32 → 2 + 1/32`) before testing the drop condition,
@@ -800,6 +805,24 @@ The forward cancellation uses two verification strategies:
 2. **m * floor_arg == A** — distributes `m` over the floor argument using
    `distribute_mul_decompose`, which decomposes compound inverse MUL bases
    (e.g. `K * (K/2)^{-1} → 2`) to enable symbolic cancellation.
+
+#### 4.5.1 Opposite-Coefficient MUL-ADD Cancellation
+
+In `simp_add`, after coalescing like terms, `reduce_opposite_mul_add`
+scans for pairs of addterms `c*M_i` and `-c*M_j` where both bases are
+MUL nodes with the same number of factors.  If the two MUL nodes share
+all factors (the "outer product") except for exactly one ADD^1 factor
+each, the pair collapses:
+
+```
+c*K*(PW + A) - c*K*(PW + B)  ->  c*K*(A - B)
+```
+
+This eliminates shared Piecewise sub-expressions that arise when
+index computations branch identically across a stride decomposition.
+Factor ordering in MUL is hash-based, so the rule compares reconstructed
+outer products (via `apply_pow`) rather than relying on positional
+matching.  The pass runs to a fixpoint (repeated until no pair reduces).
 
 #### 4.6 Piecewise Rules
 

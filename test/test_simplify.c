@@ -1514,9 +1514,8 @@ static void test_floor_drop_const_divinfo(void) {
     CHECK(strcmp(pr(r), "1/6*K") == 0);
   }
 
-  /* Negative: floor(1/2 + K/4) should NOT simplify when 4 | K
-   * because grid spacing is 1/4 and 1/2 >= 2*(1/4). However, with
-   * 4|K, K/4 is integer and grid is 1, so 1/2 < 1 — should drop. */
+  /* floor(1/2 + K/4) -> K/4 when 4|K: divisibility makes the grid
+   * spacing 1 (not 1/4), so 1/2 < 1 and the constant drops. */
   {
     ixs_node *div_K_4[] = {
         ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_EQ,
@@ -1529,8 +1528,8 @@ static void test_floor_drop_const_divinfo(void) {
     CHECK(strcmp(pr(r), "1/4*K") == 0);
   }
 
-  /* Negative: floor(1/2 + K/3) should NOT simplify when only 3 | K
-   * because K/3 is integer, grid is 1, and 1/2 < 1 — actually should. */
+  /* floor(1/2 + K/3) -> K/3 when 3|K: same reasoning, different
+   * modulus. Coefficient 1/3 has denom 3, absorbed by Mod(K,3)==0. */
   {
     ixs_node *div_K_3[] = {
         ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 3)), IXS_CMP_EQ,

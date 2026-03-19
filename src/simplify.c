@@ -151,6 +151,36 @@ static int addterm_cmp(const void *a, const void *b) {
   return ixs_node_cmp(ta->term, tb->term);
 }
 
+/* Sort addterms by base, then merge like terms by summing coefficients.
+ * Returns new count, or (uint32_t)-1 on overflow/OOM. */
+static uint32_t coalesce_addterms(ixs_ctx *ctx, ixs_addterm *terms,
+                                  uint32_t nterms) {
+  if (nterms > 1)
+    qsort(terms, nterms, sizeof(ixs_addterm), addterm_cmp);
+  uint32_t w = 0;
+  for (uint32_t k = 0; k < nterms; k++) {
+    if (w > 0 && terms[w - 1].term == terms[k].term) {
+      int64_t ap, aq, bp, bq, rp, rq;
+      ixs_node_get_rat(terms[w - 1].coeff, &ap, &aq);
+      ixs_node_get_rat(terms[k].coeff, &bp, &bq);
+      if (!ixs_rat_add(ap, aq, bp, bq, &rp, &rq))
+        return (uint32_t)-1;
+      if (ixs_rat_is_zero(rp)) {
+        w--;
+      } else {
+        terms[w - 1].coeff = make_const(ctx, rp, rq);
+        if (!terms[w - 1].coeff)
+          return (uint32_t)-1;
+      }
+    } else {
+      if (w != k)
+        terms[w] = terms[k];
+      w++;
+    }
+  }
+  return w;
+}
+
 /* Sorting comparator for mulfactors by their base node. */
 static int mulfactor_cmp(const void *a, const void *b) {
   const ixs_mulfactor *fa = (const ixs_mulfactor *)a;
@@ -163,6 +193,117 @@ static int nodeptr_cmp(const void *a, const void *b) {
   const ixs_node *na = *(const ixs_node *const *)a;
   const ixs_node *nb = *(const ixs_node *const *)b;
   return ixs_node_cmp(na, nb);
+}
+
+/* Reduce opposite-coefficient MUL pairs that share all factors except
+ * one ADD^1 base.  c*K*(PW+A) - c*K*(PW+B) -> c*K*(A-B).
+ * Enables cancellation of shared Piecewise sub-expressions.
+ * Factor ordering in MUL is hash-based, so the ADD^1 factor may sit
+ * at different positions -- we compare the outer product instead.
+ * Returns new nterms, or (uint32_t)-1 on overflow/OOM. */
+static uint32_t reduce_opposite_mul_add(ixs_ctx *ctx, ixs_addterm *terms,
+                                        uint32_t nterms, int64_t *const_p,
+                                        int64_t *const_q) {
+  uint32_t i, j;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (i = 0; i < nterms && !changed; i++) {
+      ixs_node *mi = terms[i].term;
+      int32_t ai = -1;
+      uint32_t k;
+      if (mi->tag != IXS_MUL || mi->u.mul.nfactors < 2)
+        continue;
+      for (k = 0; k < mi->u.mul.nfactors; k++) {
+        if (mi->u.mul.factors[k].base->tag == IXS_ADD &&
+            mi->u.mul.factors[k].exp == 1) {
+          ai = (int32_t)k;
+          break;
+        }
+      }
+      if (ai < 0)
+        continue;
+      ixs_node *outer_i = mi->u.mul.coeff;
+      for (k = 0; k < mi->u.mul.nfactors && outer_i; k++) {
+        if ((int32_t)k == ai)
+          continue;
+        outer_i =
+            apply_pow(ctx, outer_i, mi->u.mul.factors[k].base,
+                      mi->u.mul.factors[k].exp);
+      }
+      if (!outer_i)
+        return (uint32_t)-1;
+      for (j = i + 1; j < nterms; j++) {
+        ixs_node *mj = terms[j].term;
+        if (mj->tag != IXS_MUL ||
+            mj->u.mul.nfactors != mi->u.mul.nfactors)
+          continue;
+        int64_t ci_p, ci_q, cj_p, cj_q, sp, sq;
+        ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
+        ixs_node_get_rat(terms[j].coeff, &cj_p, &cj_q);
+        if (!ixs_rat_add(ci_p, ci_q, cj_p, cj_q, &sp, &sq))
+          continue;
+        if (!ixs_rat_is_zero(sp))
+          continue;
+        int32_t aj = -1;
+        for (k = 0; k < mj->u.mul.nfactors; k++) {
+          if (mj->u.mul.factors[k].base->tag == IXS_ADD &&
+              mj->u.mul.factors[k].exp == 1) {
+            aj = (int32_t)k;
+            break;
+          }
+        }
+        if (aj < 0)
+          continue;
+        ixs_node *outer_j = mj->u.mul.coeff;
+        for (k = 0; k < mj->u.mul.nfactors && outer_j; k++) {
+          if ((int32_t)k == aj)
+            continue;
+          outer_j =
+              apply_pow(ctx, outer_j, mj->u.mul.factors[k].base,
+                        mj->u.mul.factors[k].exp);
+        }
+        if (!outer_j || outer_i != outer_j)
+          continue;
+        ixs_node *add_a = mi->u.mul.factors[ai].base;
+        ixs_node *add_b = mj->u.mul.factors[aj].base;
+        ixs_node *diff = simp_add(
+            ctx, add_a, simp_mul(ctx, ixs_node_int(ctx, -1), add_b));
+        if (!diff)
+          return (uint32_t)-1;
+        ixs_node *new_term = simp_mul(ctx, outer_i, diff);
+        if (!new_term)
+          return (uint32_t)-1;
+        int64_t np, nq;
+        ixs_node *nbase;
+        add_decompose(ctx, new_term, &np, &nq, &nbase);
+        int64_t rp, rq;
+        if (!ixs_rat_mul(ci_p, ci_q, np, nq, &rp, &rq))
+          return (uint32_t)-1;
+        if (!nbase) {
+          if (!ixs_rat_add(*const_p, *const_q, rp, rq, const_p, const_q))
+            return (uint32_t)-1;
+          terms[j] = terms[nterms - 1];
+          nterms--;
+          terms[i] = terms[nterms - 1];
+          nterms--;
+        } else {
+          terms[i].coeff = make_const(ctx, rp, rq);
+          if (!terms[i].coeff)
+            return (uint32_t)-1;
+          terms[i].term = nbase;
+          terms[j] = terms[nterms - 1];
+          nterms--;
+        }
+        nterms = coalesce_addterms(ctx, terms, nterms);
+        if (nterms == (uint32_t)-1)
+          return (uint32_t)-1;
+        changed = true;
+        break;
+      }
+    }
+  }
+  return nterms;
 }
 
 /* ------------------------------------------------------------------ */
@@ -593,159 +734,14 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     }
   }
 
-  /* Sort terms by base. */
-  if (nterms > 1)
-    qsort(terms, nterms, sizeof(ixs_addterm), addterm_cmp);
+  nterms = coalesce_addterms(ctx, terms, nterms);
+  if (nterms == (uint32_t)-1)
+    goto overflow;
 
-  /* Collect like terms. */
-  j = 0;
-  for (i = 0; i < nterms; i++) {
-    if (j > 0 && terms[j - 1].term == terms[i].term) {
-      int64_t ap2, aq2, bp2, bq2, rp, rq;
-      ixs_node_get_rat(terms[j - 1].coeff, &ap2, &aq2);
-      ixs_node_get_rat(terms[i].coeff, &bp2, &bq2);
-      if (!ixs_rat_add(ap2, aq2, bp2, bq2, &rp, &rq))
-        goto overflow;
-      if (ixs_rat_is_zero(rp)) {
-        j--;
-      } else {
-        terms[j - 1].coeff = make_const(ctx, rp, rq);
-        if (!terms[j - 1].coeff)
-          return NULL;
-      }
-    } else {
-      if (j != i)
-        terms[j] = terms[i];
-      j++;
-    }
-  }
-  nterms = j;
-
-  /* Reduce opposite-coefficient MUL pairs that share all factors except
-   * one ADD^1 base.  c*K*(PW+A) - c*K*(PW+B) → c*K*(A-B).
-   * Enables cancellation of shared Piecewise sub-expressions.
-   * Factor ordering in MUL is hash-based, so the ADD^1 factor may sit
-   * at different positions — we compare the outer product instead. */
-  {
-    bool opp_changed = true;
-    while (opp_changed) {
-      opp_changed = false;
-      for (i = 0; i < nterms && !opp_changed; i++) {
-        ixs_node *mi = terms[i].term;
-        int32_t ai = -1;
-        uint32_t k;
-        if (mi->tag != IXS_MUL || mi->u.mul.nfactors < 2)
-          continue;
-        for (k = 0; k < mi->u.mul.nfactors; k++) {
-          if (mi->u.mul.factors[k].base->tag == IXS_ADD &&
-              mi->u.mul.factors[k].exp == 1) {
-            ai = (int32_t)k;
-            break;
-          }
-        }
-        if (ai < 0)
-          continue;
-        ixs_node *outer_i = mi->u.mul.coeff;
-        for (k = 0; k < mi->u.mul.nfactors && outer_i; k++) {
-          if ((int32_t)k == ai)
-            continue;
-          outer_i = apply_pow(ctx, outer_i, mi->u.mul.factors[k].base,
-                              mi->u.mul.factors[k].exp);
-        }
-        if (!outer_i)
-          return NULL;
-        for (j = i + 1; j < nterms; j++) {
-          ixs_node *mj = terms[j].term;
-          if (mj->tag != IXS_MUL || mj->u.mul.nfactors != mi->u.mul.nfactors)
-            continue;
-          int64_t ci_p, ci_q, cj_p, cj_q, sp, sq;
-          ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
-          ixs_node_get_rat(terms[j].coeff, &cj_p, &cj_q);
-          if (!ixs_rat_add(ci_p, ci_q, cj_p, cj_q, &sp, &sq))
-            continue;
-          if (!ixs_rat_is_zero(sp))
-            continue;
-          int32_t aj = -1;
-          for (k = 0; k < mj->u.mul.nfactors; k++) {
-            if (mj->u.mul.factors[k].base->tag == IXS_ADD &&
-                mj->u.mul.factors[k].exp == 1) {
-              aj = (int32_t)k;
-              break;
-            }
-          }
-          if (aj < 0)
-            continue;
-          ixs_node *outer_j = mj->u.mul.coeff;
-          for (k = 0; k < mj->u.mul.nfactors && outer_j; k++) {
-            if ((int32_t)k == aj)
-              continue;
-            outer_j = apply_pow(ctx, outer_j, mj->u.mul.factors[k].base,
-                                mj->u.mul.factors[k].exp);
-          }
-          if (!outer_j || outer_i != outer_j)
-            continue;
-          ixs_node *add_a = mi->u.mul.factors[ai].base;
-          ixs_node *add_b = mj->u.mul.factors[aj].base;
-          ixs_node *diff =
-              simp_add(ctx, add_a, simp_mul(ctx, ixs_node_int(ctx, -1), add_b));
-          if (!diff)
-            return NULL;
-          ixs_node *new_term = simp_mul(ctx, outer_i, diff);
-          if (!new_term)
-            return NULL;
-          int64_t np, nq;
-          ixs_node *nbase;
-          add_decompose(ctx, new_term, &np, &nq, &nbase);
-          int64_t rp, rq;
-          if (!ixs_rat_mul(ci_p, ci_q, np, nq, &rp, &rq))
-            goto overflow;
-          if (!nbase) {
-            if (!ixs_rat_add(const_p, const_q, rp, rq, &const_p, &const_q))
-              goto overflow;
-            terms[j] = terms[nterms - 1];
-            nterms--;
-            terms[i] = terms[nterms - 1];
-            nterms--;
-          } else {
-            terms[i].coeff = make_const(ctx, rp, rq);
-            if (!terms[i].coeff)
-              return NULL;
-            terms[i].term = nbase;
-            terms[j] = terms[nterms - 1];
-            nterms--;
-          }
-          if (nterms > 1)
-            qsort(terms, nterms, sizeof(ixs_addterm), addterm_cmp);
-          {
-            uint32_t w = 0;
-            for (k = 0; k < nterms; k++) {
-              if (w > 0 && terms[w - 1].term == terms[k].term) {
-                int64_t a2, aq2, b2, bq2, rp2, rq2;
-                ixs_node_get_rat(terms[w - 1].coeff, &a2, &aq2);
-                ixs_node_get_rat(terms[k].coeff, &b2, &bq2);
-                if (!ixs_rat_add(a2, aq2, b2, bq2, &rp2, &rq2))
-                  goto overflow;
-                if (ixs_rat_is_zero(rp2)) {
-                  w--;
-                } else {
-                  terms[w - 1].coeff = make_const(ctx, rp2, rq2);
-                  if (!terms[w - 1].coeff)
-                    return NULL;
-                }
-              } else {
-                if (w != k)
-                  terms[w] = terms[k];
-                w++;
-              }
-            }
-            nterms = w;
-          }
-          opp_changed = true;
-          break;
-        }
-      }
-    }
-  }
+  nterms =
+      reduce_opposite_mul_add(ctx, terms, nterms, &const_p, &const_q);
+  if (nterms == (uint32_t)-1)
+    goto overflow;
 
   {
     ixs_node *mod_result = recognize_mod(ctx, terms, nterms, const_p, const_q);
