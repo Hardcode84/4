@@ -968,6 +968,7 @@ def test_simplify_batch_matches_individual(exprs: list[ExprTree], envs: list[Env
     batch_copy = list(ixs_exprs)
     ctx.simplify_batch(batch_copy)
 
+    checked = 0
     for env in envs:
         for j in range(len(ixs_exprs)):
             if individual[j].is_error or batch_copy[j].is_error:
@@ -984,6 +985,8 @@ def test_simplify_batch_matches_individual(exprs: list[ExprTree], envs: list[Env
                 f"batch vs individual mismatch: {ind_val} != {bat_val} "
                 f"at {env}, expr[{j}]={exprs[j]}"
             )
+            checked += 1
+    assume(checked > 0)
 
 
 @given(
@@ -1120,6 +1123,7 @@ def test_recognize_mod_targeted(
     s = str(simplified)
     assert "floor" not in s, f"recognize_mod should have fired: {s}"
 
+    checked = 0
     for env in envs:
         try:
             raw = eval_expr(expr, env)
@@ -1130,6 +1134,8 @@ def test_recognize_mod_targeted(
             continue
         simp = eval_ixs(simplified, ctx, env)
         assert orig == simp, f"recognize_mod mismatch: {orig} != {simp} at {env}"
+        checked += 1
+    assume(checked > 0)
 
 
 @given(
@@ -1156,6 +1162,7 @@ def test_cancel_floor_mod_pairs_targeted(
 
     assert str(simplified) == sym, f"Expected {sym}, got {simplified}"
 
+    checked = 0
     for env in envs:
         try:
             raw = eval_expr(expr, env)
@@ -1166,21 +1173,21 @@ def test_cancel_floor_mod_pairs_targeted(
             continue
         simp = eval_ixs(simplified, ctx, env)
         assert orig == simp
+        checked += 1
+    assume(checked > 0)
 
 
 @given(
-    sym=st.sampled_from(_VARS[:4]),
-    other_sym=st.sampled_from(_VARS[4:]),
+    other_sym=st.sampled_from(_VARS),
     c=st.integers(min_value=1, max_value=15),
     K_val=st.integers(min_value=16, max_value=50),
-    other_val=st.integers(min_value=0, max_value=100),
+    envs=st.lists(_env_st(0, 100), min_size=1, max_size=10),
 )
 def test_floor_drop_const_sym_targeted(
-    sym: str,
     other_sym: str,
     c: int,
     K_val: int,
-    other_val: int,
+    envs: list[Env],
 ) -> None:
     """floor((other + c) / K) with 0 <= c < K: exercises floor_drop_const."""
     assume(c < K_val)
@@ -1195,14 +1202,16 @@ def test_floor_drop_const_sym_targeted(
     simplified = ixs_expr.simplify()
     assume(not simplified.is_error)
 
-    env = {v: 10 for v in _VARS}
-    env[sym] = K_val
-    env[other_sym] = other_val
-    try:
-        raw = eval_expr(expr, env)
-    except (ZeroDivisionError, ValueError, TypeError):
-        assume(False)
-    orig = _as_int(raw)
-    assume(orig is not None)
-    simp = eval_ixs(simplified, ctx, env)
-    assert orig == simp, f"floor_drop_const_sym mismatch: {orig} != {simp}"
+    checked = 0
+    for env in envs:
+        try:
+            raw = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError):
+            continue
+        orig = _as_int(raw)
+        if orig is None:
+            continue
+        simp = eval_ixs(simplified, ctx, env)
+        assert orig == simp, f"floor_drop_const_sym mismatch: {orig} != {simp}"
+        checked += 1
+    assume(checked > 0)
