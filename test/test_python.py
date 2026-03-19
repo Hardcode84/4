@@ -593,7 +593,9 @@ def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
                 if sp_int != ground_truth:
                     warnings.warn(
                         f"SymPy disagrees with ground truth at {env}: "
-                        f"sympy={sp_int}, expected={ground_truth}, expr={expr}",
+                        f"sympy={sp_int}, expected={ground_truth}, "
+                        f"ixsimpl={ixs_result}, sympy={sp_expr}, "
+                        f"ixsimpl_simpl={ixs_simplified}",
                         stacklevel=1,
                     )
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
