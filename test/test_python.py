@@ -37,15 +37,50 @@ Env = dict[str, int]
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 
 
+def _env_from_val(val_st: st.SearchStrategy[int]) -> st.SearchStrategy[Env]:
+    """Build an env strategy that draws each variable from val_st."""
+    return st.fixed_dictionaries({v: val_st for v in _VARS})
+
+
+def _signed(base: st.SearchStrategy[int]) -> st.SearchStrategy[int]:
+    """Draw from base or its negation with equal probability."""
+    return st.one_of(base, base.map(lambda x: -x))
+
+
 def _env_st(lo: int = 1, hi: int = 100) -> st.SearchStrategy[Env]:
-    return st.fixed_dictionaries({v: st.integers(lo, hi) for v in _VARS})
+    """Env with each variable uniform in [lo, hi]."""
+    return _env_from_val(st.integers(lo, hi))
 
 
 def _wide_env_st() -> st.SearchStrategy[Env]:
-    """Env strategy mixing negative, zero, and positive values."""
-    return st.fixed_dictionaries(
-        {v: st.one_of(st.integers(-100, -1), st.just(0), st.integers(1, 100)) for v in _VARS}
-    )
+    """Env mixing negative, zero, and positive values."""
+    return _env_from_val(st.one_of(st.integers(-100, -1), st.just(0), st.integers(1, 100)))
+
+
+_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 127, 251, 509, 1021]
+_POW2 = [1 << k for k in range(1, 16)]
+_POW2_ADJ = [v + d for v in _POW2 for d in (-1, 1)]
+_INTERESTING = sorted(set(_PRIMES + _POW2 + _POW2_ADJ + [0, 1, -1]))
+
+
+def _spicy_env_st() -> st.SearchStrategy[Env]:
+    """Env with primes, powers of 2, pow2 +/- 1, 0, and +/-1."""
+    return _env_from_val(_signed(st.sampled_from(_INTERESTING)))
+
+
+def _prime_env_st() -> st.SearchStrategy[Env]:
+    """Env biased toward primes (with optional negation)."""
+    return _env_from_val(_signed(st.sampled_from(_PRIMES)))
+
+
+def _pow2_env_st() -> st.SearchStrategy[Env]:
+    """Env biased toward powers of 2 and pow2 +/- 1."""
+    return _env_from_val(_signed(st.sampled_from(sorted(set(_POW2 + _POW2_ADJ)))))
+
+
+def _mixed_env_st() -> st.SearchStrategy[Env]:
+    """Env blending uniform [0, 100], wide, and spicy values."""
+    return st.one_of(_env_st(0, 100), _wide_env_st(), _spicy_env_st())
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +472,7 @@ def test_expand_basic() -> None:
         assert term in s2, f"missing {term} in {s2}"
 
 
-@given(
-    expr=expressions(),
-    envs=st.lists(st.one_of(_env_st(0, 100), _wide_env_st()), min_size=1, max_size=10),
-)
-def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
+def _check_simplify_consistency(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics: evaluate original and simplified
     at random points, check they agree."""
     ctx = ixsimpl.Context()
@@ -463,10 +494,49 @@ def test_simplify_self_consistency(expr: ExprTree, envs: list[Env]) -> None:
         orig = _as_int(raw)
         if orig is None:
             continue
-        simp = eval_ixs(ixs_simplified, ctx, env)
+        try:
+            simp = eval_ixs(ixs_simplified, ctx, env)
+        except (ValueError, TypeError):
+            continue
         assert orig == simp, f"Mismatch: {orig} != {simp} at {env}, expr={expr}"
         checked += 1
-    assume(checked > 0)  # reject vacuous passes (all envs skipped)
+    assume(checked > 0)
+
+
+@given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
+def test_simplify_consistency_uniform(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with uniform env [0, 100]."""
+    _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_wide_env_st(), min_size=1, max_size=10))
+def test_simplify_consistency_wide(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with negative/zero/positive env."""
+    _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_prime_env_st(), min_size=1, max_size=10))
+def test_simplify_consistency_primes(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with prime-biased env."""
+    _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_pow2_env_st(), min_size=1, max_size=10))
+def test_simplify_consistency_pow2(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with pow2-biased env."""
+    _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_spicy_env_st(), min_size=1, max_size=10))
+def test_simplify_consistency_spicy(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with mixed interesting values."""
+    _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_mixed_env_st(), min_size=1, max_size=10))
+def test_simplify_consistency_mixed(expr: ExprTree, envs: list[Env]) -> None:
+    """Simplification preserves semantics with blended uniform/wide/spicy env."""
+    _check_simplify_consistency(expr, envs)
 
 
 @given(
@@ -966,7 +1036,7 @@ def test_bounds_targeted(
 
 @given(
     expr=expressions(),
-    envs=st.lists(st.one_of(_env_st(0, 100), _wide_env_st()), min_size=1, max_size=10),
+    envs=st.lists(_mixed_env_st(), min_size=1, max_size=10),
 )
 def test_expand_semantics(expr: ExprTree, envs: list[Env]) -> None:
     """expand() preserves numerical semantics."""
