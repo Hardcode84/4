@@ -1472,6 +1472,122 @@ static void test_floor_mod_cancel_symbolic(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_drop_const_divinfo(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *r;
+
+  ixs_node *div_K_256[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 256)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+
+  /* floor(7/8 + K/256) -> K/256 when 256 | K */
+  {
+    ixs_node *e = ixs_floor(
+        ctx, ixs_add(ctx, ixs_div(ctx, ixs_int(ctx, 7), ixs_int(ctx, 8)),
+                     ixs_div(ctx, K, ixs_int(ctx, 256))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strcmp(pr(r), "1/256*K") == 0);
+  }
+
+  /* floor(floor(K/32)/8 + 7/8) -> K/256 when 256 | K */
+  {
+    ixs_node *fk32 = ixs_floor(ctx, ixs_div(ctx, K, ixs_int(ctx, 32)));
+    ixs_node *e =
+        ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fk32, ixs_int(ctx, 8)),
+                               ixs_div(ctx, ixs_int(ctx, 7), ixs_int(ctx, 8))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strcmp(pr(r), "1/256*K") == 0);
+  }
+
+  /* floor(1/3 + K/6) -> K/6 when 6 | K */
+  {
+    ixs_node *div_K_6[] = {
+        ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 6)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *e = ixs_floor(
+        ctx, ixs_add(ctx, ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 3)),
+                     ixs_div(ctx, K, ixs_int(ctx, 6))));
+    r = ixs_simplify(ctx, e, div_K_6, 1);
+    CHECK(strcmp(pr(r), "1/6*K") == 0);
+  }
+
+  /* Negative: floor(1/2 + K/4) should NOT simplify when 4 | K
+   * because grid spacing is 1/4 and 1/2 >= 2*(1/4). However, with
+   * 4|K, K/4 is integer and grid is 1, so 1/2 < 1 — should drop. */
+  {
+    ixs_node *div_K_4[] = {
+        ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *e = ixs_floor(
+        ctx, ixs_add(ctx, ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 2)),
+                     ixs_div(ctx, K, ixs_int(ctx, 4))));
+    r = ixs_simplify(ctx, e, div_K_4, 1);
+    CHECK(strcmp(pr(r), "1/4*K") == 0);
+  }
+
+  /* Negative: floor(1/2 + K/3) should NOT simplify when only 3 | K
+   * because K/3 is integer, grid is 1, and 1/2 < 1 — actually should. */
+  {
+    ixs_node *div_K_3[] = {
+        ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 3)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *e = ixs_floor(
+        ctx, ixs_add(ctx, ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 2)),
+                     ixs_div(ctx, K, ixs_int(ctx, 3))));
+    r = ixs_simplify(ctx, e, div_K_3, 1);
+    CHECK(strcmp(pr(r), "1/3*K") == 0);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_opposite_mul_add_cancel(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *pw = ixs_sym(ctx, "PW");
+  ixs_node *e, *r;
+
+  /* K*(PW + x) - K*(PW + 3) = K*(x - 3) */
+  {
+    ixs_node *a = ixs_mul(ctx, K, ixs_add(ctx, pw, x));
+    ixs_node *b = ixs_mul(ctx, ixs_int(ctx, -1),
+                          ixs_mul(ctx, K, ixs_add(ctx, pw, ixs_int(ctx, 3))));
+    e = ixs_add(ctx, a, b);
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "(-3 + x)*K") == 0);
+  }
+
+  /* 2*K*(PW + x) - 2*K*(PW + x) = 0 */
+  {
+    ixs_node *t =
+        ixs_mul(ctx, ixs_int(ctx, 2), ixs_mul(ctx, K, ixs_add(ctx, pw, x)));
+    e = ixs_add(ctx, t, ixs_mul(ctx, ixs_int(ctx, -1), t));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(r == ixs_int(ctx, 0));
+  }
+
+  /* K*(PW + floor(a)) - K*(PW + floor(b)) = K*(floor(a) - floor(b)) */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *fa = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+    ixs_node *fb = ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)));
+    ixs_node *a = ixs_mul(ctx, K, ixs_add(ctx, pw, fa));
+    ixs_node *b =
+        ixs_mul(ctx, ixs_int(ctx, -1), ixs_mul(ctx, K, ixs_add(ctx, pw, fb)));
+    e = ixs_add(ctx, a, b);
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "K*(floor(1/3*x) - floor(1/3*y))") == 0);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1508,6 +1624,8 @@ int main(void) {
   test_subs_power_overflow();
   test_floor_mod_cancel();
   test_floor_mod_cancel_symbolic();
+  test_floor_drop_const_divinfo();
+  test_opposite_mul_add_cancel();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
