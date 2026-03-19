@@ -189,9 +189,11 @@ def to_sympy(tree: ExprTree) -> Any:
         a, b = to_sympy(tree[1]), to_sympy(tree[2])
         return sympy.Rational(1, int(b)) * a if isinstance(b, sympy.Integer) else a / b
     if op == "floor":
-        return sympy.floor(to_sympy(tree[1]))
+        # evaluate=False: SymPy incorrectly reports is_integer=True for
+        # some rational expressions (e.g. y*(2*x+2*y)/30) and drops floor.
+        return sympy.floor(to_sympy(tree[1]), evaluate=False)
     if op == "ceiling":
-        return sympy.ceiling(to_sympy(tree[1]))
+        return sympy.ceiling(to_sympy(tree[1]), evaluate=False)
     if op == "mod":
         # evaluate=False avoids SymPy Mod bugs (e.g. #28744) that silently
         # produce wrong results for certain inputs.
