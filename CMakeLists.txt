@@ -40,6 +40,7 @@ if(SKBUILD)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    set_target_properties(_ixsimpl PROPERTIES C_VISIBILITY_PRESET hidden)
 
     install(TARGETS _ixsimpl DESTINATION ixsimpl)
     install(FILES bindings/python/ixsimpl/_ixsimpl.pyi DESTINATION ixsimpl)
