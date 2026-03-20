@@ -1290,20 +1290,18 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
 
   m = PyModule_Create(&ixsimpl_module);
   if (!m)
-    return NULL;
+    goto fail_wrap;
 
   Py_INCREF(&ContextType);
   if (PyModule_AddObject(m, "Context", (PyObject *)&ContextType) < 0) {
     Py_DECREF(&ContextType);
-    Py_DECREF(m);
-    return NULL;
+    goto fail_module;
   }
 
   Py_INCREF(&_ExprType);
   if (PyModule_AddObject(m, "_Expr", (PyObject *)&_ExprType) < 0) {
     Py_DECREF(&_ExprType);
-    Py_DECREF(m);
-    return NULL;
+    goto fail_module;
   }
 
   /* Export tag constants */
@@ -1336,4 +1334,11 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
   PyModule_AddIntConstant(m, "CMP_NE", IXS_CMP_NE);
 
   return m;
+
+fail_module:
+  Py_DECREF(m);
+fail_wrap:
+  Py_DECREF(expr_wrap_type);
+  expr_wrap_type = NULL;
+  return NULL;
 }
