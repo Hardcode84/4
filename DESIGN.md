@@ -1218,7 +1218,7 @@ ixs_node *ixs_false(ixs_ctx *ctx);
 // error list. Always check ixs_ctx_nerrors() after simplification if you
 // need to detect incomplete simplification.
 ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
-                        ixs_node *const *assumptions, size_t n_assumptions);
+                       ixs_node *const *assumptions, size_t n_assumptions);
 
 // Introspection — node must not be NULL:
 ixs_tag ixs_node_tag(ixs_node *node);       // returns the node's type tag
@@ -1238,7 +1238,16 @@ bool ixs_same_node(ixs_node *a, ixs_node *b);
 // (no recursive expansion). NULL/sentinel propagation applies to expr,
 // target, and replacement as with constructors.
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
-                    ixs_node *target, ixs_node *replacement);
+                   ixs_node *target, ixs_node *replacement);
+
+// Simultaneous multi-target substitution.  Replaces targets[i] with
+// replacements[i] in a single walk.  No replacement is recursed into,
+// so {A->B, B->C} on A+B yields B+C, not C+C.  Duplicate targets:
+// first matching entry wins.  Thin wrapper around the same engine as
+// ixs_subs (nsubs=1 delegates here).
+ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+                         ixs_node *const *targets,
+                         ixs_node *const *replacements);
 
 // Output — snprintf-like: returns the number of chars that would be written
 // (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
@@ -1449,7 +1458,7 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
 ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root,
-                        ixs_visit_fn fn, void *userdata);
+                       ixs_visit_fn fn, void *userdata);
 
 /* Post-order: recurse into children, then visit node.
  * Same return/NULL/sentinel semantics as ixs_walk_pre.
@@ -2000,9 +2009,7 @@ def eval_ixs(expr, ctx, env):
     """Evaluate ixsimpl Expr by substituting all variables via subs,
     then reading the resulting integer constant.
     Returns int or raises ValueError if result is not a constant/integer."""
-    result = expr
-    for name, val in env.items():
-        result = result.subs(name, ctx.int_(val))
+    result = expr.subs({name: ctx.int_(val) for name, val in env.items()})
     if result.is_error:
         raise ValueError("sentinel")
     # Expr.__int__ returns IXS_INT value; raises TypeError for non-INT nodes

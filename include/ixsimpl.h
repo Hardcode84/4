@@ -145,6 +145,14 @@ bool ixs_same_node(ixs_node *a, ixs_node *b);
 ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement);
 
+/* Simultaneous multi-target substitution.  Replaces targets[i] with
+ * replacements[i] in a single pass.  No replacement is recursed into,
+ * so {A->B, B->C} applied to A+B yields B+C, not C+C.
+ * Duplicate targets: first matching entry wins. */
+ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+                         ixs_node *const *targets,
+                         ixs_node *const *replacements);
+
 /* --- Output ------------------------------------------------------------ */
 
 /* Print in SymPy-compatible syntax.  Returns bytes written (excl. NUL).

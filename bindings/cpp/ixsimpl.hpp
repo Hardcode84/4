@@ -64,6 +64,14 @@ public:
   Expr subs(Expr target, Expr repl) const {
     return Expr(ctx_, ixs_subs(ctx_, node_, target.node_, repl.node_));
   }
+  Expr subs_multi(uint32_t n, const Expr *targets, const Expr *repls) const {
+    std::vector<ixs_node *> t(n), r(n);
+    for (uint32_t i = 0; i < n; i++) {
+      t[i] = targets[i].node_;
+      r[i] = repls[i].node_;
+    }
+    return Expr(ctx_, ixs_subs_multi(ctx_, node_, n, t.data(), r.data()));
+  }
 
   Expr operator+(Expr rhs) const {
     return Expr(ctx_, ixs_add(ctx_, node_, rhs.node_));

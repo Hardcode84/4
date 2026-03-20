@@ -273,6 +273,69 @@ static void test_substitution(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_subs_multi(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *z = ixs_sym(ctx, "z");
+
+  /* Simultaneous: {x->y, y->x} in x+y gives y+x = x+y (swap, not collapse). */
+  {
+    ixs_node *targets[] = {x, y};
+    ixs_node *repls[] = {y, x};
+    ixs_node *expr = ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, 2), y));
+    ixs_node *r = ixs_subs_multi(ctx, expr, 2, targets, repls);
+    CHECK(r == ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 2), x)));
+  }
+
+  /* Multiple constants: {x->3, y->5} in x*y -> 15. */
+  {
+    ixs_node *targets[] = {x, y};
+    ixs_node *repls[] = {ixs_int(ctx, 3), ixs_int(ctx, 5)};
+    ixs_node *expr = ixs_mul(ctx, x, y);
+    ixs_node *r = ixs_subs_multi(ctx, expr, 2, targets, repls);
+    CHECK(r == ixs_int(ctx, 15));
+  }
+
+  /* Three targets: {x->1, y->2, z->3} in x+y+z -> 6. */
+  {
+    ixs_node *targets[] = {x, y, z};
+    ixs_node *repls[] = {ixs_int(ctx, 1), ixs_int(ctx, 2), ixs_int(ctx, 3)};
+    ixs_node *expr = ixs_add(ctx, x, ixs_add(ctx, y, z));
+    ixs_node *r = ixs_subs_multi(ctx, expr, 3, targets, repls);
+    CHECK(r == ixs_int(ctx, 6));
+  }
+
+  /* nsubs=0 returns expr unchanged. */
+  {
+    ixs_node *expr = ixs_add(ctx, x, y);
+    CHECK(ixs_subs_multi(ctx, expr, 0, NULL, NULL) == expr);
+  }
+
+  /* Piecewise: subs into both branches. */
+  {
+    ixs_node *c = ixs_cmp(ctx, z, IXS_CMP_GT, ixs_int(ctx, 0));
+    ixs_node *vals[] = {x, y};
+    ixs_node *conds[] = {c, ixs_true(ctx)};
+    ixs_node *pw = ixs_pw(ctx, 2, vals, conds);
+    ixs_node *targets[] = {x, y};
+    ixs_node *repls[] = {ixs_int(ctx, 10), ixs_int(ctx, 10)};
+    ixs_node *r = ixs_subs_multi(ctx, pw, 2, targets, repls);
+    CHECK(r == ixs_int(ctx, 10));
+  }
+
+  /* Negative: sequential would differ from simultaneous.
+   * {x->y, y->42} in x should give y, not 42. */
+  {
+    ixs_node *targets[] = {x, y};
+    ixs_node *repls[] = {y, ixs_int(ctx, 42)};
+    ixs_node *r = ixs_subs_multi(ctx, x, 2, targets, repls);
+    CHECK(r == y);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_sentinel_propagation(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1811,6 +1874,7 @@ int main(void) {
   test_mod_extract_constant();
   test_floor_drop_small_rational();
   test_substitution();
+  test_subs_multi();
   test_sentinel_propagation();
   test_nested_floor_ceil();
   test_same_node();

@@ -343,31 +343,89 @@ static PyObject *Expr_to_c(ExprObject *self, PyObject *Py_UNUSED(args)) {
   return print_to_pystr(self->node, ixs_print_c);
 }
 
-static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
-  PyObject *target_obj, *repl_obj;
-  ixs_node *target, *repl, *result;
-
-  if (!PyArg_ParseTuple(args, "OO", &target_obj, &repl_obj))
-    return NULL;
-
-  /* Accept string as shorthand for symbol lookup */
-  if (PyUnicode_Check(target_obj)) {
-    const char *name = PyUnicode_AsUTF8(target_obj);
+/* Coerce a subs key (str or Expr) to ixs_node. */
+static ixs_node *coerce_subs_target(ContextObject *ctx_obj, PyObject *obj) {
+  if (PyUnicode_Check(obj)) {
+    const char *name = PyUnicode_AsUTF8(obj);
     if (!name)
       return NULL;
-    target = ixs_sym(self->ctx_obj->ctx, name);
-  } else {
-    target = coerce_arg(self->ctx_obj, target_obj);
+    return ixs_sym(ctx_obj->ctx, name);
   }
-  if (!target)
-    return NULL;
+  return coerce_arg(ctx_obj, obj);
+}
 
-  repl = coerce_arg(self->ctx_obj, repl_obj);
-  if (!repl)
-    return NULL;
+static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
+  Py_ssize_t nargs = PyTuple_GET_SIZE(args);
 
-  result = ixs_subs(self->ctx_obj->ctx, self->node, target, repl);
-  return (PyObject *)Expr_wrap(self->ctx_obj, result);
+  /* Dict form: expr.subs({target: repl, ...}) */
+  if (nargs == 1 && PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
+    PyObject *dict = PyTuple_GET_ITEM(args, 0);
+    Py_ssize_t n = PyDict_Size(dict);
+    ixs_node **targets, **repls;
+    ixs_node *result;
+    Py_ssize_t pos = 0;
+    PyObject *key, *val;
+    uint32_t i = 0;
+
+    if (n == 0)
+      return (PyObject *)Expr_wrap(self->ctx_obj, self->node);
+
+    targets = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+    repls = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+    if (!targets || !repls) {
+      PyMem_Free(targets);
+      PyMem_Free(repls);
+      return PyErr_NoMemory();
+    }
+
+    while (PyDict_Next(dict, &pos, &key, &val)) {
+      targets[i] = coerce_subs_target(self->ctx_obj, key);
+      if (!targets[i]) {
+        PyMem_Free(targets);
+        PyMem_Free(repls);
+        return NULL;
+      }
+      repls[i] = coerce_arg(self->ctx_obj, val);
+      if (!repls[i]) {
+        PyMem_Free(targets);
+        PyMem_Free(repls);
+        return NULL;
+      }
+      i++;
+    }
+    if (i != (uint32_t)n) {
+      PyMem_Free(targets);
+      PyMem_Free(repls);
+      PyErr_SetString(PyExc_RuntimeError, "dict changed size during iteration");
+      return NULL;
+    }
+
+    result = ixs_subs_multi(self->ctx_obj->ctx, self->node, (uint32_t)n,
+                            targets, repls);
+    PyMem_Free(targets);
+    PyMem_Free(repls);
+    return (PyObject *)Expr_wrap(self->ctx_obj, result);
+  }
+
+  /* Pair form: expr.subs(target, replacement) */
+  {
+    PyObject *target_obj, *repl_obj;
+    ixs_node *target, *repl, *result;
+
+    if (!PyArg_ParseTuple(args, "OO", &target_obj, &repl_obj))
+      return NULL;
+
+    target = coerce_subs_target(self->ctx_obj, target_obj);
+    if (!target)
+      return NULL;
+
+    repl = coerce_arg(self->ctx_obj, repl_obj);
+    if (!repl)
+      return NULL;
+
+    result = ixs_subs(self->ctx_obj->ctx, self->node, target, repl);
+    return (PyObject *)Expr_wrap(self->ctx_obj, result);
+  }
 }
 
 static PyObject *Expr_child(ExprObject *self, PyObject *args) {
@@ -537,8 +595,8 @@ static PyMethodDef Expr_methods[] = {
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
-     "expr.subs(target, replacement): target is str (variable name) or Expr "
-     "(any subexpression); replacement is Expr or int."},
+     "expr.subs(target, repl) or expr.subs({t1: r1, ...}): simultaneous "
+     "substitution. Keys can be str or Expr; values can be Expr or int."},
     {"child", (PyCFunction)Expr_child, METH_VARARGS,
      "expr.child(i) -> Expr: i-th child node (0 <= i < nchildren)."},
     {"add_term", (PyCFunction)Expr_add_term, METH_VARARGS,

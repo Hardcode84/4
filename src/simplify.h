@@ -41,4 +41,9 @@ void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                     ixs_node *replacement);
 
+/* Simultaneous multi-target substitution. */
+ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+                          ixs_node *const *targets,
+                          ixs_node *const *replacements);
+
 #endif /* IXS_SIMPLIFY_H */

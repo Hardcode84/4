@@ -293,6 +293,12 @@ ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
   return simp_subs(ctx, expr, target, replacement);
 }
 
+ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+                         ixs_node *const *targets,
+                         ixs_node *const *replacements) {
+  return simp_subs_multi(ctx, expr, nsubs, targets, replacements);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Output                                                            */
 /* ------------------------------------------------------------------ */
