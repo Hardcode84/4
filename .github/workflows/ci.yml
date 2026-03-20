@@ -50,6 +50,9 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
 
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   python:
     runs-on: ubuntu-latest
     name: Python bindings + fuzz

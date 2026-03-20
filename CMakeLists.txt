@@ -72,36 +72,24 @@ target_include_directories(ixsimpl
 
 enable_testing()
 
-add_executable(test_rational test/test_rational.c)
-target_link_libraries(test_rational ixsimpl)
-target_include_directories(test_rational PRIVATE src)
-add_test(NAME test_rational COMMAND test_rational)
+# Tests that use only the public API — always built.
 
 add_executable(test_parser test/test_parser.c)
 target_link_libraries(test_parser ixsimpl)
-target_include_directories(test_parser PRIVATE src)
 add_test(NAME test_parser COMMAND test_parser)
 
 add_executable(test_simplify test/test_simplify.c)
 target_link_libraries(test_simplify ixsimpl)
-target_include_directories(test_simplify PRIVATE src)
 add_test(NAME test_simplify COMMAND test_simplify)
 
 add_executable(test_corpus test/test_corpus.c)
 target_link_libraries(test_corpus ixsimpl)
-target_include_directories(test_corpus PRIVATE src)
 add_test(NAME test_corpus COMMAND test_corpus
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_edge_cases test/test_edge_cases.c)
 target_link_libraries(test_edge_cases ixsimpl)
-target_include_directories(test_edge_cases PRIVATE src)
 add_test(NAME test_edge_cases COMMAND test_edge_cases)
-
-add_executable(test_arena test/test_arena.c)
-target_link_libraries(test_arena ixsimpl)
-target_include_directories(test_arena PRIVATE src)
-add_test(NAME test_arena COMMAND test_arena)
 
 add_executable(test_introspect test/test_introspect.c)
 target_link_libraries(test_introspect ixsimpl)
@@ -111,8 +99,21 @@ add_executable(test_expand test/test_expand.c)
 target_link_libraries(test_expand ixsimpl)
 add_test(NAME test_expand COMMAND test_expand)
 
+# Tests that need internal symbols — skipped in amalgamated builds.
+
+if(NOT USE_AMALGAMATION)
+    add_executable(test_rational test/test_rational.c)
+    target_link_libraries(test_rational ixsimpl)
+    target_include_directories(test_rational PRIVATE src)
+    add_test(NAME test_rational COMMAND test_rational)
+
+    add_executable(test_arena test/test_arena.c)
+    target_link_libraries(test_arena ixsimpl)
+    target_include_directories(test_arena PRIVATE src)
+    add_test(NAME test_arena COMMAND test_arena)
+endif()
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)
 target_link_libraries(bench_corpus ixsimpl)
-target_include_directories(bench_corpus PRIVATE src)
