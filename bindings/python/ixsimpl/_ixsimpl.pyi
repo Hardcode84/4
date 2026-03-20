@@ -109,7 +109,7 @@ class Context:
     def ne(self, a: _Expr | int, b: _Expr | int) -> _Expr: ...
     def simplify_batch(
         self,
-        exprs: list[_Expr],
+        exprs: Sequence[_Expr],
         *,
         assumptions: Sequence[_Expr] | None = None,
     ) -> None: ...
