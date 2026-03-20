@@ -149,3 +149,52 @@ def test_is_error_on_valid() -> None:
     assert not ctx.int_(5).is_error
     assert not ctx.sym("x").is_error
     assert not (ctx.sym("x") + ctx.int_(1)).is_error
+
+
+def test_free_symbols_basic() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    y = ctx.sym("y")
+    z = ctx.sym("z")
+
+    assert x.free_symbols == frozenset({x})
+    assert ctx.int_(42).free_symbols == frozenset()
+    assert (x + y).free_symbols == frozenset({x, y})
+    assert (x + y * z).free_symbols == frozenset({x, y, z})
+
+
+def test_free_symbols_boolean() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    b = ctx.sym("b")
+    cond = x > 0
+    assert cond.free_symbols == frozenset({x})
+    expr = ixsimpl.pw((x, cond), (ctx.int_(0), ctx.true_()))
+    assert expr.free_symbols == frozenset({x})
+    combined = ixsimpl.and_(cond, ixsimpl.not_(b > 1))
+    assert combined.free_symbols == frozenset({x, b})
+
+
+def test_free_symbols_cached() -> None:
+    ctx = ixsimpl.Context()
+    e = ctx.sym("x") + ctx.sym("y")
+    first = e.free_symbols
+    second = e.free_symbols
+    assert first is second
+
+
+def test_free_symbols_returns_expr_type() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    e = x + 1
+    for s in e.free_symbols:
+        assert isinstance(s, ixsimpl.Expr)
+
+
+def test_expr_is_subclass() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    assert isinstance(x, ixsimpl.Expr)
+    e = x + 1
+    assert isinstance(e, ixsimpl.Expr)
+    assert type(e).__name__ == "Expr"

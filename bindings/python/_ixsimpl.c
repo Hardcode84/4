@@ -15,7 +15,12 @@
 
 /* Forward declarations */
 static PyTypeObject ContextType;
-static PyTypeObject ExprType;
+static PyTypeObject _ExprType;
+
+/* Module-level type used by Expr_wrap to allocate instances.
+ * Defaults to &_ExprType; overridden by _set_expr_class() so that a
+ * Python subclass (with __dict__) is instantiated instead. */
+static PyTypeObject *expr_wrap_type;
 
 /* ------------------------------------------------------------------ */
 /*  ContextObject (defined first so ExprObject can reference it)      */
@@ -40,7 +45,7 @@ static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
     PyErr_SetString(PyExc_MemoryError, "ixsimpl: out of memory");
     return NULL;
   }
-  self = PyObject_New(ExprObject, &ExprType);
+  self = (ExprObject *)expr_wrap_type->tp_alloc(expr_wrap_type, 0);
   if (!self)
     return NULL;
   self->node = node;
@@ -56,7 +61,7 @@ static void Expr_dealloc(ExprObject *self) {
 
 /* Coerce a Python object to an ixs_node, extracting ctx from peer Expr. */
 static ixs_node *coerce_arg(ContextObject *ctx_obj, PyObject *obj) {
-  if (Py_TYPE(obj) == &ExprType) {
+  if (PyObject_TypeCheck(obj, &_ExprType)) {
     ExprObject *e = (ExprObject *)obj;
     if (e->ctx_obj != ctx_obj) {
       PyErr_SetString(
@@ -83,9 +88,9 @@ static ixs_node *coerce_arg(ContextObject *ctx_obj, PyObject *obj) {
 
 /* Helper: extract ctx from either operand in a binary op. */
 static ContextObject *binop_ctx(PyObject *a, PyObject *b) {
-  if (Py_TYPE(a) == &ExprType)
+  if (PyObject_TypeCheck(a, &_ExprType))
     return ((ExprObject *)a)->ctx_obj;
-  if (Py_TYPE(b) == &ExprType)
+  if (PyObject_TypeCheck(b, &_ExprType))
     return ((ExprObject *)b)->ctx_obj;
   return NULL;
 }
@@ -144,7 +149,7 @@ static PyObject *Expr_richcompare(ExprObject *self, PyObject *other, int op) {
   ixs_node *result;
 
   if (op == Py_EQ) {
-    if (Py_TYPE(other) == &ExprType) {
+    if (PyObject_TypeCheck(other, &_ExprType)) {
       if (((ExprObject *)other)->node == self->node)
         Py_RETURN_TRUE;
       Py_RETURN_FALSE;
@@ -152,7 +157,7 @@ static PyObject *Expr_richcompare(ExprObject *self, PyObject *other, int op) {
     Py_RETURN_NOTIMPLEMENTED;
   }
   if (op == Py_NE) {
-    if (Py_TYPE(other) == &ExprType) {
+    if (PyObject_TypeCheck(other, &_ExprType)) {
       if (((ExprObject *)other)->node != self->node)
         Py_RETURN_TRUE;
       Py_RETURN_FALSE;
@@ -306,7 +311,7 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
         return PyErr_NoMemory();
       for (i = 0; i < n; i++) {
         PyObject *item = PySequence_GetItem(assumptions_obj, i);
-        if (!item || Py_TYPE(item) != &ExprType) {
+        if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
           Py_XDECREF(item);
           PyMem_Free(assumptions);
           PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
@@ -729,16 +734,16 @@ static PyGetSetDef Expr_getset[] = {
      NULL},
     {NULL}};
 
-static PyTypeObject ExprType = {
-    .ob_base = PyVarObject_HEAD_INIT(NULL, 0).tp_name = "ixsimpl.Expr",
+static PyTypeObject _ExprType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0).tp_name = "ixsimpl._Expr",
     .tp_basicsize = sizeof(ExprObject),
     .tp_dealloc = (destructor)Expr_dealloc,
     .tp_repr = (reprfunc)Expr_repr,
     .tp_as_number = &Expr_as_number,
     .tp_hash = (hashfunc)Expr_hash,
     .tp_str = (reprfunc)Expr_str,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "ixsimpl expression node.",
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_doc = "ixsimpl expression node (internal base type).",
     .tp_richcompare = (richcmpfunc)Expr_richcompare,
     .tp_methods = Expr_methods,
     .tp_getset = Expr_getset,
@@ -868,7 +873,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
 
   for (i = 0; i < n_exprs; i++) {
     PyObject *item = PyList_GetItem(exprs_obj, i);
-    if (Py_TYPE(item) != &ExprType) {
+    if (!PyObject_TypeCheck(item, &_ExprType)) {
       PyMem_Free(exprs);
       PyErr_SetString(PyExc_TypeError, "each expr must be an Expr");
       return NULL;
@@ -896,7 +901,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
       }
       for (i = 0; i < n_assumptions; i++) {
         PyObject *item = PySequence_GetItem(assumptions_obj, i);
-        if (!item || Py_TYPE(item) != &ExprType) {
+        if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
           Py_XDECREF(item);
           PyMem_Free(exprs);
           PyMem_Free(assumptions);
@@ -1049,7 +1054,7 @@ static PyTypeObject ContextType = {
 static PyObject *mod_floor(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
   ixs_node *result;
-  if (Py_TYPE(arg) != &ExprType) {
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.floor() requires an Expr");
     return NULL;
   }
@@ -1061,7 +1066,7 @@ static PyObject *mod_floor(PyObject *Py_UNUSED(module), PyObject *arg) {
 static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
   ixs_node *result;
-  if (Py_TYPE(arg) != &ExprType) {
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.ceil() requires an Expr");
     return NULL;
   }
@@ -1081,7 +1086,7 @@ static PyObject *mod_binary_op(PyObject *args,
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
     return NULL;
 
-  if (Py_TYPE(a_obj) != &ExprType) {
+  if (!PyObject_TypeCheck(a_obj, &_ExprType)) {
     PyErr_Format(PyExc_TypeError, "ixsimpl.%s() first arg must be Expr", name);
     return NULL;
   }
@@ -1122,7 +1127,7 @@ static PyObject *mod_or_(PyObject *Py_UNUSED(module), PyObject *args) {
 static PyObject *mod_not_(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
   ixs_node *result;
-  if (Py_TYPE(arg) != &ExprType) {
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.not_() requires an Expr");
     return NULL;
   }
@@ -1171,9 +1176,9 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
     cond_obj = PyTuple_GetItem(pair, 1);
 
     if (!ctx_obj) {
-      if (Py_TYPE(val_obj) == &ExprType)
+      if (PyObject_TypeCheck(val_obj, &_ExprType))
         ctx_obj = ((ExprObject *)val_obj)->ctx_obj;
-      else if (Py_TYPE(cond_obj) == &ExprType)
+      else if (PyObject_TypeCheck(cond_obj, &_ExprType))
         ctx_obj = ((ExprObject *)cond_obj)->ctx_obj;
       else {
         PyMem_Free(values);
@@ -1208,13 +1213,27 @@ static PyObject *mod_same_node(PyObject *Py_UNUSED(module), PyObject *args) {
   PyObject *a_obj, *b_obj;
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
     return NULL;
-  if (Py_TYPE(a_obj) != &ExprType || Py_TYPE(b_obj) != &ExprType) {
+  if (!PyObject_TypeCheck(a_obj, &_ExprType) ||
+      !PyObject_TypeCheck(b_obj, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError,
                     "ixsimpl.same_node() requires two Expr arguments");
     return NULL;
   }
   return PyBool_FromLong(
       ixs_same_node(((ExprObject *)a_obj)->node, ((ExprObject *)b_obj)->node));
+}
+
+static PyObject *mod_set_expr_class(PyObject *Py_UNUSED(module),
+                                    PyObject *arg) {
+  if (!PyType_Check(arg) ||
+      !PyType_IsSubtype((PyTypeObject *)arg, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "argument must be a subclass of _Expr");
+    return NULL;
+  }
+  Py_INCREF(arg);
+  Py_XDECREF(expr_wrap_type);
+  expr_wrap_type = (PyTypeObject *)arg;
+  Py_RETURN_NONE;
 }
 
 static PyMethodDef module_methods[] = {
@@ -1241,6 +1260,9 @@ static PyMethodDef module_methods[] = {
     {"same_node", (PyCFunction)mod_same_node, METH_VARARGS,
      "same_node(a, b) -> bool: True if a and b are the same node (pointer "
      "eq)."},
+    {"_set_expr_class", (PyCFunction)mod_set_expr_class, METH_O,
+     "Register a Python subclass of _Expr as the type instantiated by all "
+     "expression-returning operations."},
     {NULL}};
 
 /* ------------------------------------------------------------------ */
@@ -1260,8 +1282,11 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
 
   if (PyType_Ready(&ContextType) < 0)
     return NULL;
-  if (PyType_Ready(&ExprType) < 0)
+  if (PyType_Ready(&_ExprType) < 0)
     return NULL;
+
+  expr_wrap_type = &_ExprType;
+  Py_INCREF(&_ExprType);
 
   m = PyModule_Create(&ixsimpl_module);
   if (!m)
@@ -1274,9 +1299,9 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
     return NULL;
   }
 
-  Py_INCREF(&ExprType);
-  if (PyModule_AddObject(m, "Expr", (PyObject *)&ExprType) < 0) {
-    Py_DECREF(&ExprType);
+  Py_INCREF(&_ExprType);
+  if (PyModule_AddObject(m, "_Expr", (PyObject *)&_ExprType) < 0) {
+    Py_DECREF(&_ExprType);
     Py_DECREF(m);
     return NULL;
   }
