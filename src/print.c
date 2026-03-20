@@ -353,7 +353,7 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-size_t ixs_print_impl(ixs_node *expr, char *buf, size_t bufsize) {
+IXS_STATIC size_t ixs_print_impl(ixs_node *expr, char *buf, size_t bufsize) {
   printbuf pb;
   if (!expr) {
     if (buf && bufsize > 0)
@@ -450,7 +450,7 @@ static void print_c_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-size_t ixs_print_c_impl(ixs_node *expr, char *buf, size_t bufsize) {
+IXS_STATIC size_t ixs_print_c_impl(ixs_node *expr, char *buf, size_t bufsize) {
   printbuf pb;
   if (!expr) {
     if (buf && bufsize > 0)

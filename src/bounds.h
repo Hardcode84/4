@@ -4,6 +4,8 @@
 #ifndef IXS_BOUNDS_H
 #define IXS_BOUNDS_H
 
+#include "internal.h"
+
 #include "interval.h"
 #include "node.h"
 
@@ -42,28 +44,23 @@ typedef struct {
 } ixs_bounds;
 
 /* Returns false on OOM (arena exhausted). */
-bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
+IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 
 /* No-op; bounds memory is reclaimed by scratch arena restore. */
-void ixs_bounds_destroy(ixs_bounds *b);
+IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
 
 /* Deep-copy bounds onto the scratch arena. Returns false on OOM. */
-bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
+IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
 /* Extract variable bounds from an assumption (e.g., $T0 >= 0). */
-void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
+IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 
 /* Get the interval for an expression using propagation rules. */
-ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
-
-/* Legacy: return the known divisor of a symbol (0 if none).
- * Only returns nonzero when remainder == 0 (pure divisibility).
- * Prefer ixs_bounds_get_modrem for new code. */
-int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name);
+IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 
 /* Full modulus/remainder query.  Returns true when info is available.
  * On success *mod > 0 and 0 <= *rem < *mod. */
-bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name, int64_t *mod,
-                           int64_t *rem);
+IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
+                                      int64_t *mod, int64_t *rem);
 
 #endif /* IXS_BOUNDS_H */

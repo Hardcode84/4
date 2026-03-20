@@ -13,7 +13,7 @@
 
 /* --- Safe arithmetic --- */
 
-bool ixs_safe_add(int64_t a, int64_t b, int64_t *r) {
+IXS_STATIC bool ixs_safe_add(int64_t a, int64_t b, int64_t *r) {
   if (b > 0 && a > INT64_MAX - b)
     return false;
   if (b < 0 && a < INT64_MIN - b)
@@ -22,7 +22,7 @@ bool ixs_safe_add(int64_t a, int64_t b, int64_t *r) {
   return true;
 }
 
-bool ixs_safe_sub(int64_t a, int64_t b, int64_t *r) {
+IXS_STATIC bool ixs_safe_sub(int64_t a, int64_t b, int64_t *r) {
   if (b < 0 && a > INT64_MAX + b)
     return false;
   if (b > 0 && a < INT64_MIN + b)
@@ -31,7 +31,7 @@ bool ixs_safe_sub(int64_t a, int64_t b, int64_t *r) {
   return true;
 }
 
-bool ixs_safe_mul(int64_t a, int64_t b, int64_t *r) {
+IXS_STATIC bool ixs_safe_mul(int64_t a, int64_t b, int64_t *r) {
   if (a == 0 || b == 0) {
     *r = 0;
     return true;
@@ -71,7 +71,7 @@ bool ixs_safe_mul(int64_t a, int64_t b, int64_t *r) {
   return true;
 }
 
-bool ixs_safe_neg(int64_t a, int64_t *r) {
+IXS_STATIC bool ixs_safe_neg(int64_t a, int64_t *r) {
   if (a == INT64_MIN)
     return false;
   *r = -a;
@@ -95,7 +95,7 @@ static int64_t u64_to_i64_clamped(uint64_t u) {
   return (u > (uint64_t)INT64_MAX) ? INT64_MAX : (int64_t)u;
 }
 
-int64_t ixs_gcd(int64_t a, int64_t b) {
+IXS_STATIC int64_t ixs_gcd(int64_t a, int64_t b) {
   uint64_t u = to_unsigned_mag(a);
   uint64_t v = to_unsigned_mag(b);
   unsigned shift;
@@ -130,7 +130,8 @@ int64_t ixs_gcd(int64_t a, int64_t b) {
 
 /* --- Normalize --- */
 
-bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
+IXS_STATIC bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp,
+                                  int64_t *rq) {
   if (q == 0)
     return false;
 
@@ -161,8 +162,8 @@ bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
 
 /* --- Arithmetic --- */
 
-bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
-                 int64_t *rq) {
+IXS_STATIC bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
+                            int64_t *rp, int64_t *rq) {
   if (aq == 0 || bq == 0)
     return false;
   /*
@@ -186,16 +187,16 @@ bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
   return ixs_rat_normalize(num, den, rp, rq);
 }
 
-bool ixs_rat_sub(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
-                 int64_t *rq) {
+IXS_STATIC bool ixs_rat_sub(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
+                            int64_t *rp, int64_t *rq) {
   int64_t neg_bp;
   if (!ixs_safe_neg(bp, &neg_bp))
     return false;
   return ixs_rat_add(ap, aq, neg_bp, bq, rp, rq);
 }
 
-bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
-                 int64_t *rq) {
+IXS_STATIC bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
+                            int64_t *rp, int64_t *rq) {
   if (aq == 0 || bq == 0)
     return false;
   /* Cross-reduce to limit overflow: gcd(ap, bq) and gcd(bp, aq) */
@@ -215,14 +216,14 @@ bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
   return ixs_rat_normalize(num, den, rp, rq);
 }
 
-bool ixs_rat_div(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
-                 int64_t *rq) {
+IXS_STATIC bool ixs_rat_div(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
+                            int64_t *rp, int64_t *rq) {
   if (bp == 0)
     return false;
   return ixs_rat_mul(ap, aq, bq, bp, rp, rq);
 }
 
-bool ixs_rat_neg(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
+IXS_STATIC bool ixs_rat_neg(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
   if (!ixs_safe_neg(p, rp))
     return false;
   *rq = q;
@@ -235,7 +236,7 @@ bool ixs_rat_neg(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
  * Floored division: floor(p / q) for q > 0.
  * C division truncates toward zero; we adjust for negative dividends.
  */
-int64_t ixs_rat_floor(int64_t p, int64_t q) {
+IXS_STATIC int64_t ixs_rat_floor(int64_t p, int64_t q) {
   int64_t d = p / q;
   int64_t r = p % q;
   /* If remainder is negative, floor is one less than truncated. */
@@ -244,7 +245,7 @@ int64_t ixs_rat_floor(int64_t p, int64_t q) {
   return d;
 }
 
-int64_t ixs_rat_ceil(int64_t p, int64_t q) {
+IXS_STATIC int64_t ixs_rat_ceil(int64_t p, int64_t q) {
   int64_t d = p / q;
   int64_t r = p % q;
   /* If remainder is positive, ceil is one more than truncated. */
@@ -255,8 +256,8 @@ int64_t ixs_rat_ceil(int64_t p, int64_t q) {
 
 /* --- Floored mod --- */
 
-bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
-                 int64_t *rq) {
+IXS_STATIC bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
+                            int64_t *rp, int64_t *rq) {
   /* mod(a, b) = a - b * floor(a / b) */
   int64_t dp, dq;
   if (!ixs_rat_div(ap, aq, bp, bq, &dp, &dq))
@@ -276,7 +277,7 @@ bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq, int64_t *rp,
 
 /* --- Compare --- */
 
-int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
+IXS_STATIC int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
   /*
    * Compare a/aq vs b/bq where aq, bq > 0.
    * Equivalent to sign(a*bq - b*aq).

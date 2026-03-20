@@ -117,7 +117,7 @@ static uint32_t compute_hash(const ixs_node *n) {
 /*  Node equality (structural)                                        */
 /* ------------------------------------------------------------------ */
 
-bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
+IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
   uint32_t i;
   if (a == b)
     return true;
@@ -206,7 +206,7 @@ bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
  * Next: compare by precomputed structural hash (O(1), deterministic).
  * Recursive fallback fires only on the rare 32-bit hash collision.
  */
-int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
+IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   uint32_t i;
   int c;
   if (a == b)
@@ -308,14 +308,14 @@ int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
 /*  Hash-consing table                                                */
 /* ------------------------------------------------------------------ */
 
-bool ixs_htab_init(ixs_ctx *ctx) {
+IXS_STATIC bool ixs_htab_init(ixs_ctx *ctx) {
   ctx->htab_cap = IXS_HTAB_INIT_CAP;
   ctx->htab_used = 0;
   ctx->htab = calloc(ctx->htab_cap, sizeof(ixs_node *));
   return ctx->htab != NULL;
 }
 
-void ixs_htab_destroy(ixs_ctx *ctx) {
+IXS_STATIC void ixs_htab_destroy(ixs_ctx *ctx) {
   free(ctx->htab);
   ctx->htab = NULL;
 }
@@ -374,7 +374,7 @@ static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
   return found;
 }
 
-ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
+IXS_STATIC ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
   ixs_node *found;
   size_t idx = htab_find_slot(ctx, node, &found);
   if (found)
@@ -403,7 +403,7 @@ static ixs_node *alloc_node(ixs_ctx *ctx) {
 /*  Raw node constructors                                             */
 /* ------------------------------------------------------------------ */
 
-ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
+IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
   ixs_node tmp;
   ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
@@ -422,7 +422,7 @@ ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
+IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
   ixs_node tmp;
   ixs_node *found, *n;
   if (q == 1)
@@ -447,7 +447,7 @@ ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
 
 /* Cannot use htab_lookup: name may not be NUL-terminated, and
  * ixs_node_equal uses strcmp, so we probe with memcmp directly. */
-ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
+IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   uint32_t sym_hash;
   ixs_node *n;
   char *interned;
@@ -483,8 +483,8 @@ ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
-                       ixs_addterm *terms) {
+IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
+                                  uint32_t nterms, ixs_addterm *terms) {
   ixs_node tmp;
   ixs_node *found, *n;
   ixs_addterm *a;
@@ -518,8 +518,8 @@ ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff, uint32_t nterms,
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
-                       ixs_mulfactor *factors) {
+IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
+                                  uint32_t nfactors, ixs_mulfactor *factors) {
   ixs_node tmp;
   ixs_node *found, *n;
   ixs_mulfactor *f;
@@ -553,7 +553,7 @@ ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff, uint32_t nfactors,
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
+IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
   ixs_node tmp;
   ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
@@ -572,7 +572,7 @@ ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
+IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
   ixs_node tmp;
   ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
@@ -591,8 +591,8 @@ ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
-                          ixs_node *rhs, ixs_cmp_op op) {
+IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
+                                     ixs_node *rhs, ixs_cmp_op op) {
   ixs_node tmp;
   ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
@@ -613,7 +613,8 @@ ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
+IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
+                                 ixs_pwcase *cases) {
   ixs_node tmp;
   ixs_node *found, *n;
   ixs_pwcase *c;
@@ -646,8 +647,8 @@ ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
-                         ixs_node **args) {
+IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
+                                    ixs_node **args) {
   ixs_node tmp;
   ixs_node *found, *n;
   ixs_node **a;
@@ -680,7 +681,7 @@ ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
   return ixs_htab_intern(ctx, n);
 }
 
-ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
+IXS_STATIC ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
   ixs_node tmp;
   ixs_node *found, *n;
   memset(&tmp, 0, sizeof(tmp));
@@ -703,21 +704,19 @@ ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
 /*  Utilities                                                         */
 /* ------------------------------------------------------------------ */
 
-bool ixs_node_is_const(const ixs_node *n) {
+IXS_STATIC bool ixs_node_is_const(const ixs_node *n) {
   return n->tag == IXS_INT || n->tag == IXS_RAT;
 }
 
-bool ixs_node_is_int(const ixs_node *n) { return n->tag == IXS_INT; }
-
-bool ixs_node_is_zero(const ixs_node *n) {
+IXS_STATIC bool ixs_node_is_zero(const ixs_node *n) {
   return n->tag == IXS_INT && n->u.ival == 0;
 }
 
-bool ixs_node_is_one(const ixs_node *n) {
+IXS_STATIC bool ixs_node_is_one(const ixs_node *n) {
   return n->tag == IXS_INT && n->u.ival == 1;
 }
 
-void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
+IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
   if (n->tag == IXS_INT) {
     *p = n->u.ival;
     *q = 1;
@@ -730,7 +729,7 @@ void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
   }
 }
 
-bool ixs_node_is_sentinel(const ixs_node *n) {
+IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n) {
   return n->tag == IXS_ERROR || n->tag == IXS_PARSE_ERROR;
 }
 
@@ -738,7 +737,7 @@ bool ixs_node_is_sentinel(const ixs_node *n) {
 /*  Error list                                                        */
 /* ------------------------------------------------------------------ */
 
-void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
+IXS_STATIC void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
   char buf[512];
   va_list ap;
   va_start(ap, fmt);
@@ -770,7 +769,7 @@ void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
 /*  NULL / sentinel propagation                                       */
 /* ------------------------------------------------------------------ */
 
-ixs_node *ixs_propagate1(ixs_node *a) {
+IXS_STATIC ixs_node *ixs_propagate1(ixs_node *a) {
   if (!a)
     return NULL;
   if (ixs_node_is_sentinel(a))
@@ -783,7 +782,7 @@ ixs_node *ixs_propagate1(ixs_node *a) {
  * the caller can short-circuit.  NULL (OOM) returns NULL — callers
  * propagate that by their own NULL return.  Both clean → NULL.
  */
-ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL; /* OOM propagation — caller returns NULL */
   if (a->tag == IXS_PARSE_ERROR || b->tag == IXS_PARSE_ERROR)
@@ -799,7 +798,7 @@ ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
 /*  Integer-valued predicate                                          */
 /* ------------------------------------------------------------------ */
 
-bool ixs_node_is_integer_valued(const ixs_node *n) {
+IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   if (!n)
     return false;
   switch (n->tag) {

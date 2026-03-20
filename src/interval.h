@@ -4,6 +4,8 @@
 #ifndef IXS_INTERVAL_H
 #define IXS_INTERVAL_H
 
+#include "internal.h"
+
 #include "rational.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -66,16 +68,17 @@ static inline ixs_interval ixs_interval_range(int64_t lo_p, int64_t lo_q,
 }
 
 /* Widen one endpoint to +/-infinity based on the sign of the product. */
-void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp, int64_t *rq);
+IXS_STATIC void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp,
+                                  int64_t *rq);
 
-ixs_interval iv_add(ixs_interval a, ixs_interval b);
-ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq);
-ixs_interval iv_mul(ixs_interval a, ixs_interval b);
+IXS_STATIC ixs_interval iv_add(ixs_interval a, ixs_interval b);
+IXS_STATIC ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq);
+IXS_STATIC ixs_interval iv_mul(ixs_interval a, ixs_interval b);
 
 /* Reciprocal of a strictly positive interval. Returns unknown if
  * the interval contains zero or is invalid. */
-ixs_interval iv_recip(ixs_interval a);
+IXS_STATIC ixs_interval iv_recip(ixs_interval a);
 
-ixs_interval iv_intersect(ixs_interval a, ixs_interval b);
+IXS_STATIC ixs_interval iv_intersect(ixs_interval a, ixs_interval b);
 
 #endif /* IXS_INTERVAL_H */

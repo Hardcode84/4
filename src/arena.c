@@ -31,14 +31,14 @@ static ixs_arena_chunk *chunk_new(size_t data_capacity) {
   return c;
 }
 
-void ixs_arena_init(ixs_arena *a, size_t initial_size) {
+IXS_STATIC void ixs_arena_init(ixs_arena *a, size_t initial_size) {
   if (initial_size < IXS_ARENA_DEFAULT_SIZE)
     initial_size = IXS_ARENA_DEFAULT_SIZE;
   a->min_chunk = initial_size;
   a->current = NULL;
 }
 
-void ixs_arena_destroy(ixs_arena *a) {
+IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
   ixs_arena_chunk *c = a->current;
   while (c) {
     ixs_arena_chunk *next = c->next;
@@ -48,7 +48,7 @@ void ixs_arena_destroy(ixs_arena *a) {
   a->current = NULL;
 }
 
-void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
+IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
   if (size == 0)
     size = 1;
   if (align == 0)
@@ -85,7 +85,7 @@ void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
   return c->base;
 }
 
-char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
+IXS_STATIC char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
   if (len == (size_t)-1)
     return NULL;
   char *p = ixs_arena_alloc(a, len + 1, 1);
@@ -96,14 +96,14 @@ char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
   return p;
 }
 
-ixs_arena_mark ixs_arena_save(ixs_arena *a) {
+IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a) {
   ixs_arena_mark m;
   m.chunk = a->current;
   m.used = a->current ? a->current->used : 0;
   return m;
 }
 
-void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
+IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
   while (a->current != m.chunk) {
     if (!a->current)
       return;
@@ -115,8 +115,8 @@ void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
     a->current->used = m.used;
 }
 
-void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size, size_t new_size,
-                     size_t align) {
+IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
+                                size_t new_size, size_t align) {
   if (!ptr)
     return ixs_arena_alloc(a, new_size, align);
   if (new_size < old_size)

@@ -157,6 +157,6 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
   }
 }
 
-ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
+IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
   return do_expand(ctx, expr, 0);
 }

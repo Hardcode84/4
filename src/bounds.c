@@ -7,7 +7,7 @@
 
 #define BOUNDS_INIT_CAP 16
 
-bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
+IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->scratch = scratch;
   b->nvars = 0;
   b->cap = BOUNDS_INIT_CAP;
@@ -20,9 +20,9 @@ bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
 }
 
 /* All bounds storage lives in the scratch arena; no per-object cleanup. */
-void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
+IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
 
-bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
+IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->scratch = src->scratch;
   dst->nvars = src->nvars;
   dst->cap = src->nvars ? src->nvars : 1;
@@ -254,7 +254,7 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
  * Extract interval bounds and modular congruence from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
  */
-void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
+IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   if (a->tag != IXS_CMP)
     return;
 
@@ -465,7 +465,7 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
   }
 }
 
-ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
+IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv = bounds_get_propagated(b, expr);
   if (b->nexprs && expr) {
     size_t j;
@@ -477,15 +477,8 @@ ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   return iv;
 }
 
-int64_t ixs_bounds_get_divisor(ixs_bounds *b, const char *name) {
-  ixs_var_bound *v = find_var(b, name);
-  if (v && v->modulus > 0 && v->remainder == 0)
-    return v->modulus;
-  return 0;
-}
-
-bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name, int64_t *mod,
-                           int64_t *rem) {
+IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
+                                      int64_t *mod, int64_t *rem) {
   ixs_var_bound *v;
   if (!mod || !rem)
     return false;

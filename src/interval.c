@@ -3,7 +3,8 @@
  */
 #include "interval.h"
 
-void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp, int64_t *rq) {
+IXS_STATIC void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp,
+                                  int64_t *rq) {
   bool neg = (ap < 0) != ixs_rat_is_neg(bp);
   if (neg)
     ixs_interval_set_neg_inf(rp, rq);
@@ -11,7 +12,7 @@ void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp, int64_t *rq) {
     ixs_interval_set_pos_inf(rp, rq);
 }
 
-ixs_interval iv_add(ixs_interval a, ixs_interval b) {
+IXS_STATIC ixs_interval iv_add(ixs_interval a, ixs_interval b) {
   ixs_interval r;
   if (!a.valid || !b.valid)
     return ixs_interval_unknown();
@@ -23,7 +24,7 @@ ixs_interval iv_add(ixs_interval a, ixs_interval b) {
   return r;
 }
 
-ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
+IXS_STATIC ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
   ixs_interval r;
   if (!a.valid)
     return ixs_interval_unknown();
@@ -44,7 +45,7 @@ ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq) {
   return r;
 }
 
-ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
+IXS_STATIC ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
   ixs_interval r;
   int64_t ap[4], aq[4], bp[4], bq[4], rp[4], rq[4];
   uint32_t i;
@@ -88,7 +89,7 @@ ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
   return r;
 }
 
-ixs_interval iv_recip(ixs_interval a) {
+IXS_STATIC ixs_interval iv_recip(ixs_interval a) {
   ixs_interval r;
   if (!a.valid || ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) <= 0)
     return ixs_interval_unknown();
@@ -105,7 +106,7 @@ ixs_interval iv_recip(ixs_interval a) {
   return r;
 }
 
-ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
+IXS_STATIC ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
   ixs_interval r;
   if (!a.valid)
     return b;

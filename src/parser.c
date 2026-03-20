@@ -519,7 +519,8 @@ static ixs_node *parse_cond(parser *p) {
 
 /* --- Public entry point --- */
 
-ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input, size_t len) {
+IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
+                                    size_t len) {
   parser p;
   p.ctx = ctx;
   p.input = input;

@@ -56,9 +56,9 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n);
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp);
-ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
-ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
-ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
+IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
+IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -1008,7 +1008,7 @@ overflow:
   return simp_err(ctx, "rational overflow in add");
 }
 
-ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_node *result = simp_add_impl(ctx, a, b);
   ixs_arena_restore(&ctx->scratch, m);
@@ -1141,7 +1141,7 @@ overflow:
   return simp_err(ctx, "rational overflow in multiply");
 }
 
-ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_node *result = simp_mul_impl(ctx, a, b);
   ixs_arena_restore(&ctx->scratch, m);
@@ -1152,14 +1152,14 @@ ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /*  simp_neg / simp_sub / simp_div                                    */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_neg(ixs_ctx *ctx, ixs_node *a) {
+IXS_STATIC ixs_node *simp_neg(ixs_ctx *ctx, ixs_node *a) {
   ixs_node *prop = ixs_propagate1(a);
   if (prop)
     return prop;
   return simp_mul(ctx, ixs_node_int(ctx, -1), a);
 }
 
-ixs_node *simp_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -1168,7 +1168,7 @@ ixs_node *simp_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_add(ctx, a, simp_neg(ctx, b));
 }
 
-ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -1995,7 +1995,7 @@ static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
   }
 }
 
-ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
+IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
   return simp_floor_bnds(ctx, NULL, x);
 }
 
@@ -2019,7 +2019,7 @@ static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
   }
 }
 
-ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
+IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
   return simp_ceil_bnds(ctx, NULL, x);
 }
 
@@ -2257,7 +2257,7 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   return try_rules(ctx, bnds, node, mod_rules);
 }
 
-ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_mod_bnds(ctx, NULL, a, b);
 }
 
@@ -2338,7 +2338,7 @@ static ixs_node *simp_max_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   return try_rules(ctx, bnds, node, max_rules);
 }
 
-ixs_node *simp_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_max_bnds(ctx, NULL, a, b);
 }
 
@@ -2365,7 +2365,7 @@ static ixs_node *simp_min_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   return try_rules(ctx, bnds, node, min_rules);
 }
 
-ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_min_bnds(ctx, NULL, a, b);
 }
 
@@ -2373,7 +2373,7 @@ ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /*  simp_xor                                                          */
 /* ------------------------------------------------------------------ */
 
-ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -2506,7 +2506,8 @@ static ixs_node *simp_cmp_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   return try_rules(ctx, bnds, node, cmp_rules);
 }
 
-ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
+IXS_STATIC ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op,
+                              ixs_node *b) {
   return simp_cmp_bnds(ctx, NULL, a, op, b);
 }
 
@@ -2542,7 +2543,7 @@ static ixs_node *not_cmp_flip(ixs_ctx *ctx, ixs_node *a) {
                          cmp_flip_op(a->u.binary.cmp_op));
 }
 
-ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
+IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
   ixs_node *r;
   ixs_node *prop = ixs_propagate1(a);
   if (prop)
@@ -2641,7 +2642,7 @@ static ixs_node *simp_logic_impl(ixs_ctx *ctx, ixs_tag tag, ixs_node *a,
   return ixs_node_logic(ctx, tag, nargs, args);
 }
 
-ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -2663,7 +2664,7 @@ ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return result;
 }
 
-ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -2758,8 +2759,8 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
   return ixs_node_pw(ctx, ncases, cases);
 }
 
-ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                  ixs_node **conds) {
+IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
+                             ixs_node **conds) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_node *result = simp_pw_impl(ctx, n, values, conds);
   ixs_arena_restore(&ctx->scratch, m);
@@ -3026,14 +3027,14 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   return subs_rec(ctx, expr, nsubs, targets, replacements, memo);
 }
 
-ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
-                    ixs_node *replacement) {
+IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
+                               ixs_node *replacement) {
   return subs_common(ctx, expr, 1, &target, &replacement);
 }
 
-ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
-                          ixs_node *const *targets,
-                          ixs_node *const *replacements) {
+IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
+                                     uint32_t nsubs, ixs_node *const *targets,
+                                     ixs_node *const *replacements) {
   return subs_common(ctx, expr, nsubs, targets, replacements);
 }
 
@@ -3544,8 +3545,9 @@ static bool build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
   return true;
 }
 
-ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
-                        ixs_node *const *assumptions, size_t n_assumptions) {
+IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
@@ -3558,8 +3560,9 @@ ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
-                         ixs_node *const *assumptions, size_t n_assumptions) {
+IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
+                                    ixs_node *const *assumptions,
+                                    size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   size_t i;
