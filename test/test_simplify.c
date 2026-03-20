@@ -1747,6 +1747,57 @@ static void test_round_unwrap_inner(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* A|~A = True, A&~A = False, and CMP complement pairs. */
+static void test_complement_annihilation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *zero = ixs_int(ctx, 0);
+
+  /* NOT complement: sym | NOT(sym) = True */
+  CHECK(ixs_or(ctx, x, ixs_not(ctx, x)) == ixs_true(ctx));
+  CHECK(ixs_or(ctx, ixs_not(ctx, x), x) == ixs_true(ctx));
+
+  /* NOT complement: sym & NOT(sym) = False */
+  CHECK(ixs_and(ctx, x, ixs_not(ctx, x)) == ixs_false(ctx));
+  CHECK(ixs_and(ctx, ixs_not(ctx, x), x) == ixs_false(ctx));
+
+  /* CMP complement: (x > 0) | (x <= 0) = True */
+  {
+    ixs_node *gt = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+    ixs_node *le = ixs_cmp(ctx, x, IXS_CMP_LE, zero);
+    CHECK(ixs_or(ctx, gt, le) == ixs_true(ctx));
+    CHECK(ixs_and(ctx, gt, le) == ixs_false(ctx));
+  }
+
+  /* CMP complement: (x == y) | (x != y) = True */
+  {
+    ixs_node *eq = ixs_cmp(ctx, x, IXS_CMP_EQ, y);
+    ixs_node *ne = ixs_cmp(ctx, x, IXS_CMP_NE, y);
+    CHECK(ixs_or(ctx, eq, ne) == ixs_true(ctx));
+    CHECK(ixs_and(ctx, eq, ne) == ixs_false(ctx));
+  }
+
+  /* Piecewise((0, c), (0, ~c)) collapses to 0. */
+  {
+    ixs_node *c = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+    ixs_node *nc = ixs_not(ctx, c);
+    ixs_node *vals[] = {zero, zero};
+    ixs_node *conds[] = {c, nc};
+    ixs_node *pw = ixs_pw(ctx, 2, vals, conds);
+    CHECK(pw == zero);
+  }
+
+  /* Negative: (x > 0) | (y <= 0) is NOT True (different operands). */
+  {
+    ixs_node *a = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+    ixs_node *b = ixs_cmp(ctx, y, IXS_CMP_LE, zero);
+    CHECK(ixs_or(ctx, a, b) != ixs_true(ctx));
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1788,6 +1839,7 @@ int main(void) {
   test_opposite_mul_add_cancel();
   test_flatten_mul_add_floor_mod();
   test_round_unwrap_inner();
+  test_complement_annihilation();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

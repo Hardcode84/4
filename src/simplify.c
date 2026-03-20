@@ -2514,37 +2514,32 @@ ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
 /*  simp_and / simp_or / simp_not                                     */
 /* ------------------------------------------------------------------ */
 
+static ixs_cmp_op cmp_flip_op(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LE;
+  case IXS_CMP_GE:
+    return IXS_CMP_LT;
+  case IXS_CMP_LT:
+    return IXS_CMP_GE;
+  case IXS_CMP_LE:
+    return IXS_CMP_GT;
+  case IXS_CMP_EQ:
+    return IXS_CMP_NE;
+  case IXS_CMP_NE:
+    return IXS_CMP_EQ;
+  default:
+    return op;
+  }
+}
+
 /* ~(a > b) -> a <= b, etc.  Returns NULL if a is not a CMP node. */
 static ixs_node *not_cmp_flip(ixs_ctx *ctx, ixs_node *a) {
-  ixs_cmp_op flipped;
   if (a->tag != IXS_CMP)
     return NULL;
-  switch (a->u.binary.cmp_op) {
-  case IXS_CMP_GT:
-    flipped = IXS_CMP_LE;
-    break;
-  case IXS_CMP_GE:
-    flipped = IXS_CMP_LT;
-    break;
-  case IXS_CMP_LT:
-    flipped = IXS_CMP_GE;
-    break;
-  case IXS_CMP_LE:
-    flipped = IXS_CMP_GT;
-    break;
-  case IXS_CMP_EQ:
-    flipped = IXS_CMP_NE;
-    break;
-  case IXS_CMP_NE:
-    flipped = IXS_CMP_EQ;
-    break;
-  default:
-    flipped = a->u.binary.cmp_op;
-    break;
-  }
   IXS_STAT_HIT(ctx);
   return ixs_node_binary(ctx, IXS_CMP, a->u.binary.lhs, a->u.binary.rhs,
-                         flipped);
+                         cmp_flip_op(a->u.binary.cmp_op));
 }
 
 ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
@@ -2617,6 +2612,31 @@ static ixs_node *simp_logic_impl(ixs_ctx *ctx, ixs_tag tag, ixs_node *a,
 
   if (nargs == 1)
     return args[0];
+
+  /* Complementary pair annihilation: OR(A, ~A)=True, AND(A, ~A)=False. */
+  {
+    ixs_node *annihilator = (tag == IXS_OR) ? ctx->node_true : ctx->node_false;
+    for (i = 0; i < nargs; i++) {
+      if (args[i]->tag == IXS_NOT) {
+        uint32_t k;
+        ixs_node *child = args[i]->u.unary_bool.arg;
+        for (k = 0; k < nargs; k++) {
+          if (args[k] == child)
+            return annihilator;
+        }
+      } else if (args[i]->tag == IXS_CMP) {
+        uint32_t k;
+        ixs_cmp_op flipped = cmp_flip_op(args[i]->u.binary.cmp_op);
+        for (k = i + 1; k < nargs; k++) {
+          if (args[k]->tag == IXS_CMP &&
+              args[k]->u.binary.lhs == args[i]->u.binary.lhs &&
+              args[k]->u.binary.rhs == args[i]->u.binary.rhs &&
+              args[k]->u.binary.cmp_op == flipped)
+            return annihilator;
+        }
+      }
+    }
+  }
 
   return ixs_node_logic(ctx, tag, nargs, args);
 }
