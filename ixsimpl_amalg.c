@@ -3701,15 +3701,10 @@ int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 #define SIMPLIFY_ITER_LIMIT 64
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
-/* Each simplification rule: (ctx, bnds, node) -> node.
- *   return n   = rule didn't fire (no change)
- *   return new = rule fired, use new node
- *   return NULL = OOM (propagated to caller)
- *
- * Thin wrappers use `r ? r : n` to map a helper's NULL-means-no-match
- * convention.  This conflates OOM with "didn't fire" — acceptable for
- * now since OOM is fatal shortly after, but a dedicated NO_MATCH
- * sentinel would be cleaner (see bead 4-3or). */
+/* Rule-chain functions (rules and the helpers they call):
+ *   return n    = rule didn't fire (no change)
+ *   return new  = rule fired, use new node
+ *   return NULL = OOM (propagated to caller) */
 
 typedef ixs_node *(*ixs_rule_fn)(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 
@@ -3741,17 +3736,16 @@ static ixs_node *try_rules(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n,
 
 /* Forward declarations for helpers defined later in this file. */
 static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                         ixs_node *arg, bool is_ceil);
+                                         ixs_node *n, bool is_ceil);
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr);
 static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m);
-static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
-                                 ixs_node *r);
+static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *l, ixs_node *r);
+                                     ixs_node *n);
 static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *l, ixs_node *r);
+                                     ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
-                                    ixs_node *cmp_node);
+                                    ixs_node *n);
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp);
 ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
@@ -5092,7 +5086,7 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
         int64_t denom = tq / g2;
         if (!is_known_divisible(bnds, x->u.add.terms[i].term, denom))
           return x;
-        eff_num = tq; /* product is integer → effective denom 1 */
+        eff_num = tq; /* product is integer -- effective denom 1 */
       } else {
         return x;
       }
@@ -5132,7 +5126,7 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
  * gcd(g, L*D) >= gcd(g, L) for any positive integer D, adding r < gcd(g,L)
  * to N cannot push past the next multiple of gcd(g,L*D), so the floor
  * is unchanged.  Therefore floor((N+C)/(L*D)) = floor((N+C')/(L*D))
- * whenever C ≡ C' (mod gcd(g, L)).
+ * whenever C == C' (mod gcd(g, L)).
  */
 
 /* Check that every term in an ADD is MUL and contains denom^-1. */
@@ -5402,14 +5396,12 @@ static ixs_node *floor_mod_div_zero(ixs_ctx *ctx, ixs_node *x) {
 
 static ixs_node *rule_floor_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *n) {
-  ixs_node *r = try_floor_ceil_collapse(ctx, bnds, n->u.unary.arg, false);
-  return r ? r : n;
+  return try_floor_ceil_collapse(ctx, bnds, n, false);
 }
 
 static ixs_node *rule_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n) {
-  ixs_node *r = try_floor_ceil_collapse(ctx, bnds, n->u.unary.arg, true);
-  return r ? r : n;
+  return try_floor_ceil_collapse(ctx, bnds, n, true);
 }
 
 static ixs_node *rule_round_integer_divinfo(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -5502,13 +5494,14 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
  *
  * Detects MUL nodes where one factor is FLOOR/CEIL^1 and the
  * remaining product is 1/D with D a positive integer.
- * Returns the simplified arg, x unchanged if the rule doesn't apply,
+ * Returns simplified result, n unchanged if the rule doesn't apply,
  * or NULL on OOM.
  */
-static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *x,
+static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *n,
                                     ixs_tag inner_tag, round_fn rnd) {
+  ixs_node *x = n->u.unary.arg;
   if (x->tag != IXS_MUL)
-    return x;
+    return n;
 
   int32_t fl_idx = -1;
   uint32_t i;
@@ -5520,14 +5513,14 @@ static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *x,
     }
   }
   if (fl_idx < 0)
-    return x;
+    return n;
 
   /* Build denom D = (1/coeff) * prod(fi^(-ei)) for all non-round factors.
    * D must be a positive integer for the identity to hold. */
   int64_t cp, cq;
   ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
   if (cp <= 0)
-    return x;
+    return n;
   ixs_node *denom = make_const(ctx, cq, cp);
   if (!denom)
     return NULL;
@@ -5540,7 +5533,7 @@ static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *x,
   if (!denom)
     return NULL;
   if (!ixs_node_is_integer_valued(denom))
-    return x;
+    return n;
 
   ixs_node *inner_arg = x->u.mul.factors[fl_idx].base->u.unary.arg;
   ixs_node *replaced = simp_div(ctx, inner_arg, denom);
@@ -5551,24 +5544,14 @@ static ixs_node *round_unwrap_inner(ixs_ctx *ctx, ixs_node *x,
 
 static ixs_node *rule_floor_unwrap_inner(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
-  ixs_node *x = n->u.unary.arg;
-  ixs_node *r;
   (void)bnds;
-  r = round_unwrap_inner(ctx, x, IXS_FLOOR, simp_floor);
-  if (!r)
-    return NULL;
-  return (r == x) ? n : r;
+  return round_unwrap_inner(ctx, n, IXS_FLOOR, simp_floor);
 }
 
 static ixs_node *rule_ceil_unwrap_inner(ixs_ctx *ctx, ixs_bounds *bnds,
                                         ixs_node *n) {
-  ixs_node *x = n->u.unary.arg;
-  ixs_node *r;
   (void)bnds;
-  r = round_unwrap_inner(ctx, x, IXS_CEIL, simp_ceil);
-  if (!r)
-    return NULL;
-  return (r == x) ? n : r;
+  return round_unwrap_inner(ctx, n, IXS_CEIL, simp_ceil);
 }
 
 /* ---- Floor/ceil rule tables -------------------------------------- */
@@ -5655,28 +5638,30 @@ ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
 /* ------------------------------------------------------------------ */
 
 /* Mod(c*t, m) -> 0 when all factors are integer-valued and m | c. */
-static ixs_node *mod_mul_zero(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+static ixs_node *mod_mul_zero(ixs_ctx *ctx, ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   if (a->tag != IXS_MUL || b->tag != IXS_INT || b->u.ival <= 0)
-    return NULL;
+    return n;
 
   int64_t cp, cq;
   uint32_t i;
   ixs_node_get_rat(a->u.mul.coeff, &cp, &cq);
   if (cq != 1 || cp == 0 || cp % b->u.ival != 0)
-    return NULL;
+    return n;
 
   for (i = 0; i < a->u.mul.nfactors; i++) {
     if (a->u.mul.factors[i].exp < 0 ||
         !ixs_node_is_integer_valued(a->u.mul.factors[i].base))
-      return NULL;
+      return n;
   }
   return ixs_node_int(ctx, 0);
 }
 
 /* Mod(x + k*m, m) -> Mod(x, m): strip additive multiples of m. */
-static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   if (a->tag != IXS_ADD || b->tag != IXS_INT || b->u.ival <= 0)
-    return NULL;
+    return n;
 
   int64_t m = b->u.ival;
   int64_t const_p, const_q;
@@ -5713,7 +5698,7 @@ static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 
   if (!changed) {
     ixs_arena_restore(&ctx->scratch, sm);
-    return NULL;
+    return n;
   }
 
   ixs_node *new_a;
@@ -5750,17 +5735,17 @@ static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
  * Proof: each |ci| | q, so sum = Sigma ci*ti is a multiple of g = gcd(|ci|).
  * Then (sum mod q) in {0, g, 2g, ..., q-g}.  If 0 < c < g, then
  * (sum mod q) + c < q, so Mod(sum + c, q) = (sum mod q) + c. */
-static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *a,
-                                         ixs_node *b) {
+static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   if (a->tag != IXS_ADD || b->tag != IXS_INT || b->u.ival <= 0)
-    return NULL;
+    return n;
 
   int64_t m = b->u.ival;
   int64_t const_p, const_q;
   ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
 
   if (const_q != 1 || const_p <= 0 || a->u.add.nterms == 0)
-    return NULL;
+    return n;
 
   int64_t g = 0;
   bool ok = true;
@@ -5779,7 +5764,7 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *a,
   }
 
   if (!ok || g <= 1 || const_p >= g)
-    return NULL;
+    return n;
 
   ixs_node *zero = ixs_node_int(ctx, 0);
   if (!zero)
@@ -5821,10 +5806,8 @@ static ixs_node *rule_mod_one(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
 
 static ixs_node *rule_mod_mul_zero(ixs_ctx *ctx, ixs_bounds *bnds,
                                    ixs_node *n) {
-  ixs_node *r;
   (void)bnds;
-  r = mod_mul_zero(ctx, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return mod_mul_zero(ctx, n);
 }
 
 static ixs_node *rule_mod_idempotent(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -5839,24 +5822,19 @@ static ixs_node *rule_mod_idempotent(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_mod_strip_multiples(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
-  ixs_node *r;
   (void)bnds;
-  r = mod_strip_multiples(ctx, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return mod_strip_multiples(ctx, n);
 }
 
 static ixs_node *rule_mod_extract_small_const(ixs_ctx *ctx, ixs_bounds *bnds,
                                               ixs_node *n) {
-  ixs_node *r;
   (void)bnds;
-  r = mod_extract_small_const(ctx, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return mod_extract_small_const(ctx, n);
 }
 
 static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
                                       ixs_node *n) {
-  ixs_node *r = mod_bounds_elim(ctx, bnds, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return mod_bounds_elim(ctx, bnds, n);
 }
 
 /* Constant folds and identity first, then structural, bounds last. */
@@ -5927,16 +5905,12 @@ static ixs_node *rule_min_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
-  ixs_node *r =
-      max_bounds_collapse(ctx, bnds, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return max_bounds_collapse(ctx, bnds, n);
 }
 
 static ixs_node *rule_min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
-  ixs_node *r =
-      min_bounds_collapse(ctx, bnds, n->u.binary.lhs, n->u.binary.rhs);
-  return r ? r : n;
+  return min_bounds_collapse(ctx, bnds, n);
 }
 
 static const ixs_rule max_rules[] = {
@@ -6037,17 +6011,17 @@ ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /* ------------------------------------------------------------------ */
 
 /* Normalize: (a op b) -> ((a - b) op 0) so all comparisons have zero RHS. */
-static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op,
-                                       ixs_node *b) {
+static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   ixs_node *diff;
   if (ixs_node_is_zero(b))
-    return NULL;
+    return n;
   diff = simp_sub(ctx, a, b);
   if (!diff)
-    return diff; /* propagate NULL */
+    return diff;
   if (ixs_node_is_sentinel(diff))
     return diff;
-  return simp_cmp(ctx, diff, op, ixs_node_int(ctx, 0));
+  return simp_cmp(ctx, diff, n->u.binary.cmp_op, ixs_node_int(ctx, 0));
 }
 
 /* ---- CMP rule wrappers ------------------------------------------- */
@@ -6107,17 +6081,13 @@ static ixs_node *rule_cmp_identity(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_cmp_normalize(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n) {
-  ixs_node *r;
   (void)bnds;
-  r = cmp_normalize_to_zero(ctx, n->u.binary.lhs, n->u.binary.cmp_op,
-                            n->u.binary.rhs);
-  return r ? r : n;
+  return cmp_normalize_to_zero(ctx, n);
 }
 
 static ixs_node *rule_cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
-  ixs_node *r = cmp_bounds_resolve(ctx, bnds, n);
-  return r ? r : n;
+  return cmp_bounds_resolve(ctx, bnds, n);
 }
 
 /* Normalize before bounds: canonicalize to `expr CMP 0` so bounds
@@ -6666,24 +6636,24 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   return result;
 }
 
-/* Collapse floor or ceil to a constant when bounds pin it to one value.
- * Returns the constant node, or NULL if bounds don't collapse. */
+/* Collapse floor or ceil to a constant when bounds pin it to one value. */
 static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                         ixs_node *arg, bool is_ceil) {
+                                         ixs_node *n, bool is_ceil) {
+  ixs_node *arg = n->u.unary.arg;
   ixs_interval iv;
   int64_t lo_val, hi_val;
   if (!bnds)
-    return NULL;
+    return n;
   iv = ixs_bounds_get(bnds, arg);
   if (!iv.valid)
-    return NULL;
+    return n;
   lo_val = is_ceil ? ixs_rat_ceil(iv.lo_p, iv.lo_q)
                    : ixs_rat_floor(iv.lo_p, iv.lo_q);
   hi_val = is_ceil ? ixs_rat_ceil(iv.hi_p, iv.hi_q)
                    : ixs_rat_floor(iv.hi_p, iv.hi_q);
   if (lo_val == hi_val)
     return ixs_node_int(ctx, lo_val);
-  return NULL;
+  return n;
 }
 
 /* True when expr is provably divisible by m (m > 0) given bounds.
@@ -6696,7 +6666,7 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
   if (expr->tag == IXS_INT)
     return expr->u.ival % m == 0;
 
-  /* Symbol with known congruence: x ≡ r (mod M), divisible by m iff
+  /* Symbol with known congruence: x == r (mod M), divisible by m iff
    * M % m == 0 && r % m == 0. */
   if (expr->tag == IXS_SYM) {
     int64_t sym_mod, sym_rem;
@@ -6786,19 +6756,19 @@ static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   return false;
 }
 
-/* Mod(x, M) -> x when 0 <= x < M; -> r when x ≡ r (mod m) and m % M == 0;
- * -> 0 when M | x.  Returns NULL if bounds don't resolve. */
-static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
-                                 ixs_node *r) {
+/* Mod(x, M) -> x when 0 <= x < M; -> r when x == r (mod m) and m % M == 0;
+ * -> 0 when M | x. */
+static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
+  ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
   if (!bnds || r->tag != IXS_INT || r->u.ival <= 0)
-    return NULL;
+    return n;
 
   ixs_interval iv = ixs_bounds_get(bnds, l);
   if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
       iv.hi_p < r->u.ival)
     return l;
 
-  /* x ≡ rem (mod m) with m % M == 0  ⟹  Mod(x, M) == rem % M */
+  /* x == rem (mod m) with m % M == 0  =>  Mod(x, M) == rem % M */
   if (l->tag == IXS_SYM) {
     int64_t sym_mod, sym_rem;
     if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
@@ -6809,61 +6779,62 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *l,
   if (is_known_divisible(bnds, l, r->u.ival))
     return ixs_node_int(ctx, 0);
 
-  return NULL;
+  return n;
 }
 
 /* max(l, r) -> l or r when bounds prove one always dominates. */
 static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *l, ixs_node *r) {
+                                     ixs_node *n) {
+  ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
   ixs_interval il, ir;
   (void)ctx;
   if (!bnds)
-    return NULL;
+    return n;
   il = ixs_bounds_get(bnds, l);
   ir = ixs_bounds_get(bnds, r);
   if (!il.valid || !ir.valid)
-    return NULL;
+    return n;
   if (ixs_rat_cmp(il.lo_p, il.lo_q, ir.hi_p, ir.hi_q) >= 0)
     return l;
   if (ixs_rat_cmp(ir.lo_p, ir.lo_q, il.hi_p, il.hi_q) >= 0)
     return r;
-  return NULL;
+  return n;
 }
 
 /* min(l, r) -> l or r when bounds prove one always dominates. */
 static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *l, ixs_node *r) {
+                                     ixs_node *n) {
+  ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
   ixs_interval il, ir;
   (void)ctx;
   if (!bnds)
-    return NULL;
+    return n;
   il = ixs_bounds_get(bnds, l);
   ir = ixs_bounds_get(bnds, r);
   if (!il.valid || !ir.valid)
-    return NULL;
+    return n;
   if (ixs_rat_cmp(il.hi_p, il.hi_q, ir.lo_p, ir.lo_q) <= 0)
     return l;
   if (ixs_rat_cmp(ir.hi_p, ir.hi_q, il.lo_p, il.lo_q) <= 0)
     return r;
-  return NULL;
+  return n;
 }
 
 /* Resolve (expr cmp 0) to TRUE/FALSE when bounds determine the outcome. */
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
-                                    ixs_node *cmp_node) {
+                                    ixs_node *n) {
   ixs_interval iv;
   bool known = false;
   bool val = false;
 
-  if (!bnds || cmp_node->tag != IXS_CMP ||
-      !ixs_node_is_zero(cmp_node->u.binary.rhs))
-    return NULL;
+  if (!bnds || n->tag != IXS_CMP || !ixs_node_is_zero(n->u.binary.rhs))
+    return n;
 
-  iv = ixs_bounds_get(bnds, cmp_node->u.binary.lhs);
+  iv = ixs_bounds_get(bnds, n->u.binary.lhs);
   if (!iv.valid)
-    return NULL;
+    return n;
 
-  switch (cmp_node->u.binary.cmp_op) {
+  switch (n->u.binary.cmp_op) {
   case IXS_CMP_GT:
     if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0) {
       known = true;
@@ -6921,7 +6892,7 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
   }
   if (known)
     return val ? ctx->node_true : ctx->node_false;
-  return NULL;
+  return n;
 }
 
 static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
