@@ -55,5 +55,11 @@ repos:
         name: regenerate ixsimpl_amalg.c
         language: python
         entry: python scripts/amalgamate.py
-        files: ^src/.*\.c$
+        files: ^src/.*\.[ch]$
+        pass_filenames: false
+      - id: check-exports
+        name: check exported symbols
+        language: python
+        entry: python scripts/check_exports.py
+        files: ^(src/.*\.[ch]|include/ixsimpl\.h|ixsimpl_amalg\.c)$
         pass_filenames: false
