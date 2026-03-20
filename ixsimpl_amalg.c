@@ -4474,6 +4474,82 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
   }
 }
 
+/* Fold PW terms in an ADD when 2+ share the same condition structure.
+ * Distributes non-PW addends into each branch and merges PW values.
+ * Returns the merged PW, or NULL if inapplicable or OOM. */
+static ixs_node *pw_fold_in_add(ixs_ctx *ctx, ixs_addterm *terms,
+                                uint32_t nterms, int64_t const_p,
+                                int64_t const_q) {
+  uint32_t i, j;
+  int32_t first_pw = -1;
+  uint32_t pw_count = 0;
+  ixs_node *ref;
+  uint32_t nc;
+
+  for (i = 0; i < nterms; i++) {
+    if (terms[i].term->tag == IXS_PIECEWISE) {
+      if (first_pw < 0)
+        first_pw = (int32_t)i;
+      pw_count++;
+    }
+  }
+  if (pw_count < 2)
+    return NULL;
+
+  ref = terms[first_pw].term;
+  nc = ref->u.pw.ncases;
+
+  for (i = (uint32_t)first_pw + 1; i < nterms; i++) {
+    if (terms[i].term->tag != IXS_PIECEWISE)
+      continue;
+    if (terms[i].term->u.pw.ncases != nc)
+      return NULL;
+    for (j = 0; j < nc; j++) {
+      if (terms[i].term->u.pw.cases[j].cond != ref->u.pw.cases[j].cond)
+        return NULL;
+    }
+  }
+
+  /* Build the non-PW portion of the sum. */
+  ixs_node *non_pw = make_const(ctx, const_p, const_q);
+  if (!non_pw)
+    return NULL;
+  for (i = 0; i < nterms; i++) {
+    if (terms[i].term->tag == IXS_PIECEWISE)
+      continue;
+    ixs_node *scaled = simp_mul(ctx, terms[i].coeff, terms[i].term);
+    non_pw = scaled ? simp_add(ctx, non_pw, scaled) : NULL;
+    if (!non_pw)
+      return NULL;
+  }
+
+  ixs_node **vals =
+      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
+  ixs_node **cds =
+      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*cds), sizeof(void *));
+  if (!vals || !cds)
+    return NULL;
+
+  for (j = 0; j < nc; j++) {
+    ixs_node *branch = non_pw;
+    for (i = 0; i < nterms; i++) {
+      ixs_node *pw;
+      ixs_node *scaled;
+      if (terms[i].term->tag != IXS_PIECEWISE)
+        continue;
+      pw = terms[i].term;
+      scaled = simp_mul(ctx, terms[i].coeff, pw->u.pw.cases[j].value);
+      branch = scaled ? simp_add(ctx, branch, scaled) : NULL;
+      if (!branch)
+        return NULL;
+    }
+    vals[j] = branch;
+    cds[j] = ref->u.pw.cases[j].cond;
+  }
+
+  return simp_pw(ctx, nc, vals, cds);
+}
+
 static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop;
   int64_t const_p = 0, const_q = 1;
@@ -4593,6 +4669,12 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         cancel_floor_mod_pairs(ctx, terms, nterms, const_p, const_q);
     if (fmc)
       return fmc;
+  }
+
+  {
+    ixs_node *pw_result = pw_fold_in_add(ctx, terms, nterms, const_p, const_q);
+    if (pw_result)
+      return pw_result;
   }
 
   /* Result cases. */
@@ -6308,6 +6390,15 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
       return c;
     }
 
+    if (ncases > 0 && cases[ncases - 1].value == v) {
+      cases[ncases - 1].cond = simp_or(ctx, cases[ncases - 1].cond, c);
+      if (!cases[ncases - 1].cond)
+        return NULL;
+      if (cases[ncases - 1].cond->tag == IXS_TRUE)
+        break;
+      continue;
+    }
+
     if (c->tag == IXS_TRUE) {
       if (ixs_node_is_sentinel(v)) {
         if (ncases > 0 && cases[ncases - 1].cond->tag == IXS_TRUE)
@@ -6318,13 +6409,6 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
       cases[ncases].cond = c;
       ncases++;
       break;
-    }
-
-    if (ncases > 0 && cases[ncases - 1].value == v) {
-      cases[ncases - 1].cond = simp_or(ctx, cases[ncases - 1].cond, c);
-      if (!cases[ncases - 1].cond)
-        return NULL;
-      continue;
     }
 
     if (ncases >= cap) {

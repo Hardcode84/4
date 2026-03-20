@@ -963,6 +963,54 @@ static void test_floor_mod_divisor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* A - PW((A+B, c), (A+C, ~c)) + PW((B, c), (C, ~c)) should fold to 0. */
+static void test_pw_fold_in_add(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *c = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *A = ixs_mul(ctx, ixs_int(ctx, 128), y);
+  ixs_node *B = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *C =
+      ixs_mul(ctx, ixs_int(ctx, 4),
+              ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
+                                     ixs_int(ctx, 16))));
+
+  ixs_node *v1[] = {ixs_add(ctx, A, B), ixs_add(ctx, A, C)};
+  ixs_node *c1[] = {c, ixs_true(ctx)};
+  ixs_node *pw1 = ixs_pw(ctx, 2, v1, c1);
+
+  ixs_node *v2[] = {B, C};
+  ixs_node *c2[] = {c, ixs_true(ctx)};
+  ixs_node *pw2 = ixs_pw(ctx, 2, v2, c2);
+
+  /* Verify conditions are pointer-equal (hash-consed). */
+  CHECK(ixs_node_pw_cond(pw1, 0) == ixs_node_pw_cond(pw2, 0));
+  CHECK(ixs_node_pw_cond(pw1, 1) == ixs_node_pw_cond(pw2, 1));
+
+  /* A - pw1 + pw2 = 0 */
+  ixs_node *expr = ixs_add(ctx, ixs_sub(ctx, A, pw1), pw2);
+  CHECK(expr == ixs_int(ctx, 0));
+  ixs_node *r = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(r == ixs_int(ctx, 0));
+
+  /* Also test via from_sympy-like path: sequential add */
+  ixs_node *neg_pw1 = ixs_mul(ctx, ixs_int(ctx, -1), pw1);
+  ixs_node *s1 = ixs_add(ctx, A, neg_pw1);
+  ixs_node *s2 = ixs_add(ctx, s1, pw2);
+  CHECK(s2 == ixs_int(ctx, 0));
+
+  /* Negative: different conditions must NOT fold. */
+  ixs_node *d = ixs_cmp(ctx, y, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *v3[] = {B, C};
+  ixs_node *c3[] = {d, ixs_true(ctx)};
+  ixs_node *pw3 = ixs_pw(ctx, 2, v3, c3);
+  ixs_node *no_fold = ixs_add(ctx, ixs_sub(ctx, A, pw1), pw3);
+  CHECK(no_fold != ixs_int(ctx, 0));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_piecewise_branch_bounds(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1722,6 +1770,7 @@ int main(void) {
   test_mod_floor_regression();
   test_mod_recognition();
   test_floor_mod_divisor();
+  test_pw_fold_in_add();
   test_piecewise_branch_bounds();
   test_floor_symbolic_denom();
   test_simplify_batch();
