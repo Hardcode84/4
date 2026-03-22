@@ -111,6 +111,11 @@ if(NOT USE_AMALGAMATION)
     target_link_libraries(test_arena ixsimpl)
     target_include_directories(test_arena PRIVATE src)
     add_test(NAME test_arena COMMAND test_arena)
+
+    add_executable(test_bounds test/test_bounds.c)
+    target_link_libraries(test_bounds ixsimpl)
+    target_include_directories(test_bounds PRIVATE src)
+    add_test(NAME test_bounds COMMAND test_bounds)
 endif()
 
 # --- Benchmark ---
