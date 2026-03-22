@@ -150,8 +150,8 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
 @st.composite
 def conditions(draw: st.DrawFn, max_depth: int = 2) -> CondTree:
     if max_depth <= 0 or draw(st.booleans()):
-        a = draw(expressions(max_depth=2))
-        b = draw(expressions(max_depth=2))
+        a = draw(expressions(max_depth=4))
+        b = draw(expressions(max_depth=4))
         op = draw(st.sampled_from([">=", ">", "<=", "<", "==", "!="]))
         return ("cmp", op, a, b)
     combiner = draw(st.sampled_from(["and", "or", "not"]))
