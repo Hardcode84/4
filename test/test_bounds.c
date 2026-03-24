@@ -35,6 +35,26 @@ static void test_iv_add_basic(void) {
   CHECK(r.hi_p == 25 && r.hi_q == 1);
 }
 
+static void test_iv_add_overflow_widens(void) {
+  /* (-inf, -70] + [0, 63]: lo overflows, should widen to -inf. */
+  ixs_interval a = ixs_interval_range(INT64_MIN, 1, -70, 1);
+  ixs_interval b = ixs_interval_range(0, 1, 63, 1);
+  ixs_interval r = iv_add(a, b);
+  CHECK(r.valid);
+  CHECK(ixs_interval_is_neg_inf(r.lo_p, r.lo_q));
+  CHECK(r.hi_p == -7 && r.hi_q == 1);
+}
+
+static void test_iv_add_pos_overflow_widens(void) {
+  /* [70, +inf) + [0, 63]: hi overflows, should widen to +inf. */
+  ixs_interval a = ixs_interval_range(70, 1, INT64_MAX, 1);
+  ixs_interval b = ixs_interval_range(0, 1, 63, 1);
+  ixs_interval r = iv_add(a, b);
+  CHECK(r.valid);
+  CHECK(r.lo_p == 70 && r.lo_q == 1);
+  CHECK(ixs_interval_is_pos_inf(r.hi_p, r.hi_q));
+}
+
 static void test_iv_add_invalid(void) {
   ixs_interval a = ixs_interval_range(1, 1, 5, 1);
   ixs_interval b = ixs_interval_unknown();
@@ -592,6 +612,8 @@ static void test_bounds_check_non_cmp(void) {
 int main(void) {
   /* Interval arithmetic */
   test_iv_add_basic();
+  test_iv_add_overflow_widens();
+  test_iv_add_pos_overflow_widens();
   test_iv_add_invalid();
   test_iv_mul_const_basic();
   test_iv_mul_const_negative();

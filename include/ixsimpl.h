@@ -122,9 +122,11 @@ typedef enum {
   IXS_CHECK_UNKNOWN
 } ixs_check_result;
 
-/* Check whether a boolean expression (CMP node) is provably true or false
- * given the assumptions, using interval propagation.  Returns UNKNOWN when
- * bounds are insufficient to decide.  Lighter than ixs_simplify: no
+/* Check whether a comparison is provably true or false given the
+ * assumptions, using interval propagation.  expr must be a CMP node
+ * in normalized form (lhs op 0) -- this is automatic when constructed
+ * via ixs_cmp().  Returns UNKNOWN when bounds are insufficient, when
+ * expr is not a CMP, or on OOM.  Lighter than ixs_simplify: no
  * rewriting, just bounds setup + interval check. */
 ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);

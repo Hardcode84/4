@@ -1061,7 +1061,8 @@ static PyMethodDef Context_methods[] = {
     {"ne", (PyCFunction)Context_ne, METH_VARARGS,
      "Build an inequality CMP node: ctx.ne(a, b)."},
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
-     "Check if a boolean expr is provably True/False/None given assumptions."},
+     "True if provable, False if contradicted, None if undecidable from "
+     "bounds."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS, "Simplify a list of Expr in-place."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,
