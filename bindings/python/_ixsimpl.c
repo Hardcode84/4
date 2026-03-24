@@ -693,6 +693,11 @@ static PyObject *Expr_get_mul_nfactors(ExprObject *self,
   return PyLong_FromUnsignedLong(ixs_node_mul_nfactors(self->node));
 }
 
+static PyObject *Expr_get_ctx(ExprObject *self, void *Py_UNUSED(closure)) {
+  Py_INCREF(self->ctx_obj);
+  return (PyObject *)self->ctx_obj;
+}
+
 static PyObject *Expr_get_cmp_op(ExprObject *self, void *Py_UNUSED(closure)) {
   if (ixs_node_tag(self->node) != IXS_CMP) {
     PyErr_SetString(PyExc_TypeError, "cmp_op requires CMP node");
@@ -732,6 +737,7 @@ static PyGetSetDef Expr_getset[] = {
     {"cmp_op", (getter)Expr_get_cmp_op, NULL,
      "Comparison operator (int, CMP_* constant). Only valid for CMP nodes.",
      NULL},
+    {"_ctx", (getter)Expr_get_ctx, NULL, "Owning Context (internal).", NULL},
     {NULL}};
 
 static PyTypeObject _ExprType = {

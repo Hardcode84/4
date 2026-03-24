@@ -67,6 +67,10 @@ class Expr(_Expr):
                     stack.append(node.child(i))
         return frozenset(syms)
 
+    def has(self, sym: _Expr) -> bool:
+        """True if *sym* appears anywhere in this expression tree."""
+        return sym in self.free_symbols
+
 
 _set_expr_class(Expr)
 
@@ -98,6 +102,7 @@ if TYPE_CHECKING:
             assumptions: Sequence[_Expr] | None = None,
         ) -> None: ...
 
+    def abs_(x: Expr) -> Expr: ...
     def floor(expr: Expr) -> Expr: ...
     def ceil(expr: Expr) -> Expr: ...
     def mod(a: Expr, b: Expr | int) -> Expr: ...
@@ -112,6 +117,10 @@ if TYPE_CHECKING:
 
 else:
     from ixsimpl._ixsimpl import Context
+
+    def abs_(x: Expr) -> Expr:
+        """Absolute value via piecewise: pw((x, x >= 0), (-x, true))."""
+        return _pw((x, x >= 0), (-x, x._ctx.true_()))  # type: ignore[return-value]
 
     floor = _floor
     ceil = _ceil
@@ -154,6 +163,7 @@ __all__ = [
     "XOR",
     "Context",
     "Expr",
+    "abs_",
     "and_",
     "ceil",
     "floor",

@@ -1376,3 +1376,33 @@ def test_check_non_cmp_returns_none() -> None:
     x = ctx.sym("x")
     assert ctx.check(x) is None
     assert ctx.check(x + 1) is None
+
+
+def test_has_basic() -> None:
+    ctx = ixsimpl.Context()
+    x, y, z = ctx.sym("x"), ctx.sym("y"), ctx.sym("z")
+    expr = x + 2 * y
+    assert expr.has(x)
+    assert expr.has(y)
+    assert not expr.has(z)
+    assert x.has(x)
+    assert not ctx.int_(42).has(x)
+
+
+def test_abs_simplifies_under_bounds() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    a = ixsimpl.abs_(x)
+    assert a.tag == ixsimpl.PIECEWISE
+
+    pos = a.simplify(assumptions=[x >= 0])
+    assert str(pos) == "x"
+
+    neg = a.simplify(assumptions=[x < 0])
+    assert str(neg) == "-x"
+
+
+def test_abs_constant() -> None:
+    ctx = ixsimpl.Context()
+    assert str(ixsimpl.abs_(ctx.int_(5))) == "5"
+    assert str(ixsimpl.abs_(ctx.int_(-3))) == "3"
