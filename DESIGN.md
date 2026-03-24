@@ -1268,6 +1268,14 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                          ixs_node *const *assumptions, size_t n_assumptions);
 
+// Entailment check: is a boolean expression provably true or false
+// under the given assumptions?  Uses interval propagation only (no
+// rewriting).  Returns IXS_CHECK_TRUE, IXS_CHECK_FALSE, or
+// IXS_CHECK_UNKNOWN.  Lighter than ixs_simplify for pure truth queries.
+typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
+ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+                           ixs_node *const *assumptions, size_t n_assumptions);
+
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
 // The canonical form keeps products factored; call this when you need

@@ -42,6 +42,11 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                                     ixs_node *const *assumptions,
                                     size_t n_assumptions);
 
+/* Entailment check: bounds-only, no rewriting. */
+IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
+                                       ixs_node *const *assumptions,
+                                       size_t n_assumptions);
+
 /* Substitution: replace all occurrences of target with replacement. */
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement);

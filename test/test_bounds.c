@@ -520,6 +520,72 @@ static void test_iv_endpoint_widen_neg_neg(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Bounds: entailment check (ixs_bounds_check)                       */
+/* ------------------------------------------------------------------ */
+
+/* M in (-inf, 63]: M < 70 is always true. */
+static void test_bounds_check_true(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *assume = ixs_cmp(ctx, M, IXS_CMP_LT, ixs_int(ctx, 64));
+  ixs_node *query = ixs_cmp(ctx, M, IXS_CMP_LT, ixs_int(ctx, 70));
+  CHECK(ixs_check(ctx, query, &assume, 1) == IXS_CHECK_TRUE);
+  ixs_ctx_destroy(ctx);
+}
+
+/* M in (-inf, 63]: M > 70 is always false. */
+static void test_bounds_check_false(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *assume = ixs_cmp(ctx, M, IXS_CMP_LT, ixs_int(ctx, 64));
+  ixs_node *query = ixs_cmp(ctx, M, IXS_CMP_GT, ixs_int(ctx, 70));
+  CHECK(ixs_check(ctx, query, &assume, 1) == IXS_CHECK_FALSE);
+  ixs_ctx_destroy(ctx);
+}
+
+/* M in (-inf, 63]: M < 32 is unknown (could be 10 or 50). */
+static void test_bounds_check_unknown(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *assume = ixs_cmp(ctx, M, IXS_CMP_LT, ixs_int(ctx, 64));
+  ixs_node *query = ixs_cmp(ctx, M, IXS_CMP_LT, ixs_int(ctx, 32));
+  CHECK(ixs_check(ctx, query, &assume, 1) == IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+/* M == 5: (M - 5) == 0 is true; (M - 3) == 0 is false. */
+static void test_bounds_check_eq(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *assume = ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 5));
+  ixs_node *q_true = ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 5));
+  ixs_node *q_false = ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 3));
+  CHECK(ixs_check(ctx, q_true, &assume, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, q_false, &assume, 1) == IXS_CHECK_FALSE);
+  ixs_ctx_destroy(ctx);
+}
+
+/* M in [0, 10]: M != 20 is true. */
+static void test_bounds_check_ne(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *assumes[2];
+  assumes[0] = ixs_cmp(ctx, M, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, M, IXS_CMP_LE, ixs_int(ctx, 10));
+  ixs_node *query = ixs_cmp(ctx, M, IXS_CMP_NE, ixs_int(ctx, 20));
+  CHECK(ixs_check(ctx, query, assumes, 2) == IXS_CHECK_TRUE);
+  ixs_ctx_destroy(ctx);
+}
+
+/* Non-CMP input returns UNKNOWN. */
+static void test_bounds_check_non_cmp(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  CHECK(ixs_check(ctx, x, NULL, 0) == IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+/* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -574,6 +640,14 @@ int main(void) {
 
   /* Bounds: expression overrides */
   test_bounds_expr_override();
+
+  /* Bounds: entailment check */
+  test_bounds_check_true();
+  test_bounds_check_false();
+  test_bounds_check_unknown();
+  test_bounds_check_eq();
+  test_bounds_check_ne();
+  test_bounds_check_non_cmp();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

@@ -851,6 +851,68 @@ static PyObject *Context_ne(ContextObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self, result);
 }
 
+static PyObject *Context_check(ContextObject *self, PyObject *args,
+                               PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "assumptions", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL;
+  Py_ssize_t i, n_assumptions = 0;
+  ixs_node *expr, **assumptions = NULL;
+  ixs_check_result r;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
+                                   &assumptions_obj))
+    return NULL;
+
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  expr = ((ExprObject *)expr_obj)->node;
+
+  if (assumptions_obj && assumptions_obj != Py_None) {
+    n_assumptions = PySequence_Size(assumptions_obj);
+    if (n_assumptions < 0)
+      return NULL;
+    if (n_assumptions > 0) {
+      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      if (!assumptions)
+        return PyErr_NoMemory();
+      for (i = 0; i < n_assumptions; i++) {
+        PyObject *item = PySequence_GetItem(assumptions_obj, i);
+        if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
+          Py_XDECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+          return NULL;
+        }
+        if (((ExprObject *)item)->ctx_obj != self) {
+          Py_DECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_ValueError,
+                          "ixsimpl: assumption from different context");
+          return NULL;
+        }
+        assumptions[i] = ((ExprObject *)item)->node;
+        Py_DECREF(item);
+      }
+    }
+  }
+
+  r = ixs_check(self->ctx, expr, assumptions, (size_t)n_assumptions);
+  PyMem_Free(assumptions);
+
+  if (r == IXS_CHECK_TRUE)
+    Py_RETURN_TRUE;
+  if (r == IXS_CHECK_FALSE)
+    Py_RETURN_FALSE;
+  Py_RETURN_NONE;
+}
+
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
   static char *kwlist[] = {"exprs", "assumptions", NULL};
@@ -998,6 +1060,8 @@ static PyMethodDef Context_methods[] = {
      "Build an equality CMP node: ctx.eq(a, b)."},
     {"ne", (PyCFunction)Context_ne, METH_VARARGS,
      "Build an inequality CMP node: ctx.ne(a, b)."},
+    {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
+     "Check if a boolean expr is provably True/False/None given assumptions."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS, "Simplify a list of Expr in-place."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,

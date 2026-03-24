@@ -63,4 +63,9 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem);
 
+/* Check a normalized CMP node (lhs op 0) against current bounds.
+ * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or
+ * non-zero rhs returns UNKNOWN. */
+IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp);
+
 #endif /* IXS_BOUNDS_H */

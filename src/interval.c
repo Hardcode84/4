@@ -17,10 +17,18 @@ IXS_STATIC ixs_interval iv_add(ixs_interval a, ixs_interval b) {
   if (!a.valid || !b.valid)
     return ixs_interval_unknown();
   r.valid = true;
-  if (!ixs_rat_add(a.lo_p, a.lo_q, b.lo_p, b.lo_q, &r.lo_p, &r.lo_q))
-    return ixs_interval_unknown();
-  if (!ixs_rat_add(a.hi_p, a.hi_q, b.hi_p, b.hi_q, &r.hi_p, &r.hi_q))
-    return ixs_interval_unknown();
+  if (!ixs_rat_add(a.lo_p, a.lo_q, b.lo_p, b.lo_q, &r.lo_p, &r.lo_q)) {
+    if (ixs_rat_is_neg(a.lo_p) || ixs_rat_is_neg(b.lo_p))
+      ixs_interval_set_neg_inf(&r.lo_p, &r.lo_q);
+    else
+      ixs_interval_set_pos_inf(&r.lo_p, &r.lo_q);
+  }
+  if (!ixs_rat_add(a.hi_p, a.hi_q, b.hi_p, b.hi_q, &r.hi_p, &r.hi_q)) {
+    if (!ixs_rat_is_neg(a.hi_p) || !ixs_rat_is_neg(b.hi_p))
+      ixs_interval_set_pos_inf(&r.hi_p, &r.hi_q);
+    else
+      ixs_interval_set_neg_inf(&r.hi_p, &r.hi_q);
+  }
   return r;
 }
 

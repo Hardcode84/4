@@ -1336,3 +1336,43 @@ def test_floor_drop_const_sym_targeted(
         assert orig == simp, f"floor_drop_const_sym mismatch: {orig} != {simp}"
         checked += 1
     assume(checked > 0)
+
+
+def test_check_entailment_basic() -> None:
+    """Mirrors the Wave evaluate_with_assumptions use case."""
+    ctx = ixsimpl.Context()
+    M = ctx.sym("M")
+
+    assume_lt64 = M < 64
+
+    assert ctx.check(M > 70, assumptions=[assume_lt64]) is False
+    assert ctx.check(M < 70, assumptions=[assume_lt64]) is True
+    assert ctx.check(M < 32, assumptions=[assume_lt64]) is None
+
+    assert ctx.check(ctx.eq(M, 5), assumptions=[ctx.eq(M, 5)]) is True
+    assert ctx.check(ctx.eq(M, 3), assumptions=[ctx.eq(M, 5)]) is False
+
+
+def test_check_two_sided_bounds() -> None:
+    ctx = ixsimpl.Context()
+    N = ctx.sym("N")
+    assumes = [N >= 0, N <= 10]
+
+    assert ctx.check(ctx.ne(N, 20), assumptions=assumes) is True
+    assert ctx.check(N >= 0, assumptions=assumes) is True
+    assert ctx.check(N < 0, assumptions=assumes) is False
+    assert ctx.check(N > 5, assumptions=assumes) is None
+
+
+def test_check_no_assumptions() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    assert ctx.check(x > 0) is None
+    assert ctx.check(x < 0) is None
+
+
+def test_check_non_cmp_returns_none() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    assert ctx.check(x) is None
+    assert ctx.check(x + 1) is None

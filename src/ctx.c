@@ -283,6 +283,15 @@ void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
 }
 
 /* ------------------------------------------------------------------ */
+/*  Entailment checking                                               */
+/* ------------------------------------------------------------------ */
+
+ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+                           ixs_node *const *assumptions, size_t n_assumptions) {
+  return simp_check(ctx, expr, assumptions, n_assumptions);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Comparison and substitution                                       */
 /* ------------------------------------------------------------------ */
 

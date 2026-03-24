@@ -3266,75 +3266,14 @@ static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
 /* Resolve (expr cmp 0) to TRUE/FALSE when bounds determine the outcome. */
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n) {
-  ixs_interval iv;
-  bool known = false;
-  bool val = false;
-
-  if (!bnds || n->tag != IXS_CMP || !ixs_node_is_zero(n->u.binary.rhs))
+  ixs_check_result r;
+  if (!bnds)
     return n;
-
-  iv = ixs_bounds_get(bnds, n->u.binary.lhs);
-  if (!iv.valid)
-    return n;
-
-  switch (n->u.binary.cmp_op) {
-  case IXS_CMP_GT:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0) {
-      known = true;
-      val = true;
-    } else if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0) {
-      known = true;
-      val = false;
-    }
-    break;
-  case IXS_CMP_GE:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0) {
-      known = true;
-      val = true;
-    } else if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0) {
-      known = true;
-      val = false;
-    }
-    break;
-  case IXS_CMP_LT:
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0) {
-      known = true;
-      val = true;
-    } else if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0) {
-      known = true;
-      val = false;
-    }
-    break;
-  case IXS_CMP_LE:
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0) {
-      known = true;
-      val = true;
-    } else if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0) {
-      known = true;
-      val = false;
-    }
-    break;
-  case IXS_CMP_EQ:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0 &&
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0) {
-      known = true;
-      val = true;
-    } else if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
-               ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0) {
-      known = true;
-      val = false;
-    }
-    break;
-  case IXS_CMP_NE:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0) {
-      known = true;
-      val = true;
-    }
-    break;
-  }
-  if (known)
-    return val ? ctx->node_true : ctx->node_false;
+  r = ixs_bounds_check(bnds, n);
+  if (r == IXS_CHECK_TRUE)
+    return ctx->node_true;
+  if (r == IXS_CHECK_FALSE)
+    return ctx->node_false;
   return n;
 }
 
@@ -3587,4 +3526,20 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
   }
   ixs_bounds_destroy(&bnds);
   ixs_arena_restore(&ctx->scratch, m);
+}
+
+IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
+                                       ixs_node *const *assumptions,
+                                       size_t n_assumptions) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_bounds bnds;
+  ixs_check_result r;
+  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+    ixs_arena_restore(&ctx->scratch, m);
+    return IXS_CHECK_UNKNOWN;
+  }
+  r = ixs_bounds_check(&bnds, expr);
+  ixs_bounds_destroy(&bnds);
+  ixs_arena_restore(&ctx->scratch, m);
+  return r;
 }

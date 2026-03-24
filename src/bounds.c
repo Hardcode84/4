@@ -477,6 +477,61 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   return iv;
 }
 
+IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
+  ixs_interval iv;
+
+  if (!cmp || cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
+    return IXS_CHECK_UNKNOWN;
+
+  iv = ixs_bounds_get(b, cmp->u.binary.lhs);
+  if (!iv.valid)
+    return IXS_CHECK_UNKNOWN;
+
+  switch (cmp->u.binary.cmp_op) {
+  case IXS_CMP_GT:
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_GE:
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_LT:
+    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_LE:
+    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_EQ:
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0 &&
+        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
+        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_NE:
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
+        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
+      return IXS_CHECK_TRUE;
+    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0 &&
+        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0)
+      return IXS_CHECK_FALSE;
+    break;
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem) {
   ixs_var_bound *v;

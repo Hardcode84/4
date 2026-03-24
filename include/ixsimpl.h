@@ -114,6 +114,21 @@ ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
 ixs_node *ixs_true(ixs_ctx *ctx);
 ixs_node *ixs_false(ixs_ctx *ctx);
 
+/* --- Entailment checking ----------------------------------------------- */
+
+typedef enum {
+  IXS_CHECK_TRUE,
+  IXS_CHECK_FALSE,
+  IXS_CHECK_UNKNOWN
+} ixs_check_result;
+
+/* Check whether a boolean expression (CMP node) is provably true or false
+ * given the assumptions, using interval propagation.  Returns UNKNOWN when
+ * bounds are insufficient to decide.  Lighter than ixs_simplify: no
+ * rewriting, just bounds setup + interval check. */
+ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+                           ixs_node *const *assumptions, size_t n_assumptions);
+
 /* --- Simplification ---------------------------------------------------- */
 
 /* Simplify expr under the given assumptions (array of CMP/AND/OR nodes).
