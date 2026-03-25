@@ -71,12 +71,54 @@ class Expr(_Expr):
         """True if *sym* appears anywhere in this expression tree."""
         return sym in self.free_symbols
 
+    def eval(self, env: dict[str, int]) -> int:
+        """Evaluate with concrete integer values.  Raises TypeError if
+        the result is not a constant integer (e.g. unbound symbols)."""
+        return int(self.subs(env))  # type: ignore[arg-type]
+
 
 _set_expr_class(Expr)
 
 
+def lambdify(
+    symbols: Sequence[Expr | str] | Expr | str,
+    expr: Expr | list[Expr],
+) -> Callable[..., int | list[int]]:
+    """Build a callable that evaluates *expr* numerically.
+
+    Near drop-in for ``sympy.lambdify``.  No ``modules`` parameter needed:
+    ixsimpl's subs + constant folding handles floor/Mod/etc natively.
+
+    >>> f = lambdify([x, y], x + 2*y)
+    >>> f(3, 4)
+    11
+
+    When *expr* is a list, the callable returns a list::
+
+        f = lambdify(syms, [dim_x, dim_y, dim_z])
+        f(64, 128)  # -> [d1, d2, d3]
+    """
+    if isinstance(symbols, (_Expr, str)):
+        symbols = [symbols]
+    names: list[str] = [s.sym_name if isinstance(s, _Expr) else s for s in symbols]
+    if isinstance(expr, list):
+        exprs = expr
+
+        def _eval_many(*args: int) -> list[int]:
+            env = dict(zip(names, args))
+            return [int(e.subs(env)) for e in exprs]  # type: ignore[arg-type]
+
+        return _eval_many
+
+    def _eval_one(*args: int) -> int:
+        env = dict(zip(names, args))
+        return int(expr.subs(env))  # type: ignore[arg-type]
+
+    return _eval_one
+
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ixsimpl._ixsimpl import Context as _Context
 
@@ -114,6 +156,10 @@ if TYPE_CHECKING:
     def not_(a: Expr) -> Expr: ...
     def pw(*branches: tuple[Expr | int, Expr | int]) -> Expr: ...
     def same_node(a: Expr, b: Expr) -> bool: ...
+    def lambdify(
+        symbols: Sequence[Expr | str] | Expr | str,
+        expr: Expr | list[Expr],
+    ) -> Callable[..., int | list[int]]: ...
 
 else:
     from ixsimpl._ixsimpl import Context
@@ -167,6 +213,7 @@ __all__ = [
     "and_",
     "ceil",
     "floor",
+    "lambdify",
     "max_",
     "min_",
     "mod",

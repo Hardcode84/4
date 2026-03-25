@@ -8,6 +8,7 @@
 
 #include "interval.h"
 #include "node.h"
+#include <ixsimpl.h>
 
 /*
  * Lightweight interval analysis for bound-dependent rewrites.
@@ -62,6 +63,12 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
  * On success *mod > 0 and 0 <= *rem < *mod. */
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem);
+
+/* Initialize bounds from an array of assumption nodes.
+ * Skips NULL and sentinel assumptions.  Returns false on OOM. */
+IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,
+                                 ixs_node *const *assumptions,
+                                 size_t n_assumptions);
 
 /* Check a normalized CMP node (lhs op 0) against current bounds.
  * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or

@@ -683,6 +683,23 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   return IXS_CHECK_UNKNOWN;
 }
 
+IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,
+                                 ixs_node *const *assumptions,
+                                 size_t n_assumptions) {
+  if (!ixs_bounds_init(b, scratch))
+    return false;
+  if (assumptions) {
+    size_t i;
+    for (i = 0; i < n_assumptions; i++) {
+      ixs_node *a = assumptions[i];
+      if (!a || ixs_node_is_sentinel(a))
+        continue;
+      ixs_bounds_add_assumption(b, a);
+    }
+  }
+  return true;
+}
+
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem) {
   ixs_var_bound *v;
@@ -7234,28 +7251,12 @@ static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-static bool build_bounds(ixs_bounds *bnds, ixs_arena *scratch,
-                         ixs_node *const *assumptions, size_t n_assumptions) {
-  if (!ixs_bounds_init(bnds, scratch))
-    return false;
-  if (assumptions) {
-    size_t i;
-    for (i = 0; i < n_assumptions; i++) {
-      ixs_node *a = assumptions[i];
-      if (!a || ixs_node_is_sentinel(a))
-        continue;
-      ixs_bounds_add_assumption(bnds, a);
-    }
-  }
-  return true;
-}
-
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    ixs_node *const *assumptions,
                                    size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+  if (!ixs_bounds_build(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
     ixs_arena_restore(&ctx->scratch, m);
     return NULL;
   }
@@ -7271,7 +7272,7 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   size_t i;
-  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+  if (!ixs_bounds_build(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
     for (i = 0; i < n; i++)
       exprs[i] = NULL;
     ixs_arena_restore(&ctx->scratch, m);
@@ -7300,7 +7301,7 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   ixs_check_result r;
-  if (!build_bounds(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
+  if (!ixs_bounds_build(&bnds, &ctx->scratch, assumptions, n_assumptions)) {
     ixs_arena_restore(&ctx->scratch, m);
     return IXS_CHECK_UNKNOWN;
   }

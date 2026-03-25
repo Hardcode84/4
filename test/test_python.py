@@ -1406,3 +1406,150 @@ def test_abs_constant() -> None:
     ctx = ixsimpl.Context()
     assert str(ixsimpl.abs_(ctx.int_(5))) == "5"
     assert str(ixsimpl.abs_(ctx.int_(-3))) == "3"
+
+
+# ---------------------------------------------------------------------------
+#  Expr.eval and lambdify
+# ---------------------------------------------------------------------------
+
+
+def test_eval_basic() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    expr = x + 2 * y
+    assert expr.eval({"x": 3, "y": 4}) == 11
+    assert expr.eval({"x": 0, "y": 0}) == 0
+    assert expr.eval({"x": -1, "y": 5}) == 9
+
+
+def test_eval_constant() -> None:
+    ctx = ixsimpl.Context()
+    assert ctx.int_(42).eval({}) == 42
+
+
+def test_eval_with_expr_keys() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    expr = x * y
+    assert expr.eval({x: 7, y: 6}) == 42  # type: ignore[dict-item]
+
+
+def test_eval_raises_on_unbound() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    expr = x + y
+    import pytest
+
+    with pytest.raises(TypeError):
+        expr.eval({"x": 1})
+
+
+def test_eval_floor_mod() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    expr = ixsimpl.floor(x / 3)
+    assert expr.eval({"x": 10}) == 3
+    assert expr.eval({"x": 9}) == 3
+    assert expr.eval({"x": 8}) == 2
+
+    expr2 = ixsimpl.mod(x, 4)
+    assert expr2.eval({"x": 10}) == 2
+    assert expr2.eval({"x": 8}) == 0
+
+
+def test_lambdify_single_expr() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    f = ixsimpl.lambdify([x, y], x + 2 * y)
+    assert f(3, 4) == 11
+    assert f(0, 0) == 0
+    assert f(-1, 5) == 9
+
+
+def test_lambdify_scalar_symbol() -> None:
+    """Single symbol (not a list) is accepted."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    f = ixsimpl.lambdify(x, x * x)
+    assert f(5) == 25
+    assert f(-3) == 9
+
+
+def test_lambdify_multi_expr() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    f = ixsimpl.lambdify([x, y], [x + y, x - y, x * y])
+    assert f(10, 3) == [13, 7, 30]
+    assert f(0, 0) == [0, 0, 0]
+
+
+def test_lambdify_constant() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    f = ixsimpl.lambdify([x], ctx.int_(7))
+    assert f(999) == 7
+
+
+def test_lambdify_string_symbols() -> None:
+    """String symbol names work too."""
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    f = ixsimpl.lambdify(["x", "y"], x * y + 1)
+    assert f(6, 7) == 43
+
+
+@given(
+    expr=expressions(max_depth=3),
+    envs=st.lists(_env_st(1, 50), min_size=1, max_size=10),
+)
+def test_eval_matches_subs(expr: ExprTree, envs: list[Env]) -> None:
+    """Expr.eval agrees with manual subs for integer results."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    simplified = ixs_expr.simplify()
+    assume(not simplified.is_error)
+
+    for env in envs:
+        try:
+            via_subs = eval_ixs(simplified, ctx, env)
+        except (ValueError, TypeError):
+            continue
+        via_eval = simplified.eval(env)
+        assert via_subs == via_eval, f"eval vs subs mismatch: {via_subs} != {via_eval} at {env}"
+
+
+@given(
+    expr=expressions(max_depth=3),
+    envs=st.lists(_env_st(1, 50), min_size=1, max_size=10),
+)
+def test_lambdify_matches_eval(expr: ExprTree, envs: list[Env]) -> None:
+    """lambdify callable agrees with Expr.eval."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+    simplified = ixs_expr.simplify()
+    assume(not simplified.is_error)
+
+    syms = sorted(simplified.free_symbols, key=lambda s: s.sym_name)
+    if not syms:
+        assume(False)
+    f = ixsimpl.lambdify(syms, simplified)
+
+    checked = 0
+    for env in envs:
+        args = [env[s.sym_name] for s in syms]
+        try:
+            via_eval = simplified.eval(env)
+        except (TypeError, ValueError):
+            continue
+        via_lam = f(*args)
+        assert via_eval == via_lam, f"lambdify vs eval mismatch: {via_eval} != {via_lam} at {env}"
+        checked += 1
+    assume(checked > 0)

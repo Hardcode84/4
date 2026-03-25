@@ -532,6 +532,23 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   return IXS_CHECK_UNKNOWN;
 }
 
+IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,
+                                 ixs_node *const *assumptions,
+                                 size_t n_assumptions) {
+  if (!ixs_bounds_init(b, scratch))
+    return false;
+  if (assumptions) {
+    size_t i;
+    for (i = 0; i < n_assumptions; i++) {
+      ixs_node *a = assumptions[i];
+      if (!a || ixs_node_is_sentinel(a))
+        continue;
+      ixs_bounds_add_assumption(b, a);
+    }
+  }
+  return true;
+}
+
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem) {
   ixs_var_bound *v;
