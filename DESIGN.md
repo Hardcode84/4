@@ -700,7 +700,8 @@ floor(floor(x))                    → floor(x)
 floor(ceiling(x))                  → ceiling(x)
 floor(integer_valued)              → identity
 floor(n + intval_terms + rest)     → n + intval_terms + floor(rest)
-    where each intval_term has integer coeff and integer-valued base
+    where each intval_term is provably integer-valued (structurally,
+    or via congruence: (p/q)*sym when q divides sym's known modulus)
 floor(outer * (a + b + ...))       → distribute, extract integer-valued products
     e.g. floor((6*K*floor(x/3) + y) / (2*K)) → 3*floor(x/3) + floor(y/(2*K))
     MUL bases in outer are decomposed for symbolic cancellation
@@ -711,6 +712,7 @@ ceiling(ceiling(x))                → ceiling(x)
 ceiling(floor(x))                  → floor(x)
 ceiling(integer_valued)            → identity
 ceiling(n + intval_terms + rest)   → n + intval_terms + ceiling(rest)
+    (same congruence-aware integrality check as floor)
 ceiling(outer * (a + b + ...))     → distribute, extract integer-valued products
 ```
 
@@ -747,6 +749,13 @@ terms, `is_known_divisible` checks whether the denominator divides out.
 `round_extract_add` splits rational constants into integer + fractional
 parts (e.g. `65/32 → 2 + 1/32`) before testing the drop condition,
 so `floor(65/32 + 1/2*floor(x/16))` reduces to `2 + floor(1/2*floor(x/16))`.
+When bounds are available, `round_extract_add` uses `is_integer_with_divinfo`
+and `is_known_divisible` to extract addends with rational coefficients that
+are provably integer via congruence (e.g. `floor(x/3 + K/32)` ->
+`K/32 + floor(x/3)` when `Mod(K, M) == 0` for any `M` with `32 | M`,
+since `32 | K` makes `K/32` integer).  The helper `addterm_is_integer_valued`
+encapsulates
+this check for both the detection and extraction passes.
 
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
@@ -982,6 +991,9 @@ This enables rules like:
 - `floor(expr)` / `ceiling(expr)` → `expr` when `expr` is provably
   integer-valued using congruence (e.g., `floor(K/32)` → `K/32`
   when `Mod(K, 32) == 0`)
+- `floor(a + (p/q)*sym + rest)` → `(p/q)*sym + floor(a + rest)` when
+  `q/gcd(|p|,q)` divides sym's known modulus (the rational addend is
+  integer per congruence and can be extracted from the floor)
 
 **Algebraic rewrites** (no bounds needed):
 

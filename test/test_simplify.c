@@ -1656,6 +1656,71 @@ static void test_floor_drop_const_divinfo(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_floor_extract_divinfo(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *r;
+
+  ixs_node *div_K_256[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 256)), IXS_CMP_EQ,
+              ixs_int(ctx, 0)),
+  };
+
+  /* floor(x/3 + K/32) -> 1/32*K + floor(1/3*x) when 32|K.
+   * The rational addend K/32 is integer per congruence; extract it. */
+  {
+    ixs_node *e = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)),
+                                         ixs_div(ctx, K, ixs_int(ctx, 32))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "1/32*K") != NULL);
+    CHECK(strstr(pr(r), "floor(1/3*x)") != NULL);
+    CHECK(strstr(pr(r), "floor(1/3*x + ") == NULL);
+  }
+
+  /* Same expression without bounds: floor keeps both terms inside. */
+  {
+    ixs_node *e = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)),
+                                         ixs_div(ctx, K, ixs_int(ctx, 32))));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strstr(pr(r), "floor(") != NULL);
+    CHECK(strstr(pr(r), "1/32*K") != NULL);
+    CHECK(strstr(pr(r), "1/3*x") != NULL);
+  }
+
+  /* floor(x/5 + K/2) -> 1/2*K + floor(1/5*x) when 2|K. */
+  {
+    ixs_node *e = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 5)),
+                                         ixs_div(ctx, K, ixs_int(ctx, 2))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "1/2*K") != NULL);
+    CHECK(strstr(pr(r), "floor(1/5*x)") != NULL);
+  }
+
+  /* Negative: floor(x/3 + K/257) stays fused -- 257 does not divide
+   * K's known modulus 256. */
+  {
+    ixs_node *e = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)),
+                                         ixs_div(ctx, K, ixs_int(ctx, 257))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "floor(") != NULL);
+    CHECK(strstr(pr(r), "1/257*K") != NULL);
+    CHECK(strstr(pr(r), "1/3*x") != NULL);
+  }
+
+  /* ceiling(x/3 + K/32) -> 1/32*K + ceiling(1/3*x) when 32|K.
+   * Same path as floor; verify the ceiling branch works. */
+  {
+    ixs_node *e = ixs_ceil(ctx, ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)),
+                                        ixs_div(ctx, K, ixs_int(ctx, 32))));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "1/32*K") != NULL);
+    CHECK(strstr(pr(r), "ceiling(1/3*x)") != NULL);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_opposite_mul_add_cancel(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -2069,6 +2134,7 @@ int main(void) {
   test_floor_mod_cancel();
   test_floor_mod_cancel_symbolic();
   test_floor_drop_const_divinfo();
+  test_floor_extract_divinfo();
   test_opposite_mul_add_cancel();
   test_flatten_mul_add_floor_mod();
   test_round_unwrap_inner();

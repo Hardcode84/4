@@ -5019,12 +5019,34 @@ static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
 }
 
 /*
+ * True when the ADD product coeff*term is provably integer-valued.
+ * With bounds: handles rational coefficients whose reduced denominator
+ * divides the term per congruence info (e.g. (1/32)*K when 32|K).
+ */
+static bool addterm_is_integer_valued(ixs_bounds *bnds, ixs_node *coeff,
+                                      ixs_node *term) {
+  int64_t cp, cq;
+  ixs_node_get_rat(coeff, &cp, &cq);
+  if (cq == 1)
+    return bnds ? is_integer_with_divinfo(bnds, term)
+                : ixs_node_is_integer_valued(term);
+  if (!bnds)
+    return false;
+  int64_t g = ixs_gcd(cp, cq);
+  int64_t denom = cq / g;
+  return is_known_divisible(bnds, term, denom);
+}
+
+/*
  * Extract integer-valued addends from round(ADD).
  *   round(n + intval_terms + rest) -> n + intval_terms + round(rest)
+ * When bnds is non-NULL, also extracts terms with rational coefficients
+ * that are integer per congruence info (e.g. (1/32)*K when 32|K).
  * Returns the simplified node, x unchanged if nothing to extract,
  * or NULL on OOM.
  */
-static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
+static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
+                                   round_fn rnd) {
   if (x->tag != IXS_ADD)
     return x;
 
@@ -5040,9 +5062,8 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
 
   uint32_t i;
   for (i = 0; i < x->u.add.nterms && !have_int; i++) {
-    int64_t cp, cq;
-    ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
-    if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term))
+    if (addterm_is_integer_valued(bnds, x->u.add.terms[i].coeff,
+                                  x->u.add.terms[i].term))
       have_int = true;
   }
   if (!have_int)
@@ -5092,9 +5113,8 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_node *x, round_fn rnd) {
   }
 
   for (i = 0; i < x->u.add.nterms; i++) {
-    int64_t cp, cq;
-    ixs_node_get_rat(x->u.add.terms[i].coeff, &cp, &cq);
-    if (cq == 1 && ixs_node_is_integer_valued(x->u.add.terms[i].term)) {
+    if (addterm_is_integer_valued(bnds, x->u.add.terms[i].coeff,
+                                  x->u.add.terms[i].term)) {
       int_sum = simp_add(
           ctx, int_sum,
           simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
@@ -5586,8 +5606,7 @@ static ixs_node *rule_round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds,
   round_fn rnd = (n->tag == IXS_FLOOR) ? simp_floor : simp_ceil;
   ixs_node *x = n->u.unary.arg;
   ixs_node *r;
-  (void)bnds;
-  r = round_extract_add(ctx, x, rnd);
+  r = round_extract_add(ctx, bnds, x, rnd);
   if (!r)
     return NULL;
   return (r == x) ? n : r;
