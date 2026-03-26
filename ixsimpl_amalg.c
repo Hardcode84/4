@@ -7074,6 +7074,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     return n;
 
   case IXS_SYM: {
+    /* Equality substitution: bounds pinned to a single integer => replace. */
     if (bnds) {
       ixs_interval iv = ixs_bounds_get(bnds, n);
       if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p == iv.hi_p)
@@ -7106,6 +7107,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       if (!b)
         return NULL;
       if (ixs_node_is_const(b) && n->u.mul.factors[i].exp == 1) {
+        /* Fold directly; avoids a dead-end const^1 power node. */
         result = simp_mul(ctx, result, b);
       } else {
         ixs_mulfactor f;

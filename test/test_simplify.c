@@ -1863,52 +1863,54 @@ static void test_complement_annihilation(void) {
 
 static void test_eq_substitution(void) {
   ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *M = ixs_sym(ctx, "BLOCK_M");
+  ixs_node *bm = ixs_sym(ctx, "BLOCK_M");
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* BLOCK_M == 256 => BLOCK_M + x becomes 256 + x */
   {
-    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
-    ixs_node *expr = ixs_add(ctx, M, x);
-    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
-    CHECK(s == ixs_simplify(ctx, ixs_add(ctx, ixs_int(ctx, 256), x), NULL, 0));
+    ixs_node *assumptions[] = {ixs_cmp(ctx, bm, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *expr = ixs_add(ctx, bm, x);
+    ixs_node *result = ixs_simplify(ctx, expr, assumptions, 1);
+    ixs_node *expected =
+        ixs_simplify(ctx, ixs_add(ctx, ixs_int(ctx, 256), x), NULL, 0);
+    CHECK(result == expected);
   }
 
   /* Derived equality: x >= 5 && x <= 5 => x replaced by 5 */
   {
-    ixs_node *assume[] = {
+    ixs_node *assumptions[] = {
         ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 5)),
         ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5)),
     };
     ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
-    ixs_node *s = ixs_simplify(ctx, expr, assume, 2);
-    CHECK(s == ixs_int(ctx, 6));
+    ixs_node *result = ixs_simplify(ctx, expr, assumptions, 2);
+    CHECK(result == ixs_int(ctx, 6));
   }
 
-  /* ceiling(M / 256) with M == 256 collapses to 1 */
+  /* ceil(M / 256) with M == 256 collapses to 1 */
   {
-    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
-    ixs_node *expr = ixs_ceil(ctx, ixs_mul(ctx, M, ixs_rat(ctx, 1, 256)));
-    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
-    CHECK(s == ixs_int(ctx, 1));
+    ixs_node *assumptions[] = {ixs_cmp(ctx, bm, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *expr = ixs_ceil(ctx, ixs_mul(ctx, bm, ixs_rat(ctx, 1, 256)));
+    ixs_node *result = ixs_simplify(ctx, expr, assumptions, 1);
+    CHECK(result == ixs_int(ctx, 1));
   }
 
   /* Negative: no equality => symbol stays */
   {
-    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_GE, ixs_int(ctx, 1))};
-    ixs_node *expr = ixs_add(ctx, M, ixs_int(ctx, 0));
-    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
-    CHECK(s == M);
+    ixs_node *assumptions[] = {ixs_cmp(ctx, bm, IXS_CMP_GE, ixs_int(ctx, 1))};
+    ixs_node *expr = ixs_add(ctx, bm, ixs_int(ctx, 0));
+    ixs_node *result = ixs_simplify(ctx, expr, assumptions, 1);
+    CHECK(result == bm);
   }
 
   /* Batch: equality substitution applies to all exprs in batch */
   {
-    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *assumptions[] = {ixs_cmp(ctx, bm, IXS_CMP_EQ, ixs_int(ctx, 256))};
     ixs_node *exprs[] = {
-        ixs_add(ctx, M, ixs_int(ctx, 1)),
-        ixs_mul(ctx, M, ixs_int(ctx, 2)),
+        ixs_add(ctx, bm, ixs_int(ctx, 1)),
+        ixs_mul(ctx, bm, ixs_int(ctx, 2)),
     };
-    ixs_simplify_batch(ctx, exprs, 2, assume, 1);
+    ixs_simplify_batch(ctx, exprs, 2, assumptions, 1);
     CHECK(exprs[0] == ixs_int(ctx, 257));
     CHECK(exprs[1] == ixs_int(ctx, 512));
   }
@@ -1924,6 +1926,7 @@ int main(void) {
   test_mod_rules();
   test_boolean();
   test_simplify_with_bounds();
+  test_eq_substitution();
   test_floor_bounds_collapse();
   test_mod_bounds_tighten();
   test_mod_extract_constant();
@@ -1959,7 +1962,6 @@ int main(void) {
   test_flatten_mul_add_floor_mod();
   test_round_unwrap_inner();
   test_complement_annihilation();
-  test_eq_substitution();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
