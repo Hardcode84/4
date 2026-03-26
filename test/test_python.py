@@ -112,13 +112,22 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
     op = draw(st.sampled_from(ops))
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op in ("floor", "ceiling"):
-        choice = draw(st.sampled_from(["div", "rat_add", "plain"]))
+        choice = draw(st.sampled_from(["div", "rat_add", "mul", "sub", "add", "plain"]))
         if choice == "div":
             d = draw(pos_ints)
             return (op, ("div", a, d))
         if choice == "rat_add":
             rat_leaf = draw(small_rats)
             return (op, ("add", rat_leaf, a))
+        if choice == "mul":
+            b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+            return (op, ("mul", a, b))
+        if choice == "sub":
+            b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+            return (op, ("sub", a, b))
+        if choice == "add":
+            b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
+            return (op, ("add", a, b))
         return (op, a)
     if op == "neg":
         return (op, a)
@@ -1466,7 +1475,7 @@ def test_eval_with_expr_keys() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")
     expr = x * y
-    assert expr.eval({x: 7, y: 6}) == 42  # type: ignore[dict-item]
+    assert expr.eval({x: 7, y: 6}) == 42
 
 
 def test_eval_raises_on_unbound() -> None:
