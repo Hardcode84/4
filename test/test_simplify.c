@@ -757,6 +757,25 @@ static void test_divisibility_assumptions(void) {
   r = ixs_simplify(ctx, e8, div_K_32, 1);
   CHECK(strcmp(pr(r), "1/32*K") == 0);
 
+  /* Multi-factor: floor(K/2 * N) -> K/2 * N when 32|K and 16|N.
+   * K/2*N = MUL(1/2, [K^1, N^1]); K absorbs the denominator 2. */
+  {
+    ixs_node *div_K32_N16[] = {
+        ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+        ixs_cmp(ctx, ixs_mod(ctx, N, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *prod = ixs_mul(ctx, ixs_div(ctx, K, ixs_int(ctx, 2)), N);
+    r = ixs_simplify(ctx, ixs_floor(ctx, prod), div_K32_N16, 2);
+    CHECK(strstr(pr(r), "floor") == NULL);
+
+    /* Negative: floor(K/64 * N) with 32|K -- K not divisible by 64. */
+    ixs_node *prod2 = ixs_mul(ctx, ixs_div(ctx, K, ixs_int(ctx, 64)), N);
+    r = ixs_simplify(ctx, ixs_floor(ctx, prod2), div_K32_N16, 2);
+    CHECK(strstr(pr(r), "floor") != NULL);
+  }
+
   ixs_ctx_destroy(ctx);
 }
 

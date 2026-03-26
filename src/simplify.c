@@ -3305,15 +3305,24 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
     return sym_mod % m == 0 && sym_rem % m == 0;
   }
 
-  /* c * base^1: m | (c * divisor(base)) when c is integer */
-  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
-      expr->u.mul.factors[0].exp == 1 && expr->u.mul.coeff->tag == IXS_INT) {
+  /* c * f1^e1 * ... * fn^en: m divides the product when the integer
+   * coefficient absorbs part of m and some factor absorbs the rest.
+   * Sufficient OR-of-factors test: does not split remain across factors. */
+  if (expr->tag == IXS_MUL && expr->u.mul.coeff->tag == IXS_INT) {
     int64_t c = expr->u.mul.coeff->u.ival;
+    int64_t remain;
+    uint32_t i;
     if (c == 0)
       return true;
-    int64_t g = ixs_gcd(c, m);
-    int64_t remain = m / g;
-    return is_known_divisible(bnds, expr->u.mul.factors[0].base, remain);
+    remain = m / ixs_gcd(c, m);
+    if (remain == 1)
+      return true;
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp >= 1 &&
+          is_known_divisible(bnds, expr->u.mul.factors[i].base, remain))
+        return true;
+    }
+    return false;
   }
 
   /* ADD: every term c_i * t_i must be divisible by m, and the constant
@@ -3341,24 +3350,36 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
 }
 
 /* True when expr is provably integer-valued given congruence info.
- * Extends ixs_node_is_integer_valued with modular reasoning:
- * p/q * sym is integer when the symbol's known congruence absorbs q. */
+ * Extends ixs_node_is_integer_valued with modular reasoning on MUL
+ * and ADD nodes: p/q * f1^e1 * ... is integer when all factors are
+ * integer-valued and some factor's congruence absorbs the reduced
+ * denominator q/gcd(p,q).  Sufficient OR-of-factors test. */
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
   if (ixs_node_is_integer_valued(expr))
     return true;
   if (!bnds)
     return false;
 
-  /* MUL: p/q * base^1 is integer if base's congruence absorbs q */
-  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
-      expr->u.mul.factors[0].exp == 1) {
+  if (expr->tag == IXS_MUL) {
+    uint32_t i;
     int64_t cp, cq;
     ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp < 0)
+        return false;
+      if (!is_integer_with_divinfo(bnds, expr->u.mul.factors[i].base))
+        return false;
+    }
     if (cq <= 1)
-      return is_integer_with_divinfo(bnds, expr->u.mul.factors[0].base);
+      return true;
     int64_t g = ixs_gcd(cp, cq);
     int64_t denom = cq / g;
-    return is_known_divisible(bnds, expr->u.mul.factors[0].base, denom);
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp >= 1 &&
+          is_known_divisible(bnds, expr->u.mul.factors[i].base, denom))
+        return true;
+    }
+    return false;
   }
 
   /* ADD: integer coeff + all integer-valued terms */

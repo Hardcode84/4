@@ -756,8 +756,15 @@ and `is_known_divisible` to extract addends with rational coefficients that
 are provably integer via congruence (e.g. `floor(x/3 + K/32)` ->
 `K/32 + floor(x/3)` when `Mod(K, M) == 0` for any `M` with `32 | M`,
 since `32 | K` makes `K/32` integer).  The helper `addterm_is_integer_valued`
-encapsulates
-this check for both the detection and extraction passes.
+encapsulates this check for both the detection and extraction passes.
+
+Both `is_integer_with_divinfo` and `is_known_divisible` handle multi-factor
+MUL nodes: for `p/q * f1^e1 * ... * fn^en`, each positive-exponent factor
+is checked for integer-valued-ness, and any single factor whose congruence
+absorbs the remaining denominator suffices to prove the whole product
+integer-valued (or divisible by a given modulus).  This is a sufficient
+OR-of-factors test, not full product factorization: `6 | (2*3)` cannot
+be proved when neither factor alone is divisible by 6.
 
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
