@@ -470,20 +470,35 @@ def test_expand_basic() -> None:
 
     e2 = ctx.parse("(a + b)*(c + d)")
     s2 = str(e2.expand())
-    for term in ("a*d", "c*a", "c*b", "d*b"):
+    for term in ("a*c", "a*d", "b*c", "b*d"):
         assert term in s2, f"missing {term} in {s2}"
 
 
-def _check_simplify_consistency(expr: ExprTree, envs: list[Env]) -> None:
+def _check_simplify_consistency(
+    expr: ExprTree,
+    envs: list[Env],
+    *,
+    with_trivial_bounds: bool = False,
+) -> None:
     """Simplification preserves semantics: evaluate original and simplified
-    at random points, check they agree."""
+    at random points, check they agree.  When with_trivial_bounds is True,
+    all symbols get wide bounds so that bnds is non-NULL and Piecewise
+    branch forking / bounds-gated rules are exercised."""
     ctx = ixsimpl.Context()
     try:
         ixs_expr = to_ixsimpl(ctx, expr)
     except ValueError:
         assume(False)
     assume(not ixs_expr.is_error)
-    ixs_simplified = ixs_expr.simplify()
+    if with_trivial_bounds:
+        assumptions = []
+        for v in _VARS:
+            s = ctx.sym(v)
+            assumptions.append(s >= ctx.int_(-1000000))
+            assumptions.append(s < ctx.int_(1000001))
+        ixs_simplified = ixs_expr.simplify(assumptions=assumptions)
+    else:
+        ixs_simplified = ixs_expr.simplify()
     assume(not ixs_simplified.is_error)
 
     checked = 0
@@ -539,6 +554,26 @@ def test_simplify_consistency_spicy(expr: ExprTree, envs: list[Env]) -> None:
 def test_simplify_consistency_mixed(expr: ExprTree, envs: list[Env]) -> None:
     """Simplification preserves semantics with blended uniform/wide/spicy env."""
     _check_simplify_consistency(expr, envs)
+
+
+@given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
+def test_simplify_bounds_aware_uniform(expr: ExprTree, envs: list[Env]) -> None:
+    """Bounds-aware simplification preserves semantics (uniform env).
+    Trivial bounds activate Piecewise branch forking, Max/Min collapse,
+    and other bounds-gated rules that are dead code without assumptions."""
+    _check_simplify_consistency(expr, envs, with_trivial_bounds=True)
+
+
+@given(expr=expressions(), envs=st.lists(_wide_env_st(), min_size=1, max_size=10))
+def test_simplify_bounds_aware_wide(expr: ExprTree, envs: list[Env]) -> None:
+    """Bounds-aware simplification with negative/zero/positive env."""
+    _check_simplify_consistency(expr, envs, with_trivial_bounds=True)
+
+
+@given(expr=expressions(), envs=st.lists(_spicy_env_st(), min_size=1, max_size=10))
+def test_simplify_bounds_aware_spicy(expr: ExprTree, envs: list[Env]) -> None:
+    """Bounds-aware simplification with interesting values."""
+    _check_simplify_consistency(expr, envs, with_trivial_bounds=True)
 
 
 @given(

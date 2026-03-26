@@ -910,7 +910,7 @@ static void test_mod_floor_regression(void) {
       ixs_add(ctx, ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 6), K), fx3), y);
   ixs_node *outer_den = ixs_mul(ctx, ixs_int(ctx, 2), K);
   e = ixs_floor(ctx, ixs_div(ctx, outer_num, outer_den));
-  CHECK(strcmp(pr(e), "3*floor(1/3*x) + floor(1/2*y*1/K)") == 0);
+  CHECK(strcmp(pr(e), "3*floor(1/3*x) + floor(1/2*1/K*y)") == 0);
 
   /* Mod(8*floor(x/4), 4) -> 0: coefficient is multiple of modulus */
   ixs_node *fx4 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
@@ -1670,7 +1670,7 @@ static void test_opposite_mul_add_cancel(void) {
                           ixs_mul(ctx, K, ixs_add(ctx, pw, ixs_int(ctx, 3))));
     e = ixs_add(ctx, a, b);
     r = ixs_simplify(ctx, e, NULL, 0);
-    CHECK(strcmp(pr(r), "(-3 + x)*K") == 0);
+    CHECK(strcmp(pr(r), "K*(-3 + x)") == 0);
   }
 
   /* 2*K*(PW + x) - 2*K*(PW + x) = 0 */

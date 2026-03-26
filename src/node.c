@@ -211,8 +211,6 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   int c;
   if (a == b)
     return 0;
-  if (a->hash != b->hash)
-    return a->hash < b->hash ? -1 : 1;
   if ((int)a->tag != (int)b->tag)
     return (int)a->tag < (int)b->tag ? -1 : 1;
 

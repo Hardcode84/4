@@ -53,14 +53,14 @@ static void test_expand_two_sums(void) {
   ixs_node *c = ixs_sym(ctx, "c");
   ixs_node *d = ixs_sym(ctx, "d");
 
-  /* (a+b)*(c+d) -> canonical: a*d + c*a + c*b + d*b */
+  /* (a+b)*(c+d) -> canonical: a*d + a*c + b*c + b*d (SYM factors sorted) */
   ixs_node *expr = ixs_mul(ctx, ixs_add(ctx, a, b), ixs_add(ctx, c, d));
   ixs_node *r = ixs_expand(ctx, expr);
   const char *s = pr(r);
   CHECK(strstr(s, "a*d") != NULL);
-  CHECK(strstr(s, "c*a") != NULL);
-  CHECK(strstr(s, "c*b") != NULL);
-  CHECK(strstr(s, "d*b") != NULL);
+  CHECK(strstr(s, "a*c") != NULL);
+  CHECK(strstr(s, "b*c") != NULL);
+  CHECK(strstr(s, "b*d") != NULL);
   ixs_ctx_destroy(ctx);
 }
 
@@ -125,13 +125,13 @@ static void test_expand_three_factors(void) {
   ixs_node *b = ixs_sym(ctx, "b");
   ixs_node *c = ixs_sym(ctx, "c");
 
-  /* (a+b)*c*2 -> 2*c*a + 2*c*b */
+  /* (a+b)*c*2 -> 2*a*c + 2*b*c */
   ixs_node *expr =
       ixs_mul(ctx, ixs_mul(ctx, ixs_add(ctx, a, b), c), ixs_int(ctx, 2));
   ixs_node *r = ixs_expand(ctx, expr);
   const char *s = pr(r);
-  CHECK(strstr(s, "c*a") != NULL);
-  CHECK(strstr(s, "c*b") != NULL);
+  CHECK(strstr(s, "a*c") != NULL);
+  CHECK(strstr(s, "b*c") != NULL);
   CHECK(strstr(s, "+") != NULL);
   ixs_ctx_destroy(ctx);
 }
