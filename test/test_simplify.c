@@ -1960,6 +1960,73 @@ static void test_pw_branch_eq_substitution(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* Inside a Piecewise branch whose condition implies x - y > 0,
+ * Max(x - y, 1) should collapse to x - y. */
+static void test_pw_max_bounds_collapse(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *one = ixs_int(ctx, 1);
+  char buf[512];
+
+  /* Piecewise((Max(x - y, 1), y - x < 0), (42, True))
+   * with x >= 1, y >= 1.
+   * Branch condition y - x < 0  =>  x - y > 0  =>  x - y >= 1.
+   * So Max(x - y, 1) collapses to x - y. */
+  {
+    ixs_node *diff = ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, -1), y));
+    ixs_node *neg_diff = ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, -1), x));
+    ixs_node *cond = ixs_cmp(ctx, neg_diff, IXS_CMP_LT, ixs_int(ctx, 0));
+    ixs_node *vals[] = {ixs_max(ctx, diff, one), ixs_int(ctx, 42)};
+    ixs_node *cds[] = {cond, ixs_true(ctx)};
+    ixs_node *pw = ixs_pw(ctx, 2, vals, cds);
+    ixs_node *assumptions[] = {
+        ixs_cmp(ctx, ixs_add(ctx, x, ixs_int(ctx, -1)), IXS_CMP_GE,
+                ixs_int(ctx, 0)),
+        ixs_cmp(ctx, ixs_add(ctx, y, ixs_int(ctx, -1)), IXS_CMP_GE,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *result = ixs_simplify(ctx, pw, assumptions, 2);
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strstr(buf, "Max(") == NULL);
+  }
+
+  /* Standalone Max (no branch guard) — bounds alone don't prove x > y. */
+  {
+    ixs_node *diff = ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, -1), y));
+    ixs_node *maxn = ixs_max(ctx, diff, one);
+    ixs_node *assumptions[] = {
+        ixs_cmp(ctx, ixs_add(ctx, x, ixs_int(ctx, -1)), IXS_CMP_GE,
+                ixs_int(ctx, 0)),
+        ixs_cmp(ctx, ixs_add(ctx, y, ixs_int(ctx, -1)), IXS_CMP_GE,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *result = ixs_simplify(ctx, maxn, assumptions, 2);
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strstr(buf, "Max(") != NULL);
+  }
+
+  /* LE variant: condition y - x <= 0 => x - y >= 0.
+   * Max(x - y, 0) should collapse to x - y. */
+  {
+    ixs_node *diff = ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, -1), y));
+    ixs_node *neg_diff = ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, -1), x));
+    ixs_node *cond = ixs_cmp(ctx, neg_diff, IXS_CMP_LE, ixs_int(ctx, 0));
+    ixs_node *vals[] = {ixs_max(ctx, diff, ixs_int(ctx, 0)), ixs_int(ctx, 99)};
+    ixs_node *cds[] = {cond, ixs_true(ctx)};
+    ixs_node *pw = ixs_pw(ctx, 2, vals, cds);
+    ixs_node *assumptions[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+    };
+    ixs_node *result = ixs_simplify(ctx, pw, assumptions, 2);
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strstr(buf, "Max(") == NULL);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1988,6 +2055,7 @@ int main(void) {
   test_floor_mod_divisor();
   test_pw_fold_in_add();
   test_piecewise_branch_bounds();
+  test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
   test_simplify_batch();
   test_print_c();

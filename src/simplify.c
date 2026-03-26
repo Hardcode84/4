@@ -3051,14 +3051,38 @@ typedef struct {
   ixs_node *val;
 } rewrite_memo_slot;
 
-static void add_cond_to_bounds(ixs_bounds *bnds, ixs_node *cond) {
+/*
+ * For a CMP of the form (expr LT 0) or (expr LE 0), also store the
+ * negated expression as a GT/GE bound.  This lets Max(neg_expr, c)
+ * collapse when the condition proves neg_expr >= c.  Without this,
+ * the expression-bound lookup in ixs_bounds_get only matches the
+ * original (non-negated) node and misses the relationship.
+ */
+static void add_cmp_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cmp) {
+  ixs_bounds_add_assumption(bnds, cmp);
+  if (ixs_node_is_zero(cmp->u.binary.rhs)) {
+    ixs_cmp_op op = cmp->u.binary.cmp_op;
+    if (op == IXS_CMP_LT || op == IXS_CMP_LE) {
+      ixs_cmp_op flipped = (op == IXS_CMP_LT) ? IXS_CMP_GT : IXS_CMP_GE;
+      ixs_node *zero = ixs_node_int(ctx, 0);
+      ixs_node *neg = zero ? simp_sub(ctx, zero, cmp->u.binary.lhs) : NULL;
+      if (neg) {
+        ixs_node *neg_cmp = simp_cmp(ctx, neg, flipped, zero);
+        if (neg_cmp && neg_cmp->tag == IXS_CMP)
+          ixs_bounds_add_assumption(bnds, neg_cmp);
+      }
+    }
+  }
+}
+
+static void add_cond_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cond) {
   if (cond->tag == IXS_CMP) {
-    ixs_bounds_add_assumption(bnds, cond);
+    add_cmp_to_bounds(ctx, bnds, cond);
   } else if (cond->tag == IXS_AND) {
     uint32_t j;
     for (j = 0; j < cond->u.logic.nargs; j++) {
       if (cond->u.logic.args[j]->tag == IXS_CMP)
-        ixs_bounds_add_assumption(bnds, cond->u.logic.args[j]);
+        add_cmp_to_bounds(ctx, bnds, cond->u.logic.args[j]);
     }
   }
 }
@@ -3400,7 +3424,7 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
               ixs_arena_alloc(&ctx->scratch, REWRITE_MEMO_SIZE * sizeof(*bmemo),
                               sizeof(void *));
           if (bmemo) {
-            add_cond_to_bounds(&bbnds, cds[i]);
+            add_cond_to_bounds(ctx, &bbnds, cds[i]);
             memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
             vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo);
           } else {

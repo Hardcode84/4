@@ -868,7 +868,10 @@ Piecewise branch gets a forked copy of the current bounds augmented with
 the branch condition.  Conditions like `E > 0` tighten the lower bound of
 `E` to 1, letting `Max(1, E)` collapse inside that branch.  Expression-level
 bounds are stored alongside per-symbol bounds and intersected during
-interval queries.
+interval queries.  For LT/LE conditions (`E < 0`, `E <= 0`), the negated
+expression `-E` is also stored with a flipped GT/GE bound; this is
+necessary because `Max(-E, c)` sees `-E` as a distinct hash-consed node
+from `E`, and the expression-bound lookup requires pointer equality.
 
 **Sentinel handling**: Sentinels do not eagerly propagate through Piecewise
 (see Error Model). A sentinel value in a branch whose condition folds to
