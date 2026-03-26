@@ -1718,6 +1718,45 @@ static void test_floor_extract_divinfo(void) {
     CHECK(strstr(pr(r), "ceiling(1/3*x)") != NULL);
   }
 
+  /* MUL*ADD path: floor((K + x) / 32) -> 1/32*K + floor(1/32*x) when 32|K.
+   * round_extract_mul_add distributes 1/32 into the ADD, then
+   * round_extract_add (with bounds) extracts the integer 1/32*K term. */
+  {
+    ixs_node *sum = ixs_add(ctx, K, x);
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, sum, ixs_int(ctx, 32)));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "1/32*K") != NULL);
+    CHECK(strstr(pr(r), "floor(1/32*x)") != NULL);
+  }
+
+  /* Same MUL*ADD without bounds: both terms stay inside floor. */
+  {
+    ixs_node *sum = ixs_add(ctx, K, x);
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, sum, ixs_int(ctx, 32)));
+    r = ixs_simplify(ctx, e, NULL, 0);
+    CHECK(strcmp(pr(r), "floor(1/32*K + 1/32*x)") == 0);
+  }
+
+  /* MUL*ADD ceiling: ceiling((K + x) / 32) extracts K/32 when 32|K. */
+  {
+    ixs_node *sum = ixs_add(ctx, K, x);
+    ixs_node *e = ixs_ceil(ctx, ixs_div(ctx, sum, ixs_int(ctx, 32)));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "1/32*K") != NULL);
+    CHECK(strstr(pr(r), "ceiling(1/32*x)") != NULL);
+  }
+
+  /* Negative MUL*ADD: floor((K + x) / 257) stays fused -- 257 does
+   * not divide K's known modulus 256. */
+  {
+    ixs_node *sum = ixs_add(ctx, K, x);
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, sum, ixs_int(ctx, 257)));
+    r = ixs_simplify(ctx, e, div_K_256, 1);
+    CHECK(strstr(pr(r), "floor(") != NULL);
+    CHECK(strstr(pr(r), "1/257*K") != NULL);
+    CHECK(strstr(pr(r), "1/257*x") != NULL);
+  }
+
   ixs_ctx_destroy(ctx);
 }
 

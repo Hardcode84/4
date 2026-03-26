@@ -717,8 +717,10 @@ ceiling(outer * (a + b + ...))     → distribute, extract integer-valued produc
 ```
 
 The ADD and MUL-over-ADD extraction rules share implementation via
-`round_extract_add` and `round_extract_mul_add`, parameterized by a
-`round_fn` function pointer to avoid duplication between floor and ceiling.
+`round_extract_add` and `round_extract_mul_add`.  `round_extract_add`
+uses a `round_fn` callback for its recursive tail; `round_extract_mul_add`
+calls `simp_floor_bnds` / `simp_ceil_bnds` directly (selected by a
+`bool is_floor` flag) so the expanded sum inherits bounds context.
 
 ```
 floor(c + sum(ci*bi))  → floor(sum(ci*bi))

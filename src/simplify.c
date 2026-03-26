@@ -47,6 +47,8 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n, bool is_ceil);
 static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr);
 static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m);
+static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
+static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *n);
@@ -1356,10 +1358,17 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
   return simp_add(ctx, int_sum, rnd(ctx, remainder));
 }
 
+/* Bounds-aware integer-valued check for a fully constructed node. */
+static bool node_is_integer(ixs_bounds *bnds, ixs_node *n) {
+  return bnds ? is_integer_with_divinfo(bnds, n)
+              : ixs_node_is_integer_valued(n);
+}
+
 /*
  * Extract integer-valued terms from round(MUL(..., ADD^1)).
- * Distributes the outer (non-ADD) factors into the ADD, then delegates
- * to round_extract_add via recursion through rnd.
+ * Distributes the outer (non-ADD) factors into the ADD, then resumes
+ * full floor/ceil simplification (including bounds-aware rules) via
+ * simp_floor_bnds / simp_ceil_bnds on the expanded sum.
  *
  * Decomposes compound MUL bases (e.g. (2*K)^-1 -> 1/2 * K^-1) so that
  * symbolic factor cancellation works through simp_mul/simp_div.
@@ -1367,8 +1376,8 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
  * Returns the simplified node, x unchanged if nothing to extract,
  * or NULL on OOM.
  */
-static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
-                                       round_fn rnd) {
+static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_bounds *bnds,
+                                       ixs_node *x, bool is_floor) {
   if (x->tag != IXS_MUL)
     return x;
 
@@ -1416,16 +1425,17 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   /* Check whether distributing outer makes any ADD term integer-valued,
    * OR whether the ADD has a nonzero integer constant and outer is
    * non-integer (distribution exposes the constant for floor_drop_const
-   * or floor_drop_const_sym). */
+   * or floor_drop_const_sym).  With bounds, is_integer_with_divinfo
+   * catches rational products like (1/32)*K when 32|K. */
   bool any_int = false;
   ixs_node *coeff_product = simp_mul(ctx, outer, add_node->u.add.coeff);
-  if (coeff_product && ixs_node_is_integer_valued(coeff_product))
+  if (coeff_product && node_is_integer(bnds, coeff_product))
     any_int = true;
   for (j = 0; j < add_node->u.add.nterms && !any_int; j++) {
     ixs_node *tc = add_node->u.add.terms[j].coeff;
     ixs_node *tt = add_node->u.add.terms[j].term;
     ixs_node *product = simp_mul(ctx, outer, simp_mul(ctx, tc, tt));
-    if (product && ixs_node_is_integer_valued(product))
+    if (product && node_is_integer(bnds, product))
       any_int = true;
   }
   if (!any_int) {
@@ -1433,11 +1443,11 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
     ixs_node_get_rat(add_node->u.add.coeff, &ac_p, &ac_q);
     if (ac_p == 0)
       return x;
-    if (ixs_node_is_integer_valued(outer))
+    if (node_is_integer(bnds, outer))
       return x;
   }
 
-  /* Expand outer * ADD and recurse through rnd(ADD). */
+  /* Expand outer * ADD and recurse through bounds-aware floor/ceil. */
   ixs_node *expanded = simp_mul(ctx, outer, add_node->u.add.coeff);
   for (j = 0; j < add_node->u.add.nterms && expanded; j++) {
     ixs_node *tc = add_node->u.add.terms[j].coeff;
@@ -1447,7 +1457,8 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_node *x,
   }
   if (!expanded)
     return NULL;
-  return rnd(ctx, expanded);
+  return is_floor ? simp_floor_bnds(ctx, bnds, expanded)
+                  : simp_ceil_bnds(ctx, bnds, expanded);
 }
 
 /*
@@ -1833,11 +1844,9 @@ static ixs_node *rule_round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_round_extract_mul_add(ixs_ctx *ctx, ixs_bounds *bnds,
                                             ixs_node *n) {
-  round_fn rnd = (n->tag == IXS_FLOOR) ? simp_floor : simp_ceil;
   ixs_node *x = n->u.unary.arg;
   ixs_node *r;
-  (void)bnds;
-  r = round_extract_mul_add(ctx, x, rnd);
+  r = round_extract_mul_add(ctx, bnds, x, n->tag == IXS_FLOOR);
   if (!r)
     return NULL;
   return (r == x) ? n : r;
