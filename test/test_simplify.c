@@ -1,7 +1,9 @@
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <inttypes.h>
 #include <ixsimpl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,8 +16,75 @@ static const char *pr(ixs_node *n) {
   return buf;
 }
 
-static void test_add_canonicalize(void) {
+/* ---- Global context with stats accumulation ---- */
+
+static ixs_ctx *g_ctx;
+
+static ixs_ctx *ctx_create_or_die(void) {
   ixs_ctx *ctx = ixs_ctx_create();
+  if (!ctx) {
+    fprintf(stderr, "ixs_ctx_create failed\n");
+    exit(1);
+  }
+  return ctx;
+}
+
+static void atexit_handler(void) {
+  size_t i, j, n_fired, n_rules;
+  size_t unhit = 0;
+
+  if (!g_ctx)
+    return;
+
+  n_fired = ixs_ctx_nstats(g_ctx);
+  n_rules = ixs_nrules();
+
+  printf("\n--- rule hit stats (%zu / %zu rules fired) ---\n", n_fired,
+         n_rules);
+  for (i = 0; i < n_fired; i++) {
+    const char *name;
+    uint64_t count = ixs_ctx_stat(g_ctx, i, &name);
+    printf("  %-30s %8" PRIu64 "\n", name, count);
+  }
+
+  for (j = 0; j < n_rules; j++) {
+    const char *rule = ixs_rule_name(j);
+    bool found = false;
+    for (i = 0; i < n_fired; i++) {
+      const char *name;
+      ixs_ctx_stat(g_ctx, i, &name);
+      if (strcmp(name, rule) == 0) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      if (!unhit)
+        printf("\n--- UNTESTED rules ---\n");
+      printf("  %s\n", rule);
+      unhit++;
+    }
+  }
+
+  if (unhit)
+    printf("%zu rule(s) never fired\n", unhit);
+  else
+    printf("all %zu known rules exercised\n", n_rules);
+
+  ixs_ctx_destroy(g_ctx);
+  g_ctx = NULL;
+}
+
+static ixs_ctx *get_ctx(void) {
+  if (!g_ctx) {
+    g_ctx = ctx_create_or_die();
+    atexit(atexit_handler);
+  }
+  return g_ctx;
+}
+
+static void test_add_canonicalize(void) {
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
 
@@ -39,12 +108,10 @@ static void test_add_canonicalize(void) {
   ixs_node *xy = ixs_add(ctx, x, y);
   r = ixs_add(ctx, xy, xy);
   CHECK(r && !ixs_is_error(r));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mul_canonicalize(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* x * 1 -> x */
@@ -66,12 +133,10 @@ static void test_mul_canonicalize(void) {
   /* x * x -> x**2 */
   r = ixs_mul(ctx, x, x);
   CHECK(r && !ixs_is_error(r));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_hash_consing(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x1 = ixs_sym(ctx, "x");
   ixs_node *x2 = ixs_sym(ctx, "x");
   CHECK(x1 == x2);
@@ -79,12 +144,10 @@ static void test_hash_consing(void) {
   ixs_node *a = ixs_add(ctx, x1, ixs_int(ctx, 1));
   ixs_node *b = ixs_add(ctx, x2, ixs_int(ctx, 1));
   CHECK(a == b);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_rules(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* floor(5) -> 5 */
@@ -170,12 +233,10 @@ static void test_floor_rules(void) {
                 ixs_ceil(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
     CHECK(result == expected);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mod_rules(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* Mod(floor(x), 1) -> 0 (only integer-valued args fold) */
@@ -188,12 +249,10 @@ static void test_mod_rules(void) {
   /* Mod(Mod(x, 5), 5) -> Mod(x, 5) */
   ixs_node *mx5 = ixs_mod(ctx, x, ixs_int(ctx, 5));
   CHECK(ixs_mod(ctx, mx5, ixs_int(ctx, 5)) == mx5);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_boolean(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
 
   /* True & x -> x */
   ixs_node *x = ixs_sym(ctx, "x");
@@ -211,12 +270,10 @@ static void test_boolean(void) {
 
   /* ~~x -> x */
   CHECK(ixs_not(ctx, ixs_not(ctx, cmp)) == cmp);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_simplify_with_bounds(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *T0 = ixs_sym(ctx, "$T0");
 
   ixs_node *assumptions[] = {
@@ -228,12 +285,10 @@ static void test_simplify_with_bounds(void) {
   ixs_node *expr = ixs_mod(ctx, T0, ixs_int(ctx, 256));
   ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, 2);
   CHECK(simplified == T0);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_substitution(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* x + 1 with x=5 -> 6 */
@@ -269,12 +324,10 @@ static void test_substitution(void) {
   expr = ixs_add(ctx, mod_x4, ixs_mul(ctx, ixs_int(ctx, 2), mod_x4));
   result = ixs_subs(ctx, expr, mod_x4, y);
   CHECK(result && strcmp(pr(result), "3*y") == 0);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_subs_multi(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *z = ixs_sym(ctx, "z");
@@ -332,12 +385,12 @@ static void test_subs_multi(void) {
     ixs_node *r = ixs_subs_multi(ctx, x, 2, targets, repls);
     CHECK(r == y);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
+/* Local context: error/sentinel tests push domain errors and clear them,
+ * which would pollute the shared context's error list. */
 static void test_sentinel_propagation(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = ctx_create_or_die();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* NULL propagation */
@@ -359,7 +412,7 @@ static void test_sentinel_propagation(void) {
 }
 
 static void test_floor_bounds_collapse(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   ixs_node *assumptions[] = {
@@ -427,12 +480,10 @@ static void test_floor_bounds_collapse(void) {
   expr = ixs_mod(ctx, x, ixs_int(ctx, 16));
   r = ixs_simplify(ctx, expr, csym, 2);
   CHECK(r == x);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mod_bounds_tighten(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* Mod(x, 16) with 0 <= x < 8 -> x (bounds tighter than [0,15]) */
@@ -461,12 +512,10 @@ static void test_mod_bounds_tighten(void) {
   ixs_node *ce = ixs_ceil(ctx, mod1);
   r = ixs_simplify(ctx, ce, NULL, 0);
   CHECK(r != ixs_int(ctx, 0));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mod_extract_constant(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* Mod(4*x + 3, 16) -> 3 + Mod(4*x, 16)
@@ -520,12 +569,10 @@ static void test_mod_extract_constant(void) {
   expr = ixs_mod(ctx, sum, ixs_int(ctx, 12));
   r = ixs_simplify(ctx, expr, NULL, 0);
   CHECK(strstr(pr(r), "1 + Mod(") != NULL);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_drop_small_rational(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* floor(floor(x)/3 + 1/6) with floor(x) >= 0 -> floor(floor(x)/3)
@@ -583,12 +630,10 @@ static void test_floor_drop_small_rational(void) {
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
                    assumptions, 1);
   CHECK(!ixs_same_node(r, without_r));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_nested_floor_ceil(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* floor(floor(x/3) / 5) -> floor(x/15) */
@@ -635,20 +680,17 @@ static void test_nested_floor_ceil(void) {
   inner = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
   e = ixs_floor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), inner));
   CHECK(e && strcmp(pr(e), "2*floor(1/3*x)") == 0);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_same_node(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   CHECK(ixs_same_node(NULL, NULL));
   CHECK(!ixs_same_node(ixs_int(ctx, 1), NULL));
   CHECK(ixs_same_node(ixs_int(ctx, 42), ixs_int(ctx, 42)));
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_print_roundtrip(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
 
   const char *exprs[] = {
       "x + y",     "3*x + 2",   "floor(x/2)", "ceiling(x + 1)",
@@ -667,12 +709,10 @@ static void test_print_roundtrip(void) {
     CHECK(n2 && !ixs_is_error(n2));
     CHECK(ixs_same_node(n, n2));
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_divisibility_assumptions(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *N = ixs_sym(ctx, "N");
   ixs_node *M = ixs_sym(ctx, "M");
@@ -775,12 +815,10 @@ static void test_divisibility_assumptions(void) {
     r = ixs_simplify(ctx, ixs_floor(ctx, prod2), div_K32_N16, 2);
     CHECK(strstr(pr(r), "floor") != NULL);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_large_expressions(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   int i;
 
   /* ADD with >256 distinct terms. */
@@ -839,12 +877,10 @@ static void test_large_expressions(void) {
     free(vals);
     free(conds);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_bounds_many_vars(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   int i;
 
   /* Build 100 symbols each with bounds: 0 <= v_i < 256.
@@ -869,12 +905,10 @@ static void test_bounds_many_vars(void) {
   expr = ixs_mod(ctx, syms[0], ixs_int(ctx, 256));
   r = ixs_simplify(ctx, expr, assumptions, 200);
   CHECK(r == syms[0]);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mod_floor_regression(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *K = ixs_sym(ctx, "K");
@@ -941,12 +975,10 @@ static void test_mod_floor_regression(void) {
   ixs_node *nested =
       ixs_mod(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 16));
   CHECK(nested != NULL && !ixs_is_error(nested));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_mod_recognition(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *cx = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 8)));
@@ -1058,12 +1090,10 @@ static void test_mod_recognition(void) {
                         ixs_mul(ctx, G, ixs_floor(ctx, ixs_div(ctx, x, G)))));
     CHECK(ixs_node_tag(e) == IXS_ADD);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_mod_divisor(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* floor(Mod(x, 64) / 16) stays: the "mod-then-divide" form is the natural
@@ -1079,13 +1109,11 @@ static void test_floor_mod_divisor(void) {
   e = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 32)));
   CHECK(e == ixs_int(ctx, 0));
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* A - PW((A+B, c), (A+C, ~c)) + PW((B, c), (C, ~c)) should fold to 0. */
 static void test_pw_fold_in_add(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *c = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
@@ -1127,12 +1155,10 @@ static void test_pw_fold_in_add(void) {
   ixs_node *pw3 = ixs_pw(ctx, 2, v3, c3);
   ixs_node *no_fold = ixs_add(ctx, ixs_sub(ctx, A, pw1), pw3);
   CHECK(no_fold != ixs_int(ctx, 0));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_piecewise_branch_bounds(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *modx = ixs_mod(ctx, x, ixs_int(ctx, 32));
 
@@ -1155,12 +1181,10 @@ static void test_piecewise_branch_bounds(void) {
     ixs_print(result, buf, sizeof(buf));
     CHECK(strstr(buf, "Max(") == NULL);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_product_zero_branch_collapse(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *N = ixs_sym(ctx, "N");
   ixs_node *M = ixs_sym(ctx, "M");
   ixs_node *C = ixs_ceil(ctx, ixs_div(ctx, N, ixs_int(ctx, 192)));
@@ -1211,12 +1235,10 @@ static void test_product_zero_branch_collapse(void) {
     ixs_node *neg_result = ixs_simplify(ctx, neg_pw, neg_assumes, 2);
     CHECK(neg_result != ixs_int(ctx, 0));
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_symbolic_denom(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *K = ixs_sym(ctx, "K");
 
@@ -1253,12 +1275,10 @@ static void test_floor_symbolic_denom(void) {
   ixs_node *e3 = ixs_floor(ctx, ixs_div(ctx, x, K));
   r = ixs_simplify(ctx, e3, assumes, 3);
   CHECK(r != ixs_int(ctx, 0));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_simplify_batch(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   ixs_node *exprs[3];
@@ -1272,12 +1292,10 @@ static void test_simplify_batch(void) {
   CHECK(exprs[0] == x);
   CHECK(exprs[1] == x);
   CHECK(exprs[2] == ixs_int(ctx, 7));
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_print_c(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
 
@@ -1299,12 +1317,10 @@ static void test_print_c(void) {
   /* integer */
   ixs_print_c(ixs_int(ctx, 42), buf, sizeof(buf));
   CHECK(strcmp(buf, "42") == 0);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_drop_fractional_const(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *fl_x = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
@@ -1338,12 +1354,10 @@ static void test_floor_drop_fractional_const(void) {
       ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, fl_x, ixs_int(ctx, 2)),
                              ixs_div(ctx, fl_y, ixs_int(ctx, 3))));
   CHECK(d == d_exp);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_round_extract_rat_split(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* floor(65/32 + 1/2*floor(x/16))  ->  2 + floor(1/32 + 1/2*floor(x/16))
@@ -1398,12 +1412,10 @@ static void test_round_extract_rat_split(void) {
                              ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
   ixs_node *expected_e = ixs_add(ctx, ixs_int(ctx, -3), inner_e);
   CHECK(e == expected_e);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_drop_const_sym(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *D = ixs_sym(ctx, "D");
   ixs_node *dinv = ixs_div(ctx, ixs_int(ctx, 1), D);
@@ -1455,12 +1467,10 @@ static void test_floor_drop_const_sym(void) {
     ixs_node *ct = ixs_floor(ctx, ixs_add(ctx, xD, cD));
     CHECK(ct == expected1);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_add_flatten_neg(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
 
@@ -1475,12 +1485,10 @@ static void test_add_flatten_neg(void) {
 
   /* 2*(x + y) - (x + y) = x + y */
   CHECK(ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 2), s), s) == s);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_non_integer_min(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *r15 = ixs_rat(ctx, 1, 5);
 
@@ -1502,12 +1510,10 @@ static void test_floor_non_integer_min(void) {
   ixs_node *fl3 = ixs_floor(ctx, neg_x);
   ixs_node *s3 = ixs_simplify(ctx, fl3, NULL, 0);
   CHECK(s3 == neg_x);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_modrem_congruence(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *r;
@@ -1580,12 +1586,10 @@ static void test_modrem_congruence(void) {
   CHECK(ixs_node_int_val(r) == 1);
   r = ixs_simplify(ctx, ixs_mod(ctx, y, ixs_int(ctx, 2)), crt_ys, 2);
   CHECK(ixs_node_int_val(r) == 1);
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_subs_power_overflow(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* x*x with x=0 -> 0 (constant power folding, base case) */
@@ -1620,13 +1624,11 @@ static void test_subs_power_overflow(void) {
   r = ixs_subs(ctx, x3, x, ixs_rat(ctx, 3, 2));
   CHECK(r && ixs_node_tag(r) == IXS_RAT);
   CHECK(ixs_node_rat_num(r) == 27 && ixs_node_rat_den(r) == 8);
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* m*floor(E/m) + Mod(E, m) = E: integer and symbolic moduli. */
 static void test_floor_mod_cancel(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
 
@@ -1682,13 +1684,11 @@ static void test_floor_mod_cancel(void) {
               ixs_mul(ctx, ixs_int(ctx, 4),
                       ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 4)))));
   CHECK(ixs_node_tag(e) == IXS_ADD);
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* Floor-Mod cancellation with symbolic modulus: m*floor(E/m) + Mod(E, m). */
 static void test_floor_mod_cancel_symbolic(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *half_K = ixs_div(ctx, K, ixs_int(ctx, 2));
@@ -1721,12 +1721,10 @@ static void test_floor_mod_cancel_symbolic(void) {
     e = ixs_sub(ctx, pair_A, pair_B);
     CHECK(e && ixs_node_tag(e) == IXS_INT && ixs_node_int_val(e) == 40);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_drop_const_divinfo(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *r;
 
@@ -1794,12 +1792,10 @@ static void test_floor_drop_const_divinfo(void) {
     r = ixs_simplify(ctx, e, div_K_3, 1);
     CHECK(strcmp(pr(r), "1/3*K") == 0);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_floor_extract_divinfo(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *r;
@@ -1898,12 +1894,10 @@ static void test_floor_extract_divinfo(void) {
     CHECK(strstr(pr(r), "1/257*K") != NULL);
     CHECK(strstr(pr(r), "1/257*x") != NULL);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_opposite_mul_add_cancel(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *pw = ixs_sym(ctx, "PW");
@@ -1940,8 +1934,6 @@ static void test_opposite_mul_add_cancel(void) {
     r = ixs_simplify(ctx, e, NULL, 0);
     CHECK(strcmp(pr(r), "K*(floor(1/3*x) - floor(1/3*y))") == 0);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* Flatten MUL-over-ADD exposes floor terms for cancel_floor_mod_pairs.
@@ -1949,7 +1941,7 @@ static void test_opposite_mul_add_cancel(void) {
  * distributes to K*floor(A/m) - K*floor(B/m) + Mod terms,
  * then floor-Mod identity fires: c*Mod(X,m) + c*m*floor(X/m) = c*X. */
 static void test_flatten_mul_add_floor_mod(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *r;
@@ -1997,12 +1989,10 @@ static void test_flatten_mul_add_floor_mod(void) {
     r = ixs_simplify(ctx, e, NULL, 0);
     CHECK(strcmp(pr(r), "K*(floor(1/3*x) - floor(1/3*y))") == 0);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_round_unwrap_inner(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *K = ixs_sym(ctx, "K");
   ixs_node *r;
@@ -2052,13 +2042,11 @@ static void test_round_unwrap_inner(void) {
     r = ixs_simplify(ctx, e, NULL, 0);
     CHECK(strcmp(pr(r), "ceiling(1/5*x)") == 0);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* A|~A = True, A&~A = False, and CMP complement pairs. */
 static void test_complement_annihilation(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *zero = ixs_int(ctx, 0);
@@ -2103,12 +2091,10 @@ static void test_complement_annihilation(void) {
     ixs_node *b = ixs_cmp(ctx, y, IXS_CMP_LE, zero);
     CHECK(ixs_or(ctx, a, b) != ixs_true(ctx));
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 static void test_eq_substitution(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *bm = ixs_sym(ctx, "BLOCK_M");
   ixs_node *x = ixs_sym(ctx, "x");
 
@@ -2160,14 +2146,12 @@ static void test_eq_substitution(void) {
     CHECK(exprs[0] == ixs_int(ctx, 257));
     CHECK(exprs[1] == ixs_int(ctx, 512));
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* Piecewise branches fork bounds; equality substitution should fire
  * independently per branch with each branch's augmented bounds. */
 static void test_pw_branch_eq_substitution(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
   /* Piecewise((x + 1, x == 5), (x + 2, True))
@@ -2202,14 +2186,12 @@ static void test_pw_branch_eq_substitution(void) {
     CHECK(strcmp(buf, "Piecewise((13, -3 + x == 0), "
                       "(27, -7 + x == 0), (30 + x, True))") == 0);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 /* Inside a Piecewise branch whose condition implies x - y > 0,
  * Max(x - y, 1) should collapse to x - y. */
 static void test_pw_max_bounds_collapse(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *one = ixs_int(ctx, 1);
@@ -2269,8 +2251,6 @@ static void test_pw_max_bounds_collapse(void) {
     ixs_print(result, buf, sizeof(buf));
     CHECK(strstr(buf, "Max(") == NULL);
   }
-
-  ixs_ctx_destroy(ctx);
 }
 
 int main(void) {

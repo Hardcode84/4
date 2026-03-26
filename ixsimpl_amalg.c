@@ -6413,6 +6413,61 @@ static const ixs_rule cmp_rules[] = {
     {NULL, NULL, false},
 };
 
+/* Ad-hoc transforms tracked via IXS_STAT_HIT (not in rule tables). */
+static const char *extra_transforms[] = {
+    "recognize_mod",
+    "cancel_floor_mod_pairs",
+    "not_cmp_flip",
+};
+
+static const ixs_rule *const all_rule_tables[] = {
+    floor_rules, ceil_rules, mod_rules, max_rules, min_rules, cmp_rules,
+};
+
+#define RULE_NAME_CAP 128 /* must be >= IXS_STATS_CAP */
+
+static size_t collect_unique_names(const char **out, size_t cap) {
+  size_t n = 0, t, i, j;
+  for (t = 0; t < sizeof(all_rule_tables) / sizeof(all_rule_tables[0]); t++) {
+    for (i = 0; all_rule_tables[t][i].fn; i++) {
+      const char *name = all_rule_tables[t][i].name;
+      bool dup = false;
+      for (j = 0; j < n; j++) {
+        if (strcmp(out[j], name) == 0) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup && n < cap)
+        out[n++] = name;
+    }
+  }
+  for (i = 0; i < sizeof(extra_transforms) / sizeof(extra_transforms[0]); i++) {
+    const char *name = extra_transforms[i];
+    bool dup = false;
+    for (j = 0; j < n; j++) {
+      if (strcmp(out[j], name) == 0) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup && n < cap)
+      out[n++] = name;
+  }
+  return n;
+}
+
+size_t ixs_nrules(void) {
+  const char *names[RULE_NAME_CAP];
+  return collect_unique_names(names, RULE_NAME_CAP);
+}
+
+const char *ixs_rule_name(size_t index) {
+  const char *names[RULE_NAME_CAP];
+  size_t n = collect_unique_names(names, RULE_NAME_CAP);
+  return index < n ? names[index] : NULL;
+}
+
 static ixs_node *simp_cmp_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
                                ixs_cmp_op op, ixs_node *b) {
   ixs_node *node;

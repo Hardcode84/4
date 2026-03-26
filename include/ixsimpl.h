@@ -278,12 +278,19 @@ ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
 size_t ixs_ctx_nstats(ixs_ctx *ctx);
 
 /* Retrieve the i-th stat entry (arbitrary order, 0-based).
- * Sets *name to the rule function name and returns the hit count.
+ * Sets *name to the rule name and returns the hit count.
  * Returns 0 with *name = NULL for out-of-range indices. */
 uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
 
 /* Reset all counters to zero. */
 void ixs_ctx_stats_reset(ixs_ctx *ctx);
+
+/* Total number of distinct rule/transform names registered in the
+ * simplifier (rule tables + ad-hoc transforms).  Context-independent. */
+size_t ixs_nrules(void);
+
+/* The i-th rule name (0-based).  Returns NULL if out of range. */
+const char *ixs_rule_name(size_t index);
 
 /* --- Tree walk --------------------------------------------------------- */
 

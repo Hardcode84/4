@@ -78,8 +78,16 @@ add_executable(test_parser test/test_parser.c)
 target_link_libraries(test_parser ixsimpl)
 add_test(NAME test_parser COMMAND test_parser)
 
+# Stats-enabled build: test_simplify links this to collect rule hit counts.
+add_library(ixsimpl_stats STATIC ${LIB_SOURCES})
+target_include_directories(ixsimpl_stats
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_definitions(ixsimpl_stats PRIVATE IXS_STATS)
+
 add_executable(test_simplify test/test_simplify.c)
-target_link_libraries(test_simplify ixsimpl)
+target_link_libraries(test_simplify ixsimpl_stats)
 add_test(NAME test_simplify COMMAND test_simplify)
 
 add_executable(test_corpus test/test_corpus.c)
