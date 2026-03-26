@@ -1829,6 +1829,23 @@ static void test_floor_drop_const_divinfo(void) {
     r = ixs_simplify(ctx, e, div_K_3, 1);
     CHECK(strcmp(pr(r), "1/3*K") == 0);
   }
+
+  /* Negative: floor(1/2*x + 1/2*x*(x+1/2)) must NOT drop the floor
+   * even with 2|x.  At x=2 the inner is 7/2, floor=3.
+   * Regression: is_known_divisible declared x*(x+1/2) divisible by 2
+   * because x is, without verifying (x+1/2) is integer-valued. */
+  {
+    ixs_node *x = ixs_sym(ctx, "x");
+    ixs_node *div_x_2[] = {
+        ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    ixs_node *xph = ixs_add(ctx, x, ixs_rat(ctx, 1, 2));
+    ixs_node *inner = ixs_add(ctx, x, ixs_mul(ctx, x, xph));
+    ixs_node *e = ixs_floor(ctx, ixs_div(ctx, inner, ixs_int(ctx, 2)));
+    r = ixs_simplify(ctx, e, div_x_2, 1);
+    CHECK(strstr(pr(r), "floor(") != NULL);
+  }
 }
 
 static void test_floor_extract_divinfo(void) {

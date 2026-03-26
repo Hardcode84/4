@@ -3360,15 +3360,21 @@ static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
     return sym_mod % m == 0 && sym_rem % m == 0;
   }
 
-  /* c * f1^e1 * ... * fn^en: m divides the product when the integer
-   * coefficient absorbs part of m and some factor absorbs the rest.
-   * Sufficient OR-of-factors test: does not split remain across factors. */
+  /* c * f1^e1 * ... * fn^en: m divides the product when every factor
+   * is integer-valued, the integer coefficient absorbs part of m, and
+   * some factor absorbs the rest.  All factors must be integer-valued;
+   * otherwise a factor like (x+1/2) can consume divisibility from
+   * another factor without contributing an integer to the product. */
   if (expr->tag == IXS_MUL && expr->u.mul.coeff->tag == IXS_INT) {
     int64_t c = expr->u.mul.coeff->u.ival;
     int64_t remain;
     uint32_t i;
     if (c == 0)
       return true;
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
+        return false;
+    }
     remain = m / ixs_gcd(c, m);
     if (remain == 1)
       return true;
