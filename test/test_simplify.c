@@ -252,6 +252,40 @@ static void test_mod_rules(void) {
   /* Mod(Mod(x, 5), 5) -> Mod(x, 5) */
   ixs_node *mx5 = ixs_mod(ctx, x, ixs_int(ctx, 5));
   CHECK(ixs_mod(ctx, mx5, ixs_int(ctx, 5)) == mx5);
+
+  /* Mod with non-integer argument must NOT fold to 0.
+   * Mod(x*(x+1/3), 1) is NOT zero -- e.g. at x=2 it equals 2/3.
+   * Regression: mod_bounds_elim called is_known_divisible without
+   * checking integer-valuedness of the numerator. */
+  {
+    ixs_node *rat_prod = ixs_mul(ctx, x, ixs_add(ctx, x, ixs_rat(ctx, 1, 3)));
+    ixs_node *m1 = ixs_mod(ctx, rat_prod, ixs_int(ctx, 1));
+    ixs_node *neg = ixs_mul(ctx, ixs_int(ctx, -1), m1);
+    ixs_node *fl = ixs_floor(ctx, neg);
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 10)),
+    };
+    ixs_node *r = ixs_simplify(ctx, fl, assumes, 2);
+    CHECK(r != ixs_int(ctx, 0));
+  }
+
+  /* ceiling(Mod(-Mod(y/2, 1), 1)) must NOT fold to 0.
+   * At y=1: Mod(1/2, 1)=1/2, -1/2, Mod(-1/2, 1)=1/2, ceil=1. */
+  {
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *m_inner =
+        ixs_mod(ctx, ixs_div(ctx, y, ixs_int(ctx, 2)), ixs_int(ctx, 1));
+    ixs_node *m_outer =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, -1), m_inner), ixs_int(ctx, 1));
+    ixs_node *ce = ixs_ceil(ctx, m_outer);
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 10)),
+    };
+    ixs_node *r = ixs_simplify(ctx, ce, assumes, 2);
+    CHECK(r != ixs_int(ctx, 0));
+  }
 }
 
 static void test_boolean(void) {

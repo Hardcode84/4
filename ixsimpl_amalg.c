@@ -7292,7 +7292,7 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
       return ixs_node_int(ctx, sym_rem % r->u.ival);
   }
 
-  if (is_known_divisible(bnds, l, r->u.ival))
+  if (ixs_node_is_integer_valued(l) && is_known_divisible(bnds, l, r->u.ival))
     return ixs_node_int(ctx, 0);
 
   return n;
