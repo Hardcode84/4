@@ -958,6 +958,11 @@ consistent assumptions is the caller's responsibility.
 
 This enables rules like:
 
+- **Equality substitution**: when a symbol's bounds collapse to a point
+  interval `[c, c]` (from `sym == c` assumption, or derived via
+  `sym >= c` ∧ `sym <= c`), the rewriter replaces the symbol with integer
+  `c` throughout the expression tree. This cascades through constant
+  folding, collapsing `ceiling(M/256)` to `1` when `M == 256`, etc.
 - `Mod(x, 32)` where `0 <= x < 32` → `x`
 - `floor(x/64)` where `0 <= x < 64` → `0`
 - `floor(x)` → constant when `floor(lo) == floor(hi)` (same for ceiling)
