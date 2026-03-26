@@ -1475,7 +1475,7 @@ def test_eval_with_expr_keys() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")
     expr = x * y
-    assert expr.eval({x: 7, y: 6}) == 42
+    assert expr.eval({x: 7, y: 6}) == 42  # type: ignore[dict-item]
 
 
 def test_eval_raises_on_unbound() -> None:
