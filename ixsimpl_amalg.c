@@ -4222,12 +4222,15 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 /*
  * Mod recognition pass over additive terms.
  *
+ * Pass 1 — constant divisor (N is integer, embedded in MUL coeff):
  *   floor: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N)
  *   ceil:  c*E + d*ceil(E/N)  where d == -c*N  -> -c*Mod(-E, N)
  *
- * Scans for FLOOR/CEIL terms whose arg is MUL(1/N, [(B, exp=1)]) and a
- * matching base term B with the right coefficient ratio.  Matched
- * terms are NULLed and the result is rebuilt through simp_add.
+ * Pass 2 — symbolic divisor (D is a factor product in the outer MUL):
+ *   floor: c*E - c*(D*floor(E/D))              ->  c*Mod(E, D)
+ *   ceil:  c*(D*ceil(E/D)) - c*E               -> -c*Mod(-E, D)
+ *
+ * Matched terms are NULLed and the result is rebuilt through simp_add.
  * Returns the simplified node, or NULL if no pattern matched.
  */
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
@@ -4292,6 +4295,88 @@ static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
           return NULL;
       } else {
         mod_node = simp_mod(ctx, fbase, ixs_node_int(ctx, N));
+        if (!mod_node)
+          return NULL;
+        terms[j].term = mod_node;
+      }
+      terms[i].term = NULL;
+      found = true;
+      break;
+    }
+  }
+
+  /* Second pass: symbolic-divisor Mod recognition.
+   * Finds FLOOR/CEIL as a factor inside a MUL term, reconstructs D from
+   * the remaining factors, and checks D * round_arg == some other term E. */
+  for (i = 0; i < nterms; i++) {
+    ixs_node *mul_term, *round_arg, *D, *candidate_E;
+    int32_t fl_idx = -1;
+    uint32_t k;
+    bool is_ceil;
+
+    if (!terms[i].term || terms[i].term->tag != IXS_MUL)
+      continue;
+    mul_term = terms[i].term;
+
+    for (k = 0; k < mul_term->u.mul.nfactors; k++) {
+      ixs_tag tag = mul_term->u.mul.factors[k].base->tag;
+      if ((tag == IXS_FLOOR || tag == IXS_CEIL) &&
+          mul_term->u.mul.factors[k].exp == 1) {
+        if (fl_idx >= 0) {
+          fl_idx = -1;
+          break;
+        }
+        fl_idx = (int32_t)k;
+        is_ceil = (tag == IXS_CEIL);
+      }
+    }
+    if (fl_idx < 0)
+      continue;
+
+    round_arg = mul_term->u.mul.factors[fl_idx].base->u.unary.arg;
+
+    D = mul_term->u.mul.coeff;
+    for (k = 0; k < mul_term->u.mul.nfactors && D; k++) {
+      if ((int32_t)k == fl_idx)
+        continue;
+      D = apply_pow(ctx, D, mul_term->u.mul.factors[k].base,
+                    mul_term->u.mul.factors[k].exp);
+    }
+    if (!D)
+      return NULL;
+
+    candidate_E = simp_mul(ctx, D, round_arg);
+    if (!candidate_E)
+      return NULL;
+
+    for (j = 0; j < nterms; j++) {
+      int64_t bp, bq, rp, rq, sp, sq;
+      ixs_node *mod_node;
+      if (j == i || !terms[j].term || terms[j].term != candidate_E)
+        continue;
+      ixs_node_get_rat(terms[j].coeff, &bp, &bq);
+      ixs_node_get_rat(terms[i].coeff, &rp, &rq);
+      if (!ixs_rat_add(bp, bq, rp, rq, &sp, &sq))
+        continue;
+      if (sp != 0)
+        continue;
+
+      if (is_ceil) {
+        ixs_node *neg_E;
+        if (bp == INT64_MIN)
+          continue;
+        neg_E = simp_mul(ctx, ixs_node_int(ctx, -1), candidate_E);
+        if (!neg_E)
+          return NULL;
+        mod_node = simp_mod(ctx, neg_E, D);
+        if (!mod_node)
+          return NULL;
+        terms[j].term = mod_node;
+        terms[j].coeff = make_const(ctx, -bp, bq);
+        if (!terms[j].coeff)
+          return NULL;
+      } else {
+        mod_node = simp_mod(ctx, candidate_E, D);
         if (!mod_node)
           return NULL;
         terms[j].term = mod_node;

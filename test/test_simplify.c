@@ -1002,6 +1002,44 @@ static void test_mod_recognition(void) {
               ixs_mul(ctx, ixs_int(ctx, -5), x));
   CHECK(ixs_node_tag(e) == IXS_ADD);
 
+  /* Symbolic divisor: E - G*floor(E/G) -> Mod(E, G) */
+  {
+    ixs_node *G = ixs_sym(ctx, "G");
+    ixs_node *E = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 192)));
+    e = ixs_add(ctx, E,
+                ixs_mul(ctx, ixs_int(ctx, -1),
+                        ixs_mul(ctx, G, ixs_floor(ctx, ixs_div(ctx, E, G)))));
+    CHECK(e == ixs_mod(ctx, E, G));
+  }
+
+  /* Scaled symbolic: 3*E - 3*G*floor(E/G) -> 3*Mod(E, G) */
+  {
+    ixs_node *G = ixs_sym(ctx, "G");
+    ixs_node *E = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 192)));
+    e = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), E),
+                ixs_mul(ctx, ixs_int(ctx, -3),
+                        ixs_mul(ctx, G, ixs_floor(ctx, ixs_div(ctx, E, G)))));
+    CHECK(e == ixs_mul(ctx, ixs_int(ctx, 3), ixs_mod(ctx, E, G)));
+  }
+
+  /* Symbolic ceil: G*ceil(x/G) - x -> Mod(-x, G) */
+  {
+    ixs_node *G = ixs_sym(ctx, "G");
+    e = ixs_add(ctx, ixs_mul(ctx, G, ixs_ceil(ctx, ixs_div(ctx, x, G))),
+                ixs_mul(ctx, ixs_int(ctx, -1), x));
+    CHECK(e == ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, -1), x), G));
+  }
+
+  /* Negative: E - G*floor(x/G) stays (dividend mismatch) */
+  {
+    ixs_node *G = ixs_sym(ctx, "G");
+    ixs_node *E = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 192)));
+    e = ixs_add(ctx, E,
+                ixs_mul(ctx, ixs_int(ctx, -1),
+                        ixs_mul(ctx, G, ixs_floor(ctx, ixs_div(ctx, x, G)))));
+    CHECK(ixs_node_tag(e) == IXS_ADD);
+  }
+
   ixs_ctx_destroy(ctx);
 }
 

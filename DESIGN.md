@@ -812,6 +812,8 @@ Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 (reverse direction, in simp_add — recognize_mod)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)
 c*N*ceil(E/N) - c*E                     → c*Mod(-E, N)
+c*E - c*D*floor(E/D)                    → c*Mod(E, D)     (D symbolic)
+c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
