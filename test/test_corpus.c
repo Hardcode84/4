@@ -20,6 +20,18 @@ static const char *corpus_path = "test/corpus.txt";
 static const char *assumptions_path = "test/corpus_assumptions.txt";
 static const char *expected_path = "test/corpus_expected.txt";
 
+static void parse_path_args(int argc, char **argv) {
+  int i;
+  for (i = 1; i < argc; i++) {
+    if (strncmp(argv[i], "--corpus=", 9) == 0)
+      corpus_path = argv[i] + 9;
+    else if (strncmp(argv[i], "--assumptions=", 14) == 0)
+      assumptions_path = argv[i] + 14;
+    else if (strncmp(argv[i], "--expected=", 11) == 0)
+      expected_path = argv[i] + 11;
+  }
+}
+
 /* Extract expression from "simplify time: X.XXXXs: <expr>". Returns pointer
  * into line, or NULL if format invalid. */
 static const char *extract_expr(char *line) {
@@ -106,13 +118,21 @@ static size_t load_assumptions(ixs_ctx *ctx, ixs_node **assumptions,
 }
 
 int main(int argc, char **argv) {
-  FILE *corpus = fopen(corpus_path, "r");
+  FILE *corpus;
   FILE *gen_expected = NULL;
+  int generate = 0;
+  int i;
+  parse_path_args(argc, argv);
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--generate") == 0)
+      generate = 1;
+  }
+  corpus = fopen(corpus_path, "r");
   if (!corpus) {
     fprintf(stderr, "test_corpus: cannot open %s\n", corpus_path);
     return 1;
   }
-  if (argc > 1 && strcmp(argv[1], "--generate") == 0) {
+  if (generate) {
     gen_expected = fopen(expected_path, "w");
     if (!gen_expected) {
       fprintf(stderr, "test_corpus: cannot create %s\n", expected_path);
@@ -136,28 +156,30 @@ int main(int argc, char **argv) {
   size_t expected_cap = 0;
   size_t expected_len = 0;
 
-  /* Optionally load expected output for comparison */
-  FILE *expf = fopen(expected_path, "r");
-  if (expf) {
-    expected_cap = 4096;
-    expected_lines = malloc(expected_cap * sizeof(char *));
-    if (expected_lines) {
-      while (expected_len < expected_cap && fgets(line, sizeof line, expf)) {
-        size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n')
-          line[--len] = '\0';
-        {
-          size_t len = strlen(line) + 1;
-          char *copy = malloc(len);
-          if (copy) {
-            memcpy(copy, line, len);
-            expected_lines[expected_len++] = copy;
+  /* Optionally load expected output for comparison (skip in generate mode) */
+  if (!gen_expected) {
+    FILE *expf = fopen(expected_path, "r");
+    if (expf) {
+      expected_cap = 4096;
+      expected_lines = malloc(expected_cap * sizeof(char *));
+      if (expected_lines) {
+        while (expected_len < expected_cap && fgets(line, sizeof line, expf)) {
+          size_t len = strlen(line);
+          if (len > 0 && line[len - 1] == '\n')
+            line[--len] = '\0';
+          {
+            size_t len2 = strlen(line) + 1;
+            char *copy = malloc(len2);
+            if (copy) {
+              memcpy(copy, line, len2);
+              expected_lines[expected_len++] = copy;
+            }
           }
         }
+        fclose(expf);
+      } else {
+        fclose(expf);
       }
-      fclose(expf);
-    } else {
-      fclose(expf);
     }
   }
 

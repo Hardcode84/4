@@ -86,6 +86,11 @@ add_executable(test_corpus test/test_corpus.c)
 target_link_libraries(test_corpus ixsimpl)
 add_test(NAME test_corpus COMMAND test_corpus
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME test_corpus_gemm256x192 COMMAND test_corpus
+         --corpus=test/corpus_gemm256x192.txt
+         --assumptions=test/corpus_gemm256x192_assumptions.txt
+         --expected=test/corpus_gemm256x192_expected.txt
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_edge_cases test/test_edge_cases.c)
 target_link_libraries(test_edge_cases ixsimpl)

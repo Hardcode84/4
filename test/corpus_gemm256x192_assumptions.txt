@@ -1,0 +1,18 @@
+$T0 >= 0
+$T0 < 256
+$T1 >= 0
+$T1 < 4
+$T2 >= 0
+$T2 < 4
+$WG0 >= 0
+$WG1 >= 0
+M >= 1
+N >= 1
+K >= 1
+BLOCK_M >= 1
+BLOCK_N >= 1
+BLOCK_K >= 1
+GROUP_SIZE_N >= 1
+Mod(M, BLOCK_M) == 0
+Mod(N, BLOCK_N) == 0
+Mod(K, BLOCK_K) == 0

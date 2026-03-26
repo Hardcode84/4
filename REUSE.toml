@@ -6,9 +6,7 @@ path = [
     ".clang-format",
     ".gitignore",
     "ixsimpl_amalg.c",
-    "test/corpus.txt",
-    "test/corpus_assumptions.txt",
-    "test/corpus_expected.txt",
+    "test/corpus*.txt",
     "scripts/requirements-gen.txt",
 ]
 SPDX-FileCopyrightText = "2026 ixsimpl contributors"
