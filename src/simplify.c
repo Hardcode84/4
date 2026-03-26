@@ -3165,11 +3165,60 @@ typedef struct {
 } rewrite_memo_slot;
 
 /*
- * For a CMP of the form (expr LT 0) or (expr LE 0), also store the
- * negated expression as a GT/GE bound.  This lets Max(neg_expr, c)
- * collapse when the condition proves neg_expr >= c.  Without this,
- * the expression-bound lookup in ixs_bounds_get only matches the
- * original (non-negated) node and misses the relationship.
+ * If a MUL expression is pinned to zero (LE bound intersects propagated
+ * GE to give [0,0]) and all but one factor are strictly nonzero, store
+ * [0,0] for the remaining factor.
+ * E.g. floor(C/32)*ceil(M/256) <= 0 with ceil(M/256)>=1 => floor(C/32)==0.
+ */
+static void decompose_product_zero(ixs_bounds *bnds, ixs_node *mul) {
+  uint32_t i, j, nf;
+  ixs_interval prod_iv;
+  int64_t cp, cq;
+
+  if (mul->tag != IXS_MUL)
+    return;
+  prod_iv = ixs_bounds_get(bnds, mul);
+  if (!ixs_interval_is_point_int(prod_iv, NULL) || prod_iv.lo_p != 0)
+    return;
+
+  ixs_node_get_rat(mul->u.mul.coeff, &cp, &cq);
+  (void)cq;
+  if (cp == 0)
+    return;
+
+  nf = mul->u.mul.nfactors;
+  for (i = 0; i < nf; i++) {
+    ixs_interval fi;
+    bool others_nonzero;
+    if (mul->u.mul.factors[i].exp != 1)
+      continue;
+    fi = ixs_bounds_get(bnds, mul->u.mul.factors[i].base);
+    if (fi.valid && ixs_rat_cmp(fi.lo_p, fi.lo_q, 0, 1) > 0)
+      continue;
+
+    others_nonzero = true;
+    for (j = 0; j < nf; j++) {
+      ixs_interval fj;
+      if (j == i)
+        continue;
+      fj = ixs_bounds_get(bnds, mul->u.mul.factors[j].base);
+      if (!fj.valid || !(ixs_rat_cmp(fj.lo_p, fj.lo_q, 0, 1) > 0 ||
+                         ixs_rat_cmp(fj.hi_p, fj.hi_q, 0, 1) < 0)) {
+        others_nonzero = false;
+        break;
+      }
+    }
+    if (others_nonzero)
+      ixs_bounds_add_expr(bnds, mul->u.mul.factors[i].base,
+                          ixs_interval_exact(0, 1));
+  }
+}
+
+/*
+ * Store a CMP as a branch-local bound.  For LT/LE, also store the negated
+ * expression as a GT/GE bound so Max(neg_expr, c) can collapse when the
+ * condition proves neg_expr >= c.  Finally, attempt product-zero
+ * decomposition on the LHS when compared against zero.
  */
 static void add_cmp_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cmp) {
   ixs_bounds_add_assumption(bnds, cmp);
@@ -3185,6 +3234,7 @@ static void add_cmp_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cmp) {
           ixs_bounds_add_assumption(bnds, neg_cmp);
       }
     }
+    decompose_product_zero(bnds, cmp->u.binary.lhs);
   }
 }
 

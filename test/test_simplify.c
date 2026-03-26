@@ -1140,6 +1140,62 @@ static void test_piecewise_branch_bounds(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_product_zero_branch_collapse(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *N = ixs_sym(ctx, "N");
+  ixs_node *M = ixs_sym(ctx, "M");
+  ixs_node *C = ixs_ceil(ctx, ixs_div(ctx, N, ixs_int(ctx, 192)));
+  ixs_node *CM = ixs_ceil(ctx, ixs_div(ctx, M, ixs_int(ctx, 256)));
+  ixs_node *fc = ixs_floor(ctx, ixs_div(ctx, C, ixs_int(ctx, 32)));
+  ixs_node *mc = ixs_mod(ctx, C, ixs_int(ctx, 32));
+
+  /* Piecewise((floor(-32*floor(C/32)*ceil(M/256)/Mod(C,32)),
+   *            Mod(C,32) > 0 & floor(C/32)*ceil(M/256) <= 0),
+   *           (0, True))
+   * Should collapse to 0: the guard pins floor(C/32) to 0, making
+   * the branch value = floor(0) = 0 = default branch. */
+  ixs_node *branch = ixs_floor(
+      ctx,
+      ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, -32), ixs_mul(ctx, fc, CM)), mc));
+  ixs_node *guard =
+      ixs_and(ctx, ixs_cmp(ctx, mc, IXS_CMP_GT, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, ixs_mul(ctx, fc, CM), IXS_CMP_LE, ixs_int(ctx, 0)));
+  ixs_node *vals[] = {branch, ixs_int(ctx, 0)};
+  ixs_node *cds[] = {guard, ixs_true(ctx)};
+  ixs_node *pw = ixs_pw(ctx, 2, vals, cds);
+
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, N, IXS_CMP_GE, ixs_int(ctx, 1)),
+      ixs_cmp(ctx, M, IXS_CMP_GE, ixs_int(ctx, 1)),
+  };
+  ixs_node *result = ixs_simplify(ctx, pw, assumes, 2);
+  CHECK(result == ixs_int(ctx, 0));
+
+  /* Negative: when both factors could be zero, decomposition must not
+   * fire.  floor(x)*floor(y) <= 0 with x,y >= 0: either factor could
+   * be zero, so we cannot pin one to 0. */
+  {
+    ixs_node *x = ixs_sym(ctx, "x");
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *fx = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)));
+    ixs_node *fy = ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 32)));
+    ixs_node *prod = ixs_mul(ctx, fx, fy);
+    ixs_node *neg_branch = ixs_floor(ctx, ixs_div(ctx, prod, ixs_int(ctx, 7)));
+    ixs_node *neg_guard = ixs_cmp(ctx, prod, IXS_CMP_LE, ixs_int(ctx, 0));
+    ixs_node *neg_vals[] = {neg_branch, ixs_int(ctx, 0)};
+    ixs_node *neg_cds[] = {neg_guard, ixs_true(ctx)};
+    ixs_node *neg_pw = ixs_pw(ctx, 2, neg_vals, neg_cds);
+    ixs_node *neg_assumes[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+    };
+    ixs_node *neg_result = ixs_simplify(ctx, neg_pw, neg_assumes, 2);
+    CHECK(neg_result != ixs_int(ctx, 0));
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_floor_symbolic_denom(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -2197,6 +2253,7 @@ int main(void) {
   test_floor_mod_divisor();
   test_pw_fold_in_add();
   test_piecewise_branch_bounds();
+  test_product_zero_branch_collapse();
   test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
   test_simplify_batch();

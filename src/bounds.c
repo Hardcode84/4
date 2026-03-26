@@ -250,6 +250,27 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
   }
 }
 
+IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
+                                    ixs_interval iv) {
+  ixs_expr_bound *eb;
+  if (!b || !expr || !iv.valid)
+    return;
+  if (b->nexprs >= b->expr_cap) {
+    size_t new_cap = b->expr_cap ? b->expr_cap * 2 : 4;
+    ixs_expr_bound *new_arr =
+        ixs_arena_alloc(b->scratch, new_cap * sizeof(*new_arr), sizeof(void *));
+    if (!new_arr)
+      return;
+    if (b->nexprs)
+      memcpy(new_arr, b->exprs, b->nexprs * sizeof(*b->exprs));
+    b->exprs = new_arr;
+    b->expr_cap = new_cap;
+  }
+  eb = &b->exprs[b->nexprs++];
+  eb->expr = expr;
+  eb->iv = iv;
+}
+
 /*
  * Extract interval bounds and modular congruence from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
@@ -310,31 +331,39 @@ IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   }
 
   /* Fallback: expr op 0 for non-symbol lhs. Store as expression bound. */
-  if (ixs_node_is_zero(rhs) && ixs_node_is_integer_valued(lhs) &&
-      (op == IXS_CMP_GT || op == IXS_CMP_GE)) {
-    ixs_expr_bound *eb;
-    if (b->nexprs >= b->expr_cap) {
-      size_t new_cap = b->expr_cap ? b->expr_cap * 2 : 4;
-      ixs_expr_bound *new_arr = ixs_arena_alloc(
-          b->scratch, new_cap * sizeof(*new_arr), sizeof(void *));
-      if (!new_arr)
-        return;
-      if (b->nexprs)
-        memcpy(new_arr, b->exprs, b->nexprs * sizeof(*b->exprs));
-      b->exprs = new_arr;
-      b->expr_cap = new_cap;
+  if (ixs_node_is_zero(rhs) && ixs_node_is_integer_valued(lhs)) {
+    ixs_interval eb_iv;
+    eb_iv.valid = false;
+    switch (op) {
+    case IXS_CMP_GT:
+      eb_iv.valid = true;
+      eb_iv.lo_p = 1;
+      eb_iv.lo_q = 1;
+      ixs_interval_set_pos_inf(&eb_iv.hi_p, &eb_iv.hi_q);
+      break;
+    case IXS_CMP_GE:
+      eb_iv.valid = true;
+      eb_iv.lo_p = 0;
+      eb_iv.lo_q = 1;
+      ixs_interval_set_pos_inf(&eb_iv.hi_p, &eb_iv.hi_q);
+      break;
+    case IXS_CMP_LT:
+      eb_iv.valid = true;
+      ixs_interval_set_neg_inf(&eb_iv.lo_p, &eb_iv.lo_q);
+      eb_iv.hi_p = -1;
+      eb_iv.hi_q = 1;
+      break;
+    case IXS_CMP_LE:
+      eb_iv.valid = true;
+      ixs_interval_set_neg_inf(&eb_iv.lo_p, &eb_iv.lo_q);
+      eb_iv.hi_p = 0;
+      eb_iv.hi_q = 1;
+      break;
+    default:
+      break;
     }
-    eb = &b->exprs[b->nexprs++];
-    eb->expr = lhs;
-    eb->iv.valid = true;
-    ixs_interval_set_pos_inf(&eb->iv.hi_p, &eb->iv.hi_q);
-    if (op == IXS_CMP_GT) {
-      eb->iv.lo_p = 1;
-      eb->iv.lo_q = 1;
-    } else {
-      eb->iv.lo_p = 0;
-      eb->iv.lo_q = 1;
-    }
+    if (eb_iv.valid)
+      ixs_bounds_add_expr(b, lhs, eb_iv);
   }
 }
 

@@ -516,6 +516,37 @@ static void test_bounds_expr_override(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_expr_le(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *expr = ixs_add(ctx, x, y);
+
+  /* x+y <= 0 as an expression-level assumption */
+  ixs_bounds_add_assumption(&b,
+                            ixs_cmp(ctx, expr, IXS_CMP_LE, ixs_int(ctx, 0)));
+  ixs_interval iv = ixs_bounds_get(&b, expr);
+  CHECK(iv.valid);
+  CHECK(ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0);
+  CHECK(ixs_interval_is_neg_inf(iv.lo_p, iv.lo_q));
+
+  /* x+y < 0 tightens upper bound to -1 */
+  ixs_bounds b2;
+  CHECK(ixs_bounds_init(&b2, &ctx->scratch));
+  ixs_bounds_add_assumption(&b2,
+                            ixs_cmp(ctx, expr, IXS_CMP_LT, ixs_int(ctx, 0)));
+  iv = ixs_bounds_get(&b2, expr);
+  CHECK(iv.valid);
+  CHECK(iv.hi_p == -1 && iv.hi_q == 1);
+
+  ixs_bounds_destroy(&b2);
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Endpoint widening                                                 */
 /* ------------------------------------------------------------------ */
@@ -662,6 +693,7 @@ int main(void) {
 
   /* Bounds: expression overrides */
   test_bounds_expr_override();
+  test_bounds_expr_le();
 
   /* Bounds: entailment check */
   test_bounds_check_true();

@@ -56,6 +56,10 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 /* Extract variable bounds from an assumption (e.g., $T0 >= 0). */
 IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 
+/* Store an explicit interval for an arbitrary expression node. */
+IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
+                                    ixs_interval iv);
+
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 

@@ -881,10 +881,20 @@ Piecewise branch gets a forked copy of the current bounds augmented with
 the branch condition.  Conditions like `E > 0` tighten the lower bound of
 `E` to 1, letting `Max(1, E)` collapse inside that branch.  Expression-level
 bounds are stored alongside per-symbol bounds and intersected during
-interval queries.  For LT/LE conditions (`E < 0`, `E <= 0`), the negated
-expression `-E` is also stored with a flipped GT/GE bound; this is
-necessary because `Max(-E, c)` sees `-E` as a distinct hash-consed node
-from `E`, and the expression-bound lookup requires pointer equality.
+interval queries.  All four comparison directions (GT, GE, LT, LE) are
+stored directly as expression bounds.  For LT/LE conditions (`E < 0`,
+`E <= 0`), the negated expression `-E` is also stored with a flipped GT/GE
+bound; this is necessary because `Max(-E, c)` sees `-E` as a distinct
+hash-consed node from `E`, and the expression-bound lookup requires pointer
+equality.
+
+**Product-zero decomposition**: When a guard pins a product `A*B` to zero
+(the LE bound and propagated GE bound intersect to `[0,0]`) and all factors
+except one are provably nonzero, the remaining factor gets an explicit
+`[0,0]` bound.  For example, `floor(C/32)*ceil(M/256) <= 0` with `M >= 1`
+forces `ceil(M/256) >= 1`, so `floor(C/32)` must be zero.  This lets the
+branch value `floor(-32*floor(C/32)*...) = floor(0) = 0` collapse,
+eliminating the entire Piecewise when the branch matches the default.
 
 **Sentinel handling**: Sentinels do not eagerly propagate through Piecewise
 (see Error Model). A sentinel value in a branch whose condition folds to
