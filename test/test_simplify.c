@@ -66,11 +66,14 @@ static void atexit_handler(void) {
     }
   }
 
-  if (unhit)
-    printf("%zu rule(s) never fired\n", unhit);
-  else
-    printf("all %zu known rules exercised\n", n_rules);
+  if (unhit) {
+    fprintf(stderr, "%zu rule(s) never fired\n", unhit);
+    ixs_ctx_destroy(g_ctx);
+    g_ctx = NULL;
+    _Exit(1);
+  }
 
+  printf("all %zu known rules exercised\n", n_rules);
   ixs_ctx_destroy(g_ctx);
   g_ctx = NULL;
 }
@@ -2253,6 +2256,169 @@ static void test_pw_max_bounds_collapse(void) {
   }
 }
 
+static void test_ceil_collapse_and_unwrap(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *r;
+
+  /* ceil_collapse: ceil(x/32) with 1 <= x <= 32 -> 1
+   * x/32 in [1/32, 1], ceil of both endpoints is 1. */
+  ixs_node *a_ceil[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 1)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 32)),
+  };
+  r = ixs_simplify(ctx, ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 32))),
+                   a_ceil, 2);
+  CHECK(r && ixs_node_int_val(r) == 1);
+
+  /* negative: ceil(x/32) with 1 <= x <= 64 should NOT collapse
+   * (ceil(1/32)=1, ceil(64/32)=2). */
+  ixs_node *a_wide[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 1)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 64)),
+  };
+  r = ixs_simplify(ctx, ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 32))),
+                   a_wide, 2);
+  CHECK(r && ixs_node_tag(r) != IXS_INT);
+
+  /* ceil_unwrap_inner: ceil(ceil(A) / K) -> ceil(A / K)
+   * Symbolic divisor forces nfactors > 1, bypassing round_pull_in_denom. */
+  {
+    ixs_node *K = ixs_sym(ctx, "K");
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *inner_arg =
+        ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 7)),
+                ixs_div(ctx, ixs_mul(ctx, K, y), ixs_int(ctx, 7)));
+    ixs_node *expr = ixs_ceil(ctx, ixs_div(ctx, ixs_ceil(ctx, inner_arg), K));
+    r = ixs_simplify(ctx, expr, NULL, 0);
+    CHECK(strstr(pr(r), "ceiling(ceiling(") == NULL);
+  }
+}
+
+static void test_max_min_const_fold(void) {
+  ixs_ctx *ctx = get_ctx();
+
+  /* max_const_fold: Max(3, 7) -> 7 */
+  CHECK(ixs_max(ctx, ixs_int(ctx, 3), ixs_int(ctx, 7)) == ixs_int(ctx, 7));
+
+  /* Max(7, 3) -> 7 (reversed order) */
+  CHECK(ixs_max(ctx, ixs_int(ctx, 7), ixs_int(ctx, 3)) == ixs_int(ctx, 7));
+
+  /* Max with rationals: Max(1/3, 1/2) -> 1/2 */
+  CHECK(ixs_max(ctx, ixs_rat(ctx, 1, 3), ixs_rat(ctx, 1, 2)) ==
+        ixs_rat(ctx, 1, 2));
+
+  /* min_const_fold: Min(3, 7) -> 3 */
+  CHECK(ixs_min(ctx, ixs_int(ctx, 3), ixs_int(ctx, 7)) == ixs_int(ctx, 3));
+
+  /* Min(7, 3) -> 3 */
+  CHECK(ixs_min(ctx, ixs_int(ctx, 7), ixs_int(ctx, 3)) == ixs_int(ctx, 3));
+
+  /* Min with rationals: Min(1/3, 1/2) -> 1/3 */
+  CHECK(ixs_min(ctx, ixs_rat(ctx, 1, 3), ixs_rat(ctx, 1, 2)) ==
+        ixs_rat(ctx, 1, 3));
+}
+
+static void test_min_bounds_collapse(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+
+  /* Min(x, y) with 0 <= x <= 5 and 10 <= y <= 20 -> x
+   * (x.hi=5 <= y.lo=10, so x is always smaller) */
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5)),
+      ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 10)),
+      ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 20)),
+  };
+  ixs_node *r = ixs_simplify(ctx, ixs_min(ctx, x, y), assumes, 4);
+  CHECK(r == x);
+
+  /* negative: overlapping ranges should NOT collapse */
+  ixs_node *overlap[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 10)),
+      ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 5)),
+      ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 20)),
+  };
+  r = ixs_simplify(ctx, ixs_min(ctx, x, y), overlap, 4);
+  CHECK(r && ixs_node_tag(r) != IXS_SYM);
+}
+
+static void test_cmp_const_fold(void) {
+  ixs_ctx *ctx = get_ctx();
+
+  /* 5 > 3 -> True */
+  CHECK(ixs_cmp(ctx, ixs_int(ctx, 5), IXS_CMP_GT, ixs_int(ctx, 3)) ==
+        ixs_true(ctx));
+
+  /* 3 > 5 -> False */
+  CHECK(ixs_cmp(ctx, ixs_int(ctx, 3), IXS_CMP_GT, ixs_int(ctx, 5)) ==
+        ixs_false(ctx));
+
+  /* 5 == 5 -> True */
+  CHECK(ixs_cmp(ctx, ixs_int(ctx, 5), IXS_CMP_EQ, ixs_int(ctx, 5)) ==
+        ixs_true(ctx));
+
+  /* 5 != 5 -> False */
+  CHECK(ixs_cmp(ctx, ixs_int(ctx, 5), IXS_CMP_NE, ixs_int(ctx, 5)) ==
+        ixs_false(ctx));
+
+  /* 1/3 < 1/2 -> True */
+  CHECK(ixs_cmp(ctx, ixs_rat(ctx, 1, 3), IXS_CMP_LT, ixs_rat(ctx, 1, 2)) ==
+        ixs_true(ctx));
+
+  /* 1/2 <= 1/3 -> False */
+  CHECK(ixs_cmp(ctx, ixs_rat(ctx, 1, 2), IXS_CMP_LE, ixs_rat(ctx, 1, 3)) ==
+        ixs_false(ctx));
+}
+
+static void test_cmp_identity(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* x >= x -> True */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_GE, x) == ixs_true(ctx));
+
+  /* x <= x -> True */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_LE, x) == ixs_true(ctx));
+
+  /* x == x -> True */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_EQ, x) == ixs_true(ctx));
+
+  /* x > x -> False */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_GT, x) == ixs_false(ctx));
+
+  /* x < x -> False */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_LT, x) == ixs_false(ctx));
+
+  /* x != x -> False */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_NE, x) == ixs_false(ctx));
+}
+
+static void test_cmp_bounds_resolve(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* x >= 5 with 10 <= x <= 20 -> True */
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10)),
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 20)),
+  };
+  ixs_node *ge5 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 5));
+  CHECK(ixs_simplify(ctx, ge5, assumes, 2) == ixs_true(ctx));
+
+  /* x < 5 with 10 <= x <= 20 -> False */
+  ixs_node *lt5 = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 5));
+  CHECK(ixs_simplify(ctx, lt5, assumes, 2) == ixs_false(ctx));
+
+  /* negative: x > 15 with 10 <= x <= 20 is indeterminate */
+  ixs_node *gt15 = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 15));
+  ixs_node *r = ixs_simplify(ctx, gt15, assumes, 2);
+  CHECK(r != ixs_true(ctx) && r != ixs_false(ctx));
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -2301,6 +2467,12 @@ int main(void) {
   test_flatten_mul_add_floor_mod();
   test_round_unwrap_inner();
   test_complement_annihilation();
+  test_ceil_collapse_and_unwrap();
+  test_max_min_const_fold();
+  test_min_bounds_collapse();
+  test_cmp_const_fold();
+  test_cmp_identity();
+  test_cmp_bounds_resolve();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
