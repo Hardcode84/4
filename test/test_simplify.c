@@ -1918,6 +1918,48 @@ static void test_eq_substitution(void) {
   ixs_ctx_destroy(ctx);
 }
 
+/* Piecewise branches fork bounds; equality substitution should fire
+ * independently per branch with each branch's augmented bounds. */
+static void test_pw_branch_eq_substitution(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* Piecewise((x + 1, x == 5), (x + 2, True))
+   * Branch 1 learns x == 5 => x + 1 becomes 6.
+   * Default branch: x stays symbolic => x + 2 unchanged. */
+  {
+    ixs_node *vals[] = {ixs_add(ctx, x, ixs_int(ctx, 1)),
+                        ixs_add(ctx, x, ixs_int(ctx, 2))};
+    ixs_node *cds[] = {ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 5)),
+                       ixs_true(ctx)};
+    ixs_node *pw = ixs_pw(ctx, 2, vals, cds);
+    ixs_node *result = ixs_simplify(ctx, pw, NULL, 0);
+    char buf[256];
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strcmp(buf, "Piecewise((6, -5 + x == 0), (2 + x, True))") == 0);
+  }
+
+  /* Two guarded branches with different equalities and distinct values:
+   * Piecewise((x + 10, x == 3), (x + 20, x == 7), (x + 30, True))
+   * Branch 1: x == 3 => 13, Branch 2: x == 7 => 27, default: x + 30. */
+  {
+    ixs_node *vals[] = {ixs_add(ctx, x, ixs_int(ctx, 10)),
+                        ixs_add(ctx, x, ixs_int(ctx, 20)),
+                        ixs_add(ctx, x, ixs_int(ctx, 30))};
+    ixs_node *cds[] = {ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 3)),
+                       ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7)),
+                       ixs_true(ctx)};
+    ixs_node *pw = ixs_pw(ctx, 3, vals, cds);
+    ixs_node *result = ixs_simplify(ctx, pw, NULL, 0);
+    char buf[256];
+    ixs_print(result, buf, sizeof(buf));
+    CHECK(strcmp(buf, "Piecewise((13, -3 + x == 0), "
+                      "(27, -7 + x == 0), (30 + x, True))") == 0);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1927,6 +1969,7 @@ int main(void) {
   test_boolean();
   test_simplify_with_bounds();
   test_eq_substitution();
+  test_pw_branch_eq_substitution();
   test_floor_bounds_collapse();
   test_mod_bounds_tighten();
   test_mod_extract_constant();

@@ -56,6 +56,16 @@ static inline ixs_interval ixs_interval_exact(int64_t p, int64_t q) {
   return iv;
 }
 
+/* True when iv is a single integer value; writes it to *val if non-NULL. */
+static inline bool ixs_interval_is_point_int(ixs_interval iv, int64_t *val) {
+  if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p == iv.hi_p) {
+    if (val)
+      *val = iv.lo_p;
+    return true;
+  }
+  return false;
+}
+
 static inline ixs_interval ixs_interval_range(int64_t lo_p, int64_t lo_q,
                                               int64_t hi_p, int64_t hi_q) {
   ixs_interval iv;

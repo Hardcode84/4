@@ -7076,9 +7076,9 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   case IXS_SYM: {
     /* Equality substitution: bounds pinned to a single integer => replace. */
     if (bnds) {
-      ixs_interval iv = ixs_bounds_get(bnds, n);
-      if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p == iv.hi_p)
-        return ixs_node_int(ctx, iv.lo_p);
+      int64_t val;
+      if (ixs_interval_is_point_int(ixs_bounds_get(bnds, n), &val))
+        return ixs_node_int(ctx, val);
     }
     return n;
   }
