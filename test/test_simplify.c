@@ -1378,6 +1378,27 @@ static void test_round_extract_rat_split(void) {
   ixs_node *expected_c = ixs_floor(ctx, ixs_div(ctx, fl_x16, ixs_int(ctx, 2)));
   CHECK(c == expected_c);
 
+  /* Negative: floor(-63/32 + floor(x/16)/2).
+   * -63/32 splits as fl=-2, rem=1/32.  1/32 < 1/2 => const drops.
+   * Result: -2 + floor(floor(x/16)/2). */
+  ixs_node *d = ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, -63, 32),
+                                       ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  ixs_node *expected_d =
+      ixs_add(ctx, ixs_int(ctx, -2),
+              ixs_floor(ctx, ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  CHECK(d == expected_d);
+
+  /* Negative: floor(-65/32 + floor(x/16)/2).
+   * -65/32 splits as fl=-3, rem=31/32.  31/32 >= 1/2 => const NOT dropped.
+   * Result: -3 + floor(31/32 + floor(x/16)/2). */
+  ixs_node *e = ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, -65, 32),
+                                       ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  ixs_node *inner_e =
+      ixs_floor(ctx, ixs_add(ctx, ixs_rat(ctx, 31, 32),
+                             ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
+  ixs_node *expected_e = ixs_add(ctx, ixs_int(ctx, -3), inner_e);
+  CHECK(e == expected_e);
+
   ixs_ctx_destroy(ctx);
 }
 
@@ -1426,6 +1447,14 @@ static void test_floor_drop_const_sym(void) {
   ixs_node *e5 = ixs_floor(ctx, ixs_add(ctx, xD, c33D));
   ixs_node *r5 = ixs_simplify(ctx, e5, &assume_d, 1);
   CHECK(r5 == e2);
+
+  /* Construction-time path (no ixs_simplify, bnds=NULL):
+   * floor_drop_const_sym has needs_bounds=false, so it fires from
+   * simp_floor directly.  Same pattern as e1 above. */
+  {
+    ixs_node *ct = ixs_floor(ctx, ixs_add(ctx, xD, cD));
+    CHECK(ct == expected1);
+  }
 
   ixs_ctx_destroy(ctx);
 }
