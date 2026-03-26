@@ -1861,6 +1861,61 @@ static void test_complement_annihilation(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_eq_substitution(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *M = ixs_sym(ctx, "BLOCK_M");
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  /* BLOCK_M == 256 => BLOCK_M + x becomes 256 + x */
+  {
+    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *expr = ixs_add(ctx, M, x);
+    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
+    CHECK(s == ixs_simplify(ctx, ixs_add(ctx, ixs_int(ctx, 256), x), NULL, 0));
+  }
+
+  /* Derived equality: x >= 5 && x <= 5 => x replaced by 5 */
+  {
+    ixs_node *assume[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 5)),
+        ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5)),
+    };
+    ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
+    ixs_node *s = ixs_simplify(ctx, expr, assume, 2);
+    CHECK(s == ixs_int(ctx, 6));
+  }
+
+  /* ceiling(M / 256) with M == 256 collapses to 1 */
+  {
+    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *expr = ixs_ceil(ctx, ixs_mul(ctx, M, ixs_rat(ctx, 1, 256)));
+    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
+    CHECK(s == ixs_int(ctx, 1));
+  }
+
+  /* Negative: no equality => symbol stays */
+  {
+    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_GE, ixs_int(ctx, 1))};
+    ixs_node *expr = ixs_add(ctx, M, ixs_int(ctx, 0));
+    ixs_node *s = ixs_simplify(ctx, expr, assume, 1);
+    CHECK(s == M);
+  }
+
+  /* Batch: equality substitution applies to all exprs in batch */
+  {
+    ixs_node *assume[] = {ixs_cmp(ctx, M, IXS_CMP_EQ, ixs_int(ctx, 256))};
+    ixs_node *exprs[] = {
+        ixs_add(ctx, M, ixs_int(ctx, 1)),
+        ixs_mul(ctx, M, ixs_int(ctx, 2)),
+    };
+    ixs_simplify_batch(ctx, exprs, 2, assume, 1);
+    CHECK(exprs[0] == ixs_int(ctx, 257));
+    CHECK(exprs[1] == ixs_int(ctx, 512));
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_add_canonicalize();
   test_mul_canonicalize();
@@ -1904,6 +1959,7 @@ int main(void) {
   test_flatten_mul_add_floor_mod();
   test_round_unwrap_inner();
   test_complement_annihilation();
+  test_eq_substitution();
 
   printf("test_simplify: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

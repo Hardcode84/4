@@ -7067,12 +7067,20 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   switch (n->tag) {
   case IXS_INT:
   case IXS_RAT:
-  case IXS_SYM:
   case IXS_TRUE:
   case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return n;
+
+  case IXS_SYM: {
+    if (bnds) {
+      ixs_interval iv = ixs_bounds_get(bnds, n);
+      if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p == iv.hi_p)
+        return ixs_node_int(ctx, iv.lo_p);
+    }
+    return n;
+  }
 
   case IXS_ADD: {
     ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo);
@@ -7097,13 +7105,17 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       ixs_node *b = rewrite(ctx, n->u.mul.factors[i].base, bnds, memo);
       if (!b)
         return NULL;
-      ixs_mulfactor f;
-      f.base = b;
-      f.exp = n->u.mul.factors[i].exp;
-      ixs_node *pw = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
-      if (!pw)
-        return NULL;
-      result = simp_mul(ctx, result, pw);
+      if (ixs_node_is_const(b) && n->u.mul.factors[i].exp == 1) {
+        result = simp_mul(ctx, result, b);
+      } else {
+        ixs_mulfactor f;
+        f.base = b;
+        f.exp = n->u.mul.factors[i].exp;
+        ixs_node *pw = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
+        if (!pw)
+          return NULL;
+        result = simp_mul(ctx, result, pw);
+      }
       if (!result)
         return NULL;
     }
