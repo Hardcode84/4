@@ -1141,34 +1141,60 @@ static ixs_node *simp_mul_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       if (!ixs_rat_mul(coeff_p, coeff_q, cp, cq, &coeff_p, &coeff_q))
         goto overflow;
       for (j = 0; j < x->u.mul.nfactors; j++) {
-        /* Flatten compound MUL bases at exp==1 to avoid non-canonical
-         * forms like MUL(2, [(K/256, 1)]) instead of MUL(1/128, [(K,1)]). */
-        if (x->u.mul.factors[j].exp == 1 &&
-            x->u.mul.factors[j].base->tag == IXS_MUL) {
+        /* Flatten compound MUL bases at exp +/-1 to avoid non-canonical
+         * forms like MUL(2, [(K/256, 1)]) instead of MUL(1/128, [(K,1)]).
+         * For exp==-1, invert the sub-coefficient and scale sub-exponents
+         * by ej so that (K/32)^{-1} decomposes to 32 * K^{-1}.  Skip
+         * flattening when the sub-coefficient is zero (degenerate) or any
+         * inner exponent is INT32_MIN (negation is UB). */
+        int32_t ej = x->u.mul.factors[j].exp;
+        if ((ej == 1 || ej == -1) && x->u.mul.factors[j].base->tag == IXS_MUL) {
           ixs_node *mb = x->u.mul.factors[j].base;
           int64_t mp, mq;
           ixs_node_get_rat(mb->u.mul.coeff, &mp, &mq);
+          if (ej == -1) {
+            uint32_t kk;
+            if (mp == 0)
+              goto no_flatten;
+            for (kk = 0; kk < mb->u.mul.nfactors; kk++)
+              if (mb->u.mul.factors[kk].exp == INT32_MIN)
+                goto no_flatten;
+            {
+              int64_t tmp = mp;
+              mp = mq;
+              mq = tmp;
+              if (mq < 0) {
+                mp = -mp;
+                mq = -mq;
+              }
+            }
+          }
           if (!ixs_rat_mul(coeff_p, coeff_q, mp, mq, &coeff_p, &coeff_q))
             goto overflow;
-          uint32_t k;
-          for (k = 0; k < mb->u.mul.nfactors; k++) {
-            if (nfactors >= cap) {
-              factors =
-                  scratch_grow(&ctx->scratch, factors, &cap, sizeof(*factors));
-              if (!factors)
-                return NULL;
+          {
+            uint32_t k;
+            for (k = 0; k < mb->u.mul.nfactors; k++) {
+              if (nfactors >= cap) {
+                factors = scratch_grow(&ctx->scratch, factors, &cap,
+                                       sizeof(*factors));
+                if (!factors)
+                  return NULL;
+              }
+              factors[nfactors].base = mb->u.mul.factors[k].base;
+              factors[nfactors].exp = mb->u.mul.factors[k].exp * ej;
+              nfactors++;
             }
-            factors[nfactors++] = mb->u.mul.factors[k];
           }
-        } else {
-          if (nfactors >= cap) {
-            factors =
-                scratch_grow(&ctx->scratch, factors, &cap, sizeof(*factors));
-            if (!factors)
-              return NULL;
-          }
-          factors[nfactors++] = x->u.mul.factors[j];
+          continue;
         }
+      no_flatten:
+        if (nfactors >= cap) {
+          factors =
+              scratch_grow(&ctx->scratch, factors, &cap, sizeof(*factors));
+          if (!factors)
+            return NULL;
+        }
+        factors[nfactors++] = x->u.mul.factors[j];
       }
     } else {
       if (nfactors >= cap) {
@@ -2163,71 +2189,129 @@ static ixs_node *mod_mul_zero(ixs_ctx *ctx, ixs_node *n) {
 /* Mod(x + k*m, m) -> Mod(x, m): strip additive multiples of m. */
 static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
-  if (a->tag != IXS_ADD || b->tag != IXS_INT || b->u.ival <= 0)
+  if (a->tag != IXS_ADD)
     return n;
 
-  int64_t m = b->u.ival;
-  int64_t const_p, const_q;
-  ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
+  /* Integer modulus: fast path using integer arithmetic. */
+  if (b->tag == IXS_INT && b->u.ival > 0) {
+    int64_t m = b->u.ival;
+    int64_t const_p, const_q;
+    ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
 
-  int64_t new_const_p = const_p, new_const_q = const_q;
-  if (const_q == 1) {
-    new_const_p = const_p % m;
-    if (new_const_p < 0)
-      new_const_p += m;
-  }
-
-  ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
-  ixs_addterm *reduced = ixs_arena_alloc(
-      &ctx->scratch, a->u.add.nterms * sizeof(*reduced), sizeof(void *));
-  if (!reduced) {
-    ixs_arena_restore(&ctx->scratch, sm);
-    return NULL;
-  }
-  uint32_t nr = 0;
-  uint32_t i;
-  bool changed = (new_const_p != const_p || new_const_q != const_q);
-
-  for (i = 0; i < a->u.add.nterms; i++) {
-    int64_t cp, cq;
-    ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
-    if (cq == 1 && cp % m == 0 &&
-        ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
-      changed = true;
-      continue;
+    int64_t new_const_p = const_p, new_const_q = const_q;
+    if (const_q == 1) {
+      new_const_p = const_p % m;
+      if (new_const_p < 0)
+        new_const_p += m;
     }
-    reduced[nr++] = a->u.add.terms[i];
-  }
 
-  if (!changed) {
-    ixs_arena_restore(&ctx->scratch, sm);
-    return n;
-  }
-
-  ixs_node *new_a;
-  if (nr == 0) {
-    new_a = make_const(ctx, new_const_p, new_const_q);
-  } else {
-    ixs_node *c = make_const(ctx, new_const_p, new_const_q);
-    if (!c) {
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_addterm *reduced = ixs_arena_alloc(
+        &ctx->scratch, a->u.add.nterms * sizeof(*reduced), sizeof(void *));
+    if (!reduced) {
       ixs_arena_restore(&ctx->scratch, sm);
       return NULL;
     }
-    if (nr == 1 && ixs_rat_is_zero(new_const_p)) {
-      int64_t rcp, rcq;
-      ixs_node_get_rat(reduced[0].coeff, &rcp, &rcq);
-      if (ixs_rat_is_one(rcp, rcq))
-        new_a = reduced[0].term;
-      else
-        new_a = simp_mul(ctx, make_const(ctx, rcp, rcq), reduced[0].term);
-    } else {
-      new_a = ixs_node_add(ctx, c, nr, reduced);
+    uint32_t nr = 0;
+    uint32_t i;
+    bool changed = (new_const_p != const_p || new_const_q != const_q);
+
+    for (i = 0; i < a->u.add.nterms; i++) {
+      int64_t cp, cq;
+      ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
+      if (cq == 1 && cp % m == 0 &&
+          ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
+        changed = true;
+        continue;
+      }
+      reduced[nr++] = a->u.add.terms[i];
     }
+
+    if (!changed) {
+      ixs_arena_restore(&ctx->scratch, sm);
+      return n;
+    }
+
+    ixs_node *new_a;
+    if (nr == 0) {
+      new_a = make_const(ctx, new_const_p, new_const_q);
+    } else {
+      ixs_node *c = make_const(ctx, new_const_p, new_const_q);
+      if (!c) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+      if (nr == 1 && ixs_rat_is_zero(new_const_p)) {
+        int64_t rcp, rcq;
+        ixs_node_get_rat(reduced[0].coeff, &rcp, &rcq);
+        if (ixs_rat_is_one(rcp, rcq))
+          new_a = reduced[0].term;
+        else
+          new_a = simp_mul(ctx, make_const(ctx, rcp, rcq), reduced[0].term);
+      } else {
+        new_a = ixs_node_add(ctx, c, nr, reduced);
+      }
+    }
+    ixs_arena_restore(&ctx->scratch, sm);
+    if (!new_a)
+      return NULL;
+    return simp_mod(ctx, new_a, b);
   }
-  ixs_arena_restore(&ctx->scratch, sm);
-  if (!new_a)
-    return NULL;
-  return simp_mod(ctx, new_a, b);
+
+  /* Symbolic modulus: trial-divide each addend by b.  Strip those
+   * where the quotient is provably integer-valued.  The ADD constant
+   * is left as-is because we cannot reduce it modulo a symbolic b. */
+  {
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_addterm *reduced = ixs_arena_alloc(
+        &ctx->scratch, a->u.add.nterms * sizeof(*reduced), sizeof(void *));
+    if (!reduced) {
+      ixs_arena_restore(&ctx->scratch, sm);
+      return NULL;
+    }
+    uint32_t nr = 0;
+    uint32_t i;
+    bool changed = false;
+
+    for (i = 0; i < a->u.add.nterms; i++) {
+      ixs_node *addend =
+          simp_mul(ctx, a->u.add.terms[i].coeff, a->u.add.terms[i].term);
+      ixs_node *quotient = addend ? simp_div(ctx, addend, b) : NULL;
+      if (quotient && !ixs_node_is_sentinel(quotient) &&
+          ixs_node_is_integer_valued(quotient)) {
+        changed = true;
+        continue;
+      }
+      reduced[nr++] = a->u.add.terms[i];
+    }
+
+    if (!changed) {
+      ixs_arena_restore(&ctx->scratch, sm);
+      return n;
+    }
+
+    ixs_node *new_a;
+    if (nr == 0) {
+      new_a = a->u.add.coeff;
+    } else {
+      int64_t cp, cq;
+      ixs_node_get_rat(a->u.add.coeff, &cp, &cq);
+      if (nr == 1 && cq == 1 && cp == 0) {
+        int64_t rcp, rcq;
+        ixs_node_get_rat(reduced[0].coeff, &rcp, &rcq);
+        if (ixs_rat_is_one(rcp, rcq))
+          new_a = reduced[0].term;
+        else
+          new_a = simp_mul(ctx, reduced[0].coeff, reduced[0].term);
+      } else {
+        new_a = ixs_node_add(ctx, a->u.add.coeff, nr, reduced);
+      }
+    }
+    ixs_arena_restore(&ctx->scratch, sm);
+    if (!new_a)
+      return NULL;
+    return simp_mod(ctx, new_a, b);
+  }
 }
 
 /* Extract a small constant addend from Mod when every other term's

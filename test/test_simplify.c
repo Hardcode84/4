@@ -286,6 +286,44 @@ static void test_mod_rules(void) {
     ixs_node *r = ixs_simplify(ctx, ce, assumes, 2);
     CHECK(r != ixs_int(ctx, 0));
   }
+
+  /* Division with compound MUL divisor: a / (a/c) -> c */
+  {
+    ixs_node *K = ixs_sym(ctx, "K");
+    ixs_node *K_over_32 = ixs_div(ctx, K, ixs_int(ctx, 32));
+
+    /* K / (K/32) -> 32 */
+    ixs_node *q1 = ixs_div(ctx, K, K_over_32);
+    CHECK(ixs_node_int_val(q1) == 32);
+
+    /* 8*K / (K/32) -> 256 */
+    ixs_node *q2 = ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, 8), K), K_over_32);
+    CHECK(ixs_node_int_val(q2) == 256);
+  }
+
+  /* Symbolic modulus: Mod(T0 + 8*K*T1, K/32) -> Mod(T0, K/32) */
+  {
+    ixs_node *K = ixs_sym(ctx, "K");
+    ixs_node *t0 = ixs_sym(ctx, "t0");
+    ixs_node *t1 = ixs_sym(ctx, "t1");
+    ixs_node *t2 = ixs_sym(ctx, "t2");
+    ixs_node *K32 = ixs_div(ctx, K, ixs_int(ctx, 32));
+    ixs_node *eight_K_t1 = ixs_mul(ctx, ixs_int(ctx, 8), ixs_mul(ctx, K, t1));
+    ixs_node *K_t2 = ixs_mul(ctx, K, t2);
+
+    /* Single addend stripped */
+    ixs_node *m1 = ixs_mod(ctx, ixs_add(ctx, t0, eight_K_t1), K32);
+    CHECK(m1 == ixs_mod(ctx, t0, K32));
+
+    /* Two addends stripped */
+    ixs_node *sum = ixs_add(ctx, t0, ixs_add(ctx, eight_K_t1, K_t2));
+    ixs_node *m2 = ixs_mod(ctx, sum, K32);
+    CHECK(m2 == ixs_mod(ctx, t0, K32));
+
+    /* Non-multiple addend preserved */
+    ixs_node *m3 = ixs_mod(ctx, ixs_add(ctx, t0, t1), K32);
+    CHECK(m3 != ixs_mod(ctx, t0, K32));
+  }
 }
 
 static void test_boolean(void) {
