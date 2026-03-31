@@ -815,6 +815,9 @@ Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
+Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
+                     all terms integer   → g*Mod(x, m) + r
+Mod(c*x, c*m)       where c > 1         → c*Mod(x, m)
 
 (reverse direction, in simp_add — recognize_mod)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)

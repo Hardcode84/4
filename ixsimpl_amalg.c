@@ -6175,6 +6175,145 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
   return simp_add(ctx, moded, ixs_node_int(ctx, const_p));
 }
 
+/* Leading positive integer coefficient of a MUL node, or 0 if the
+ * coefficient is fractional, negative, or the node is not MUL. */
+static int64_t mul_int_factor(ixs_node *b) {
+  int64_t bp, bq;
+  if (b->tag != IXS_MUL)
+    return 0;
+  ixs_node_get_rat(b->u.mul.coeff, &bp, &bq);
+  return (bq == 1 && bp > 0) ? bp : 0;
+}
+
+/* Mod(g*x + r, g*m) -> g*Mod(x, m) + r
+ *
+ * Factor out gcd(addend coefficients, modulus integer factor).
+ * Valid when g > 1, 0 <= r < g, all terms integer-valued.
+ * Also handles MUL LHS: Mod(c*x, c*m) -> c*Mod(x, m).
+ *
+ * Skips integer moduli -- extract_small_const et al. already cover
+ * them, and extracting here changes canonical forms that downstream
+ * difference-cancellation depends on. */
+static ixs_node *mod_scale_extract(ixs_ctx *ctx, ixs_bounds *bnds,
+                                   ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
+
+  if (b->tag == IXS_INT)
+    return n;
+
+  /* MUL LHS: Mod(c*x, b) where gcd(|c|, int-factor-of-b) > 1. */
+  if (a->tag == IXS_MUL) {
+    int64_t ap, aq;
+    ixs_node_get_rat(a->u.mul.coeff, &ap, &aq);
+    int64_t aap = (ap > 0) ? ap : (ap >= -INT64_MAX) ? -ap : 0;
+    if (aq != 1 || aap <= 1)
+      return n;
+    int64_t bfactor = mul_int_factor(b);
+    if (bfactor == 0)
+      return n;
+    int64_t g = ixs_gcd(aap, bfactor);
+    if (g <= 1)
+      return n;
+    ixs_node *gc = ixs_node_int(ctx, g);
+    if (!gc)
+      return NULL;
+    ixs_node *new_mod = simp_div(ctx, b, gc);
+    if (!new_mod || ixs_node_is_sentinel(new_mod))
+      return n;
+    ixs_node *inner = simp_div(ctx, a, gc);
+    if (!inner || ixs_node_is_sentinel(inner))
+      return n;
+    ixs_node *moded = simp_mod(ctx, inner, new_mod);
+    return moded ? simp_mul(ctx, gc, moded) : NULL;
+  }
+
+  /* ADD LHS: Mod(sum + r, b) where gcd(term coefficients, bfactor) > 1.
+   * The modulus integer factor is included in the GCD to avoid changing
+   * canonical forms when the modulus has a fractional coefficient. */
+  if (a->tag != IXS_ADD || a->u.add.nterms == 0)
+    return n;
+
+  int64_t bfactor = mul_int_factor(b);
+  if (bfactor == 0)
+    return n;
+
+  int64_t g = bfactor;
+  uint32_t i;
+  for (i = 0; i < a->u.add.nterms; i++) {
+    int64_t cp, cq;
+    ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
+    int64_t acp = (cp > 0) ? cp : (cp >= -INT64_MAX) ? -cp : 0;
+    if (cq != 1 || acp == 0 ||
+        !ixs_node_is_integer_valued(a->u.add.terms[i].term))
+      return n;
+    g = ixs_gcd(g, acp);
+    if (g <= 1)
+      return n;
+  }
+
+  int64_t kp, kq;
+  ixs_node_get_rat(a->u.add.coeff, &kp, &kq);
+  if (kq != 1 || kp < 0 || kp >= g)
+    return n;
+
+  ixs_node *gc = ixs_node_int(ctx, g);
+  if (!gc)
+    return NULL;
+
+  ixs_node *new_mod = simp_div(ctx, b, gc);
+  if (!new_mod || ixs_node_is_sentinel(new_mod))
+    return n;
+
+  /* When r > 0 the identity requires b/g to be integer-valued;
+   * otherwise Mod(g*s + r, g*m) can wrap when s approaches m. */
+  if (kp > 0 && !is_integer_with_divinfo(bnds, new_mod))
+    return n;
+
+  ixs_node *inner;
+  if (a->u.add.nterms == 1) {
+    int64_t cp, cq;
+    ixs_node_get_rat(a->u.add.terms[0].coeff, &cp, &cq);
+    int64_t nc = cp / g;
+    if (nc == 1)
+      inner = a->u.add.terms[0].term;
+    else
+      inner = simp_mul(ctx, make_const(ctx, nc, 1), a->u.add.terms[0].term);
+  } else {
+    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+    ixs_addterm *nt = ixs_arena_alloc(
+        &ctx->scratch, a->u.add.nterms * sizeof(*nt), sizeof(void *));
+    if (!nt) {
+      ixs_arena_restore(&ctx->scratch, sm);
+      return NULL;
+    }
+    for (i = 0; i < a->u.add.nterms; i++) {
+      int64_t cp, cq;
+      ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
+      nt[i].coeff = make_const(ctx, cp / g, 1);
+      nt[i].term = a->u.add.terms[i].term;
+      if (!nt[i].coeff) {
+        ixs_arena_restore(&ctx->scratch, sm);
+        return NULL;
+      }
+    }
+    ixs_node *zero = ixs_node_int(ctx, 0);
+    inner = zero ? ixs_node_add(ctx, zero, a->u.add.nterms, nt) : NULL;
+    ixs_arena_restore(&ctx->scratch, sm);
+  }
+  if (!inner)
+    return NULL;
+
+  ixs_node *moded = simp_mod(ctx, inner, new_mod);
+  if (!moded)
+    return NULL;
+  ixs_node *scaled = simp_mul(ctx, gc, moded);
+  if (!scaled)
+    return NULL;
+  if (kp > 0)
+    return simp_add(ctx, scaled, ixs_node_int(ctx, kp));
+  return scaled;
+}
+
 /* ---- Mod rule wrappers ------------------------------------------- */
 
 static ixs_node *rule_mod_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -6229,12 +6368,19 @@ static ixs_node *rule_mod_extract_small_const(ixs_ctx *ctx, ixs_bounds *bnds,
   return mod_extract_small_const(ctx, n);
 }
 
+static ixs_node *rule_mod_scale_extract(ixs_ctx *ctx, ixs_bounds *bnds,
+                                        ixs_node *n) {
+  return mod_scale_extract(ctx, bnds, n);
+}
+
 static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
                                       ixs_node *n) {
   return mod_bounds_elim(ctx, bnds, n);
 }
 
-/* Constant folds and identity first, then structural, bounds last. */
+/* Constant folds and identity first, then structural, bounds last.
+ * scale_extract skips IXS_INT moduli to preserve canonical forms that
+ * strip_multiples and difference-cancellation in simp_add depend on. */
 static const ixs_rule mod_rules[] = {
     {rule_mod_const_fold, "mod_const_fold", false},
     {rule_mod_one, "mod_one", false},
@@ -6242,6 +6388,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_idempotent, "mod_idempotent", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
     {rule_mod_extract_small_const, "mod_extract_small_const", false},
+    {rule_mod_scale_extract, "mod_scale_extract", true},
     {rule_mod_bounds_elim, "mod_bounds_elim", true},
     {NULL, NULL, false},
 };

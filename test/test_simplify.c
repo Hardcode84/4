@@ -324,6 +324,42 @@ static void test_mod_rules(void) {
     ixs_node *m3 = ixs_mod(ctx, ixs_add(ctx, t0, t1), K32);
     CHECK(m3 != ixs_mod(ctx, t0, K32));
   }
+
+  /* Scale factor extraction: Mod(16*a + 1, 128*d) -> 16*Mod(a, 8*d) + 1
+   * The rule is bounds-gated, so it fires only during ixs_simplify. */
+  {
+    ixs_node *a = ixs_sym(ctx, "a");
+    ixs_node *d = ixs_sym(ctx, "d");
+    ixs_node *lhs = ixs_mod(
+        ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), a), ixs_int(ctx, 1)),
+        ixs_mul(ctx, ixs_int(ctx, 128), d));
+    ixs_node *eight_d = ixs_mul(ctx, ixs_int(ctx, 8), d);
+    ixs_node *expected =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), ixs_mod(ctx, a, eight_d)),
+                ixs_int(ctx, 1));
+    ixs_node *simplified = ixs_simplify(ctx, lhs, NULL, 0);
+    CHECK(simplified == expected);
+
+    /* Zero remainder: Mod(16*a, 128*d) -> 16*Mod(a, 8*d) */
+    ixs_node *lhs2 = ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 16), a),
+                             ixs_mul(ctx, ixs_int(ctx, 128), d));
+    ixs_node *exp2 = ixs_mul(ctx, ixs_int(ctx, 16), ixs_mod(ctx, a, eight_d));
+    ixs_node *simp2 = ixs_simplify(ctx, lhs2, NULL, 0);
+    CHECK(simp2 == exp2);
+
+    /* Coprime: Mod(3*a + 1, 7*d) -- gcd(3,7)=1, no extraction. */
+    ixs_node *coprime = ixs_mod(
+        ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), a), ixs_int(ctx, 1)),
+        ixs_mul(ctx, ixs_int(ctx, 7), d));
+    CHECK(ixs_node_tag(coprime) == IXS_MOD);
+    CHECK(ixs_simplify(ctx, coprime, NULL, 0) == coprime);
+
+    /* r >= g: Mod(16*a + 17, 128*d) -- r=17 >= gcd(16,128)=16. */
+    ixs_node *big_r = ixs_mod(
+        ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), a), ixs_int(ctx, 17)),
+        ixs_mul(ctx, ixs_int(ctx, 128), d));
+    CHECK(ixs_simplify(ctx, big_r, NULL, 0) == big_r);
+  }
 }
 
 static void test_boolean(void) {
