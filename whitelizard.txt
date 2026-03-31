@@ -3,8 +3,4 @@
 #
 # Grandfathered functions that exceed CCN 50.
 # Reduce this list over time; do not add new entries without discussion.
-src/simplify.c:subs_rec
-src/simplify.c:rewrite_impl
-src/simplify.c:recognize_mod
-src/print.c:print_node
-src/node.c:ixs_node_cmp
+# (none)
