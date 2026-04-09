@@ -449,6 +449,47 @@ static void test_walk_sentinel(void) {
   printf("  walk_sentinel: OK\n");
 }
 
+static ixs_node *build_deep_max_chain(ixs_ctx *ctx, uint32_t depth) {
+  char name[32];
+  ixs_node *expr = ixs_sym(ctx, "v0");
+  CHECK(expr != NULL);
+  for (uint32_t i = 1; i <= depth; i++) {
+    snprintf(name, sizeof(name), "v%u", (unsigned)i);
+    expr = ixs_max(ctx, expr, ixs_sym(ctx, name));
+    CHECK(expr != NULL);
+  }
+  return expr;
+}
+
+static ixs_walk_action count_nodes(ixs_node *node, void *ud) {
+  size_t *count = (size_t *)ud;
+  (void)node;
+  (*count)++;
+  return IXS_WALK_CONTINUE;
+}
+
+static void test_walk_deep_chain(void) {
+  enum { WALK_DEPTH = 16384 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *expr = build_deep_max_chain(ctx, WALK_DEPTH);
+  size_t count = 0;
+
+  CHECK(expr != NULL);
+  CHECK(ixs_node_tag(expr) == IXS_MAX);
+
+  ixs_node *res = ixs_walk_pre(ctx, expr, count_nodes, &count);
+  CHECK(res == expr);
+  CHECK(count == 2u * (size_t)WALK_DEPTH + 1u);
+
+  count = 0;
+  res = ixs_walk_post(ctx, expr, count_nodes, &count);
+  CHECK(res == expr);
+  CHECK(count == 2u * (size_t)WALK_DEPTH + 1u);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_deep_chain: OK\n");
+}
+
 int main(void) {
   printf("test_introspect:\n");
   test_rat_accessors();
@@ -473,6 +514,7 @@ int main(void) {
   test_walk_null_root();
   test_walk_leaf();
   test_walk_sentinel();
+  test_walk_deep_chain();
   printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
 }

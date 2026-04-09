@@ -306,8 +306,8 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
 
 /* Pre-order: visit node, then recurse into children.
  * Returns root on completion, the stopping node on STOP, NULL if root
- * is NULL.  A future iterative implementation may also return NULL on
- * OOM (scratch arena exhausted); ctx is accepted for that purpose.
+ * is NULL or the explicit scratch-backed traversal stack cannot grow.
+ * ctx must be non-NULL when root is non-NULL.
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */

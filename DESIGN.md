@@ -1507,8 +1507,9 @@ typedef enum {
 typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
 
 /* Pre-order: visit node, then recurse into children.
- * Returns root on completion, the stopping node on STOP, NULL on OOM.
- * NULL root returns NULL (no-op).
+ * Returns root on completion, the stopping node on STOP, NULL if root
+ * is NULL or the explicit scratch-backed traversal stack cannot grow.
+ * ctx must be non-NULL when root is non-NULL.
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
@@ -1525,8 +1526,8 @@ ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root,
 **Return value**:
 - `root` — walk completed, all reachable nodes visited.
 - other non-NULL — callback returned STOP on that node.
-- `NULL` — root was NULL (or OOM if a future iterative implementation
-  exhausts its scratch stack).
+- `NULL` — root was NULL or the scratch-backed explicit stack ran out of
+  memory.
 
 The caller distinguishes NULL-root from OOM because they know what they
 passed. The edge case where STOP fires on root itself (returns `root`,
@@ -1539,11 +1540,11 @@ unique nodes, so callers doing exhaustive collection (e.g.
 identity. Callers that don't need dedup (printing, conversion) get the
 fast path without paying for a hash set.
 
-`ctx` is accepted so that a future iterative implementation can use the
-scratch arena for an explicit stack, avoiding stack overflow on deep trees.
-The current implementation is recursive and never returns NULL for non-NULL
-root, but is subject to stack depth limits on very deep trees (practical
-limit ~10k depth). Bead 4-3j0 tracks bounding recursion depth.
+`ctx` provides the scratch arena used by the iterative implementation's
+explicit stack. This keeps walk depth bounded by available arena memory
+instead of the C call stack, so deep trees no longer risk stack overflow.
+For non-NULL roots, `ctx` must be non-NULL. The only failure mode for
+non-NULL roots is scratch-stack OOM, reported as `NULL`.
 
 Use cases:
 - `ixs_walk_pre`: top-down — pattern matching with subtree-skipping,
