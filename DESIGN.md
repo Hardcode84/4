@@ -123,6 +123,11 @@ meaning to the library. All are treated uniformly as opaque symbolic names.
 └──────────────────────────────────────────────────────┘
 ```
 
+The diagram above shows the current implementation. The Context/Session
+refactor later in this document keeps the lower layers unchanged and only
+splits the public state handle into a long-lived store plus a reusable
+session.
+
 Node construction and simplification are **one logical layer**: every
 constructor (e.g., `ixs_add`, `ixs_floor`) applies canonicalization rules
 before hash-consing. This is intentional — it ensures all nodes in the DAG
@@ -134,15 +139,18 @@ rule functions (in `simplify.c`), which call internal node allocators (in
 `node.c`). `node.c` never calls `simplify.c` — the dependency is one-way:
 `ctx.c` → `simplify.c` → `node.c`. This prevents circular dependencies.
 
-**Thread safety**: A single `ixs_ctx` is **not** thread-safe. All operations
-on a context must be serialized by the caller. For parallel workloads, use one
-`ixs_ctx` per thread. Distinct contexts share no state and can be used
+**Thread safety**: The library has no internal synchronization. In the current
+API that means a single `ixs_ctx` is not thread-safe. In the refactored API the
+same rule applies to both a store and any session bound to it: callers must
+serialize shared use. Distinct stores share no state and can be used
 concurrently without synchronization.
 
 **Cross-context contract**: All `ixs_node*` arguments passed to any API
-function must belong to the same `ixs_ctx` as the `ctx` parameter. Passing
-a node from one context to a different context is **undefined behavior**
-(dangling arena pointer, wrong hash table).
+function must belong to the same store as the call handle: the `ctx` argument
+today, or the store bound to the `ixs_session` argument after the refactor.
+Passing a node from one store to a different store is **undefined behavior**
+(dangling arena pointer, wrong hash table). Structural import is the only
+supported cross-store bridge.
 
 **Depth limit**: The parser enforces a recursion depth limit (default 256).
 Trees built programmatically via the API have no depth limit. The simplifier,
@@ -184,6 +192,11 @@ to 16 bytes. One malloc, one free per chunk. Chunks grow by doubling
 Typical working set for one expression is < 64 KB.
 
 #### Scratch Arena
+
+This subsection describes the current implementation, where scratch lives in
+`ixs_ctx`. The refactor later in this document keeps the same save/restore
+programming model but moves scratch into `ixs_session` and caches one detached
+heap chunk for reuse instead of freeing every detached chunk immediately.
 
 Smart constructors (`simp_add`, `simp_mul`, `simp_and`, `simp_or`, `simp_pw`)
 and the parser flatten variadic children into temporary arrays before building
@@ -1088,30 +1101,35 @@ node types.
 
 ### Tier 1: NULL — Out of Memory (catastrophic)
 
-All constructors and `ixs_parse` return `NULL` when the arena cannot grow.
-This is unrecoverable. No error string is set (we can't allocate memory for
-it). NULL propagates silently: any constructor that receives a NULL argument
-returns NULL immediately without side effects.
+All constructors and parse entry points return `NULL` when the arena cannot
+grow. This is unrecoverable. No error string is set (we can't allocate memory
+for it). NULL propagates silently: any constructor that receives a NULL
+argument returns NULL immediately without side effects.
 
 ### Tier 2: Parse Error Sentinel (`IXS_PARSE_ERROR`)
 
-Returned by `ixs_parse` when the input is syntactically malformed (unexpected
-token, unmatched parentheses, unknown function name, recursion depth limit
-exceeded). There is one parse-error sentinel per context (singleton). Error
-details are appended to the context's error list.
+Returned by the parse entry points (`ixs_parse` today;
+`ixs_parse_expr`/`ixs_parse_pred` after the refactor) when the input is
+syntactically malformed (unexpected token, unmatched parentheses, unknown
+function name, recursion depth limit exceeded) or when a parsed root has the
+wrong kind. There is one parse-error sentinel per store (singleton).
+Diagnostics are appended to the active error sink: the context error list
+today, the session error list after the refactor.
 
-Only `ixs_parse` produces this sentinel. Constructors never produce it.
+Only the parse entry points produce this sentinel. Constructors never produce
+it.
 
 ### Tier 3: Domain Error Sentinel (`IXS_ERROR`)
 
 Returned by constructors when an operation is mathematically undefined:
-division by zero, `Mod(x, 0)`, rational overflow, `ixs_rat(ctx, p, 0)`,
+division by zero, `Mod(x, 0)`, rational overflow, `ixs_rat(..., p, 0)`,
 integer literal overflow during parsing of a syntactically valid number.
-There is one domain-error sentinel per context (singleton). Error details are
-appended to the context's error list.
+There is one domain-error sentinel per store (singleton). Diagnostics are
+appended to the active error sink: the context error list today, the session
+error list after the refactor.
 
-`ixs_parse` can return this sentinel when the input is syntactically valid
-but contains a domain error (e.g., `"1/0 + x"`).
+The parse entry points can return this sentinel when the input is
+syntactically valid but contains a domain error (e.g., `"1/0 + x"`).
 
 ### Propagation rules
 
@@ -1150,7 +1168,11 @@ semantics in `select`:
 This enables batch processing: one expression with a div/0 in a dead
 Piecewise branch doesn't invalidate the other 608 expressions.
 
-### Error List API
+### Error List API (Current Implementation)
+
+The functions below describe the current implementation. The sentinel tiers and
+propagation rules are intended to stay unchanged after the refactor, but the
+mutable diagnostic list moves from `ixs_ctx` to `ixs_session`.
 
 ```c
 // Query errors accumulated since last clear.
@@ -1165,7 +1187,8 @@ bool        ixs_is_parse_error(ixs_node *node);   // true only for IXS_PARSE_ERR
 bool        ixs_is_domain_error(ixs_node *node);  // true only for IXS_ERROR
 ```
 
-Error strings are arena-allocated (so they live until `ixs_ctx_destroy`).
+In the current implementation, error strings are arena-allocated (so they live
+until `ixs_ctx_destroy`).
 Each string includes the error kind and location, e.g.:
 - `"parse error at offset 7: unexpected token 'bar'"`
 - `"parse error: recursion depth limit (256) exceeded"`
@@ -1196,7 +1219,11 @@ Each string includes the error kind and location, e.g.:
 | Syntactically valid but contains domain error | `IXS_ERROR` sentinel |
 | OOM | `NULL` |
 
-## Public API
+## Public API (Current Implementation)
+
+This section is an implementation snapshot of what ships today. The intended
+replacement surface is specified later in `Target API: Context/Session
+Refactor`.
 
 ```c
 // Context: owns the arena, hash-consing table, and symbol table
@@ -1695,6 +1722,10 @@ Python extension.
 
 ## Language Bindings
 
+The binding sketches below wrap the current `ixs_ctx`-only API. When the
+Context/Session refactor lands, `Context` remains the long-lived store owner
+and mutating calls route through a session bound to that store.
+
 ### C++ Binding — `ixsimpl.hpp`
 
 A thin header-only RAII wrapper over the C API. No additional runtime cost.
@@ -1869,7 +1900,384 @@ Implementation:
 This binding adds ~800 lines of C and is the primary interface for testing
 against SymPy (run both, compare outputs).
 
+## Target API: Context/Session Refactor
+
+This section is the target contract. `Public API (Current Implementation)`
+above documents what ships today; the signatures and rules here are the
+intended replacement surface for the same engine.
+
+### Goals
+
+The refactor has four concrete goals:
+
+1. Keep `ixsimpl`'s current symbolic semantics -- immutable hash-consed DAG
+   nodes, canonical smart constructors, sentinel propagation, and
+   assumption-driven simplification.
+2. Separate long-lived store-owned state from short-lived parse/simplify
+   scratch so interned nodes are not tied to ephemeral parser and
+   simplifier state.
+3. Make scratch reusable across calls instead of reallocating from zero for
+   every parse/simplify/import operation.
+4. Provide structural import and structural binary serialization so assembly
+   text is only a human-facing view, not the steady-state interchange format.
+
+### Ownership Model
+
+The long-lived object remains `ixs_ctx`, but its role becomes narrower. The
+public session type is a fixed-size opaque blob that can live on the stack or
+inline inside host objects:
+
+```c
+#define IXS_SESSION_BYTES 4096
+
+typedef union {
+  void *ptr_align;
+  unsigned char storage[IXS_SESSION_BYTES];
+} ixs_session;
+```
+
+The union makes `ixs_session` itself pointer-aligned, which is sufficient for
+the inline `ixs_arena_chunk` header placed at the start of `storage`. As with
+the heap-backed arena, the usable data region is then aligned upward inside
+`storage` before any object that needs stronger interior alignment is emplaced
+there. The usable inline scratch capacity is therefore slightly less than 4 KB,
+which is acceptable.
+
+`IXS_SESSION_BYTES` is part of the public ABI. Changing it is an ABI break; the
+initial contract fixes it at 4096 bytes.
+
+`ixs_ctx` owns:
+
+- the permanent arena for interned nodes
+- the hash-consing table
+- singletons (`IXS_ERROR`, `IXS_PARSE_ERROR`, `true`, `false`, `0`, `1`)
+- any permanent rule/stat tables
+
+`ixs_ctx` does **not** own:
+
+- scratch allocations
+- parser state
+- temporary memo tables
+- mutable diagnostics
+
+`ixs_session` is a reusable workspace bound to exactly one `ixs_ctx`. It owns:
+
+- the inline first scratch chunk plus any active heap-grown scratch chunk
+- one cached spare heap chunk for reuse
+- diagnostic list / messages
+- temporary parse state
+- import memo tables
+- temporary buffers used by simplify, bounds, expand, and walk
+
+The current "all state lives in one context" design is convenient for a
+standalone library, but it couples unrelated lifetimes. The refactor keeps
+`ixs_ctx` as the immutable symbolic store and moves all ephemeral state into
+`ixs_session`.
+
+### Lifecycle
+
+Planned lifecycle:
+
+```c
+ixs_ctx *ixs_ctx_create(void);
+void ixs_ctx_destroy(ixs_ctx *ctx);  /* NULL-safe */
+
+void ixs_session_init(ixs_session *s, ixs_ctx *ctx);
+void ixs_session_reset(ixs_session *s);
+void ixs_session_destroy(ixs_session *s);
+```
+
+Contract:
+
+- `ixs_session_init` requires non-NULL `s` and `ctx`.
+- `ixs_session_init` performs no heap allocation. It emplaces the inline
+  scratch chunk and the private session header inside `s->storage`, so
+  initialization cannot fail once the preconditions are met.
+- `ixs_session_reset` and `ixs_session_destroy` are only valid after
+  initialization and before the matching destroy.
+- `ixs_session_destroy` releases heap-grown scratch storage, clears
+  diagnostics, and returns `*s` to an uninitialized byte blob. Reinitialize a
+  session only after destroying it.
+- `ixs_ctx_destroy(NULL)` remains a no-op. For a non-NULL store, every session
+  bound to that store must already have been destroyed. Destroying the store
+  invalidates all nodes obtained from it.
+
+`ixs_session` requires no separate heap allocation for the session object
+itself. After initialization it is a logical non-copyable object: copying the
+raw bytes duplicates interior pointers and is invalid.
+
+`ixs_session_reset`:
+
+- clears diagnostics
+- restores scratch to the session's post-init `base_mark`
+- retains one cached spare heap chunk for reuse
+
+This is the critical performance property: hot paths stop paying allocator
+setup cost on every parse/simplify/import call.
+
+### Sentinel And Diagnostics Model
+
+The refactor keeps the existing three-tier node-level error model:
+
+- `NULL` for OOM
+- `IXS_PARSE_ERROR` for syntax / format / wrong-kind parse failure
+- `IXS_ERROR` for domain failure
+
+Sentinel propagation rules stay the same, including the `Piecewise` dead-branch
+exception. The change is only where diagnostics live.
+
+Diagnostics move from `ixs_ctx` to `ixs_session`:
+
+```c
+size_t ixs_session_nerrors(ixs_session *s);
+const char *ixs_session_error(ixs_session *s, size_t index);
+void ixs_session_clear_errors(ixs_session *s);
+```
+
+Rules:
+
+- the operation that **originates** an error appends to the session error list
+- propagated sentinels stay silent
+- OOM still returns `NULL` and leaves diagnostics unchanged
+- error strings returned by `ixs_session_error` remain valid until
+  `ixs_session_clear_errors`, `ixs_session_reset`, or `ixs_session_destroy`
+- diagnostics are stored separately from rewound scratch, so nested
+  save/restore inside parse/simplify/walk cannot erase them prematurely
+
+This preserves cheap in-band error propagation while removing mutable
+diagnostic state from the long-lived store object.
+
+### Target API Surface
+
+All node-valued APIs take `ixs_session *`, including singleton accessors. The
+refactor deliberately splits the old `ixs_parse` entry point into kind-specific
+parsers.
+
+Constructors and parsers:
+
+```c
+ixs_node *ixs_int(ixs_session *s, int64_t val);
+ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q);
+ixs_node *ixs_sym(ixs_session *s, const char *name);
+
+ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_neg(ixs_session *s, ixs_node *a);
+ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
+ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
+ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
+ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_not(ixs_session *s, ixs_node *a);
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
+                 ixs_node **conds);
+
+ixs_node *ixs_true(ixs_session *s);
+ixs_node *ixs_false(ixs_session *s);
+
+ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len);
+ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
+```
+
+Transforms and queries that allocate temporary state:
+
+```c
+ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
+                       ixs_node *const *assumptions, size_t n_assumptions);
+void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
+                        ixs_node *const *assumptions, size_t n_assumptions);
+
+ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
+                           ixs_node *const *assumptions, size_t n_assumptions);
+
+ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
+ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,
+                   ixs_node *target, ixs_node *replacement);
+ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
+                         ixs_node *const *targets,
+                         ixs_node *const *replacements);
+ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root,
+                       ixs_visit_fn fn, void *userdata);
+ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root,
+                        ixs_visit_fn fn, void *userdata);
+```
+
+Node-only APIs stay unchanged:
+
+- sentinel checks
+- pointer equality
+- printers
+- node introspection accessors
+
+Store inspection APIs that do not create nodes stay on `ixs_ctx`. That
+includes rule-hit statistics and any future store-level counters.
+
+Kind predicates are needed for callers that distinguish numeric expressions
+from predicates:
+
+```c
+bool ixs_node_is_expr(const ixs_node *node);
+bool ixs_node_is_pred(const ixs_node *node);
+```
+
+Exact classification:
+
+- expression nodes: `IXS_INT`, `IXS_RAT`, `IXS_SYM`, `IXS_ADD`, `IXS_MUL`,
+  `IXS_FLOOR`, `IXS_CEIL`, `IXS_MOD`, `IXS_MAX`, `IXS_MIN`, `IXS_XOR`,
+  `IXS_PIECEWISE`
+- predicate nodes: `IXS_CMP`, `IXS_AND`, `IXS_OR`, `IXS_NOT`, `IXS_TRUE`,
+  `IXS_FALSE`
+- sentinels are neither
+
+`ixs_pw` remains expression-valued: every non-sentinel branch value must be an
+expression, every branch condition must be a predicate, and the final condition
+must be `ixs_true(s)`. Predicate-valued `Piecewise` is out of scope for this
+API.
+
+`ixs_parse_expr` accepts only expression roots. `ixs_parse_pred` accepts only
+predicate roots. If the input is syntactically well-formed but the top-level
+kind is wrong, the parser returns `IXS_PARSE_ERROR` and appends a diagnostic
+such as `expected predicate, got expression`.
+
+### Scratch Arena Reuse
+
+The current scratch arena frees every detached heap chunk on restore. That is
+correct but too allocation-heavy for reusable sessions. The refactor gives each
+session one inline scratch chunk inside the 4 KB public blob and caches at most
+one detached heap chunk for reuse.
+
+Conceptually:
+
+```c
+typedef struct ixs_arena {
+  ixs_arena_chunk *current;
+  ixs_arena_chunk *spare;
+  size_t min_chunk;
+} ixs_arena;
+```
+
+Initialization layout:
+
+1. place the inline `ixs_arena_chunk` header at the start of `storage`
+2. align the bytes immediately after that header up to `ARENA_MAX_ALIGN`
+3. initialize the scratch arena with that inline chunk as `current`
+4. allocate the private session header as the first scratch allocation
+5. record a `base_mark` immediately after that allocation
+
+The private session header therefore lives inside the inline scratch chunk, but
+`ixs_session_reset` never destroys it because reset restores to `base_mark`,
+not to the empty chunk start.
+
+Behavior after initialization:
+
+- `ixs_arena_restore` rewinds active allocations above the relevant mark
+- if restore detaches one heap chunk, that chunk becomes `spare`
+- if restore detaches additional heap chunks, they are freed immediately
+- future scratch growth reuses `spare` before calling `malloc`
+- if a future growth needs a larger chunk than `spare` can satisfy, the cached
+  chunk is freed and replaced
+- `ixs_session_reset` clears diagnostics and restores scratch to `base_mark`
+- the inline first chunk is never freed
+- `ixs_session_destroy` frees active and spare heap chunks, but never the
+  inline first chunk
+
+This keeps hot paths allocation-light without changing the symbolic semantics
+or the save/restore programming model, and it puts a hard bound on retained
+spare scratch memory.
+
+### Structural Import Between Contexts
+
+Raw node pointers remain store-owned. Mixing nodes from different stores is
+still invalid. The sanctioned bridge is structural import:
+
+```c
+ixs_node *ixs_import_node(ixs_session *dst, const ixs_node *src);
+bool ixs_import_many(ixs_session *dst, const ixs_node *const *src,
+                     size_t count, ixs_node **out);
+```
+
+Semantics:
+
+- if `src` is a sentinel, return the matching sentinel in the store bound to
+  `dst`
+- if `src` already belongs to the store bound to `dst`, reuse it directly
+- otherwise rebuild it structurally into that store
+- use a session-local memo table keyed by source pointer
+- import through the canonical constructors so the destination store interns
+  and normalizes the result
+- `ixs_import_node` returns `NULL` only on OOM
+- `ixs_import_many` returns `true` only if every element imports successfully
+- if `ixs_import_many` returns `false`, `out` is left unchanged
+- import is not transactional with respect to the destination store: nodes
+  interned before a failing allocation may remain available for later reuse
+
+This import API is the required bridge for:
+
+- safe cross-store cloning
+- importing expressions created in foreign stores
+- structural binary loading
+
+### Structural Serialization
+
+For durable binary interchange, symbolic data must not be printed and reparsed
+through symbolic text. Add a stable structural codec:
+
+```c
+typedef struct ixs_writer ixs_writer;
+typedef struct ixs_reader ixs_reader;
+
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
+ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
+```
+
+Wire-format contract:
+
+- host-independent and little-endian
+- fixed-width scalar fields (`uint8_t` tag, `uint32_t` counts/indices,
+  `int64_t` integer payloads)
+- leading magic/version header
+- topologically ordered unique-node table
+- child references by earlier table index
+- explicit tag values for sentinels and boolean singletons
+- final root index
+
+Failure contract:
+
+- `ixs_serialize_node` returns `true` on success and `false` on writer failure
+  or OOM. Writer failures are reported by `ixs_writer`; OOM leaves diagnostics
+  unchanged.
+- `ixs_deserialize_node` returns a node on success, `IXS_PARSE_ERROR` on
+  malformed or unsupported binary, and `NULL` on OOM.
+- the decoder validates framing, lengths, tag payloads, integer widths, and
+  child references in session scratch before interning anything into the
+  destination store
+- malformed input therefore reports a parse error without partially importing
+  garbage into the store
+- size/count fields that overflow `size_t`, exceed the remaining reader bytes,
+  or reference nonexistent table entries are rejected as parse errors
+
+This codec is the backend for:
+
+- persistent binary interchange
+- any future out-of-line symbolic resource storage
+
+Text parsing/printing remains for:
+
+- human-facing syntax
+- debugging
+- explicit text roundtrip tests
+
 ## Implementation Plan
+
+The phase list below describes the engine as implemented today. The
+Context/Session refactor above is an API and lifetime refactor over the same
+core, not a restart from Phase 1.
 
 ### Phase 1: Foundation
 
@@ -1930,13 +2338,12 @@ met (< 50ms total).
 
 **Milestone**: `pip install .` works; Python tests pass against SymPy oracle.
 
-### Phase 6: Hardening + Integration
+### Phase 6: Hardening
 
 - Fuzz testing (generate random expressions, verify against SymPy)
 - Edge cases: overflow, division by zero, degenerate Piecewise
 - C code output mode
 - Documentation
-- Integration with the host compiler
 
 ## Testing Strategy
 
