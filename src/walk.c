@@ -111,16 +111,26 @@ static ixs_node *walk_post(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
   return root;
 }
 
-ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
                        void *userdata) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
   if (!root)
     return NULL;
-  return walk_pre(ctx, root, fn, userdata);
+  ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = walk_pre(ctx, root, fn, userdata);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
                         void *userdata) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
   if (!root)
     return NULL;
-  return walk_post(ctx, root, fn, userdata);
+  ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = walk_post(ctx, root, fn, userdata);
+  ixs_session_unbind(&binding);
+  return result;
 }

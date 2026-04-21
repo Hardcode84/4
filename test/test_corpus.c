@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "test_session_compat.h"
+
 #define MAX_LINE 8192
 #define MAX_ASSUMPTIONS 256
 

@@ -738,7 +738,7 @@ IXS_STATIC void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
-  char *msg = ixs_arena_strdup(&ctx->arena, buf, strlen(buf));
+  char *msg = ixs_arena_strdup(&ctx->diag, buf, strlen(buf));
   if (!msg)
     return;
 
@@ -747,10 +747,9 @@ IXS_STATIC void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...) {
     if (new_cap <= ctx->errors_cap ||
         new_cap > (size_t)-1 / sizeof(const char *))
       return;
-    const char **new_arr =
-        ixs_arena_grow(&ctx->arena, (void *)ctx->errors,
-                       ctx->errors_cap * sizeof(const char *),
-                       new_cap * sizeof(const char *), sizeof(void *));
+    const char **new_arr = ixs_arena_grow(
+        &ctx->diag, (void *)ctx->errors, ctx->errors_cap * sizeof(const char *),
+        new_cap * sizeof(const char *), sizeof(void *));
     if (!new_arr)
       return;
     ctx->errors = new_arr;

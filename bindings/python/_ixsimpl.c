@@ -28,6 +28,7 @@ static PyTypeObject *expr_wrap_type;
 
 typedef struct ContextObject {
   PyObject_HEAD ixs_ctx *ctx;
+  ixs_session session;
 } ContextObject;
 
 /* ------------------------------------------------------------------ */
@@ -52,6 +53,10 @@ static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
   self->ctx_obj = ctx_obj;
   Py_INCREF(ctx_obj);
   return self;
+}
+
+static ixs_session *Context_session(ContextObject *ctx_obj) {
+  return &ctx_obj->session;
 }
 
 static void Expr_dealloc(ExprObject *self) {
@@ -80,7 +85,7 @@ static ixs_node *coerce_arg(ContextObject *ctx_obj, PyObject *obj) {
     }
     if (v == -1 && PyErr_Occurred())
       return NULL;
-    return ixs_int(ctx_obj->ctx, (int64_t)v);
+    return ixs_int(Context_session(ctx_obj), (int64_t)v);
   }
   PyErr_SetString(PyExc_TypeError, "ixsimpl: expected Expr or int");
   return NULL;
@@ -186,7 +191,7 @@ static PyObject *Expr_richcompare(ExprObject *self, PyObject *other, int op) {
     Py_RETURN_NOTIMPLEMENTED;
   }
 
-  result = ixs_cmp(ctx_obj->ctx, a, cmp, b);
+  result = ixs_cmp(Context_session(ctx_obj), a, cmp, b);
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
@@ -217,7 +222,7 @@ static PyObject *Expr_add(PyObject *a, PyObject *b) {
   nb = coerce_arg(ctx_obj, b);
   if (!nb)
     return NULL;
-  result = ixs_add(ctx_obj->ctx, na, nb);
+  result = ixs_add(Context_session(ctx_obj), na, nb);
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
@@ -232,7 +237,7 @@ static PyObject *Expr_sub(PyObject *a, PyObject *b) {
   nb = coerce_arg(ctx_obj, b);
   if (!nb)
     return NULL;
-  result = ixs_sub(ctx_obj->ctx, na, nb);
+  result = ixs_sub(Context_session(ctx_obj), na, nb);
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
@@ -247,7 +252,7 @@ static PyObject *Expr_mul(PyObject *a, PyObject *b) {
   nb = coerce_arg(ctx_obj, b);
   if (!nb)
     return NULL;
-  result = ixs_mul(ctx_obj->ctx, na, nb);
+  result = ixs_mul(Context_session(ctx_obj), na, nb);
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
@@ -262,12 +267,12 @@ static PyObject *Expr_truediv(PyObject *a, PyObject *b) {
   nb = coerce_arg(ctx_obj, b);
   if (!nb)
     return NULL;
-  result = ixs_div(ctx_obj->ctx, na, nb);
+  result = ixs_div(Context_session(ctx_obj), na, nb);
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
 static PyObject *Expr_neg(ExprObject *self) {
-  ixs_node *result = ixs_neg(self->ctx_obj->ctx, self->node);
+  ixs_node *result = ixs_neg(Context_session(self->ctx_obj), self->node);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -331,14 +336,14 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
     }
   }
 
-  result =
-      ixs_simplify(self->ctx_obj->ctx, self->node, assumptions, n_assumptions);
+  result = ixs_simplify(Context_session(self->ctx_obj), self->node, assumptions,
+                        n_assumptions);
   PyMem_Free(assumptions);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
 static PyObject *Expr_expand(ExprObject *self, PyObject *Py_UNUSED(args)) {
-  ixs_node *result = ixs_expand(self->ctx_obj->ctx, self->node);
+  ixs_node *result = ixs_expand(Context_session(self->ctx_obj), self->node);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -354,7 +359,7 @@ static ixs_node *coerce_subs_target(ContextObject *ctx_obj, PyObject *obj) {
     const char *name = PyUnicode_AsUTF8(obj);
     if (!name)
       return NULL;
-    return ixs_sym(ctx_obj->ctx, name);
+    return ixs_sym(Context_session(ctx_obj), name);
   }
   return coerce_arg(ctx_obj, obj);
 }
@@ -405,8 +410,8 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
       return NULL;
     }
 
-    result = ixs_subs_multi(self->ctx_obj->ctx, self->node, (uint32_t)n,
-                            targets, repls);
+    result = ixs_subs_multi(Context_session(self->ctx_obj), self->node,
+                            (uint32_t)n, targets, repls);
     PyMem_Free(targets);
     PyMem_Free(repls);
     return (PyObject *)Expr_wrap(self->ctx_obj, result);
@@ -428,7 +433,7 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
     if (!repl)
       return NULL;
 
-    result = ixs_subs(self->ctx_obj->ctx, self->node, target, repl);
+    result = ixs_subs(Context_session(self->ctx_obj), self->node, target, repl);
     return (PyObject *)Expr_wrap(self->ctx_obj, result);
   }
 }
@@ -764,18 +769,22 @@ static PyObject *Context_new(PyTypeObject *type, PyObject *Py_UNUSED(args),
   ContextObject *self = (ContextObject *)type->tp_alloc(type, 0);
   if (!self)
     return NULL;
+  self->ctx = NULL;
   self->ctx = ixs_ctx_create();
   if (!self->ctx) {
     Py_DECREF(self);
     PyErr_SetString(PyExc_MemoryError, "ixsimpl: failed to create context");
     return NULL;
   }
+  ixs_session_init(&self->session, self->ctx);
   return (PyObject *)self;
 }
 
 static void Context_dealloc(ContextObject *self) {
-  if (self->ctx)
+  if (self->ctx) {
+    ixs_session_destroy(&self->session);
     ixs_ctx_destroy(self->ctx);
+  }
   Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -786,7 +795,7 @@ static PyObject *Context_sym(ContextObject *self, PyObject *args) {
   ixs_node *node;
   if (!PyArg_ParseTuple(args, "s", &name))
     return NULL;
-  node = ixs_sym(self->ctx, name);
+  node = ixs_sym(Context_session(self), name);
   return (PyObject *)Expr_wrap(self, node);
 }
 
@@ -796,7 +805,7 @@ static PyObject *Context_parse(ContextObject *self, PyObject *args) {
   ixs_node *node;
   if (!PyArg_ParseTuple(args, "s#", &input, &len))
     return NULL;
-  node = ixs_parse(self->ctx, input, (size_t)len);
+  node = ixs_parse(Context_session(self), input, (size_t)len);
   return (PyObject *)Expr_wrap(self, node);
 }
 
@@ -805,7 +814,7 @@ static PyObject *Context_int_(ContextObject *self, PyObject *args) {
   ixs_node *node;
   if (!PyArg_ParseTuple(args, "L", &val))
     return NULL;
-  node = ixs_int(self->ctx, (int64_t)val);
+  node = ixs_int(Context_session(self), (int64_t)val);
   return (PyObject *)Expr_wrap(self, node);
 }
 
@@ -814,17 +823,17 @@ static PyObject *Context_rat(ContextObject *self, PyObject *args) {
   ixs_node *node;
   if (!PyArg_ParseTuple(args, "LL", &p, &q))
     return NULL;
-  node = ixs_rat(self->ctx, (int64_t)p, (int64_t)q);
+  node = ixs_rat(Context_session(self), (int64_t)p, (int64_t)q);
   return (PyObject *)Expr_wrap(self, node);
 }
 
 static PyObject *Context_true_(ContextObject *self, PyObject *Py_UNUSED(args)) {
-  return (PyObject *)Expr_wrap(self, ixs_true(self->ctx));
+  return (PyObject *)Expr_wrap(self, ixs_true(Context_session(self)));
 }
 
 static PyObject *Context_false_(ContextObject *self,
                                 PyObject *Py_UNUSED(args)) {
-  return (PyObject *)Expr_wrap(self, ixs_false(self->ctx));
+  return (PyObject *)Expr_wrap(self, ixs_false(Context_session(self)));
 }
 
 static PyObject *Context_eq(ContextObject *self, PyObject *args) {
@@ -838,7 +847,7 @@ static PyObject *Context_eq(ContextObject *self, PyObject *args) {
   b = coerce_arg(self, b_obj);
   if (!b)
     return NULL;
-  result = ixs_cmp(self->ctx, a, IXS_CMP_EQ, b);
+  result = ixs_cmp(Context_session(self), a, IXS_CMP_EQ, b);
   return (PyObject *)Expr_wrap(self, result);
 }
 
@@ -853,7 +862,7 @@ static PyObject *Context_ne(ContextObject *self, PyObject *args) {
   b = coerce_arg(self, b_obj);
   if (!b)
     return NULL;
-  result = ixs_cmp(self->ctx, a, IXS_CMP_NE, b);
+  result = ixs_cmp(Context_session(self), a, IXS_CMP_NE, b);
   return (PyObject *)Expr_wrap(self, result);
 }
 
@@ -909,7 +918,8 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
     }
   }
 
-  r = ixs_check(self->ctx, expr, assumptions, (size_t)n_assumptions);
+  r = ixs_check(Context_session(self), expr, assumptions,
+                (size_t)n_assumptions);
   PyMem_Free(assumptions);
 
   if (r == IXS_CHECK_TRUE)
@@ -990,7 +1000,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
     }
   }
 
-  ixs_simplify_batch(self->ctx, exprs, (size_t)n_exprs, assumptions,
+  ixs_simplify_batch(Context_session(self), exprs, (size_t)n_exprs, assumptions,
                      (size_t)n_assumptions);
 
   for (i = 0; i < n_exprs; i++) {
@@ -1016,7 +1026,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
 
 static PyObject *Context_clear_errors(ContextObject *self,
                                       PyObject *Py_UNUSED(args)) {
-  ixs_ctx_clear_errors(self->ctx);
+  ixs_session_clear_errors(Context_session(self));
   Py_RETURN_NONE;
 }
 
@@ -1084,13 +1094,13 @@ static PyMethodDef Context_methods[] = {
 
 static PyObject *Context_get_errors(ContextObject *self,
                                     void *Py_UNUSED(closure)) {
-  size_t n = ixs_ctx_nerrors(self->ctx);
+  size_t n = ixs_session_nerrors(Context_session(self));
   size_t i;
   PyObject *list = PyList_New((Py_ssize_t)n);
   if (!list)
     return NULL;
   for (i = 0; i < n; i++) {
-    const char *msg = ixs_ctx_error(self->ctx, i);
+    const char *msg = ixs_session_error(Context_session(self), i);
     PyObject *s = PyUnicode_FromString(msg ? msg : "");
     if (!s) {
       Py_DECREF(list);
@@ -1130,7 +1140,7 @@ static PyObject *mod_floor(PyObject *Py_UNUSED(module), PyObject *arg) {
     return NULL;
   }
   e = (ExprObject *)arg;
-  result = ixs_floor(e->ctx_obj->ctx, e->node);
+  result = ixs_floor(Context_session(e->ctx_obj), e->node);
   return (PyObject *)Expr_wrap(e->ctx_obj, result);
 }
 
@@ -1142,12 +1152,12 @@ static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
     return NULL;
   }
   e = (ExprObject *)arg;
-  result = ixs_ceil(e->ctx_obj->ctx, e->node);
+  result = ixs_ceil(Context_session(e->ctx_obj), e->node);
   return (PyObject *)Expr_wrap(e->ctx_obj, result);
 }
 
 static PyObject *mod_binary_op(PyObject *args,
-                               ixs_node *(*op)(ixs_ctx *, ixs_node *,
+                               ixs_node *(*op)(ixs_session *, ixs_node *,
                                                ixs_node *),
                                const char *name) {
   PyObject *a_obj, *b_obj;
@@ -1167,7 +1177,7 @@ static PyObject *mod_binary_op(PyObject *args,
   if (!b)
     return NULL;
 
-  result = op(ae->ctx_obj->ctx, a, b);
+  result = op(Context_session(ae->ctx_obj), a, b);
   return (PyObject *)Expr_wrap(ae->ctx_obj, result);
 }
 
@@ -1203,7 +1213,7 @@ static PyObject *mod_not_(PyObject *Py_UNUSED(module), PyObject *arg) {
     return NULL;
   }
   e = (ExprObject *)arg;
-  result = ixs_not(e->ctx_obj->ctx, e->node);
+  result = ixs_not(Context_session(e->ctx_obj), e->node);
   return (PyObject *)Expr_wrap(e->ctx_obj, result);
 }
 
@@ -1274,7 +1284,7 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
     }
   }
 
-  result = ixs_pw(ctx_obj->ctx, (uint32_t)n, values, conds);
+  result = ixs_pw(Context_session(ctx_obj), (uint32_t)n, values, conds);
   PyMem_Free(values);
   PyMem_Free(conds);
   return (PyObject *)Expr_wrap(ctx_obj, result);

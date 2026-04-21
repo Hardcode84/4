@@ -31,7 +31,7 @@ static const char *extract_expr(char *line) {
   return p;
 }
 
-static ixs_node *parse_assumption(ixs_ctx *ctx, char *line) {
+static ixs_node *parse_assumption(ixs_session *s, char *line) {
   static const struct {
     const char *op;
     size_t len;
@@ -72,14 +72,14 @@ static ixs_node *parse_assumption(ixs_ctx *ctx, char *line) {
     left_end--;
   *left_end = '\0';
 
-  ixs_node *a = ixs_parse(ctx, start, (size_t)(left_end - start));
-  ixs_node *b = ixs_parse(ctx, right, strlen(right));
+  ixs_node *a = ixs_parse(s, start, (size_t)(left_end - start));
+  ixs_node *b = ixs_parse(s, right, strlen(right));
   if (!a || !b || ixs_is_error(a) || ixs_is_error(b))
     return NULL;
-  return ixs_cmp(ctx, a, cmp_op, b);
+  return ixs_cmp(s, a, cmp_op, b);
 }
 
-static size_t load_assumptions(ixs_ctx *ctx, ixs_node **assumptions,
+static size_t load_assumptions(ixs_session *s, ixs_node **assumptions,
                                size_t max_n) {
   FILE *f = fopen(assumptions_path, "r");
   if (!f)
@@ -88,7 +88,7 @@ static size_t load_assumptions(ixs_ctx *ctx, ixs_node **assumptions,
   size_t n = 0;
   char line[MAX_LINE];
   while (n < max_n && fgets(line, sizeof line, f)) {
-    ixs_node *a = parse_assumption(ctx, line);
+    ixs_node *a = parse_assumption(s, line);
     if (a)
       assumptions[n++] = a;
   }
@@ -144,12 +144,21 @@ int main(void) {
   }
 
   ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session session;
   ixs_node *assumptions[MAX_ASSUMPTIONS];
-  size_t n_assumptions = load_assumptions(ctx, assumptions, MAX_ASSUMPTIONS);
+  if (!ctx) {
+    fprintf(stderr, "bench_corpus: out of memory\n");
+    free(storage);
+    return 1;
+  }
+  ixs_session_init(&session, ctx);
+  size_t n_assumptions =
+      load_assumptions(&session, assumptions, MAX_ASSUMPTIONS);
 
   ixs_node **parsed = malloc(n_exprs * sizeof(ixs_node *));
   if (!parsed) {
     fprintf(stderr, "bench_corpus: out of memory\n");
+    ixs_session_destroy(&session);
     ixs_ctx_destroy(ctx);
     free(storage);
     return 1;
@@ -159,11 +168,11 @@ int main(void) {
   double best_simplify_ms = 1e9;
 
   for (int iter = 0; iter < N_ITERATIONS; iter++) {
-    ixs_ctx_clear_errors(ctx);
+    ixs_session_clear_errors(&session);
 
     clock_t t0 = clock();
     for (size_t i = 0; i < n_exprs; i++) {
-      parsed[i] = ixs_parse(ctx, exprs[i], strlen(exprs[i]));
+      parsed[i] = ixs_parse(&session, exprs[i], strlen(exprs[i]));
       if (!parsed[i] || ixs_is_error(parsed[i]))
         parsed[i] = NULL;
     }
@@ -172,7 +181,7 @@ int main(void) {
     clock_t t2 = clock();
     for (size_t i = 0; i < n_exprs; i++) {
       if (parsed[i])
-        ixs_simplify(ctx, parsed[i], assumptions, n_assumptions);
+        ixs_simplify(&session, parsed[i], assumptions, n_assumptions);
     }
     clock_t t3 = clock();
 
@@ -201,6 +210,7 @@ int main(void) {
          total_ms, expr_per_sec, avg_us, N_ITERATIONS);
 
   free(parsed);
+  ixs_session_destroy(&session);
   ixs_ctx_destroy(ctx);
   free(storage);
   return 0;

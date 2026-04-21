@@ -9,6 +9,59 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define IXS_ALIGN_UP_CONST(val, align)                                         \
+  (((val) + (align) - 1u) & ~((align) - 1u))
+
+typedef char ixs_session_storage_must_fit_impl
+    [(IXS_SESSION_BYTES >= IXS_ALIGN_UP_CONST(sizeof(ixs_arena_chunk), 16u) +
+                               sizeof(ixs_session_impl))
+         ? 1
+         : -1];
+
+static void session_clear_errors_state(ixs_arena *diag, const char ***errors,
+                                       size_t *nerrors, size_t *errors_cap) {
+  ixs_arena_destroy(diag);
+  ixs_arena_init(diag, IXS_ARENA_DEFAULT_SIZE);
+  *errors = NULL;
+  *nerrors = 0;
+  *errors_cap = 0;
+}
+
+static ixs_arena *session_scratch(ixs_session_impl *impl) {
+  if (ixs_session_is_active(impl))
+    return &impl->ctx->scratch;
+  return &impl->scratch;
+}
+
+static ixs_arena *session_diag(ixs_session_impl *impl) {
+  if (ixs_session_is_active(impl))
+    return &impl->ctx->diag;
+  return &impl->diag;
+}
+
+static const char ***session_errors(ixs_session_impl *impl) {
+  if (ixs_session_is_active(impl))
+    return &impl->ctx->errors;
+  return &impl->errors;
+}
+
+static size_t *session_nerrors(ixs_session_impl *impl) {
+  if (ixs_session_is_active(impl))
+    return &impl->ctx->nerrors;
+  return &impl->nerrors;
+}
+
+static size_t *session_errors_cap(ixs_session_impl *impl) {
+  if (ixs_session_is_active(impl))
+    return &impl->ctx->errors_cap;
+  return &impl->errors_cap;
+}
+
+static void session_clear_errors_impl(ixs_session_impl *impl) {
+  session_clear_errors_state(session_diag(impl), session_errors(impl),
+                             session_nerrors(impl), session_errors_cap(impl));
+}
+
 static ixs_node *ctx_err(ixs_ctx *ctx, const char *msg) {
   ixs_ctx_push_error(ctx, "%s", msg);
   return ctx->sentinel_error;
@@ -41,7 +94,6 @@ ixs_ctx *ixs_ctx_create(void) {
   memset(&tmp, 0, sizeof(tmp));
 
   ixs_arena_init(&tmp.arena, IXS_ARENA_DEFAULT_SIZE);
-  ixs_arena_init(&tmp.scratch, IXS_ARENA_DEFAULT_SIZE);
 
   if (!ixs_htab_init(&tmp))
     return NULL;
@@ -79,7 +131,6 @@ ixs_ctx *ixs_ctx_create(void) {
 
 fail:
   ixs_htab_destroy(&tmp);
-  ixs_arena_destroy(&tmp.scratch);
   ixs_arena_destroy(&tmp.arena);
   return NULL;
 }
@@ -88,25 +139,66 @@ void ixs_ctx_destroy(ixs_ctx *ctx) {
   if (!ctx)
     return;
   ixs_htab_destroy(ctx);
-  ixs_arena_destroy(&ctx->scratch);
   /* ctx itself lives inside the main arena; snapshot before freeing. */
   ixs_arena arena = ctx->arena;
   ixs_arena_destroy(&arena);
 }
 
 /* ------------------------------------------------------------------ */
+/*  Session lifecycle                                                 */
+/* ------------------------------------------------------------------ */
+
+void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
+  ixs_arena scratch;
+  ixs_session_impl *impl;
+
+  memset(s, 0, sizeof(*s));
+  ixs_arena_init_inline(&scratch, s->storage, IXS_SESSION_BYTES,
+                        IXS_ARENA_DEFAULT_SIZE);
+  impl = ixs_arena_alloc(&scratch, sizeof(*impl), sizeof(void *));
+  if (!impl)
+    return;
+  memset(impl, 0, sizeof(*impl));
+  impl->ctx = ctx;
+  impl->scratch = scratch;
+  ixs_arena_init(&impl->diag, IXS_ARENA_DEFAULT_SIZE);
+  impl->base_mark = ixs_arena_save(&impl->scratch);
+}
+
+void ixs_session_reset(ixs_session *s) {
+  ixs_session_impl *impl = ixs_session_get(s);
+  ixs_arena_restore(session_scratch(impl), impl->base_mark);
+  session_clear_errors_impl(impl);
+}
+
+void ixs_session_destroy(ixs_session *s) {
+  ixs_session_impl *impl = ixs_session_get(s);
+  ixs_arena_destroy(&impl->diag);
+  ixs_arena_destroy(&impl->scratch);
+  memset(s, 0, sizeof(*s));
+}
+
+/* ------------------------------------------------------------------ */
 /*  Error list                                                        */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_ctx_nerrors(ixs_ctx *ctx) { return ctx->nerrors; }
-
-const char *ixs_ctx_error(ixs_ctx *ctx, size_t index) {
-  if (index >= ctx->nerrors)
-    return NULL;
-  return ctx->errors[index];
+size_t ixs_session_nerrors(ixs_session *s) {
+  ixs_session_impl *impl = ixs_session_get(s);
+  return *session_nerrors(impl);
 }
 
-void ixs_ctx_clear_errors(ixs_ctx *ctx) { ctx->nerrors = 0; }
+const char *ixs_session_error(ixs_session *s, size_t index) {
+  ixs_session_impl *impl = ixs_session_get(s);
+  const char **errors = *session_errors(impl);
+  size_t nerrors = *session_nerrors(impl);
+  if (index >= nerrors)
+    return NULL;
+  return errors[index];
+}
+
+void ixs_session_clear_errors(ixs_session *s) {
+  session_clear_errors_impl(ixs_session_get(s));
+}
 
 /* ------------------------------------------------------------------ */
 /*  Rule-hit statistics                                                */
@@ -178,117 +270,221 @@ bool ixs_is_domain_error(ixs_node *node) {
 /*  Constructors (delegate to simplify.c)                             */
 /* ------------------------------------------------------------------ */
 
-ixs_node *ixs_int(ixs_ctx *ctx, int64_t val) { return ixs_node_int(ctx, val); }
-
-ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
-  if (q == 0)
-    return ctx_err(ctx, "ixs_rat: denominator is zero");
-  int64_t rp, rq;
-  if (!ixs_rat_normalize(p, q, &rp, &rq))
-    return ctx_err(ctx, "ixs_rat: rational overflow");
-  return ixs_node_rat(ctx, rp, rq);
+ixs_node *ixs_int(ixs_session *s, int64_t val) {
+  return ixs_node_int(ixs_session_ctx(s), val);
 }
 
-ixs_node *ixs_sym(ixs_ctx *ctx, const char *name) {
+ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result;
+  if (q == 0)
+    result = ctx_err(ctx, "ixs_rat: denominator is zero");
+  else {
+    int64_t rp, rq;
+    if (!ixs_rat_normalize(p, q, &rp, &rq))
+      result = ctx_err(ctx, "ixs_rat: rational overflow");
+    else
+      result = ixs_node_rat(ctx, rp, rq);
+  }
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_sym(ixs_session *s, const char *name) {
+  ixs_ctx *ctx = ixs_session_ctx(s);
   return ixs_node_sym(ctx, name, strlen(name));
 }
 
-ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_add(ctx, a, b);
+ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_add(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_mul(ctx, a, b);
+ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_mul(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a) { return simp_neg(ctx, a); }
-
-ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_sub(ctx, a, b);
+ixs_node *ixs_neg(ixs_session *s, ixs_node *a) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_neg(ctx, a);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_div(ctx, a, b);
+ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_sub(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x) { return simp_floor(ctx, x); }
-
-ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x) { return simp_ceil(ctx, x); }
-
-ixs_node *ixs_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_mod(ctx, a, b);
+ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_div(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_max(ctx, a, b);
+ixs_node *ixs_floor(ixs_session *s, ixs_node *x) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_floor(ctx, x);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_min(ctx, a, b);
+ixs_node *ixs_ceil(ixs_session *s, ixs_node *x) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_ceil(ctx, x);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_xor(ctx, a, b);
+ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_mod(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
+ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_max(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_min(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_xor(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
                  ixs_node **conds) {
-  return simp_pw(ctx, n, values, conds);
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_pw(ctx, n, values, conds);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
-  return simp_cmp(ctx, a, op, b);
+ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_cmp(ctx, a, op, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_and(ctx, a, b);
+ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_and(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_or(ctx, a, b);
+ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_or(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a) { return simp_not(ctx, a); }
+ixs_node *ixs_not(ixs_session *s, ixs_node *a) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_not(ctx, a);
+  ixs_session_unbind(&binding);
+  return result;
+}
 
-ixs_node *ixs_true(ixs_ctx *ctx) { return ctx->node_true; }
+ixs_node *ixs_true(ixs_session *s) { return ixs_session_ctx(s)->node_true; }
 
-ixs_node *ixs_false(ixs_ctx *ctx) { return ctx->node_false; }
+ixs_node *ixs_false(ixs_session *s) { return ixs_session_ctx(s)->node_false; }
 
 /* ------------------------------------------------------------------ */
 /*  Parse                                                             */
 /* ------------------------------------------------------------------ */
 
-ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len) {
+ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result;
   if (!input)
-    return ctx->sentinel_parse_error;
-  return ixs_parse_impl(ctx, input, len);
+    result = ctx->sentinel_parse_error;
+  else
+    result = ixs_parse_impl(ctx, input, len);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Simplification                                                    */
 /* ------------------------------------------------------------------ */
 
-ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr) {
-  return expand_impl(ctx, expr);
+ixs_node *ixs_expand(ixs_session *s, ixs_node *expr) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = expand_impl(ctx, expr);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
+ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions) {
-  return simp_simplify(ctx, expr, assumptions, n_assumptions);
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_simplify(ctx, expr, assumptions, n_assumptions);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
+void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
   simp_simplify_batch(ctx, exprs, n, assumptions, n_assumptions);
+  ixs_session_unbind(&binding);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Entailment checking                                               */
 /* ------------------------------------------------------------------ */
 
-ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions) {
-  return simp_check(ctx, expr, assumptions, n_assumptions);
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_check_result result = simp_check(ctx, expr, assumptions, n_assumptions);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -297,15 +493,23 @@ ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
 
 bool ixs_same_node(ixs_node *a, ixs_node *b) { return a == b; }
 
-ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
+ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement) {
-  return simp_subs(ctx, expr, target, replacement);
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_subs(ctx, expr, target, replacement);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
-ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements) {
-  return simp_subs_multi(ctx, expr, nsubs, targets, replacements);
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_subs_multi(ctx, expr, nsubs, targets, replacements);
+  ixs_session_unbind(&binding);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */

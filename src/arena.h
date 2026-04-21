@@ -19,6 +19,8 @@ typedef struct ixs_arena_chunk {
 
 typedef struct {
   ixs_arena_chunk *current;
+  ixs_arena_chunk *spare;
+  ixs_arena_chunk *inline_chunk;
   size_t min_chunk;
 } ixs_arena;
 
@@ -28,6 +30,9 @@ typedef struct {
 } ixs_arena_mark;
 
 IXS_STATIC void ixs_arena_init(ixs_arena *a, size_t initial_size);
+IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
+                                      size_t storage_bytes,
+                                      size_t initial_size);
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a);
 
 /* Returns NULL on OOM or overflow. align must be a power of 2, at most 16. */

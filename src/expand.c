@@ -3,6 +3,7 @@
  */
 #include "expand.h"
 #include "node.h"
+#include "simplify.h"
 
 #define EXPAND_MAX_DEPTH 256
 #define EXPAND_MAX_EXP 64
@@ -27,14 +28,14 @@ static ixs_node *mul_expand(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       ixs_node *tc = a->u.add.terms[i].coeff;
       ixs_node *tt = a->u.add.terms[i].term;
       ixs_node *tb = mul_expand(ctx, tt, b);
-      result = ixs_add(ctx, result, mul_expand(ctx, tc, tb));
+      result = simp_add(ctx, result, mul_expand(ctx, tc, tb));
     }
     return result;
   }
   if (b->tag == IXS_ADD)
     return mul_expand(ctx, b, a);
 
-  return ixs_mul(ctx, a, b);
+  return simp_mul(ctx, a, b);
 }
 
 static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
@@ -63,7 +64,7 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     for (uint32_t i = 0; i < node->u.add.nterms; i++) {
       ixs_node *tc = node->u.add.terms[i].coeff;
       ixs_node *tt = do_expand(ctx, node->u.add.terms[i].term, depth + 1);
-      result = ixs_add(ctx, result, mul_expand(ctx, tc, tt));
+      result = simp_add(ctx, result, mul_expand(ctx, tc, tt));
     }
     return result;
   }
@@ -86,34 +87,34 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
       } else {
         ixs_node *pow = base;
         for (int32_t e = 1; e < mag; e++)
-          pow = ixs_mul(ctx, pow, base);
-        result = ixs_div(ctx, result, pow);
+          pow = simp_mul(ctx, pow, base);
+        result = simp_div(ctx, result, pow);
       }
     }
     return result;
   }
 
   case IXS_FLOOR:
-    return ixs_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    return simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
   case IXS_CEIL:
-    return ixs_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
 
   case IXS_MOD:
-    return ixs_mod(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                   do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return simp_mod(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
+                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_MAX:
-    return ixs_max(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                   do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return simp_max(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
+                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_MIN:
-    return ixs_min(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                   do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return simp_min(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
+                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_XOR:
-    return ixs_xor(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                   do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return simp_xor(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
+                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_CMP:
-    return ixs_cmp(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                   node->u.binary.cmp_op,
-                   do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return simp_cmp(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
+                    node->u.binary.cmp_op,
+                    do_expand(ctx, node->u.binary.rhs, depth + 1));
 
   case IXS_PIECEWISE: {
     uint32_t nc = node->u.pw.ncases;
@@ -130,7 +131,7 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
       vals[i] = do_expand(ctx, node->u.pw.cases[i].value, depth + 1);
       conds[i] = do_expand(ctx, node->u.pw.cases[i].cond, depth + 1);
     }
-    ixs_node *result = ixs_pw(ctx, nc, vals, conds);
+    ixs_node *result = simp_pw(ctx, nc, vals, conds);
     ixs_arena_restore(&ctx->scratch, sm);
     return result;
   }
@@ -143,14 +144,14 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     ixs_node *result = do_expand(ctx, node->u.logic.args[0], depth + 1);
     for (uint32_t i = 1; i < na; i++) {
       ixs_node *arg = do_expand(ctx, node->u.logic.args[i], depth + 1);
-      result = (node->tag == IXS_AND) ? ixs_and(ctx, result, arg)
-                                      : ixs_or(ctx, result, arg);
+      result = (node->tag == IXS_AND) ? simp_and(ctx, result, arg)
+                                      : simp_or(ctx, result, arg);
     }
     return result;
   }
 
   case IXS_NOT:
-    return ixs_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
+    return simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
 
   default:
     return node;

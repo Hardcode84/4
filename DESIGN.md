@@ -147,7 +147,8 @@ concurrently without synchronization.
 
 **Cross-context contract**: All `ixs_node*` arguments passed to any API
 function must belong to the same store as the call handle: the `ctx` argument
-today, or the store bound to the `ixs_session` argument after the refactor.
+for store-only APIs, or the store bound to the `ixs_session` argument for
+session-taking APIs.
 Passing a node from one store to a different store is **undefined behavior**
 (dangling arena pointer, wrong hash table). Structural import is the only
 supported cross-store bridge.
@@ -193,17 +194,18 @@ Typical working set for one expression is < 64 KB.
 
 #### Scratch Arena
 
-This subsection describes the current implementation, where scratch lives in
-`ixs_ctx`. The refactor later in this document keeps the same save/restore
-programming model but moves scratch into `ixs_session` and caches one detached
-heap chunk for reuse instead of freeing every detached chunk immediately.
+This subsection describes the current implementation after the first
+context/session slice. Public callers own an `ixs_session`, which owns scratch
+and diagnostics. Internally, the active session temporarily mirrors that state
+onto `ixs_ctx` while legacy ctx-based helpers run, so the save/restore
+programming model remains unchanged.
 
 Smart constructors (`simp_add`, `simp_mul`, `simp_and`, `simp_or`, `simp_pw`)
 and the parser flatten variadic children into temporary arrays before building
-the final hash-consed node. These temporaries live on the scratch arena —
-a second arena (`ixs_arena scratch`) in `ixs_ctx`, used
-exclusively for short-lived temporary allocations. A save/restore API lets
-callers rewind the scratch arena after the temporary data is consumed:
+the final hash-consed node. These temporaries live on the active session's
+scratch arena and are mirrored onto `ctx->scratch` only for the duration of the
+bound public call. A save/restore API lets callers rewind the scratch arena
+after the temporary data is consumed:
 
 ```c
 typedef struct {
@@ -387,11 +389,14 @@ early `return parse_error(...)` exits), then restores.
 save/restore pairs nest in LIFO order, each wrapper restores only its own
 mark. The scratch arena never leaks across wrapper boundaries.
 
-**Lifecycle**: Initialized in `ixs_ctx_create`, destroyed in
-`ixs_ctx_destroy`. No other management needed.
+**Lifecycle**: Initialized in `ixs_session_init`, restored to the base mark by
+`ixs_session_reset`, and destroyed in `ixs_session_destroy`.
 
 **Status**: Fully implemented. All smart constructors, the parser, `subs`,
-and `rewrite_impl` use the scratch arena with wrapper/impl split.
+`rewrite_impl`, and `walk` use session-backed scratch. The remaining internal
+helpers still take `ixs_ctx *`, so public entry points bind the active session
+onto the context on entry and copy the final scratch/diagnostic state back out
+on exit.
 `MAX_TERMS` and `ixs_limits.h` have been removed. OOM injection for
 arena testing is tracked separately (bead 4-96o).
 
@@ -1108,13 +1113,11 @@ argument returns NULL immediately without side effects.
 
 ### Tier 2: Parse Error Sentinel (`IXS_PARSE_ERROR`)
 
-Returned by the parse entry points (`ixs_parse` today;
-`ixs_parse_expr`/`ixs_parse_pred` after the refactor) when the input is
-syntactically malformed (unexpected token, unmatched parentheses, unknown
-function name, recursion depth limit exceeded) or when a parsed root has the
-wrong kind. There is one parse-error sentinel per store (singleton).
-Diagnostics are appended to the active error sink: the context error list
-today, the session error list after the refactor.
+Returned by `ixs_parse` when the input is syntactically malformed (unexpected
+token, unmatched parentheses, unknown function name, recursion depth limit
+exceeded) or when a parsed root has the wrong kind. There is one parse-error
+sentinel per store (singleton). Diagnostics are appended to the active session
+error list.
 
 Only the parse entry points produce this sentinel. Constructors never produce
 it.
@@ -1125,8 +1128,7 @@ Returned by constructors when an operation is mathematically undefined:
 division by zero, `Mod(x, 0)`, rational overflow, `ixs_rat(..., p, 0)`,
 integer literal overflow during parsing of a syntactically valid number.
 There is one domain-error sentinel per store (singleton). Diagnostics are
-appended to the active error sink: the context error list today, the session
-error list after the refactor.
+appended to the active session error list.
 
 The parse entry points can return this sentinel when the input is
 syntactically valid but contains a domain error (e.g., `"1/0 + x"`).
@@ -1170,16 +1172,16 @@ Piecewise branch doesn't invalidate the other 608 expressions.
 
 ### Error List API (Current Implementation)
 
-The functions below describe the current implementation. The sentinel tiers and
-propagation rules are intended to stay unchanged after the refactor, but the
-mutable diagnostic list moves from `ixs_ctx` to `ixs_session`.
+The functions below describe the current implementation. Sentinel tiers and
+propagation rules remain the same; the mutable diagnostic list now lives on
+`ixs_session`.
 
 ```c
 // Query errors accumulated since last clear.
-// ixs_ctx_error returns NULL if index >= ixs_ctx_nerrors(ctx).
-size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
-const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
-void        ixs_ctx_clear_errors(ixs_ctx *ctx);
+// ixs_session_error returns NULL if index >= ixs_session_nerrors(s).
+size_t      ixs_session_nerrors(ixs_session *s);
+const char *ixs_session_error(ixs_session *s, size_t index);
+void        ixs_session_clear_errors(ixs_session *s);
 
 // Check sentinel kind
 bool        ixs_is_error(ixs_node *node);        // true for either sentinel
@@ -1221,77 +1223,71 @@ Each string includes the error kind and location, e.g.:
 
 ## Public API (Current Implementation)
 
-This section is an implementation snapshot of what ships today. The intended
-replacement surface is specified later in `Target API: Context/Session
-Refactor`.
+This section is an implementation snapshot of what ships today after the first
+context/session slice. Later sections describe follow-on API work that is not
+yet implemented here.
 
 ```c
-// Context: owns the arena, hash-consing table, and symbol table
+// Long-lived store: owns interned nodes, hash-consing, and singletons.
 typedef struct ixs_ctx ixs_ctx;
 typedef struct ixs_node ixs_node;
 
-// Lifecycle. Returns NULL on OOM.
-ixs_ctx   *ixs_ctx_create(void);
-void       ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
+// Reusable workspace: owns scratch and diagnostics. The public object is a
+// fixed-size 4 KB blob so callers can stack-allocate it.
+#define IXS_SESSION_BYTES 4096u
+typedef union {
+  void *ptr_align;
+  unsigned char storage[IXS_SESSION_BYTES];
+} ixs_session;
 
-// Error list and sentinel checks (see Error Model section above).
-// ctx must be non-NULL for these (only ixs_ctx_destroy is NULL-safe).
-size_t      ixs_ctx_nerrors(ixs_ctx *ctx);
-const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
-void        ixs_ctx_clear_errors(ixs_ctx *ctx);
-bool        ixs_is_error(ixs_node *node);         // true for either sentinel
-bool        ixs_is_parse_error(ixs_node *node);    // true only for IXS_PARSE_ERROR
-bool        ixs_is_domain_error(ixs_node *node);   // true only for IXS_ERROR
+// Lifecycle. ixs_ctx_create returns NULL on OOM.
+ixs_ctx *ixs_ctx_create(void);
+void ixs_ctx_destroy(ixs_ctx *ctx);  // NULL-safe
+void ixs_session_init(ixs_session *s, ixs_ctx *ctx);
+void ixs_session_reset(ixs_session *s);
+void ixs_session_destroy(ixs_session *s);
 
-// Parse a SymPy-format expression string.
-// Returns: valid node on success, IXS_PARSE_ERROR sentinel on syntax error,
-// IXS_ERROR sentinel if syntactically valid but contains domain error
-// (e.g. 1/0), NULL on OOM. Error details appended to context error list.
-// Precondition: input must be a non-NULL pointer to at least len bytes of
-// readable memory. NULL input is undefined behavior.
-ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
+// Diagnostics and sentinel checks.
+size_t ixs_session_nerrors(ixs_session *s);
+const char *ixs_session_error(ixs_session *s, size_t index);
+void ixs_session_clear_errors(ixs_session *s);
+bool ixs_is_error(ixs_node *node);        // true for either sentinel
+bool ixs_is_parse_error(ixs_node *node);  // true only for IXS_PARSE_ERROR
+bool ixs_is_domain_error(ixs_node *node); // true only for IXS_ERROR
 
-// Construct expressions programmatically
-ixs_node *ixs_int(ixs_ctx *ctx, int64_t val);
-ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q);
-ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);  // name must be non-NULL and non-empty
-ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // a + (-1)*b
-ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a);                // (-1)*a
-ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // a*b^(-1); ERROR on b==0
-ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
-ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x);
-ixs_node *ixs_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
-                    // n >= 1; last cond should be ixs_true
-                    // values and conds must be non-NULL arrays of at least n elements
-                    // NULL/sentinel entries: NULL element → entire result is NULL;
-                    // sentinel element → propagates per priority rules
-ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
-ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);  // flattens into n-ary
-ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);   // flattens into n-ary
-ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
-ixs_node *ixs_true(ixs_ctx *ctx);
-ixs_node *ixs_false(ixs_ctx *ctx);
+// Parse a SymPy-format expression string. Errors append to the session list.
+ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 
-// Simplify with assumptions. Assumptions are boolean expression nodes
-// (e.g., comparisons like `M > 0`, `$T0 >= 0`, `$T0 < 256`, or equalities
-// like `Mod(M, 128) == 0`). The simplifier extracts variable bounds from
-// comparison assumptions automatically. Assumptions are separate from the
-// expression tree so that hash-consing is preserved. Pass NULL/0 if none.
-// NULL/sentinel propagation: if expr is NULL returns NULL, if expr is
-// sentinel returns that sentinel. NULL/sentinel entries in assumptions
-// array are silently skipped.
-// Precondition: assumptions must be non-NULL when n_assumptions > 0.
-// NOTE: if the fixed-point iteration limit is reached without convergence,
-// the current best result is returned and an error is appended to the
-// error list. Always check ixs_ctx_nerrors() after simplification if you
-// need to detect incomplete simplification.
-ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
+// Construct expressions programmatically. All node arguments must belong to
+// the context bound to s.
+ixs_node *ixs_int(ixs_session *s, int64_t val);
+ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q);
+ixs_node *ixs_sym(ixs_session *s, const char *name);
+ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_neg(ixs_session *s, ixs_node *a);
+ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
+ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
+ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
+                 ixs_node **conds);
+ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
+ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_not(ixs_session *s, ixs_node *a);
+ixs_node *ixs_true(ixs_session *s);
+ixs_node *ixs_false(ixs_session *s);
+
+// Simplify with assumptions built in the same bound context. Pass NULL/0 if
+// none. NULL/sentinel entries in the assumptions array are silently skipped.
+// NOTE: if the fixed-point iteration limit is reached without convergence, the
+// current best result is returned and an error is appended to the session list.
+ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
 // Introspection — node must not be NULL:
@@ -1311,7 +1307,7 @@ bool ixs_same_node(ixs_node *a, ixs_node *b);
 // to hash-consing). Does NOT re-substitute into the replacement itself
 // (no recursive expansion). NULL/sentinel propagation applies to expr,
 // target, and replacement as with constructors.
-ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
+ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,
                    ixs_node *target, ixs_node *replacement);
 
 // Simultaneous multi-target substitution.  Replaces targets[i] with
@@ -1319,7 +1315,7 @@ ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr,
 // so {A->B, B->C} on A+B yields B+C, not C+C.  Duplicate targets:
 // first matching entry wins.  Thin wrapper around the same engine as
 // ixs_subs (nsubs=1 delegates here).
-ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements);
 
@@ -1339,22 +1335,22 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 // NULL (the arena is likely exhausted, so no expression is trustworthy).
 // Precondition: exprs must be non-NULL when n > 0; assumptions must be
 // non-NULL when n_assumptions > 0. No-op when n == 0.
-void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
-                         ixs_node *const *assumptions, size_t n_assumptions);
+void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
+                        ixs_node *const *assumptions, size_t n_assumptions);
 
 // Entailment check: is a boolean expression provably true or false
 // under the given assumptions?  Uses interval propagation only (no
 // rewriting).  Returns IXS_CHECK_TRUE, IXS_CHECK_FALSE, or
 // IXS_CHECK_UNKNOWN.  Lighter than ixs_simplify for pure truth queries.
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
-ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
 // The canonical form keeps products factored; call this when you need
 // expanded form for term-by-term analysis.  NULL-safe.
-ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
+ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 
 // Rule-hit statistics (requires -DIXS_STATS at compile time).
 // When disabled, nstats returns 0, stat returns 0/NULL, reset is a no-op.
@@ -1379,45 +1375,48 @@ Usage pattern:
 
 ```c
 ixs_ctx *ctx = ixs_ctx_create();
+ixs_session s;
+ixs_session_init(&s, ctx);
 
 // Assumptions are just boolean expressions built with the same API
-ixs_node *T0  = ixs_sym(ctx, "$T0");
-ixs_node *T1  = ixs_sym(ctx, "$T1");
-ixs_node *M   = ixs_sym(ctx, "M");
-ixs_node *N   = ixs_sym(ctx, "N");
-ixs_node *K   = ixs_sym(ctx, "K");
+ixs_node *T0  = ixs_sym(&s, "$T0");
+ixs_node *T1  = ixs_sym(&s, "$T1");
+ixs_node *M   = ixs_sym(&s, "M");
+ixs_node *N   = ixs_sym(&s, "N");
+ixs_node *K   = ixs_sym(&s, "K");
 ixs_node *assumptions[] = {
-    ixs_cmp(ctx, T0, IXS_CMP_GE, ixs_int(ctx, 0)),   // $T0 >= 0
-    ixs_cmp(ctx, T0, IXS_CMP_LT, ixs_int(ctx, 256)), // $T0 < 256
-    ixs_cmp(ctx, T1, IXS_CMP_GE, ixs_int(ctx, 0)),   // $T1 >= 0
-    ixs_cmp(ctx, T1, IXS_CMP_LT, ixs_int(ctx, 4)),   // $T1 < 4
-    ixs_cmp(ctx, M,  IXS_CMP_GE, ixs_int(ctx, 1)),   // M >= 1
-    ixs_cmp(ctx, N,  IXS_CMP_GE, ixs_int(ctx, 1)),   // N >= 1
-    ixs_cmp(ctx, K,  IXS_CMP_GE, ixs_int(ctx, 1)),   // K >= 1
+    ixs_cmp(&s, T0, IXS_CMP_GE, ixs_int(&s, 0)),   // $T0 >= 0
+    ixs_cmp(&s, T0, IXS_CMP_LT, ixs_int(&s, 256)), // $T0 < 256
+    ixs_cmp(&s, T1, IXS_CMP_GE, ixs_int(&s, 0)),   // $T1 >= 0
+    ixs_cmp(&s, T1, IXS_CMP_LT, ixs_int(&s, 4)),   // $T1 < 4
+    ixs_cmp(&s, M,  IXS_CMP_GE, ixs_int(&s, 1)),   // M >= 1
+    ixs_cmp(&s, N,  IXS_CMP_GE, ixs_int(&s, 1)),   // N >= 1
+    ixs_cmp(&s, K,  IXS_CMP_GE, ixs_int(&s, 1)),   // K >= 1
 };
 size_t n_assumptions = sizeof(assumptions) / sizeof(assumptions[0]);
 
-ixs_node *expr = ixs_parse(ctx, input, strlen(input));
+ixs_node *expr = ixs_parse(&s, input, strlen(input));
 if (!expr) { /* OOM */ return; }
 if (ixs_is_parse_error(expr)) {
-    fprintf(stderr, "syntax: %s\n", ixs_ctx_error(ctx, 0));
-    ixs_ctx_clear_errors(ctx);
+    fprintf(stderr, "syntax: %s\n", ixs_session_error(&s, 0));
+    ixs_session_clear_errors(&s);
     return;
 }
 
-ixs_node *simplified = ixs_simplify(ctx, expr, assumptions, n_assumptions);
+ixs_node *simplified = ixs_simplify(&s, expr, assumptions, n_assumptions);
 if (!simplified) { /* OOM */ return; }
 
 if (ixs_is_domain_error(simplified)) {
-    for (size_t i = 0; i < ixs_ctx_nerrors(ctx); i++)
-        fprintf(stderr, "error: %s\n", ixs_ctx_error(ctx, i));
-    ixs_ctx_clear_errors(ctx);
+    for (size_t i = 0; i < ixs_session_nerrors(&s); i++)
+        fprintf(stderr, "error: %s\n", ixs_session_error(&s, i));
+    ixs_session_clear_errors(&s);
 } else {
     char buf[4096];
     ixs_print(simplified, buf, sizeof(buf));
     printf("%s\n", buf);
 }
 
+ixs_session_destroy(&s);
 ixs_ctx_destroy(ctx);  // frees everything
 ```
 
@@ -1976,7 +1975,7 @@ standalone library, but it couples unrelated lifetimes. The refactor keeps
 
 ### Lifecycle
 
-Planned lifecycle:
+Lifecycle for the current session slice:
 
 ```c
 ixs_ctx *ixs_ctx_create(void);

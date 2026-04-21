@@ -468,6 +468,60 @@ static ixs_walk_action count_nodes(ixs_node *node, void *ud) {
   return IXS_WALK_CONTINUE;
 }
 
+typedef struct {
+  ixs_ctx *ctx;
+  size_t count;
+  bool reentered;
+} reentrant_walk_state;
+
+static ixs_walk_action reenter_same_session(ixs_node *node, void *ud) {
+  reentrant_walk_state *state = (reentrant_walk_state *)ud;
+  state->count++;
+  if (!state->reentered && ixs_node_tag(node) == IXS_ADD) {
+    ixs_node *nested;
+    ixs_node *err;
+    state->reentered = true;
+
+    nested = ixs_parse(state->ctx, "u+v+w+x", 7);
+    CHECK(nested != NULL);
+    CHECK(!ixs_is_error(nested));
+    CHECK(ixs_ctx_nerrors(state->ctx) == 0);
+
+    err = ixs_div(state->ctx, ixs_int(state->ctx, 1), ixs_int(state->ctx, 0));
+    CHECK(err != NULL);
+    CHECK(ixs_is_domain_error(err));
+    CHECK(ixs_ctx_nerrors(state->ctx) == 1);
+    ixs_ctx_clear_errors(state->ctx);
+    CHECK(ixs_ctx_nerrors(state->ctx) == 0);
+  }
+  return IXS_WALK_CONTINUE;
+}
+
+static void test_walk_same_session_reentry(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "a");
+  ixs_node *b = ixs_sym(ctx, "b");
+  ixs_node *c = ixs_sym(ctx, "c");
+  ixs_node *d = ixs_sym(ctx, "d");
+  ixs_node *lhs = ixs_add(ctx, a, b);
+  ixs_node *rhs = ixs_add(ctx, c, d);
+  ixs_node *expr = ixs_mul(ctx, lhs, rhs);
+  size_t expected = 0;
+  reentrant_walk_state state = {ctx, 0, false};
+
+  CHECK(expr != NULL);
+  CHECK(ixs_walk_pre(ctx, expr, count_nodes, &expected) == expr);
+
+  ixs_node *res = ixs_walk_pre(ctx, expr, reenter_same_session, &state);
+  CHECK(res == expr);
+  CHECK(state.reentered);
+  CHECK(state.count == expected);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+  printf("  walk_same_session_reentry: OK\n");
+}
+
 static void test_walk_deep_chain(void) {
   enum { WALK_DEPTH = 16384 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -514,6 +568,7 @@ int main(void) {
   test_walk_null_root();
   test_walk_leaf();
   test_walk_sentinel();
+  test_walk_same_session_reentry();
   test_walk_deep_chain();
   printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

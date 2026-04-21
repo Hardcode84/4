@@ -9,6 +9,7 @@
 #include "arena.h"
 #include "rational.h"
 #include <ixsimpl.h>
+#include <string.h>
 
 /* --- Internal node struct --- */
 
@@ -26,6 +27,16 @@ typedef struct ixs_pwcase {
   struct ixs_node *value;
   struct ixs_node *cond;
 } ixs_pwcase;
+
+typedef struct ixs_session_impl {
+  ixs_ctx *ctx;
+  ixs_arena scratch;
+  ixs_arena diag;
+  const char **errors;
+  size_t nerrors;
+  size_t errors_cap;
+  ixs_arena_mark base_mark;
+} ixs_session_impl;
 
 struct ixs_node {
   ixs_tag tag;
@@ -103,17 +114,21 @@ static inline void ixs_stat_hit(ixs_stat_entry *stats, const char *fn) {
 
 struct ixs_ctx {
   ixs_arena arena;
-  ixs_arena scratch;
 
   /* Hash-consing table (open addressing, linear probing) */
   ixs_node **htab;
   size_t htab_cap;
   size_t htab_used;
 
-  /* Error list (arena-managed pointer array, strings also arena) */
+  /* Bound session mirrors. Session-owned state is copied in on entry to
+   * session-taking APIs and copied back out on return. */
+  ixs_arena scratch;
+  ixs_arena diag;
   const char **errors;
   size_t nerrors;
   size_t errors_cap;
+  ixs_session_impl *active_session;
+  size_t active_session_depth;
 
   /* Singletons */
   ixs_node *sentinel_error;
@@ -182,7 +197,7 @@ IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n);
  * integer-valued expressions. */
 IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n);
 
-/* Error list helper. fmt is printf-style. */
+/* Error list helpers. fmt is printf-style. */
 IXS_STATIC void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...);
 
 /* NULL/sentinel propagation for binary ops. Returns the propagated
@@ -191,5 +206,102 @@ IXS_STATIC ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b);
 
 /* Same for unary. */
 IXS_STATIC ixs_node *ixs_propagate1(ixs_node *a);
+
+static inline ixs_session_impl *ixs_session_get(ixs_session *s) {
+  ixs_arena_chunk *chunk = (ixs_arena_chunk *)(void *)s->storage;
+  return (ixs_session_impl *)(void *)chunk->base;
+}
+
+static inline const ixs_session_impl *ixs_session_cget(const ixs_session *s) {
+  const ixs_arena_chunk *chunk =
+      (const ixs_arena_chunk *)(const void *)s->storage;
+  return (const ixs_session_impl *)(const void *)chunk->base;
+}
+
+static inline ixs_ctx *ixs_session_ctx(ixs_session *s) {
+  return ixs_session_get(s)->ctx;
+}
+
+static inline const ixs_ctx *ixs_session_cctx(const ixs_session *s) {
+  return ixs_session_cget(s)->ctx;
+}
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_session_impl *impl;
+  ixs_arena prev_scratch;
+  ixs_arena prev_diag;
+  const char **prev_errors;
+  size_t prev_nerrors;
+  size_t prev_errors_cap;
+  ixs_session_impl *prev_active_session;
+  size_t prev_active_session_depth;
+  bool swapped;
+} ixs_session_binding;
+
+static inline bool ixs_session_is_active(const ixs_session_impl *impl) {
+  return impl && impl->ctx && impl->ctx->active_session == impl;
+}
+
+/*
+ * Public entry points still call ctx-based internals. Bind the session-owned
+ * scratch/diagnostic state onto the context on outermost entry, but allow
+ * same-session reentry without replaying stale state over the live scratch.
+ */
+static inline ixs_ctx *ixs_session_bind(ixs_session_binding *binding,
+                                        ixs_session *s) {
+  ixs_session_impl *impl = ixs_session_get(s);
+  ixs_ctx *ctx = impl->ctx;
+
+  memset(binding, 0, sizeof(*binding));
+  binding->ctx = ctx;
+  binding->impl = impl;
+  binding->prev_active_session = ctx->active_session;
+  binding->prev_active_session_depth = ctx->active_session_depth;
+  binding->swapped = false;
+
+  if (ctx->active_session == impl) {
+    ctx->active_session_depth++;
+    return ctx;
+  }
+
+  binding->prev_scratch = ctx->scratch;
+  binding->prev_diag = ctx->diag;
+  binding->prev_errors = ctx->errors;
+  binding->prev_nerrors = ctx->nerrors;
+  binding->prev_errors_cap = ctx->errors_cap;
+
+  ctx->scratch = impl->scratch;
+  ctx->diag = impl->diag;
+  ctx->errors = impl->errors;
+  ctx->nerrors = impl->nerrors;
+  ctx->errors_cap = impl->errors_cap;
+  ctx->active_session = impl;
+  ctx->active_session_depth = 1;
+  binding->swapped = true;
+  return ctx;
+}
+
+static inline void ixs_session_unbind(ixs_session_binding *binding) {
+  if (!binding->swapped) {
+    if (binding->ctx->active_session_depth > 0)
+      binding->ctx->active_session_depth--;
+    return;
+  }
+
+  binding->impl->scratch = binding->ctx->scratch;
+  binding->impl->diag = binding->ctx->diag;
+  binding->impl->errors = binding->ctx->errors;
+  binding->impl->nerrors = binding->ctx->nerrors;
+  binding->impl->errors_cap = binding->ctx->errors_cap;
+
+  binding->ctx->scratch = binding->prev_scratch;
+  binding->ctx->diag = binding->prev_diag;
+  binding->ctx->errors = binding->prev_errors;
+  binding->ctx->nerrors = binding->prev_nerrors;
+  binding->ctx->errors_cap = binding->prev_errors_cap;
+  binding->ctx->active_session = binding->prev_active_session;
+  binding->ctx->active_session_depth = binding->prev_active_session_depth;
+}
 
 #endif /* IXS_NODE_H */

@@ -13,7 +13,7 @@
  *   PARSE_ERROR  -- malformed input.  Propagates through arithmetic.
  *   ERROR        -- domain error (e.g. division by zero).  Same.
  * Check with ixs_is_error / ixs_is_parse_error / ixs_is_domain_error.
- * Human-readable messages accumulate in the context error list.
+ * Human-readable messages accumulate in the session error list.
  */
 
 #ifndef IXSIMPL_H
@@ -30,6 +30,13 @@ extern "C" {
 typedef struct ixs_ctx ixs_ctx;
 typedef struct ixs_node ixs_node;
 
+#define IXS_SESSION_BYTES 4096u
+
+typedef union {
+  void *ptr_align;
+  unsigned char storage[IXS_SESSION_BYTES];
+} ixs_session;
+
 typedef enum {
   IXS_CMP_GT,
   IXS_CMP_GE,
@@ -44,20 +51,39 @@ typedef enum {
 /* Create a new context.  Returns NULL on allocation failure. */
 ixs_ctx *ixs_ctx_create(void);
 
-/* Destroy ctx and free all nodes allocated within it. */
+/* Destroy ctx and free all nodes allocated within it. NULL-safe.
+ * Destroy all sessions bound to ctx before calling this. */
 void ixs_ctx_destroy(ixs_ctx *ctx);
+
+/* --- Session lifecycle ------------------------------------------------- */
+
+/* `ixs_session` is a reusable workspace bound to exactly one ctx.
+ * `s` and `ctx` must be non-NULL. The bound ctx must outlive s. Unless stated
+ * otherwise, every API that takes `ixs_session *` requires a non-NULL
+ * initialized session. */
+
+/* Initialize a reusable workspace bound to ctx. */
+void ixs_session_init(ixs_session *s, ixs_ctx *ctx);
+
+/* Restore scratch to the post-init mark and clear accumulated errors.
+ * Valid only after successful initialization. */
+void ixs_session_reset(ixs_session *s);
+
+/* Destroy s and release any heap-grown session storage.
+ * Valid only after successful initialization. */
+void ixs_session_destroy(ixs_session *s);
 
 /* --- Error list -------------------------------------------------------- */
 
 /* Number of accumulated error messages. */
-size_t ixs_ctx_nerrors(ixs_ctx *ctx);
+size_t ixs_session_nerrors(ixs_session *s);
 
 /* Retrieve the i-th error message (0-based).  Pointer valid until next
- * mutating call on ctx. */
-const char *ixs_ctx_error(ixs_ctx *ctx, size_t index);
+ * mutating call on s. */
+const char *ixs_session_error(ixs_session *s, size_t index);
 
 /* Discard all accumulated errors. */
-void ixs_ctx_clear_errors(ixs_ctx *ctx);
+void ixs_session_clear_errors(ixs_session *s);
 
 /* --- Sentinel checks --------------------------------------------------- */
 
@@ -75,44 +101,46 @@ bool ixs_is_domain_error(ixs_node *node);
 /* Parse a SymPy-style expression from input[0..len-1].
  * input must be NUL-terminated at or before input[len].
  * Returns the simplified AST, PARSE_ERROR on bad syntax, NULL on OOM. */
-ixs_node *ixs_parse(ixs_ctx *ctx, const char *input, size_t len);
+ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 
 /* --- Constructors ------------------------------------------------------ */
 
-/* All constructors return NULL on OOM.  Node arguments must belong to ctx. */
+/* All constructors return NULL on OOM.  Node arguments must belong to the
+ * context bound to s. */
 
-ixs_node *ixs_int(ixs_ctx *ctx, int64_t val);
-ixs_node *ixs_rat(ixs_ctx *ctx, int64_t p, int64_t q);
-ixs_node *ixs_sym(ixs_ctx *ctx, const char *name);
+ixs_node *ixs_int(ixs_session *s, int64_t val);
+ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q);
+ixs_node *ixs_sym(ixs_session *s, const char *name);
 
-ixs_node *ixs_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_neg(ixs_ctx *ctx, ixs_node *a);
-ixs_node *ixs_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_neg(ixs_session *s, ixs_node *a);
+ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b);
 
 /* Exact rational division: a/b where b != 0.  Returns ERROR on b == 0. */
-ixs_node *ixs_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
 
-ixs_node *ixs_floor(ixs_ctx *ctx, ixs_node *x);
-ixs_node *ixs_ceil(ixs_ctx *ctx, ixs_node *x);
+ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
+ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
 
 /* Floored modulo (Python/SymPy semantics).  Returns ERROR on b == 0. */
-ixs_node *ixs_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 
-ixs_node *ixs_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
 
 /* Piecewise: n branches.  values[i] is returned when conds[i] is true;
  * last branch is the default (conds[n-1] should be ixs_true). */
-ixs_node *ixs_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values, ixs_node **conds);
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
+                 ixs_node **conds);
 
-ixs_node *ixs_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op, ixs_node *b);
-ixs_node *ixs_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
-ixs_node *ixs_not(ixs_ctx *ctx, ixs_node *a);
-ixs_node *ixs_true(ixs_ctx *ctx);
-ixs_node *ixs_false(ixs_ctx *ctx);
+ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
+ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_not(ixs_session *s, ixs_node *a);
+ixs_node *ixs_true(ixs_session *s);
+ixs_node *ixs_false(ixs_session *s);
 
 /* --- Entailment checking ----------------------------------------------- */
 
@@ -128,28 +156,28 @@ typedef enum {
  * via ixs_cmp().  Returns UNKNOWN when bounds are insufficient, when
  * expr is not a CMP, or on OOM.  Lighter than ixs_simplify: no
  * rewriting, just bounds setup + interval check. */
-ixs_check_result ixs_check(ixs_ctx *ctx, ixs_node *expr,
+ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
 
 /* --- Simplification ---------------------------------------------------- */
 
 /* Simplify expr under the given assumptions (array of CMP/AND/OR nodes).
  * Pass NULL/0 for no assumptions.  Returns simplified node, or sentinel. */
-ixs_node *ixs_simplify(ixs_ctx *ctx, ixs_node *expr,
+ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
 /* Simplify exprs[0..n-1] in place, sharing the same assumption set.
  * Each element is replaced by its simplified form.  On OOM, all
  * elements are set to NULL.  NULL or sentinel entries are skipped.
  * Bounds are parsed from assumptions once and reused across all elements. */
-void ixs_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
+void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
 /* Distribute MUL over ADD (expand products of sums into sums of products).
  * Recurses into subexpressions (floor args, piecewise branches, etc.).
  * Powers are expanded by repeated multiplication (capped at exponent 64).
  * NULL-safe. */
-ixs_node *ixs_expand(ixs_ctx *ctx, ixs_node *expr);
+ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 
 /* --- Comparison and substitution --------------------------------------- */
 
@@ -159,14 +187,14 @@ bool ixs_same_node(ixs_node *a, ixs_node *b);
 /* Return expr with all occurrences of target replaced by replacement.
  * target can be any node (symbol, subexpression, constant, etc.).
  * Uses pointer equality (hash-consed), so matching is O(1) per node. */
-ixs_node *ixs_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
+ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement);
 
 /* Simultaneous multi-target substitution.  Replaces targets[i] with
  * replacements[i] in a single pass.  No replacement is recursed into,
  * so {A->B, B->C} applied to A+B yields B+C, not C+C.
  * Duplicate targets: first matching entry wins. */
-ixs_node *ixs_subs_multi(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements);
 
@@ -307,17 +335,17 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
 /* Pre-order: visit node, then recurse into children.
  * Returns root on completion, the stopping node on STOP, NULL if root
  * is NULL or the explicit scratch-backed traversal stack cannot grow.
- * ctx must be non-NULL when root is non-NULL.
+ * s must be non-NULL when root is non-NULL.
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
-ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
                        void *userdata);
 
 /* Post-order: recurse into children, then visit node.
  * Same return/NULL/sentinel semantics as ixs_walk_pre.
  * SKIP is a no-op in post-order (children already visited). */
-ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root, ixs_visit_fn fn,
+ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
                         void *userdata);
 
 #ifdef __cplusplus

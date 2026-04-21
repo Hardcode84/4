@@ -4,6 +4,10 @@
 #ifndef TEST_CHECK_H
 #define TEST_CHECK_H
 
+#include <ixsimpl.h>
+
+#include "test_session_compat.h"
+
 #include <stdio.h>
 
 static int tests_run = 0;

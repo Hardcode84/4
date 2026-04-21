@@ -384,6 +384,11 @@ static void test_print_buffer(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_null_ctx_destroy(void) {
+  ixs_ctx_destroy(NULL);
+  CHECK(1);
+}
+
 int main(void) {
   test_integer_overflow();
   test_division_by_zero();
@@ -395,6 +400,7 @@ int main(void) {
   test_large_integers();
   test_symbol_edge_cases();
   test_print_buffer();
+  test_null_ctx_destroy();
 
   printf("test_edge_cases: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

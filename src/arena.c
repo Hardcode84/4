@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "arena.h"
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,10 @@
 
 static size_t align_up(size_t val, size_t align) {
   return (val + align - 1) & ~(align - 1);
+}
+
+static bool chunk_is_inline(const ixs_arena *a, const ixs_arena_chunk *c) {
+  return c && c == a->inline_chunk;
 }
 
 /*
@@ -36,16 +41,39 @@ IXS_STATIC void ixs_arena_init(ixs_arena *a, size_t initial_size) {
     initial_size = IXS_ARENA_DEFAULT_SIZE;
   a->min_chunk = initial_size;
   a->current = NULL;
+  a->spare = NULL;
+  a->inline_chunk = NULL;
+}
+
+IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
+                                      size_t storage_bytes,
+                                      size_t initial_size) {
+  ixs_arena_chunk *c = (ixs_arena_chunk *)storage;
+  size_t header_sz = align_up(sizeof(*c), ARENA_MAX_ALIGN);
+  if (initial_size < IXS_ARENA_DEFAULT_SIZE)
+    initial_size = IXS_ARENA_DEFAULT_SIZE;
+  c->base = (char *)storage + header_sz;
+  c->used = 0;
+  c->capacity = storage_bytes > header_sz ? storage_bytes - header_sz : 0;
+  c->next = NULL;
+  a->min_chunk = initial_size;
+  a->current = c;
+  a->spare = NULL;
+  a->inline_chunk = c;
 }
 
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
   ixs_arena_chunk *c = a->current;
   while (c) {
     ixs_arena_chunk *next = c->next;
-    free(c);
+    if (!chunk_is_inline(a, c))
+      free(c);
     c = next;
   }
+  if (a->spare && !chunk_is_inline(a, a->spare))
+    free(a->spare);
   a->current = NULL;
+  a->spare = NULL;
 }
 
 IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
@@ -75,7 +103,19 @@ IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
     cap = doubled;
   }
 
-  ixs_arena_chunk *c = chunk_new(cap);
+  ixs_arena_chunk *c = NULL;
+  if (a->spare && a->spare->capacity >= cap) {
+    c = a->spare;
+    a->spare = NULL;
+    c->used = 0;
+    c->next = NULL;
+  } else {
+    if (a->spare) {
+      free(a->spare);
+      a->spare = NULL;
+    }
+    c = chunk_new(cap);
+  }
   if (!c)
     return NULL;
   c->next = a->current;
@@ -109,7 +149,15 @@ IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
       return;
     ixs_arena_chunk *doomed = a->current;
     a->current = doomed->next;
-    free(doomed);
+    doomed->used = 0;
+    doomed->next = NULL;
+    if (chunk_is_inline(a, doomed))
+      continue;
+    if (!a->spare) {
+      a->spare = doomed;
+    } else {
+      free(doomed);
+    }
   }
   if (a->current)
     a->current->used = m.used;

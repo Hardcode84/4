@@ -205,7 +205,7 @@ static void test_iv_intersect_one_invalid(void) {
 static void test_bounds_sym_ge(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -221,7 +221,7 @@ static void test_bounds_sym_ge(void) {
 static void test_bounds_sym_lt(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 32)));
@@ -237,7 +237,7 @@ static void test_bounds_sym_lt(void) {
 static void test_bounds_sym_eq(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7)));
@@ -253,7 +253,7 @@ static void test_bounds_sym_eq(void) {
 static void test_bounds_two_sided(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -270,7 +270,7 @@ static void test_bounds_two_sided(void) {
 static void test_bounds_sym_gt(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   /* x > 5  =>  x >= 6 for integer x */
@@ -290,7 +290,7 @@ static void test_bounds_sym_gt(void) {
 static void test_bounds_propagate_add(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -309,7 +309,7 @@ static void test_bounds_propagate_add(void) {
 static void test_bounds_propagate_mul(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2)));
@@ -328,7 +328,7 @@ static void test_bounds_propagate_mul(void) {
 static void test_bounds_propagate_mod(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -347,7 +347,7 @@ static void test_bounds_propagate_mod(void) {
 static void test_bounds_propagate_mod_tight(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   /* x in [3, 7], Mod(x, 16) should tighten to [3, 7] since 7 < 16. */
@@ -367,7 +367,7 @@ static void test_bounds_propagate_mod_tight(void) {
 static void test_bounds_propagate_floor(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -391,7 +391,7 @@ static void test_bounds_propagate_floor(void) {
 static void test_bounds_unknown_sym(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_interval iv = ixs_bounds_get(&b, y);
@@ -408,7 +408,7 @@ static void test_bounds_unknown_sym(void) {
 static void test_bounds_fork(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -444,7 +444,7 @@ static void test_bounds_fork(void) {
 static void test_bounds_modrem(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   /* Mod(x, 8) == 3 */
@@ -463,7 +463,7 @@ static void test_bounds_modrem(void) {
 static void test_bounds_modrem_zero(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   /* Mod(x, 4) == 0 */
@@ -482,7 +482,7 @@ static void test_bounds_modrem_zero(void) {
 static void test_bounds_no_modrem(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   int64_t mod, rem;
   ixs_node *x = ixs_sym(ctx, "x");
@@ -499,7 +499,7 @@ static void test_bounds_no_modrem(void) {
 static void test_bounds_expr_override(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
@@ -519,7 +519,7 @@ static void test_bounds_expr_override(void) {
 static void test_bounds_expr_le(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
-  CHECK(ixs_bounds_init(&b, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
@@ -535,7 +535,7 @@ static void test_bounds_expr_le(void) {
 
   /* x+y < 0 tightens upper bound to -1 */
   ixs_bounds b2;
-  CHECK(ixs_bounds_init(&b2, &ctx->scratch));
+  CHECK(ixs_bounds_init(&b2, ixs_test_scratch(ctx)));
   ixs_bounds_add_assumption(&b2,
                             ixs_cmp(ctx, expr, IXS_CMP_LT, ixs_int(ctx, 0)));
   iv = ixs_bounds_get(&b2, expr);
