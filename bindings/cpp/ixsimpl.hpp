@@ -6,6 +6,7 @@
 
 #include <initializer_list>
 #include <ixsimpl.h>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -13,6 +14,8 @@
 #include <vector>
 
 namespace ixs {
+
+class Expr;
 
 class Context {
   ixs_ctx *ctx_;
@@ -41,6 +44,7 @@ public:
     return ixs_session_error(const_cast<ixs_session *>(&session_), i);
   }
   void clear_errors() { ixs_session_clear_errors(&session_); }
+  Expr import_expr(const Expr &expr);
 };
 
 class Expr {
@@ -158,6 +162,15 @@ public:
 private:
   ixs_ctx *session_ctx() const { return ctx_; }
 };
+
+inline Expr Context::import_expr(const Expr &expr) {
+  if (!expr.raw())
+    throw std::invalid_argument("ixsimpl: null expression");
+  ixs_node *node = ixs_import_node(session(), expr.raw());
+  if (!node)
+    throw std::bad_alloc();
+  return Expr(raw(), session(), node);
+}
 
 inline Expr floor(Expr x) {
   return Expr(x.raw_ctx(), x.raw_session(),

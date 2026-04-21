@@ -6,6 +6,7 @@
 
 #include "internal.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #define IXS_ARENA_DEFAULT_SIZE 4096
@@ -48,6 +49,9 @@ IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a);
  * mark must have come from ixs_arena_save on the same arena.
  * Marks are invalidated by any ixs_arena_restore that rewinds past them. */
 IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m);
+
+/* True if ptr points into live allocated bytes of a. */
+IXS_STATIC bool ixs_arena_contains(const ixs_arena *a, const void *ptr);
 
 /*
  * Grow an existing allocation from old_size to new_size bytes.

@@ -17,6 +17,7 @@ else()
         src/bounds.c
         src/ctx.c
         src/expand.c
+        src/import.c
         src/interval.c
         src/node.c
         src/parser.c
@@ -111,6 +112,10 @@ add_test(NAME test_introspect COMMAND test_introspect)
 add_executable(test_expand test/test_expand.c)
 target_link_libraries(test_expand ixsimpl)
 add_test(NAME test_expand COMMAND test_expand)
+
+add_executable(test_import test/test_import.c)
+target_link_libraries(test_import ixsimpl)
+add_test(NAME test_import COMMAND test_import)
 
 # Tests that need internal symbols — skipped in amalgamated builds.
 

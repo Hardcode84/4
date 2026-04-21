@@ -5,7 +5,8 @@
  * ixsimpl.h -- public API for the index expression simplifier.
  *
  * All nodes are hash-consed and owned by their ixs_ctx.  Nodes from
- * different contexts must never be mixed in the same operation.
+ * different contexts must never be mixed in the same operation; use
+ * ixs_import_node/ixs_import_many as the sanctioned structural bridge.
  *
  * Error model (three tiers, checked in this order):
  *   NULL         -- out of memory.  Propagates: any op receiving NULL
@@ -197,6 +198,21 @@ ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
 ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements);
+
+/* --- Structural import ------------------------------------------------- */
+
+/* Import src into the store bound to s.  If src already belongs to that store,
+ * it is returned directly.  Sentinels are mapped to the destination store's
+ * sentinels.  Returns NULL on OOM or if src is NULL. */
+ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
+
+/* Import src[0..count-1] into the store bound to s.  count == 0 is a no-op
+ * that returns true and permits src == NULL and out == NULL.  Otherwise NULL
+ * src/out pointers or NULL elements fail.  If it returns false, out is left
+ * unchanged, but nodes interned before the failure may remain in the
+ * destination store. */
+bool ixs_import_many(ixs_session *s, const ixs_node *const *src, size_t count,
+                     ixs_node **out);
 
 /* --- Output ------------------------------------------------------------ */
 

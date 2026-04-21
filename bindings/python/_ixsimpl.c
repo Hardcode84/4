@@ -836,6 +836,22 @@ static PyObject *Context_false_(ContextObject *self,
   return (PyObject *)Expr_wrap(self, ixs_false(Context_session(self)));
 }
 
+static PyObject *Context_import_(ContextObject *self, PyObject *arg) {
+  ExprObject *expr;
+  ixs_node *node;
+
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+
+  expr = (ExprObject *)arg;
+  node = ixs_import_node(Context_session(self), expr->node);
+  if (!node)
+    return PyErr_NoMemory();
+  return (PyObject *)Expr_wrap(self, node);
+}
+
 static PyObject *Context_eq(ContextObject *self, PyObject *args) {
   PyObject *a_obj, *b_obj;
   ixs_node *a, *b, *result;
@@ -1072,6 +1088,8 @@ static PyMethodDef Context_methods[] = {
      "Create a rational node: ctx.rat(1, 3)."},
     {"true_", (PyCFunction)Context_true_, METH_NOARGS, "Return True node."},
     {"false_", (PyCFunction)Context_false_, METH_NOARGS, "Return False node."},
+    {"import_", (PyCFunction)Context_import_, METH_O,
+     "Import an Expr from another Context's store into this one."},
     {"eq", (PyCFunction)Context_eq, METH_VARARGS,
      "Build an equality CMP node: ctx.eq(a, b)."},
     {"ne", (PyCFunction)Context_ne, METH_VARARGS,

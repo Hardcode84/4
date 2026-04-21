@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 from ixsimpl._ixsimpl import (
     ADD,
@@ -71,9 +71,18 @@ class Expr(_Expr):
         """True if *sym* appears anywhere in this expression tree."""
         return sym in self.free_symbols
 
-    def eval(self, env: dict[str, int]) -> int:
-        """Evaluate with concrete integer values.  Raises TypeError if
-        the result is not a constant integer (e.g. unbound symbols)."""
+    @overload
+    def eval(self, env: dict[str, int]) -> int: ...
+
+    @overload
+    def eval(self, env: dict[Expr, int]) -> int: ...
+
+    def eval(self, env: dict[str, int] | dict[Expr, int]) -> int:
+        """Evaluate with concrete integer values keyed by name or symbol.
+
+        Raises TypeError if the result is not a constant integer
+        (e.g. unbound symbols).
+        """
         return int(self.subs(env))  # type: ignore[arg-type]
 
 
@@ -129,6 +138,7 @@ if TYPE_CHECKING:
         def rat(self, p: int, q: int) -> Expr: ...
         def true_(self) -> Expr: ...
         def false_(self) -> Expr: ...
+        def import_(self, expr: _Expr) -> Expr: ...
         def eq(self, a: _Expr | int, b: _Expr | int) -> Expr: ...
         def ne(self, a: _Expr | int, b: _Expr | int) -> Expr: ...
         def check(

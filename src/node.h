@@ -226,6 +226,14 @@ static inline const ixs_ctx *ixs_session_cctx(const ixs_session *s) {
   return ixs_session_cget(s)->ctx;
 }
 
+/*
+ * Fast-path same-store imports by arena membership. The caller still owns the
+ * responsibility of passing a valid ixs_node pointer.
+ */
+static inline bool ixs_ctx_owns_node(const ixs_ctx *ctx, const ixs_node *node) {
+  return ctx && node && ixs_arena_contains(&ctx->arena, node);
+}
+
 typedef struct {
   ixs_ctx *ctx;
   ixs_session_impl *impl;

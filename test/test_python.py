@@ -832,6 +832,25 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
     assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
 
+@given(expr=expressions(max_depth=4))
+def test_import_roundtrip_same_node(expr: ExprTree) -> None:
+    """Importing into another context and back preserves canonical identity."""
+    ctx1 = ixsimpl.Context()
+    ctx2 = ixsimpl.Context()
+    try:
+        original = to_ixsimpl(ctx1, expr)
+    except ValueError:
+        assume(False)
+    assume(not original.is_error)
+
+    imported = ctx2.import_(original)
+    imported_again = ctx2.import_(original)
+    roundtripped = ctx1.import_(imported)
+
+    assert ixsimpl.same_node(imported, imported_again)
+    assert ixsimpl.same_node(roundtripped, original)
+
+
 @given(
     expr=expressions(),
     bound_sym=st.sampled_from(_VARS),
@@ -1475,7 +1494,7 @@ def test_eval_with_expr_keys() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")
     expr = x * y
-    assert expr.eval({x: 7, y: 6}) == 42  # type: ignore[dict-item]
+    assert expr.eval({x: 7, y: 6}) == 42
 
 
 def test_eval_raises_on_unbound() -> None:

@@ -126,6 +126,15 @@ def test_cross_context_batch() -> None:
         ctx1.simplify_batch([x1, x2])
 
 
+def test_cross_context_import() -> None:
+    ctx1 = ixsimpl.Context()
+    ctx2 = ixsimpl.Context()
+    expr = ctx1.sym("x") + 1
+    imported = ctx2.import_(expr)
+    assert str(imported) == str(expr)
+    assert imported._ctx is ctx2
+
+
 def test_parse_error_sentinel() -> None:
     ctx = ixsimpl.Context()
     e = ctx.parse("???")

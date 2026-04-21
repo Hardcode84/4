@@ -1319,6 +1319,16 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements);
 
+// Cross-store import: rebuild `src` into the store bound to `s`.
+// Sentinels map to the destination store's sentinels. If `src` already
+// belongs to the destination store, it is returned directly.
+ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
+
+// Batch import: on success writes all imported nodes to `out` and returns
+// true. On OOM returns false and leaves `out` unchanged.
+bool ixs_import_many(ixs_session *s, const ixs_node *const *src,
+                     size_t count, ixs_node **out);
+
 // Output — snprintf-like: returns the number of chars that would be written
 // (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
 // length without writing. Output is always null-terminated when bufsize > 0.
@@ -2196,25 +2206,28 @@ Raw node pointers remain store-owned. Mixing nodes from different stores is
 still invalid. The sanctioned bridge is structural import:
 
 ```c
-ixs_node *ixs_import_node(ixs_session *dst, const ixs_node *src);
-bool ixs_import_many(ixs_session *dst, const ixs_node *const *src,
+ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
+bool ixs_import_many(ixs_session *s, const ixs_node *const *src,
                      size_t count, ixs_node **out);
 ```
 
 Semantics:
 
 - if `src` is a sentinel, return the matching sentinel in the store bound to
-  `dst`
-- if `src` already belongs to the store bound to `dst`, reuse it directly
+  `s`
+- if `src` already belongs to the store bound to `s`, reuse it directly
 - otherwise rebuild it structurally into that store
 - use a session-local memo table keyed by source pointer
 - import through the canonical constructors so the destination store interns
   and normalizes the result
-- `ixs_import_node` returns `NULL` only on OOM
+- `ixs_import_node` returns `NULL` on OOM or when `src == NULL`
+- `ixs_import_many(count == 0, ...)` is a no-op success, even if `src == NULL`
+  and `out == NULL`
 - `ixs_import_many` returns `true` only if every element imports successfully
+- when `count > 0`, NULL `src`, NULL `out`, or NULL elements fail cleanly
 - if `ixs_import_many` returns `false`, `out` is left unchanged
 - import is not transactional with respect to the destination store: nodes
-  interned before a failing allocation may remain available for later reuse
+  interned before a failing import may remain available for later reuse
 
 This import API is the required bridge for:
 
