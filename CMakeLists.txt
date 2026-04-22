@@ -23,6 +23,7 @@ else()
         src/parser.c
         src/print.c
         src/rational.c
+        src/serialize.c
         src/simplify.c
         src/walk.c
     )
@@ -116,6 +117,11 @@ add_test(NAME test_expand COMMAND test_expand)
 add_executable(test_import test/test_import.c)
 target_link_libraries(test_import ixsimpl)
 add_test(NAME test_import COMMAND test_import)
+
+add_executable(test_serialize test/test_serialize.c)
+target_link_libraries(test_serialize ixsimpl)
+target_include_directories(test_serialize PRIVATE src)
+add_test(NAME test_serialize COMMAND test_serialize)
 
 # Tests that need internal symbols — skipped in amalgamated builds.
 

@@ -14,6 +14,8 @@ Properties tested:
    expressions that agree numerically with the original tree.
 6. Roundtrip: ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves
    numerical semantics.
+7. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
+   crash the forked test subprocess.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from fractions import Fraction
 from typing import Any
 
 import ixsimpl
+import pytest
 import sympy
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
@@ -35,6 +38,7 @@ CondTree = tuple[Any, ...]
 Env = dict[str, int]
 
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
+_SERIAL_MAGIC = b"IXSB"
 
 
 def _env_from_val(val_st: st.SearchStrategy[int]) -> st.SearchStrategy[Env]:
@@ -169,6 +173,14 @@ def conditions(draw: st.DrawFn, max_depth: int = 2) -> CondTree:
         return ("not", c1)
     c2 = draw(conditions(max_depth=max_depth - 1))
     return (combiner, c1, c2)
+
+
+@st.composite
+def garbage_serialized_blobs(draw: st.DrawFn, max_size: int = 256) -> bytes:
+    data = bytearray(draw(st.binary(min_size=0, max_size=max_size)))
+    if len(data) >= len(_SERIAL_MAGIC) and data[: len(_SERIAL_MAGIC)] == _SERIAL_MAGIC:
+        data[0] ^= 0x80
+    return bytes(data)
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +861,74 @@ def test_import_roundtrip_same_node(expr: ExprTree) -> None:
 
     assert ixsimpl.same_node(imported, imported_again)
     assert ixsimpl.same_node(roundtripped, original)
+
+
+@given(expr=expressions(max_depth=4))
+def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
+    """Serializing into another context and back preserves canonical identity."""
+    ctx1 = ixsimpl.Context()
+    ctx2 = ixsimpl.Context()
+    try:
+        original = to_ixsimpl(ctx1, expr)
+    except ValueError:
+        assume(False)
+    assume(not original.is_error)
+
+    data = ctx1.serialize(original)
+    decoded = ctx2.deserialize(data)
+    decoded_again = ctx2.deserialize(data)
+    roundtrip_data = ctx2.serialize(decoded)
+    roundtripped = ctx1.deserialize(roundtrip_data)
+
+    assert ixsimpl.same_node(decoded, decoded_again)
+    assert roundtrip_data == data
+    assert ixsimpl.same_node(roundtripped, original)
+
+
+@pytest.mark.forked
+@pytest.mark.filterwarnings(
+    r"ignore:This process \(pid=.*\) is multi-threaded, use of fork\(\) may lead "
+    r"to deadlocks in the child\.:DeprecationWarning"
+)
+@given(data=garbage_serialized_blobs())
+def test_deserialize_garbage_does_not_crash(data: bytes) -> None:
+    """Total garbage rejects cleanly instead of taking the process with it."""
+    ctx = ixsimpl.Context()
+    ctx.deserialize(data)
+
+
+@pytest.mark.forked
+@pytest.mark.filterwarnings(
+    r"ignore:This process \(pid=.*\) is multi-threaded, use of fork\(\) may lead "
+    r"to deadlocks in the child\.:DeprecationWarning"
+)
+@given(expr=expressions(max_depth=4), data=st.data())
+def test_deserialize_flipped_bytes_does_not_crash(expr: ExprTree, data: st.DataObject) -> None:
+    """A few random byte flips must not crash even if they hit valid framing."""
+    ctx = ixsimpl.Context()
+    try:
+        original = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not original.is_error)
+
+    payload = bytearray(ctx.serialize(original))
+    assume(len(payload) > 0)
+    positions = data.draw(
+        st.lists(
+            st.integers(min_value=0, max_value=len(payload) - 1),
+            min_size=1,
+            max_size=min(4, len(payload)),
+            unique=True,
+        ),
+        label="positions",
+    )
+    for pos in positions:
+        payload[pos] ^= data.draw(st.integers(min_value=1, max_value=255), label=f"mask_{pos}")
+
+    # Some mutations still land on another valid stream. The property here is
+    # limited on purpose: deserialization itself must not crash the subprocess.
+    ctx.deserialize(bytes(payload))
 
 
 @given(

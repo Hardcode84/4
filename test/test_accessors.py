@@ -135,6 +135,30 @@ def test_cross_context_import() -> None:
     assert imported._ctx is ctx2
 
 
+def test_context_serialize_roundtrip() -> None:
+    ctx1 = ixsimpl.Context()
+    ctx2 = ixsimpl.Context()
+    x = ctx1.sym("x")
+    y = ctx1.sym("y")
+    expr = ((x + 1) * ixsimpl.max_(y, 3)).simplify()
+
+    data = ctx1.serialize(expr)
+    decoded = ctx2.deserialize(memoryview(data))
+    decoded_again = ctx2.deserialize(data)
+
+    assert isinstance(data, bytes)
+    assert str(decoded) == str(expr)
+    assert ixsimpl.same_node(decoded, decoded_again)
+    assert ctx2.serialize(decoded) == data
+
+
+def test_context_deserialize_parse_error() -> None:
+    ctx = ixsimpl.Context()
+    decoded = ctx.deserialize(b"nope")
+    assert decoded.is_parse_error
+    assert ctx.errors
+
+
 def test_parse_error_sentinel() -> None:
     ctx = ixsimpl.Context()
     e = ctx.parse("???")

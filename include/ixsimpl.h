@@ -6,7 +6,9 @@
  *
  * All nodes are hash-consed and owned by their ixs_ctx.  Nodes from
  * different contexts must never be mixed in the same operation; use
- * ixs_import_node/ixs_import_many as the sanctioned structural bridge.
+ * ixs_import_node/ixs_import_many as the sanctioned structural bridge,
+ * and ixs_serialize_node/ixs_deserialize_node for durable binary
+ * interchange.
  *
  * Error model (three tiers, checked in this order):
  *   NULL         -- out of memory.  Propagates: any op receiving NULL
@@ -213,6 +215,43 @@ ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
  * destination store. */
 bool ixs_import_many(ixs_session *s, const ixs_node *const *src, size_t count,
                      ixs_node **out);
+
+/* --- Structural serialization ----------------------------------------- */
+
+/* Writer/read callbacks are all-or-nothing: they must consume exactly len
+ * bytes or report failure. */
+typedef bool (*ixs_writer_write_fn)(void *userdata, const void *buf,
+                                    size_t len);
+typedef bool (*ixs_reader_read_fn)(void *userdata, void *buf, size_t len);
+typedef size_t (*ixs_reader_remaining_fn)(void *userdata);
+
+typedef struct {
+  ixs_writer_write_fn write;
+  void *userdata;
+} ixs_writer;
+
+typedef struct {
+  ixs_reader_read_fn read;
+  ixs_reader_remaining_fn remaining;
+  void *userdata;
+} ixs_reader;
+
+/* Serialize root to w using a stable little-endian binary format.  s supplies
+ * scratch only; root may belong to any context.  Returns false on writer
+ * failure, OOM, or codec validation failure (for example NULL root or an
+ * unencodable internal payload).  Validation failures append session
+ * diagnostics; writer failure and OOM leave diagnostics unchanged. */
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
+
+/* Deserialize one node from r into the store bound to s.  r->remaining must
+ * report the exact unread byte count.  Returns the node on success,
+ * the destination store's IXS_PARSE_ERROR sentinel on malformed or unsupported
+ * binary (including streams that exceed implementation resource limits), and
+ * NULL on OOM.  Malformed input appends session diagnostics, is validated in
+ * session scratch, and does not intern garbage into the destination store.
+ * OOM leaves diagnostics unchanged but may occur after some validated nodes
+ * have already been interned. */
+ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
 
 /* --- Output ------------------------------------------------------------ */
 

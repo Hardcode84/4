@@ -2241,38 +2241,64 @@ For durable binary interchange, symbolic data must not be printed and reparsed
 through symbolic text. Add a stable structural codec:
 
 ```c
-typedef struct ixs_writer ixs_writer;
-typedef struct ixs_reader ixs_reader;
+typedef bool (*ixs_writer_write_fn)(void *userdata, const void *buf, size_t len);
+typedef bool (*ixs_reader_read_fn)(void *userdata, void *buf, size_t len);
+typedef size_t (*ixs_reader_remaining_fn)(void *userdata);
+
+typedef struct {
+  ixs_writer_write_fn write;
+  void *userdata;
+} ixs_writer;
+
+typedef struct {
+  ixs_reader_read_fn read;
+  ixs_reader_remaining_fn remaining;
+  void *userdata;
+} ixs_reader;
 
 bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
 ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
 ```
+
+Bindings expose the same codec as `Context.serialize()` / `Context.deserialize()`
+in Python and `Context::serialize_expr()` / `Context::deserialize_expr()` in
+C++.
 
 Wire-format contract:
 
 - host-independent and little-endian
 - fixed-width scalar fields (`uint8_t` tag, `uint32_t` counts/indices,
   `int64_t` integer payloads)
-- leading magic/version header
+- leading magic/version header: magic `IXSB`, version `1`
 - topologically ordered unique-node table
 - child references by earlier table index
 - explicit tag values for sentinels and boolean singletons
 - final root index
+- writer callbacks are all-or-nothing: either consume exactly `len` bytes or
+  fail without partial writes
+- reader callbacks expose the exact unread byte count via `remaining`
 
 Failure contract:
 
 - `ixs_serialize_node` returns `true` on success and `false` on writer failure
-  or OOM. Writer failures are reported by `ixs_writer`; OOM leaves diagnostics
-  unchanged.
-- `ixs_deserialize_node` returns a node on success, `IXS_PARSE_ERROR` on
-  malformed or unsupported binary, and `NULL` on OOM.
-- the decoder validates framing, lengths, tag payloads, integer widths, and
-  child references in session scratch before interning anything into the
-  destination store
+  or OOM. Writer failures are reported by `ixs_writer`; `root == NULL` or an
+  unencodable internal payload also returns `false`; validation failures append
+  session diagnostics; writer failure and OOM leave diagnostics unchanged.
+- `ixs_deserialize_node` returns a node on success, the destination store's
+  `IXS_PARSE_ERROR` sentinel on malformed or unsupported binary, and `NULL` on
+  OOM.
+- malformed input appends session diagnostics and the decoder validates
+  framing, lengths, tag payloads, integer widths, and child references in
+  session scratch before interning anything from that malformed payload
 - malformed input therefore reports a parse error without partially importing
   garbage into the store
+- OOM leaves diagnostics unchanged but can still happen during the later build
+  step, after some validated nodes have already been interned into the
+  destination store
 - size/count fields that overflow `size_t`, exceed the remaining reader bytes,
   or reference nonexistent table entries are rejected as parse errors
+- streams that exceed the implementation's decode node-count limit are rejected
+  as malformed input before allocation
 
 This codec is the backend for:
 

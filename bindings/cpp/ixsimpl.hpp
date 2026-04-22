@@ -4,6 +4,8 @@
 #ifndef IXSIMPL_HPP
 #define IXSIMPL_HPP
 
+#include <cstring>
+#include <exception>
 #include <initializer_list>
 #include <ixsimpl.h>
 #include <new>
@@ -45,6 +47,13 @@ public:
   }
   void clear_errors() { ixs_session_clear_errors(&session_); }
   Expr import_expr(const Expr &expr);
+  /* Throws invalid_argument for null expr, rethrows sink write exceptions,
+   * throws bad_alloc for core OOM, and runtime_error for codec validation
+   * failures. */
+  std::string serialize_expr(const Expr &expr);
+  /* Parse errors return the Context's parse-error sentinel Expr; OOM throws
+   * bad_alloc. */
+  Expr deserialize_expr(std::string_view data);
 };
 
 class Expr {
@@ -167,6 +176,75 @@ inline Expr Context::import_expr(const Expr &expr) {
   if (!expr.raw())
     throw std::invalid_argument("ixsimpl: null expression");
   ixs_node *node = ixs_import_node(session(), expr.raw());
+  if (!node)
+    throw std::bad_alloc();
+  return Expr(raw(), session(), node);
+}
+
+inline std::string Context::serialize_expr(const Expr &expr) {
+  struct StringWriter {
+    std::string bytes;
+    std::exception_ptr failure;
+
+    static bool write(void *userdata, const void *buf, size_t len) {
+      StringWriter *self = static_cast<StringWriter *>(userdata);
+      try {
+        self->bytes.append(static_cast<const char *>(buf), len);
+      } catch (...) {
+        self->failure = std::current_exception();
+        return false;
+      }
+      return true;
+    }
+  };
+  size_t before_nerrors;
+  size_t after_nerrors;
+
+  if (!expr.raw())
+    throw std::invalid_argument("ixsimpl: null expression");
+
+  before_nerrors = nerrors();
+  StringWriter sink;
+  ixs_writer writer = {&StringWriter::write, &sink};
+  if (!ixs_serialize_node(session(), expr.raw(), &writer)) {
+    if (sink.failure)
+      std::rethrow_exception(sink.failure);
+    after_nerrors = nerrors();
+    if (after_nerrors > before_nerrors)
+      throw std::runtime_error(error(before_nerrors));
+    throw std::bad_alloc();
+  }
+  return sink.bytes;
+}
+
+inline Expr Context::deserialize_expr(std::string_view data) {
+  struct StringReader {
+    const char *data;
+    size_t len;
+    size_t pos;
+
+    static bool read(void *userdata, void *buf, size_t len) {
+      StringReader *self = static_cast<StringReader *>(userdata);
+      if (self->pos > self->len)
+        return false;
+      if (len > self->len - self->pos)
+        return false;
+      std::memcpy(buf, self->data + self->pos, len);
+      self->pos += len;
+      return true;
+    }
+
+    static size_t remaining(void *userdata) {
+      StringReader *self = static_cast<StringReader *>(userdata);
+      if (self->pos > self->len)
+        return 0;
+      return self->len - self->pos;
+    }
+  };
+
+  StringReader source = {data.data(), data.size(), 0};
+  ixs_reader reader = {&StringReader::read, &StringReader::remaining, &source};
+  ixs_node *node = ixs_deserialize_node(session(), &reader);
   if (!node)
     throw std::bad_alloc();
   return Expr(raw(), session(), node);

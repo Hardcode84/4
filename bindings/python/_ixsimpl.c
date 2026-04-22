@@ -12,6 +12,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <ixsimpl.h>
+#include <string.h>
 
 /* Forward declarations */
 static PyTypeObject ContextType;
@@ -57,6 +58,62 @@ static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
 
 static ixs_session *Context_session(ContextObject *ctx_obj) {
   return &ctx_obj->session;
+}
+
+typedef struct {
+  PyObject *buf_obj;
+} BytesWriterState;
+
+typedef struct {
+  const unsigned char *data;
+  Py_ssize_t len;
+  Py_ssize_t pos;
+} BytesReaderState;
+
+static bool BytesWriter_write(void *userdata, const void *buf, size_t len) {
+  BytesWriterState *state = (BytesWriterState *)userdata;
+  Py_ssize_t old_len;
+  Py_ssize_t new_len;
+
+  if (len == 0)
+    return true;
+  if (len > (size_t)PY_SSIZE_T_MAX) {
+    PyErr_NoMemory();
+    return false;
+  }
+
+  old_len = PyByteArray_GET_SIZE(state->buf_obj);
+  if ((size_t)(PY_SSIZE_T_MAX - old_len) < len) {
+    PyErr_NoMemory();
+    return false;
+  }
+  new_len = old_len + (Py_ssize_t)len;
+  if (PyByteArray_Resize(state->buf_obj, new_len) < 0)
+    return false;
+
+  memcpy(PyByteArray_AS_STRING(state->buf_obj) + old_len, buf, len);
+  return true;
+}
+
+static bool BytesReader_read(void *userdata, void *buf, size_t len) {
+  BytesReaderState *state = (BytesReaderState *)userdata;
+  Py_ssize_t remaining;
+
+  if (state->pos > state->len)
+    return false;
+  remaining = state->len - state->pos;
+  if (len > (size_t)remaining)
+    return false;
+  memcpy(buf, state->data + state->pos, len);
+  state->pos += (Py_ssize_t)len;
+  return true;
+}
+
+static size_t BytesReader_remaining(void *userdata) {
+  BytesReaderState *state = (BytesReaderState *)userdata;
+  if (state->pos > state->len)
+    return 0;
+  return (size_t)(state->len - state->pos);
 }
 
 static void Expr_dealloc(ExprObject *self) {
@@ -852,6 +909,72 @@ static PyObject *Context_import_(ContextObject *self, PyObject *arg) {
   return (PyObject *)Expr_wrap(self, node);
 }
 
+static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
+  ExprObject *expr;
+  ixs_session *session;
+  size_t before_nerrors;
+  size_t after_nerrors;
+  PyObject *tmp;
+  PyObject *result;
+  BytesWriterState state;
+  ixs_writer writer;
+
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+
+  expr = (ExprObject *)arg;
+  session = Context_session(self);
+  before_nerrors = ixs_session_nerrors(session);
+  tmp = PyByteArray_FromStringAndSize(NULL, 0);
+  if (!tmp)
+    return NULL;
+
+  state.buf_obj = tmp;
+  writer.write = BytesWriter_write;
+  writer.userdata = &state;
+  if (!ixs_serialize_node(session, expr->node, &writer)) {
+    after_nerrors = ixs_session_nerrors(session);
+    Py_DECREF(tmp);
+    if (PyErr_Occurred())
+      return NULL;
+    if (after_nerrors > before_nerrors) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      ixs_session_error(session, before_nerrors));
+      return NULL;
+    }
+    return PyErr_NoMemory();
+  }
+
+  result = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(tmp),
+                                     PyByteArray_GET_SIZE(tmp));
+  Py_DECREF(tmp);
+  return result;
+}
+
+static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
+  Py_buffer view;
+  BytesReaderState state;
+  ixs_reader reader;
+  ixs_node *node;
+
+  if (PyObject_GetBuffer(arg, &view, PyBUF_CONTIG_RO) < 0)
+    return NULL;
+
+  state.data = (const unsigned char *)view.buf;
+  state.len = view.len;
+  state.pos = 0;
+  reader.read = BytesReader_read;
+  reader.remaining = BytesReader_remaining;
+  reader.userdata = &state;
+  node = ixs_deserialize_node(Context_session(self), &reader);
+  PyBuffer_Release(&view);
+  if (!node)
+    return PyErr_NoMemory();
+  return (PyObject *)Expr_wrap(self, node);
+}
+
 static PyObject *Context_eq(ContextObject *self, PyObject *args) {
   PyObject *a_obj, *b_obj;
   ixs_node *a, *b, *result;
@@ -1090,6 +1213,12 @@ static PyMethodDef Context_methods[] = {
     {"false_", (PyCFunction)Context_false_, METH_NOARGS, "Return False node."},
     {"import_", (PyCFunction)Context_import_, METH_O,
      "Import an Expr from another Context's store into this one."},
+    {"serialize", (PyCFunction)Context_serialize, METH_O,
+     "Serialize an Expr to stable little-endian bytes. Raises MemoryError on "
+     "allocation failure and RuntimeError on codec validation failure."},
+    {"deserialize", (PyCFunction)Context_deserialize, METH_O,
+     "Deserialize stable little-endian bytes into this Context. Malformed "
+     "input returns a parse-error Expr; OOM raises MemoryError."},
     {"eq", (PyCFunction)Context_eq, METH_VARARGS,
      "Build an equality CMP node: ctx.eq(a, b)."},
     {"ne", (PyCFunction)Context_ne, METH_VARARGS,
