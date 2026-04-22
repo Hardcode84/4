@@ -123,10 +123,10 @@ meaning to the library. All are treated uniformly as opaque symbolic names.
 └──────────────────────────────────────────────────────┘
 ```
 
-The diagram above shows the current implementation. The Context/Session
-refactor later in this document keeps the lower layers unchanged and only
-splits the public state handle into a long-lived store plus a reusable
-session.
+The diagram above shows the current engine architecture. Later sections
+describe the shipped session/store public API: the lower layers stay the
+same, while the public state handle is split into a long-lived store plus a
+reusable session.
 
 Node construction and simplification are **one logical layer**: every
 constructor (e.g., `ixs_add`, `ixs_floor`) applies canonicalization rules
@@ -139,11 +139,10 @@ rule functions (in `simplify.c`), which call internal node allocators (in
 `node.c`). `node.c` never calls `simplify.c` — the dependency is one-way:
 `ctx.c` → `simplify.c` → `node.c`. This prevents circular dependencies.
 
-**Thread safety**: The library has no internal synchronization. In the current
-API that means a single `ixs_ctx` is not thread-safe. In the refactored API the
-same rule applies to both a store and any session bound to it: callers must
-serialize shared use. Distinct stores share no state and can be used
-concurrently without synchronization.
+**Thread safety**: The library has no internal synchronization. A shared
+`ixs_ctx` and any `ixs_session` bound to it are not safe for concurrent use
+without external synchronization. Distinct stores share no state and can be
+used concurrently without synchronization.
 
 **Cross-context contract**: All `ixs_node*` arguments passed to any API
 function must belong to the same store as the call handle: the `ctx` argument
@@ -168,9 +167,11 @@ This is considered acceptable for the target domain.
 All expression nodes are allocated from a per-context arena. Nodes are never
 individually freed; the entire arena is freed when the context is destroyed.
 The `ixs_ctx` struct itself is emplaced into the main arena (built on the
-stack, then memcpy'd in), so `ixs_ctx_create` issues zero `calloc` calls.
-`ixs_ctx_destroy` snapshots the arena to a local before freeing it.
-This eliminates per-node malloc/free overhead and improves cache locality.
+stack, then memcpy'd in), so the store object does not need a separate heap
+allocation. The hash-consing table still uses `calloc`-backed buckets today, so
+`ixs_ctx_create` is not literally `calloc`-free. `ixs_ctx_destroy` snapshots
+the arena to a local before freeing it. This eliminates per-node malloc/free
+overhead and improves cache locality.
 
 ```c
 typedef struct ixs_arena_chunk {
@@ -182,15 +183,19 @@ typedef struct ixs_arena_chunk {
 
 typedef struct {
   ixs_arena_chunk *current;
+  ixs_arena_chunk *spare;
+  ixs_arena_chunk *inline_chunk;
   size_t min_chunk;      /* default 4096 */
 } ixs_arena;
 ```
 
-Each chunk is a **single `malloc`** — the `ixs_arena_chunk` header is
-emplaced at the start of the block, followed by the data region aligned
-to 16 bytes. One malloc, one free per chunk. Chunks grow by doubling
-(with overflow check — if doubling would exceed `SIZE_MAX`, treat as OOM).
-Typical working set for one expression is < 64 KB.
+Each heap-backed chunk is a **single `malloc`** — the `ixs_arena_chunk` header
+is emplaced at the start of the block, followed by the data region aligned to
+16 bytes. The main node arena uses only heap-backed chunks; session scratch
+also has one inline chunk and may retain one detached heap chunk as `spare` for
+reuse. Heap chunks grow by doubling (with overflow check — if doubling would
+exceed `SIZE_MAX`, treat as OOM). Typical working set for one expression is
+< 64 KB.
 
 #### Scratch Arena
 
@@ -557,9 +562,10 @@ Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled throughout:
   binary GCD or special-case: `gcd(INT64_MIN, q)` treats `INT64_MIN` as
   `2^63` (its unsigned magnitude) for the purpose of reduction.
 
-In practice the constants in this domain are small (< 2^20), so overflow
-should never occur; the checks are a safety net. No 128-bit fallback in the
-initial implementation.
+In practice the constants in this domain are small (< 2^20), so the slow path
+should be rare. Rational comparison nevertheless includes a portable emulated
+128-bit cross-multiply fallback when direct 64-bit multiplication would
+overflow.
 
 **Division by zero**: `ixs_rat(ctx, p, 0)` returns sentinel. `Mod(x, 0)` and
 any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
@@ -1189,8 +1195,9 @@ bool        ixs_is_parse_error(ixs_node *node);   // true only for IXS_PARSE_ERR
 bool        ixs_is_domain_error(ixs_node *node);  // true only for IXS_ERROR
 ```
 
-In the current implementation, error strings are arena-allocated (so they live
-until `ixs_ctx_destroy`).
+In the current implementation, error strings are arena-allocated in the
+session diagnostics arena. They remain valid until
+`ixs_session_clear_errors`, `ixs_session_reset`, or `ixs_session_destroy`.
 Each string includes the error kind and location, e.g.:
 - `"parse error at offset 7: unexpected token 'bar'"`
 - `"parse error: recursion depth limit (256) exceeded"`
@@ -1207,7 +1214,8 @@ Each string includes the error kind and location, e.g.:
 | Syntax error | `IXS_PARSE_ERROR` | appended | `"foo bar +"` |
 | Domain error | `IXS_ERROR` | appended | `1/0`, `Mod(x,0)`, overflow |
 | Valid parse with domain error | `IXS_ERROR` | appended | `"1/0 + x"` |
-| NULL input | `NULL` | unchanged | propagation |
+| NULL parser input | `IXS_PARSE_ERROR` | unchanged | `ixs_parse(s, NULL, len)` |
+| NULL node input to NULL-safe APIs | `NULL` | unchanged | propagation |
 | Sentinel input | same sentinel | unchanged | propagation |
 | Sentinel in Piecewise value | Piecewise kept | unchanged | dead branch |
 | `ixs_print(sentinel)` | writes `"<error>"` | unchanged | round-trip safe |
@@ -1221,11 +1229,12 @@ Each string includes the error kind and location, e.g.:
 | Syntactically valid but contains domain error | `IXS_ERROR` sentinel |
 | OOM | `NULL` |
 
-## Public API (Current Implementation)
+## Core API (Session Split Snapshot)
 
-This section is an implementation snapshot of what ships today after the first
-context/session slice. Later sections describe follow-on API work that is not
-yet implemented here.
+This section records the first context/session landing and the core surface it
+introduced. It is not a complete API reference: later sections in this
+document extend it with the currently shipped kind-aware parse, traversal,
+structural import, and structural serialization APIs.
 
 ```c
 // Long-lived store: owns interned nodes, hash-consing, and singletons.
@@ -1256,6 +1265,9 @@ bool ixs_is_parse_error(ixs_node *node);  // true only for IXS_PARSE_ERROR
 bool ixs_is_domain_error(ixs_node *node); // true only for IXS_ERROR
 
 // Parse a SymPy-format expression. Errors append to the session list.
+// The current parser surface also includes ixs_parse_expr(),
+// ixs_parse_pred(), ixs_node_is_expr(), and ixs_node_is_pred(); see
+// "Shipped API Surface" below.
 ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 
 // Construct expressions programmatically. All node arguments must belong to
@@ -1325,7 +1337,8 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
 ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
 
 // Batch import: on success writes all imported nodes to `out` and returns
-// true. On OOM returns false and leaves `out` unchanged.
+// true. On failure returns false, leaves `out` unchanged, and may already
+// have interned some successfully imported nodes into the destination store.
 bool ixs_import_many(ixs_session *s, const ixs_node *const *src,
                      size_t count, ixs_node **out);
 
@@ -1368,6 +1381,8 @@ ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 size_t   ixs_ctx_nstats(ixs_ctx *ctx);      // distinct rules that fired
 uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
 void     ixs_ctx_stats_reset(ixs_ctx *ctx);  // zero all counters
+size_t   ixs_nrules(void);                   // total registered rule names
+const char *ixs_rule_name(size_t index);     // NULL if out of range
 ```
 
 **Rule-hit statistics** (`-DIXS_STATS`): When compiled with `IXS_STATS`,
@@ -1432,10 +1447,9 @@ ixs_ctx_destroy(ctx);  // frees everything
 
 ### Node Introspection API
 
-Nodes are opaque — `struct ixs_node` is internal. The only introspection
-today is `ixs_node_tag`, `ixs_node_int_val`, and `ixs_node_hash`.
-Consumers need structural destructuring, generic traversal, and DAG
-walking.
+Nodes are opaque — `struct ixs_node` is internal. The public C API exposes
+structural introspection through `ixs_node_tag`, type-specific field
+accessors, generic child access, and scratch-backed tree walks.
 
 **Representation mismatch with sympy**: sympy's `Add(a, 2*b, 3)` has
 `args = [a, 2*b, 3]` — flat list of sub-expressions. ixsimpl's ADD is
@@ -1545,17 +1559,17 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
 /* Pre-order: visit node, then recurse into children.
  * Returns root on completion, the stopping node on STOP, NULL if root
  * is NULL or the explicit scratch-backed traversal stack cannot grow.
- * ctx must be non-NULL when root is non-NULL.
+ * s must be non-NULL when root is non-NULL.
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
-ixs_node *ixs_walk_pre(ixs_ctx *ctx, ixs_node *root,
+ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root,
                        ixs_visit_fn fn, void *userdata);
 
 /* Post-order: recurse into children, then visit node.
  * Same return/NULL/sentinel semantics as ixs_walk_pre.
  * SKIP is a no-op in post-order (children already visited). */
-ixs_node *ixs_walk_post(ixs_ctx *ctx, ixs_node *root,
+ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root,
                         ixs_visit_fn fn, void *userdata);
 ```
 
@@ -1576,10 +1590,10 @@ unique nodes, so callers doing exhaustive collection (e.g.
 identity. Callers that don't need dedup (printing, conversion) get the
 fast path without paying for a hash set.
 
-`ctx` provides the scratch arena used by the iterative implementation's
+`s` provides the scratch arena used by the iterative implementation's
 explicit stack. This keeps walk depth bounded by available arena memory
 instead of the C call stack, so deep trees no longer risk stack overflow.
-For non-NULL roots, `ctx` must be non-NULL. The only failure mode for
+For non-NULL roots, `s` must be non-NULL. The only failure mode for
 non-NULL roots is scratch-stack OOM, reported as `NULL`.
 
 Use cases:
@@ -1597,10 +1611,11 @@ Use cases:
   (same as `ixs_node_int_val`).
 - **Invalid index**: out-of-range index arguments are UB. Implementations
   contain `assert()` for debug builds but no runtime checks in release.
-- **Walk preconditions**: `ctx` and `fn` must be non-NULL. `root` may be
-  NULL (returns NULL). The callback must not destroy `ctx`. All other
-  operations (constructors, simplify, subs, parse) are safe — nodes are
-  immutable, and scratch arena save/restore nests correctly via LIFO.
+- **Walk preconditions**: `s` and `fn` must be non-NULL. `root` may be
+  NULL (returns NULL). The callback must not destroy `s` or its bound
+  store. All other operations (constructors, simplify, subs, parse) are
+  safe — nodes are immutable, and scratch arena save/restore nests
+  correctly via LIFO.
 
 ## Performance Design
 
@@ -1680,50 +1695,70 @@ ixsimpl/
 ├── include/
 │   └── ixsimpl.h            # public C API (single header)
 ├── src/
-│   ├── arena.c               # arena allocator
+│   ├── arena.c              # arena allocator
 │   ├── arena.h
-│   ├── rational.c            # exact rational arithmetic
+│   ├── rational.c           # exact rational arithmetic
 │   ├── rational.h
-│   ├── node.c                # node creation, hash-consing, canonical forms
+│   ├── node.c               # node creation, hash-consing, canonical forms
 │   ├── node.h
-│   ├── parser.c              # recursive descent parser
+│   ├── parser.c             # recursive descent parser
 │   ├── parser.h
-│   ├── simplify.c            # rewrite rules engine
+│   ├── simplify.c           # rewrite rules engine
 │   ├── simplify.h
-│   ├── expand.c              # MUL-over-ADD distribution
+│   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
-│   ├── bounds.c              # bound storage, propagation, assumption extraction
+│   ├── bounds.c             # bound storage, propagation, assumption extraction
 │   ├── bounds.h
-│   ├── interval.c            # interval arithmetic (add, mul, recip, intersect)
+│   ├── interval.c           # interval arithmetic
 │   ├── interval.h
-│   ├── print.c               # output formatters
+│   ├── print.c              # output formatters
 │   ├── print.h
-│   └── ctx.c                 # context management, public API impl
+│   ├── import.c             # cross-store structural import
+│   ├── serialize.c          # stable binary codec
+│   ├── walk.c               # scratch-backed tree traversal
+│   ├── internal.h
+│   └── ctx.c                # context/session management, public API impl
 ├── bindings/
 │   ├── cpp/
-│   │   └── ixsimpl.hpp       # C++ header-only wrapper
+│   │   └── ixsimpl.hpp      # C++ header-only wrapper
 │   └── python/
-│       ├── ixsimpl.pyi       # type stubs
-│       └── _ixsimpl.c        # CPython extension module
+│       ├── _ixsimpl.c       # CPython extension module
+│       └── ixsimpl/
+│           ├── __init__.py
+│           ├── _ixsimpl.pyi # type stubs
+│           └── sympy_conv.py
 ├── test/
+│   ├── test_arena.c
 │   ├── test_rational.c
 │   ├── test_parser.c
+│   ├── test_import.c
+│   ├── test_serialize.c
+│   ├── test_introspect.c
+│   ├── test_bounds.c
 │   ├── test_simplify.c
-│   ├── test_expand.c           # expand (MUL-over-ADD distribution) tests
-│   ├── test_edge_cases.c      # edge cases, error paths, sentinel propagation
-│   ├── test_corpus.c          # run against the 609-expression corpus
-│   ├── test_python.py         # Python binding tests
-│   ├── corpus.txt             # the reference expressions
-│   ├── corpus_expected.txt    # pre-generated SymPy simplified outputs
+│   ├── test_expand.c
+│   ├── test_edge_cases.c
+│   ├── test_corpus.c
+│   ├── test_accessors.py
+│   ├── test_python.py
+│   ├── test_sympy_conv.py
+│   ├── conftest.py
+│   ├── corpus.txt
+│   ├── corpus_expected.txt
 │   └── corpus_assumptions.txt # shared assumption set for corpus tests
 ├── bench/
-│   └── bench_corpus.c        # benchmark: time all 609 expressions
+│   └── bench_corpus.c       # benchmark: time all 609 expressions
 ├── scripts/
-│   ├── gen_expected.py        # generate corpus_expected.txt via SymPy
-│   └── requirements-gen.txt   # pinned SymPy version for generation
+│   ├── amalgamate.py        # generate ixsimpl_amalg.c
+│   ├── check_exports.py     # verify public symbol surface
+│   ├── gen_expected.py      # generate corpus_expected.txt via SymPy
+│   └── requirements-gen.txt # pinned SymPy version for generation
+├── ixsimpl_amalg.c          # generated single-TU distribution file
 ├── CMakeLists.txt
-├── pyproject.toml             # Python package build (PEP 517)
-└── LICENSE                    # MIT
+├── pyproject.toml           # Python package build (PEP 517)
+├── REUSE.toml               # licensing metadata
+├── README.md
+└── DESIGN.md
 ```
 
 Estimated total: 5,000-8,000 lines of C, ~500 lines C++ header, ~800 lines
@@ -1731,9 +1766,11 @@ Python extension.
 
 ## Language Bindings
 
-The binding sketches below wrap the current `ixs_ctx`-only API. When the
-Context/Session refactor lands, `Context` remains the long-lived store owner
-and mutating calls route through a session bound to that store.
+The binding sketches below mirror the current session-based API. `Context`
+owns the long-lived store plus an embedded reusable session, and node-producing
+operations route through that session. The code blocks are illustrative
+subsets, not exhaustive dumps of the shipped wrapper surface; consult
+`bindings/cpp/ixsimpl.hpp` and the Python stubs for the full API.
 
 ### C++ Binding — `ixsimpl.hpp`
 
@@ -1744,51 +1781,84 @@ namespace ixs {
 
 class Context {
     ixs_ctx *ctx_;
+    ixs_session session_;
 public:
     Context() : ctx_(ixs_ctx_create()) {
         if (!ctx_) throw std::bad_alloc();
+        ixs_session_init(&session_, ctx_);
     }
-    ~Context() { ixs_ctx_destroy(ctx_); }
+    ~Context() {
+        ixs_session_destroy(&session_);
+        ixs_ctx_destroy(ctx_);
+    }
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
 
     ixs_ctx *raw() const { return ctx_; }
+    ixs_session *session() { return &session_; }
+    const ixs_session *session() const { return &session_; }
+
+    size_t nerrors() const { return ixs_session_nerrors(&session_); }
+    const char *error(size_t i) const { return ixs_session_error(&session_, i); }
+    void clear_errors() { ixs_session_clear_errors(&session_); }
 };
 
 class Expr {
     ixs_ctx *ctx_;
+    ixs_session *session_;
     ixs_node *node_;
 public:
-    Expr(ixs_ctx *ctx, ixs_node *node) : ctx_(ctx), node_(node) {}
+    Expr(ixs_ctx *ctx, ixs_session *session, ixs_node *node)
+        : ctx_(ctx), session_(session), node_(node) {}
 
     static Expr parse(Context &ctx, std::string_view input) {
-        return {ctx.raw(), ixs_parse(ctx.raw(), input.data(), input.size())};
+        return {ctx.raw(), ctx.session(),
+                ixs_parse(ctx.session(), input.data(), input.size())};
+    }
+    static Expr parse_expr(Context &ctx, std::string_view input) {
+        return {ctx.raw(), ctx.session(),
+                ixs_parse_expr(ctx.session(), input.data(), input.size())};
+    }
+    static Expr parse_pred(Context &ctx, std::string_view input) {
+        return {ctx.raw(), ctx.session(),
+                ixs_parse_pred(ctx.session(), input.data(), input.size())};
     }
     static Expr sym(Context &ctx, const char *name) {
-        return {ctx.raw(), ixs_sym(ctx.raw(), name)};
+        return {ctx.raw(), ctx.session(), ixs_sym(ctx.session(), name)};
     }
     static Expr integer(Context &ctx, int64_t v) {
-        return {ctx.raw(), ixs_int(ctx.raw(), v)};
+        return {ctx.raw(), ctx.session(), ixs_int(ctx.session(), v)};
     }
 
     Expr simplify(const Expr *assumptions, size_t n_assumptions) const {
         std::vector<ixs_node*> raw(n_assumptions);
         for (size_t i = 0; i < n_assumptions; i++)
             raw[i] = assumptions[i].raw();
-        return {ctx_, ixs_simplify(ctx_, node_, raw.data(), raw.size())};
+        return {ctx_, session_,
+                ixs_simplify(session_, node_, raw.data(), raw.size())};
     }
     Expr simplify() const {
-        return {ctx_, ixs_simplify(ctx_, node_, nullptr, 0)};
+        return {ctx_, session_, ixs_simplify(session_, node_, nullptr, 0)};
     }
     Expr subs(Expr target, Expr repl) const {
-        return {ctx_, ixs_subs(ctx_, node_, target.node_, repl.node_)};
+        return {ctx_, session_,
+                ixs_subs(session_, node_, target.node_, repl.node_)};
     }
 
-    Expr operator+(Expr rhs) const { return {ctx_, ixs_add(ctx_, node_, rhs.node_)}; }
-    Expr operator-(Expr rhs) const { return {ctx_, ixs_sub(ctx_, node_, rhs.node_)}; }
-    Expr operator-()         const { return {ctx_, ixs_neg(ctx_, node_)}; }
-    Expr operator*(Expr rhs) const { return {ctx_, ixs_mul(ctx_, node_, rhs.node_)}; }
-    Expr operator/(Expr rhs) const { return {ctx_, ixs_div(ctx_, node_, rhs.node_)}; }
+    Expr operator+(Expr rhs) const {
+        return {ctx_, session_, ixs_add(session_, node_, rhs.node_)};
+    }
+    Expr operator-(Expr rhs) const {
+        ixs_node *neg = ixs_mul(session_, ixs_int(session_, -1), rhs.node_);
+        return {ctx_, session_, ixs_add(session_, node_, neg)};
+    }
+    Expr operator*(Expr rhs) const {
+        return {ctx_, session_, ixs_mul(session_, node_, rhs.node_)};
+    }
+    Expr operator-() const {
+        return {ctx_, session_,
+                ixs_mul(session_, ixs_int(session_, -1), node_)};
+    }
     bool operator==(Expr rhs) const { return ixs_same_node(node_, rhs.node_); }
 
     std::string str() const {
@@ -1804,32 +1874,30 @@ public:
     bool is_error() const { return node_ && ixs_is_error(node_); }
     bool is_parse_error() const { return node_ && ixs_is_parse_error(node_); }
     bool is_domain_error() const { return node_ && ixs_is_domain_error(node_); }
+    bool is_expr() const { return node_ && ixs_node_is_expr(node_); }
+    bool is_pred() const { return node_ && ixs_node_is_pred(node_); }
     explicit operator bool() const { return node_ && !ixs_is_error(node_); }
 
     ixs_node *raw() const { return node_; }
     ixs_ctx *raw_ctx() const { return ctx_; }
+    ixs_session *raw_session() const { return session_; }
 };
-
-inline Expr floor(Expr x) { return {x.raw_ctx(), ixs_floor(x.raw_ctx(), x.raw())}; }
-inline Expr ceil(Expr x)  { return {x.raw_ctx(), ixs_ceil(x.raw_ctx(), x.raw())}; }
-inline Expr mod(Expr a, Expr b) { return {a.raw_ctx(), ixs_mod(a.raw_ctx(), a.raw(), b.raw())}; }
-inline Expr max(Expr a, Expr b) { return {a.raw_ctx(), ixs_max(a.raw_ctx(), a.raw(), b.raw())}; }
-inline Expr min(Expr a, Expr b) { return {a.raw_ctx(), ixs_min(a.raw_ctx(), a.raw(), b.raw())}; }
-inline Expr xor_(Expr a, Expr b) { return {a.raw_ctx(), ixs_xor(a.raw_ctx(), a.raw(), b.raw())}; }
-inline Expr pw(std::initializer_list<std::pair<Expr, Expr>> branches); // piecewise
 
 } // namespace ixs
 ```
 
 Key properties:
-- `Context` owns the arena; RAII cleans up everything on destruction.
-  Constructor throws `std::bad_alloc` on OOM.
-- `Expr` is a lightweight value type (two pointers). Cheap to copy.
-  **`Expr` must not outlive its `Context`** — destroying a `Context`
-  invalidates all `Expr` values created from it (dangling pointers).
+- `Context` owns both the long-lived store and one embedded reusable session.
+  RAII cleans up both on destruction. Constructor throws `std::bad_alloc` on
+  OOM.
+- `Expr` is a lightweight value type (three pointers: store, session, node).
+  Cheap to copy. **`Expr` must not outlive its `Context`** — destroying a
+  `Context` invalidates all `Expr` values created from it (dangling pointers).
 - `operator bool()` returns `true` only for valid, non-error expressions.
   `is_null()` checks OOM, `is_parse_error()`/`is_domain_error()` check
   specific sentinels, `is_error()` checks either.
+- `parse_expr()` and `parse_pred()` expose the kind-aware parse surface;
+  `parse()` remains the backward-compatible expression parser.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -1879,10 +1947,9 @@ ctx.simplify_batch(exprs, assumptions=assumptions)
 ```
 
 Implementation:
-- `_ixsimpl.c` is a single-file CPython extension using the stable ABI
-  (`Py_LIMITED_API`), so one `.so` works across Python 3.7+.
-- `Context` Python object wraps `ixs_ctx*`; destructor calls
-  `ixs_ctx_destroy`.
+- `_ixsimpl.c` is a single-file CPython extension module written in plain C.
+- `Context` Python object owns both `ixs_ctx*` and an embedded `ixs_session`;
+  destructor destroys the session and then the store.
 - `Expr` Python object holds a reference to its `Context` (preventing
   premature GC) and wraps `ixs_node*`.
 - `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`.
@@ -1892,7 +1959,12 @@ Implementation:
 - `__hash__` returns the node's precomputed hash.
 - `Expr.is_error` property — `True` for either sentinel.
 - `Expr.is_parse_error` / `Expr.is_domain_error` — specific checks.
+- `Expr.is_expr` / `Expr.is_pred` — root-kind checks for callers that
+  distinguish numeric expressions from predicates.
 - `Context.errors` property — returns list of error strings; `Context.clear_errors()` resets.
+- `Context.parse()` remains the backward-compatible expression parser.
+  `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
+  entry points.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
@@ -1909,15 +1981,16 @@ Implementation:
 This binding adds ~800 lines of C and is the primary interface for testing
 against SymPy (run both, compare outputs).
 
-## Target API: Context/Session Refactor
+## Session/Store API (Shipped Surface and Rationale)
 
-This section is the target contract. `Public API (Current Implementation)`
-above documents what ships today; the signatures and rules here are the
-intended replacement surface for the same engine.
+This section is the normative session/store contract for the shipped API.
+`Core API (Session Split Snapshot)` above records the first landing; the
+signatures and rules here consolidate the current public surface and the
+rationale behind it.
 
 ### Goals
 
-The refactor has four concrete goals:
+The session/store split has four concrete goals:
 
 1. Keep `ixsimpl`'s current symbolic semantics -- immutable hash-consed DAG
    nodes, canonical smart constructors, sentinel propagation, and
@@ -1962,7 +2035,13 @@ initial contract fixes it at 4096 bytes.
 - singletons (`IXS_ERROR`, `IXS_PARSE_ERROR`, `true`, `false`, `0`, `1`)
 - any permanent rule/stat tables
 
-`ixs_ctx` does **not** own:
+During session-taking API calls, the bound session's scratch and diagnostic
+state is mirrored onto `ixs_ctx` so internal helpers can keep taking
+`ixs_ctx *`. Those fields are not independently owned by the store and are
+copied back out to the session on return.
+
+Authoritatively owned by `ixs_session` (and only mirrored on `ixs_ctx` while a
+session is bound):
 
 - scratch allocations
 - parser state
@@ -1978,8 +2057,8 @@ initial contract fixes it at 4096 bytes.
 - import memo tables
 - temporary buffers used by simplify, bounds, expand, and walk
 
-The current "all state lives in one context" design is convenient for a
-standalone library, but it couples unrelated lifetimes. The refactor keeps
+The older "all state lives in one context" design was convenient for a
+standalone library, but it coupled unrelated lifetimes. The shipped split keeps
 `ixs_ctx` as the immutable symbolic store and moves all ephemeral state into
 `ixs_session`.
 
@@ -2026,7 +2105,7 @@ setup cost on every parse/simplify/import call.
 
 ### Sentinel And Diagnostics Model
 
-The refactor keeps the existing three-tier node-level error model:
+The shipped split keeps the existing three-tier node-level error model:
 
 - `NULL` for OOM
 - `IXS_PARSE_ERROR` for syntax / format / wrong-kind parse failure
@@ -2056,10 +2135,10 @@ Rules:
 This preserves cheap in-band error propagation while removing mutable
 diagnostic state from the long-lived store object.
 
-### Target API Surface
+### Shipped API Surface
 
 All node-valued APIs take `ixs_session *`, including singleton accessors. The
-refactor keeps `ixs_parse` as a backward-compatible expression-parser wrapper
+shipped API keeps `ixs_parse` as a backward-compatible expression-parser wrapper
 and adds kind-specific parse entry points.
 
 Constructors and parsers:
@@ -2158,10 +2237,10 @@ such as `expected predicate, got expression`.
 
 ### Scratch Arena Reuse
 
-The current scratch arena frees every detached heap chunk on restore. That is
-correct but too allocation-heavy for reusable sessions. The refactor gives each
-session one inline scratch chunk inside the 4 KB public blob and caches at most
-one detached heap chunk for reuse.
+Scratch restore rewinds to the saved mark, retains at most one detached heap
+chunk as `spare`, and frees any additional detached chunks. The reusable
+session model adds one inline scratch chunk inside the 4 KB public blob, so the
+common case stays allocation-free after warm-up.
 
 Conceptually:
 
@@ -2169,6 +2248,7 @@ Conceptually:
 typedef struct ixs_arena {
   ixs_arena_chunk *current;
   ixs_arena_chunk *spare;
+  ixs_arena_chunk *inline_chunk;
   size_t min_chunk;
 } ixs_arena;
 ```
@@ -2316,8 +2396,8 @@ Text parsing/printing remains for:
 ## Implementation Plan
 
 The phase list below describes the engine as implemented today. The
-Context/Session refactor above is an API and lifetime refactor over the same
-core, not a restart from Phase 1.
+session/store section above is an API and lifetime refactor over the same core,
+not a restart from Phase 1.
 
 ### Phase 1: Foundation
 
@@ -2602,7 +2682,7 @@ Concrete workarounds for the fuzz test oracle:
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Simplification produces wrong results | Critical | Numerical equivalence oracle; fuzz testing |
-| 64-bit rational overflow | Medium | Checked arithmetic → sentinel + error list; 128-bit fallback if needed later |
+| 64-bit rational overflow | Medium | Checked arithmetic plus portable emulated 128-bit compare fallback; constructors still return sentinel + error list on overflow |
 | New expression patterns in future workloads | Medium | Grammar is extensible; add new node types as needed |
 | Hash-consing table becomes bottleneck | Low | Linear probing with power-of-2 sizing; rehash threshold 70% |
 | Simplification rules interact badly (infinite loops) | Medium | Fixed-point iteration limit (64); monotonically size-reducing rules |
