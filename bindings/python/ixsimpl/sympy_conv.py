@@ -93,10 +93,12 @@ def to_sympy(
         return sympy.Mod(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
 
     if tag == ixsimpl.MAX:
-        return sympy.Max(_convert(expr.child(0)), _convert(expr.child(1)))
+        # evaluate=False: SymPy can wrongly collapse nested integer Max/Min
+        # expressions, e.g. Max(-1, Min(0, Max(x, Min(y, Max(1, 2*x))))) -> -1.
+        return sympy.Max(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
 
     if tag == ixsimpl.MIN:
-        return sympy.Min(_convert(expr.child(0)), _convert(expr.child(1)))
+        return sympy.Min(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
 
     if tag == ixsimpl.XOR:
         fn = xor_fn if xor_fn is not None else sympy.Xor

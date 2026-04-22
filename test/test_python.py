@@ -220,9 +220,10 @@ def to_sympy(tree: ExprTree) -> Any:
         # produce wrong results for certain inputs.
         return sympy.Mod(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "max":
-        return sympy.Max(to_sympy(tree[1]), to_sympy(tree[2]))
+        # evaluate=False avoids wrong eager collapse of some nested Max/Min trees.
+        return sympy.Max(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "min":
-        return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]))
+        return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "xor":
         raise ValueError("xor not supported in SymPy conversion")
     if op == "piecewise":

@@ -137,6 +137,27 @@ def test_to_sympy_max_min(
     assert to_sympy(ixsimpl.min_(syms["x"], syms["y"])) == sympy.Min(sp_syms["x"], sp_syms["y"])
 
 
+def test_to_sympy_max_min_nested_regression(ctx: ixsimpl.Context) -> None:
+    """Nested Max/Min must not collapse to a wrong constant in SymPy."""
+    x = ctx.sym("x")
+    y = ctx.sym("y")
+    sx = sympy.Symbol("x", integer=True)
+    sy = sympy.Symbol("y", integer=True)
+
+    expr = ixsimpl.max_(
+        ctx.int_(-1),
+        ixsimpl.min_(
+            ctx.int_(0), ixsimpl.max_(x, ixsimpl.min_(y, ixsimpl.max_(ctx.int_(1), x + x)))
+        ),
+    )
+
+    sp = to_sympy(expr)
+    assert int(sp.xreplace({sx: sympy.Integer(1), sy: sympy.Integer(1)})) == 0
+
+    roundtripped = from_sympy(ctx, sp)
+    assert int(roundtripped.subs({"x": 1, "y": 1})) == 0
+
+
 def test_to_sympy_cmp(
     ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
 ) -> None:
