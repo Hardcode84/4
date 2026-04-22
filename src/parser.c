@@ -86,7 +86,7 @@ static void depth_pop(parser *p) { p->depth--; }
 /* --- Forward declarations --- */
 
 static ixs_node *parse_expr(parser *p);
-static ixs_node *parse_cond(parser *p);
+static ixs_node *parse_cond(parser *p, bool allow_top_level_expr);
 
 /* --- Grammar implementation --- */
 
@@ -196,7 +196,7 @@ static ixs_node *parse_piecewise_impl(parser *p) {
     if (!match_char(p, ','))
       return parse_error(p, "expected ',' in Piecewise case");
 
-    ixs_node *cond = parse_cond(p);
+    ixs_node *cond = parse_cond(p, false);
     if (!cond)
       return NULL;
 
@@ -406,15 +406,24 @@ static ixs_node *parse_expr(parser *p) {
 
 /* --- Condition parsing --- */
 
-static ixs_node *parse_cmp_expr(parser *p);
+static ixs_node *coerce_expr_to_pred(parser *p, ixs_node *node) {
+  if (!node || ixs_node_is_sentinel(node) || ixs_node_is_pred_kind(node))
+    return node;
+  return simp_cmp(p->ctx, node, IXS_CMP_NE, ixs_node_int(p->ctx, 0));
+}
 
-static ixs_node *parse_cmp_expr(parser *p) {
+static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr);
+
+static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
   skip_ws(p);
 
   /* ~expr */
   if (peek(p) == '~') {
     match_char(p, '~');
-    ixs_node *a = parse_cmp_expr(p);
+    ixs_node *a = parse_cmp_expr(p, false);
+    if (!a)
+      return NULL;
+    a = coerce_expr_to_pred(p, a);
     if (!a)
       return NULL;
     return simp_not(p->ctx, a);
@@ -429,7 +438,7 @@ static ixs_node *parse_cmp_expr(parser *p) {
   /* (cond) */
   if (peek(p) == '(') {
     match_char(p, '(');
-    ixs_node *c = parse_cond(p);
+    ixs_node *c = parse_cond(p, allow_top_level_expr);
     if (!c)
       return NULL;
     if (!match_char(p, ')'))
@@ -483,12 +492,13 @@ static ixs_node *parse_cmp_expr(parser *p) {
     return simp_cmp(p->ctx, left, op, right);
   }
 
-  /* Bare expression in condition context → e != 0 */
-  return simp_cmp(p->ctx, left, IXS_CMP_NE, ixs_node_int(p->ctx, 0));
+  if (allow_top_level_expr)
+    return left;
+  return coerce_expr_to_pred(p, left);
 }
 
-static ixs_node *parse_cond(parser *p) {
-  ixs_node *left = parse_cmp_expr(p);
+static ixs_node *parse_cond(parser *p, bool allow_top_level_expr) {
+  ixs_node *left = parse_cmp_expr(p, allow_top_level_expr);
   if (!left)
     return NULL;
 
@@ -496,7 +506,13 @@ static ixs_node *parse_cond(parser *p) {
     skip_ws(p);
     if (peek(p) == '&') {
       match_char(p, '&');
-      ixs_node *right = parse_cmp_expr(p);
+      left = coerce_expr_to_pred(p, left);
+      if (!left)
+        return NULL;
+      ixs_node *right = parse_cmp_expr(p, false);
+      if (!right)
+        return NULL;
+      right = coerce_expr_to_pred(p, right);
       if (!right)
         return NULL;
       left = simp_and(p->ctx, left, right);
@@ -504,7 +520,13 @@ static ixs_node *parse_cond(parser *p) {
         return NULL;
     } else if (peek(p) == '|') {
       match_char(p, '|');
-      ixs_node *right = parse_cmp_expr(p);
+      left = coerce_expr_to_pred(p, left);
+      if (!left)
+        return NULL;
+      ixs_node *right = parse_cmp_expr(p, false);
+      if (!right)
+        return NULL;
+      right = coerce_expr_to_pred(p, right);
       if (!right)
         return NULL;
       left = simp_or(p->ctx, left, right);
@@ -519,8 +541,32 @@ static ixs_node *parse_cond(parser *p) {
 
 /* --- Public entry point --- */
 
-IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
-                                    size_t len) {
+typedef struct {
+  ixs_arena_mark scratch_mark;
+  ixs_arena_mark diag_mark;
+  const char **errors;
+  size_t nerrors;
+  size_t errors_cap;
+} parser_state;
+
+static void parser_state_save(ixs_ctx *ctx, parser_state *state) {
+  state->scratch_mark = ixs_arena_save(&ctx->scratch);
+  state->diag_mark = ixs_arena_save(&ctx->diag);
+  state->errors = ctx->errors;
+  state->nerrors = ctx->nerrors;
+  state->errors_cap = ctx->errors_cap;
+}
+
+static void parser_state_restore(ixs_ctx *ctx, const parser_state *state) {
+  ixs_arena_restore(&ctx->scratch, state->scratch_mark);
+  ixs_arena_restore(&ctx->diag, state->diag_mark);
+  ctx->errors = state->errors;
+  ctx->nerrors = state->nerrors;
+  ctx->errors_cap = state->errors_cap;
+}
+
+static ixs_node *parse_full(ixs_ctx *ctx, const char *input, size_t len,
+                            bool pred_root) {
   parser p;
   p.ctx = ctx;
   p.input = input;
@@ -529,7 +575,7 @@ IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
   p.depth = 0;
   p.max_depth = PARSER_MAX_DEPTH;
 
-  ixs_node *result = parse_expr(&p);
+  ixs_node *result = pred_root ? parse_cond(&p, true) : parse_expr(&p);
   if (!result)
     return NULL;
 
@@ -538,4 +584,61 @@ IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
     return parse_error(&p, "trailing characters");
 
   return result;
+}
+
+static ixs_node *parse_kind_error(ixs_ctx *ctx, bool expect_pred) {
+  ixs_ctx_push_error(ctx, "parse error: expected %s, got %s",
+                     expect_pred ? "predicate" : "expression",
+                     expect_pred ? "expression" : "predicate");
+  return ctx->sentinel_parse_error;
+}
+
+static ixs_node *parse_expect_kind(ixs_ctx *ctx, const char *input, size_t len,
+                                   bool expect_pred) {
+  parser_state orig;
+  ixs_node *result;
+  bool fallback_pred = !expect_pred;
+
+  parser_state_save(ctx, &orig);
+  result = parse_full(ctx, input, len, expect_pred);
+  if (!result)
+    return NULL;
+  if (result->tag == IXS_ERROR)
+    return result;
+  if (result->tag != IXS_PARSE_ERROR) {
+    if ((expect_pred && ixs_node_is_pred_kind(result)) ||
+        (!expect_pred && ixs_node_is_expr_kind(result)))
+      return result;
+    parser_state_restore(ctx, &orig);
+    return parse_kind_error(ctx, expect_pred);
+  }
+
+  parser_state_restore(ctx, &orig);
+  result = parse_full(ctx, input, len, fallback_pred);
+  if (!result)
+    return NULL;
+  if (result->tag == IXS_ERROR)
+    return result;
+  if (result->tag != IXS_PARSE_ERROR &&
+      ((fallback_pred && ixs_node_is_pred_kind(result)) ||
+       (!fallback_pred && ixs_node_is_expr_kind(result))))
+    return parse_kind_error(ctx, expect_pred);
+
+  parser_state_restore(ctx, &orig);
+  return parse_full(ctx, input, len, expect_pred);
+}
+
+IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
+                                    size_t len) {
+  return parse_expect_kind(ctx, input, len, false);
+}
+
+IXS_STATIC ixs_node *ixs_parse_expr_impl(ixs_ctx *ctx, const char *input,
+                                         size_t len) {
+  return ixs_parse_impl(ctx, input, len);
+}
+
+IXS_STATIC ixs_node *ixs_parse_pred_impl(ixs_ctx *ctx, const char *input,
+                                         size_t len) {
+  return parse_expect_kind(ctx, input, len, true);
 }

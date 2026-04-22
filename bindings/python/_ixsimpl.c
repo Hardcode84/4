@@ -696,6 +696,14 @@ static PyObject *Expr_get_is_domain_error(ExprObject *self,
   return PyBool_FromLong(ixs_is_domain_error(self->node));
 }
 
+static PyObject *Expr_get_is_expr(ExprObject *self, void *Py_UNUSED(closure)) {
+  return PyBool_FromLong(ixs_node_is_expr(self->node));
+}
+
+static PyObject *Expr_get_is_pred(ExprObject *self, void *Py_UNUSED(closure)) {
+  return PyBool_FromLong(ixs_node_is_pred(self->node));
+}
+
 static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
 }
@@ -775,6 +783,10 @@ static PyGetSetDef Expr_getset[] = {
      "True if node is a parse error sentinel.", NULL},
     {"is_domain_error", (getter)Expr_get_is_domain_error, NULL,
      "True if node is a domain error sentinel.", NULL},
+    {"is_expr", (getter)Expr_get_is_expr, NULL,
+     "True if node is an expression root.", NULL},
+    {"is_pred", (getter)Expr_get_is_pred, NULL,
+     "True if node is a predicate root.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
     {"nchildren", (getter)Expr_get_nchildren, NULL,
      "Number of child node pointers (0 for leaves).", NULL},
@@ -856,14 +868,30 @@ static PyObject *Context_sym(ContextObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self, node);
 }
 
-static PyObject *Context_parse(ContextObject *self, PyObject *args) {
+typedef ixs_node *(*Context_parse_fn)(ixs_session *, const char *, size_t);
+
+static PyObject *Context_parse_with(ContextObject *self, PyObject *args,
+                                    Context_parse_fn parse_fn) {
   const char *input;
   Py_ssize_t len;
   ixs_node *node;
+
   if (!PyArg_ParseTuple(args, "s#", &input, &len))
     return NULL;
-  node = ixs_parse(Context_session(self), input, (size_t)len);
+  node = parse_fn(Context_session(self), input, (size_t)len);
   return (PyObject *)Expr_wrap(self, node);
+}
+
+static PyObject *Context_parse(ContextObject *self, PyObject *args) {
+  return Context_parse_with(self, args, ixs_parse);
+}
+
+static PyObject *Context_parse_expr(ContextObject *self, PyObject *args) {
+  return Context_parse_with(self, args, ixs_parse_expr);
+}
+
+static PyObject *Context_parse_pred(ContextObject *self, PyObject *args) {
+  return Context_parse_with(self, args, ixs_parse_pred);
 }
 
 static PyObject *Context_int_(ContextObject *self, PyObject *args) {
@@ -1204,7 +1232,11 @@ static PyMethodDef Context_methods[] = {
     {"sym", (PyCFunction)Context_sym, METH_VARARGS,
      "Create a symbol: ctx.sym('x')."},
     {"parse", (PyCFunction)Context_parse, METH_VARARGS,
-     "Parse a SymPy-like expression string."},
+     "Parse a SymPy-like expression string. Alias of parse_expr()."},
+    {"parse_expr", (PyCFunction)Context_parse_expr, METH_VARARGS,
+     "Parse a SymPy-like expression string and reject predicate roots."},
+    {"parse_pred", (PyCFunction)Context_parse_pred, METH_VARARGS,
+     "Parse a predicate string and reject expression roots."},
     {"int_", (PyCFunction)Context_int_, METH_VARARGS,
      "Create an integer node: ctx.int_(42)."},
     {"rat", (PyCFunction)Context_rat, METH_VARARGS,

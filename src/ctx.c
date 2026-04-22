@@ -266,6 +266,14 @@ bool ixs_is_domain_error(ixs_node *node) {
   return node && node->tag == IXS_ERROR;
 }
 
+bool ixs_node_is_expr(const ixs_node *node) {
+  return ixs_node_is_expr_kind(node);
+}
+
+bool ixs_node_is_pred(const ixs_node *node) {
+  return ixs_node_is_pred_kind(node);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Constructors (delegate to simplify.c)                             */
 /* ------------------------------------------------------------------ */
@@ -441,6 +449,30 @@ ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len) {
     result = ctx->sentinel_parse_error;
   else
     result = ixs_parse_impl(ctx, input, len);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result;
+  if (!input)
+    result = ctx->sentinel_parse_error;
+  else
+    result = ixs_parse_expr_impl(ctx, input, len);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result;
+  if (!input)
+    result = ctx->sentinel_parse_error;
+  else
+    result = ixs_parse_pred_impl(ctx, input, len);
   ixs_session_unbind(&binding);
   return result;
 }

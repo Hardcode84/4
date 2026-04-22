@@ -482,14 +482,14 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
 def test_expand_basic() -> None:
     """expand() distributes MUL over ADD."""
     ctx = ixsimpl.Context()
-    e = ctx.parse("2*(a + b)")
+    e = ctx.parse_expr("2*(a + b)")
     expanded = e.expand()
     s = str(expanded)
     assert "2*a" in s
     assert "2*b" in s
     assert "+" in s
 
-    e2 = ctx.parse("(a + b)*(c + d)")
+    e2 = ctx.parse_expr("(a + b)*(c + d)")
     s2 = str(e2.expand())
     for term in ("a*c", "a*d", "b*c", "b*d"):
         assert term in s2, f"missing {term} in {s2}"

@@ -10,5 +10,9 @@
 
 IXS_STATIC ixs_node *ixs_parse_impl(ixs_ctx *ctx, const char *input,
                                     size_t len);
+IXS_STATIC ixs_node *ixs_parse_expr_impl(ixs_ctx *ctx, const char *input,
+                                         size_t len);
+IXS_STATIC ixs_node *ixs_parse_pred_impl(ixs_ctx *ctx, const char *input,
+                                         size_t len);
 
 #endif /* IXS_PARSER_H */

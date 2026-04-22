@@ -103,8 +103,19 @@ bool ixs_is_domain_error(ixs_node *node);
 
 /* Parse a SymPy-style expression from input[0..len-1].
  * input must be NUL-terminated at or before input[len].
- * Returns the simplified AST, PARSE_ERROR on bad syntax, NULL on OOM. */
+ * Legacy convenience wrapper for ixs_parse_expr. Returns the simplified AST,
+ * PARSE_ERROR on bad syntax, NULL on OOM. */
 ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
+
+/* Kind-aware parse entry points. Wrong top-level kind returns PARSE_ERROR and
+ * appends a diagnostic. */
+ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len);
+ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
+
+/* Expression/predicate classification for callers that distinguish the two.
+ * Sentinels are neither. */
+bool ixs_node_is_expr(const ixs_node *node);
+bool ixs_node_is_pred(const ixs_node *node);
 
 /* --- Constructors ------------------------------------------------------ */
 

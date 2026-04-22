@@ -1255,7 +1255,7 @@ bool ixs_is_error(ixs_node *node);        // true for either sentinel
 bool ixs_is_parse_error(ixs_node *node);  // true only for IXS_PARSE_ERROR
 bool ixs_is_domain_error(ixs_node *node); // true only for IXS_ERROR
 
-// Parse a SymPy-format expression string. Errors append to the session list.
+// Parse a SymPy-format expression. Errors append to the session list.
 ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 
 // Construct expressions programmatically. All node arguments must belong to
@@ -2059,8 +2059,8 @@ diagnostic state from the long-lived store object.
 ### Target API Surface
 
 All node-valued APIs take `ixs_session *`, including singleton accessors. The
-refactor deliberately splits the old `ixs_parse` entry point into kind-specific
-parsers.
+refactor keeps `ixs_parse` as a backward-compatible expression-parser wrapper
+and adds kind-specific parse entry points.
 
 Constructors and parsers:
 
@@ -2090,6 +2090,7 @@ ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
 ixs_node *ixs_true(ixs_session *s);
 ixs_node *ixs_false(ixs_session *s);
 
+ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len);
 ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
 ```
@@ -2149,6 +2150,7 @@ expression, every branch condition must be a predicate, and the final condition
 must be `ixs_true(s)`. Predicate-valued `Piecewise` is out of scope for this
 API.
 
+`ixs_parse` is a backward-compatible wrapper for `ixs_parse_expr`.
 `ixs_parse_expr` accepts only expression roots. `ixs_parse_pred` accepts only
 predicate roots. If the input is syntactically well-formed but the top-level
 kind is wrong, the parser returns `IXS_PARSE_ERROR` and appends a diagnostic

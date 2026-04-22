@@ -69,6 +69,14 @@ public:
     return Expr(ctx.raw(), ctx.session(),
                 ixs_parse(ctx.session(), input.data(), input.size()));
   }
+  static Expr parse_expr(Context &ctx, std::string_view input) {
+    return Expr(ctx.raw(), ctx.session(),
+                ixs_parse_expr(ctx.session(), input.data(), input.size()));
+  }
+  static Expr parse_pred(Context &ctx, std::string_view input) {
+    return Expr(ctx.raw(), ctx.session(),
+                ixs_parse_pred(ctx.session(), input.data(), input.size()));
+  }
   static Expr sym(Context &ctx, const char *name) {
     return Expr(ctx.raw(), ctx.session(), ixs_sym(ctx.session(), name));
   }
@@ -160,6 +168,8 @@ public:
   bool is_error() const { return node_ && ixs_is_error(node_); }
   bool is_parse_error() const { return node_ && ixs_is_parse_error(node_); }
   bool is_domain_error() const { return node_ && ixs_is_domain_error(node_); }
+  bool is_expr() const { return node_ && ixs_node_is_expr(node_); }
+  bool is_pred() const { return node_ && ixs_node_is_pred(node_); }
   explicit operator bool() const {
     return node_ != nullptr && !ixs_is_error(node_);
   }

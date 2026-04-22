@@ -161,7 +161,7 @@ def test_context_deserialize_parse_error() -> None:
 
 def test_parse_error_sentinel() -> None:
     ctx = ixsimpl.Context()
-    e = ctx.parse("???")
+    e = ctx.parse_expr("???")
     assert e.is_error
     assert e.is_parse_error
     assert e.tag == ixsimpl.PARSE_ERROR
@@ -169,12 +169,59 @@ def test_parse_error_sentinel() -> None:
 
 def test_error_propagation() -> None:
     ctx = ixsimpl.Context()
-    err = ctx.parse("???")
+    err = ctx.parse_expr("???")
     x = ctx.sym("x")
     assert (err + x).is_error
     assert (x + err).is_error
     assert (err * x).is_error
     assert (x - err).is_error
+
+
+def test_kind_aware_parse_surface() -> None:
+    ctx = ixsimpl.Context()
+
+    expr = ctx.parse_expr("x + 1")
+    pred = ctx.parse_pred("x > 0")
+
+    assert expr.is_expr
+    assert not expr.is_pred
+    assert pred.is_pred
+    assert not pred.is_expr
+
+    ctx.clear_errors()
+    wrong_kind = ctx.parse_pred("x + 1")
+    assert wrong_kind.is_parse_error
+    assert any("expected predicate, got expression" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    wrong_kind = ctx.parse_expr("x > 0")
+    assert wrong_kind.is_parse_error
+    assert any("expected expression, got predicate" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    legacy_wrong_kind = ctx.parse("x > 0")
+    assert legacy_wrong_kind.is_parse_error
+    assert any("expected expression, got predicate" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    bool_wrong_kind = ctx.parse_expr("True")
+    assert bool_wrong_kind.is_parse_error
+    assert any("expected expression, got predicate" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    bare_expr_pred = ctx.parse_pred("x")
+    assert bare_expr_pred.is_parse_error
+    assert any("expected predicate, got expression" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    domain = ctx.parse_expr("x > 1/0")
+    assert domain.is_domain_error
+    assert any("division by zero" in err for err in ctx.errors)
+
+    ctx.clear_errors()
+    legacy_domain = ctx.parse("x > 1/0")
+    assert legacy_domain.is_domain_error
+    assert any("division by zero" in err for err in ctx.errors)
 
 
 def test_is_error_on_valid() -> None:

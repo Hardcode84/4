@@ -78,6 +78,12 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
 
 #define ixs_parse(ctx, input, len)                                             \
   IXS_TEST_WITH_CTX((ctx), (ixs_parse)(IXS_TEST_SESSION(ctx), (input), (len)))
+#define ixs_parse_expr(ctx, input, len)                                        \
+  IXS_TEST_WITH_CTX((ctx),                                                     \
+                    (ixs_parse_expr)(IXS_TEST_SESSION(ctx), (input), (len)))
+#define ixs_parse_pred(ctx, input, len)                                        \
+  IXS_TEST_WITH_CTX((ctx),                                                     \
+                    (ixs_parse_pred)(IXS_TEST_SESSION(ctx), (input), (len)))
 
 #define ixs_int(ctx, val)                                                      \
   IXS_TEST_WITH_CTX((ctx), (ixs_int)(IXS_TEST_SESSION(ctx), (val)))

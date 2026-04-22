@@ -727,6 +727,66 @@ IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n) {
   return n->tag == IXS_ERROR || n->tag == IXS_PARSE_ERROR;
 }
 
+IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
+  if (!n)
+    return false;
+  switch (n->tag) {
+  case IXS_INT:
+  case IXS_RAT:
+  case IXS_SYM:
+  case IXS_ADD:
+  case IXS_MUL:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_MOD:
+  case IXS_PIECEWISE:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    return true;
+  case IXS_CMP:
+  case IXS_AND:
+  case IXS_OR:
+  case IXS_NOT:
+  case IXS_TRUE:
+  case IXS_FALSE:
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return false;
+  }
+  return false;
+}
+
+IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n) {
+  if (!n)
+    return false;
+  switch (n->tag) {
+  case IXS_CMP:
+  case IXS_AND:
+  case IXS_OR:
+  case IXS_NOT:
+  case IXS_TRUE:
+  case IXS_FALSE:
+    return true;
+  case IXS_INT:
+  case IXS_RAT:
+  case IXS_SYM:
+  case IXS_ADD:
+  case IXS_MUL:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_MOD:
+  case IXS_PIECEWISE:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return false;
+  }
+  return false;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Error list                                                        */
 /* ------------------------------------------------------------------ */
