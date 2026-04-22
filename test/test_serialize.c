@@ -362,6 +362,12 @@ static void test_malformed_root_rejected_without_pollution(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+/*
+ * This regression fabricates a noncanonical MUL via raw constructors.
+ * Those helpers are internal and disappear in the amalgamated build, so keep
+ * this check on the normal multi-translation-unit path only.
+ */
+#ifndef IXS_TEST_AMALGAMATION
 static void test_noncanonical_mul_rejected_on_serialize(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
@@ -388,6 +394,7 @@ static void test_noncanonical_mul_rejected_on_serialize(void) {
   buffer_destroy(&buf);
   destroy_session(ctx, &s);
 }
+#endif
 
 static void test_node_limit_rejected_without_pollution(void) {
   ixs_ctx *ctx = NULL;
@@ -429,7 +436,9 @@ int main(void) {
   test_singletons_and_sentinels();
   test_writer_failure_no_diagnostics();
   test_malformed_root_rejected_without_pollution();
+#ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();
+#endif
   test_node_limit_rejected_without_pollution();
   if (failures) {
     fprintf(stderr, "%d serialize test(s) failed\n", failures);

@@ -121,6 +121,9 @@ add_test(NAME test_import COMMAND test_import)
 add_executable(test_serialize test/test_serialize.c)
 target_link_libraries(test_serialize ixsimpl)
 target_include_directories(test_serialize PRIVATE src)
+if(USE_AMALGAMATION)
+    target_compile_definitions(test_serialize PRIVATE IXS_TEST_AMALGAMATION)
+endif()
 add_test(NAME test_serialize COMMAND test_serialize)
 
 # Tests that need internal symbols — skipped in amalgamated builds.
