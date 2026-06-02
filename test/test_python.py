@@ -1601,6 +1601,15 @@ def test_eval_floor_mod() -> None:
     assert expr2.eval({"x": 8}) == 0
 
 
+def test_percent_operator_builds_mod() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+
+    assert ixsimpl.same_node(x % 4, ixsimpl.mod(x, 4))
+    assert ixsimpl.same_node(17 % x, ixsimpl.mod(ctx.int_(17), x))
+    assert (x % 4).eval({"x": -7}) == 1
+
+
 def test_lambdify_single_expr() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")

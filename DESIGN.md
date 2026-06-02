@@ -1932,7 +1932,7 @@ e = ixsimpl.floor(x + y) + 3
 print(e.simplify(assumptions=assumptions))
 
 # Module-level convenience functions
-e2 = ixsimpl.mod(x, 4)
+e2 = x % 4                  # equivalent to ixsimpl.mod(x, 4)
 e3 = ixsimpl.max_(x, y)   # trailing _ avoids shadowing builtin max
 e4 = ixsimpl.min_(x, y)
 e5 = ixsimpl.pw((x, x >= 0), (-x, ctx.true_()))  # piecewise
@@ -1965,7 +1965,7 @@ Implementation:
 - `Context.parse()` remains the backward-compatible expression parser.
   `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
   entry points.
-- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__neg__`,
+- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
 - `Context.int_(val)` creates an `IXS_INT` node (wraps `ixs_int`).
