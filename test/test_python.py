@@ -917,6 +917,21 @@ def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
     assert ixsimpl.same_node(roundtripped, original)
 
 
+def test_node_ptr_exposes_canonical_node_address() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    x_again = ctx.sym("x")
+    y = ctx.sym("y")
+
+    assert isinstance(x.node_ptr, int)
+    assert x.node_ptr != 0
+    assert x_again.node_ptr == x.node_ptr
+    assert y.node_ptr != x.node_ptr
+    node_as_any: Any = x
+    with pytest.raises(AttributeError):
+        node_as_any.node_ptr = 0
+
+
 @pytest.mark.forked
 @pytest.mark.filterwarnings(
     r"ignore:This process \(pid=.*\) is multi-threaded, use of fork\(\) may lead "

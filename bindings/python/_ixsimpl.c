@@ -724,6 +724,10 @@ static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
 }
 
+static PyObject *Expr_get_node_ptr(ExprObject *self, void *Py_UNUSED(closure)) {
+  return PyLong_FromVoidPtr(self->node);
+}
+
 static PyObject *Expr_get_nchildren(ExprObject *self,
                                     void *Py_UNUSED(closure)) {
   return PyLong_FromUnsignedLong(ixs_node_nchildren(self->node));
@@ -804,6 +808,8 @@ static PyGetSetDef Expr_getset[] = {
     {"is_pred", (getter)Expr_get_is_pred, NULL,
      "True if node is a predicate root.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
+    {"node_ptr", (getter)Expr_get_node_ptr, NULL,
+     "Raw ixs_node* address as an int. For identity/debug/FFI use only.", NULL},
     {"nchildren", (getter)Expr_get_nchildren, NULL,
      "Number of child node pointers (0 for leaves).", NULL},
     {"children", (getter)Expr_get_children, NULL, "Tuple of child Expr nodes.",

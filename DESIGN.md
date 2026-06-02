@@ -1983,6 +1983,9 @@ Implementation:
 - `Expr.is_parse_error` / `Expr.is_domain_error` — specific checks.
 - `Expr.is_expr` / `Expr.is_pred` — root-kind checks for callers that
   distinguish numeric expressions from predicates.
+- `Expr.node_ptr` — raw `ixs_node*` address exposed as a Python `int`.
+  This is for identity/debug/FFI plumbing only.  It is not a stable semantic
+  ID, and it is only meaningful while the owning `Context` is alive.
 - `Context.errors` property — returns list of error strings; `Context.clear_errors()` resets.
 - `Context.parse()` remains the backward-compatible expression parser.
   `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
