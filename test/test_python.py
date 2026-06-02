@@ -14,7 +14,9 @@ Properties tested:
    expressions that agree numerically with the original tree.
 6. Roundtrip: ixsimpl -> to_sympy -> from_sympy -> ixsimpl preserves
    numerical semantics.
-7. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
+7. Range API soundness: reported bounds contain sampled evaluations that
+   satisfy the input assumptions.
+8. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
    crash the forked test subprocess.
 """
 
@@ -36,6 +38,7 @@ from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 ExprTree = str | int | tuple[Any, ...]
 CondTree = tuple[Any, ...]
 Env = dict[str, int]
+RangeBounds = dict[str, tuple[int, int]]
 
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
@@ -85,6 +88,18 @@ def _pow2_env_st() -> st.SearchStrategy[Env]:
 def _mixed_env_st() -> st.SearchStrategy[Env]:
     """Env blending uniform [0, 100], wide, and spicy values."""
     return st.one_of(_env_st(0, 100), _wide_env_st(), _spicy_env_st())
+
+
+@st.composite
+def _range_bounds_st(draw: st.DrawFn) -> RangeBounds:
+    """Satisfiable per-symbol integer intervals for range-query fuzzing."""
+    names = draw(st.lists(sym_names, min_size=0, max_size=4, unique=True))
+    bounds: RangeBounds = {}
+    for name in names:
+        lo = draw(st.integers(min_value=-64, max_value=64))
+        width = draw(st.integers(min_value=0, max_value=128))
+        bounds[name] = (lo, lo + width)
+    return bounds
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +488,22 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
         return int(result)
     except TypeError as e:
         raise ValueError(f"result is not an integer constant: {result}") from e
+
+
+def _range_assumptions(ctx: ixsimpl.Context, bounds: RangeBounds) -> list[ixsimpl.Expr]:
+    assumptions = []
+    for name, (lo, hi) in bounds.items():
+        sym = ctx.sym(name)
+        assumptions.append(sym >= lo)
+        assumptions.append(sym <= hi)
+    return assumptions
+
+
+def _env_within_bounds(env: Env, bounds: RangeBounds) -> Env:
+    bounded = dict(env)
+    for name, (lo, hi) in bounds.items():
+        bounded[name] = max(lo, min(hi, bounded[name]))
+    return bounded
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1013,48 @@ def test_simplify_with_bounds(
         )
         checked += 1
     assume(checked > 0)  # reject vacuous passes (all envs skipped)
+
+
+@given(
+    expr=expressions(max_depth=4, include_piecewise=False),
+    bounds=_range_bounds_st(),
+    envs=st.lists(_mixed_env_st(), min_size=1, max_size=8),
+)
+def test_range_soundness(expr: ExprTree, bounds: RangeBounds, envs: list[Env]) -> None:
+    """Reported ranges must contain evaluations satisfying the assumptions."""
+    ctx = ixsimpl.Context()
+    try:
+        ixs_expr = to_ixsimpl(ctx, expr)
+    except ValueError:
+        assume(False)
+    assume(not ixs_expr.is_error)
+
+    range_result = ctx.range(ixs_expr, assumptions=_range_assumptions(ctx, bounds))
+    if range_result is None:
+        return
+    lo, hi = range_result
+    if lo is not None and hi is not None:
+        assert lo <= hi, f"inverted range {range_result} for expr={expr}, bounds={bounds}"
+
+    checked = 0
+    for base_env in envs:
+        env = _env_within_bounds(base_env, bounds)
+        try:
+            raw = eval_expr(expr, env)
+        except (ZeroDivisionError, ValueError, TypeError, OverflowError):
+            continue
+        if lo is not None:
+            assert lo <= raw, (
+                f"range lower bound excludes value: range={range_result}, "
+                f"value={raw}, env={env}, expr={expr}, bounds={bounds}"
+            )
+        if hi is not None:
+            assert raw <= hi, (
+                f"range upper bound excludes value: range={range_result}, "
+                f"value={raw}, env={env}, expr={expr}, bounds={bounds}"
+            )
+        checked += 1
+    assume(checked > 0)
 
 
 _LARGE_VALS_MUL = [-(1 << 30), -(1 << 30) + 1, -1, 0, 1, (1 << 30) - 1, (1 << 30)]
