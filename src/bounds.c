@@ -74,8 +74,10 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v = &b->vars[b->nvars++];
   v->name = name;
   v->iv.valid = true;
-  ixs_interval_set_neg_inf(&v->iv.lo_p, &v->iv.lo_q);
-  ixs_interval_set_pos_inf(&v->iv.hi_p, &v->iv.hi_q);
+  v->iv.lo_inf = false;
+  v->iv.hi_inf = false;
+  ixs_interval_set_lo_neg_inf(&v->iv);
+  ixs_interval_set_hi_pos_inf(&v->iv);
   v->modulus = 0;
   v->remainder = 0;
   return v;
@@ -208,34 +210,38 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     return;
   switch (op) {
   case IXS_CMP_GE:
-    if (ixs_rat_cmp(cp, cq, v->iv.lo_p, v->iv.lo_q) > 0) {
+    if (v->iv.lo_inf || ixs_rat_cmp(cp, cq, v->iv.lo_p, v->iv.lo_q) > 0) {
       v->iv.lo_p = cp;
       v->iv.lo_q = cq;
+      v->iv.lo_inf = false;
     }
     break;
   case IXS_CMP_GT: {
     int64_t lo;
     if (!ixs_safe_add(ixs_rat_floor(cp, cq), 1, &lo))
       break;
-    if (ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
+    if (v->iv.lo_inf || ixs_rat_cmp(lo, 1, v->iv.lo_p, v->iv.lo_q) > 0) {
       v->iv.lo_p = lo;
       v->iv.lo_q = 1;
+      v->iv.lo_inf = false;
     }
     break;
   }
   case IXS_CMP_LE:
-    if (ixs_rat_cmp(cp, cq, v->iv.hi_p, v->iv.hi_q) < 0) {
+    if (v->iv.hi_inf || ixs_rat_cmp(cp, cq, v->iv.hi_p, v->iv.hi_q) < 0) {
       v->iv.hi_p = cp;
       v->iv.hi_q = cq;
+      v->iv.hi_inf = false;
     }
     break;
   case IXS_CMP_LT: {
     int64_t hi;
     if (!ixs_safe_sub(ixs_rat_ceil(cp, cq), 1, &hi))
       break;
-    if (ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
+    if (v->iv.hi_inf || ixs_rat_cmp(hi, 1, v->iv.hi_p, v->iv.hi_q) < 0) {
       v->iv.hi_p = hi;
       v->iv.hi_q = 1;
+      v->iv.hi_inf = false;
     }
     break;
   }
@@ -244,6 +250,8 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     v->iv.lo_q = cq;
     v->iv.hi_p = cp;
     v->iv.hi_q = cq;
+    v->iv.lo_inf = false;
+    v->iv.hi_inf = false;
     break;
   case IXS_CMP_NE:
     break;
@@ -334,28 +342,30 @@ IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   if (ixs_node_is_zero(rhs) && ixs_node_is_integer_valued(lhs)) {
     ixs_interval eb_iv;
     eb_iv.valid = false;
+    eb_iv.lo_inf = false;
+    eb_iv.hi_inf = false;
     switch (op) {
     case IXS_CMP_GT:
       eb_iv.valid = true;
       eb_iv.lo_p = 1;
       eb_iv.lo_q = 1;
-      ixs_interval_set_pos_inf(&eb_iv.hi_p, &eb_iv.hi_q);
+      ixs_interval_set_hi_pos_inf(&eb_iv);
       break;
     case IXS_CMP_GE:
       eb_iv.valid = true;
       eb_iv.lo_p = 0;
       eb_iv.lo_q = 1;
-      ixs_interval_set_pos_inf(&eb_iv.hi_p, &eb_iv.hi_q);
+      ixs_interval_set_hi_pos_inf(&eb_iv);
       break;
     case IXS_CMP_LT:
       eb_iv.valid = true;
-      ixs_interval_set_neg_inf(&eb_iv.lo_p, &eb_iv.lo_q);
+      ixs_interval_set_lo_neg_inf(&eb_iv);
       eb_iv.hi_p = -1;
       eb_iv.hi_q = 1;
       break;
     case IXS_CMP_LE:
       eb_iv.valid = true;
-      ixs_interval_set_neg_inf(&eb_iv.lo_p, &eb_iv.lo_q);
+      ixs_interval_set_lo_neg_inf(&eb_iv);
       eb_iv.hi_p = 0;
       eb_iv.hi_q = 1;
       break;
@@ -468,17 +478,25 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
   }
   case IXS_FLOOR: {
     ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
+    ixs_interval result;
     if (!ai.valid)
       return ixs_interval_unknown();
-    return ixs_interval_range(ixs_rat_floor(ai.lo_p, ai.lo_q), 1,
-                              ixs_rat_floor(ai.hi_p, ai.hi_q), 1);
+    result = ixs_interval_range(ixs_rat_floor(ai.lo_p, ai.lo_q), 1,
+                                ixs_rat_floor(ai.hi_p, ai.hi_q), 1);
+    result.lo_inf = ai.lo_inf;
+    result.hi_inf = ai.hi_inf;
+    return result;
   }
   case IXS_CEIL: {
     ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
+    ixs_interval result;
     if (!ai.valid)
       return ixs_interval_unknown();
-    return ixs_interval_range(ixs_rat_ceil(ai.lo_p, ai.lo_q), 1,
-                              ixs_rat_ceil(ai.hi_p, ai.hi_q), 1);
+    result = ixs_interval_range(ixs_rat_ceil(ai.lo_p, ai.lo_q), 1,
+                                ixs_rat_ceil(ai.hi_p, ai.hi_q), 1);
+    result.lo_inf = ai.lo_inf;
+    result.hi_inf = ai.hi_inf;
+    return result;
   }
   case IXS_MAX: {
     ixs_interval li = ixs_bounds_get(b, expr->u.binary.lhs);
@@ -487,19 +505,33 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
       return ixs_interval_unknown();
     ixs_interval result;
     result.valid = true;
+    result.lo_inf = false;
+    result.hi_inf = false;
     /* max(lo_l, lo_r) <= max(l, r) <= max(hi_l, hi_r) */
-    result.lo_p = ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) >= 0
-                      ? li.lo_p
-                      : ri.lo_p;
-    result.lo_q = ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) >= 0
-                      ? li.lo_q
-                      : ri.lo_q;
-    result.hi_p = ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) >= 0
-                      ? li.hi_p
-                      : ri.hi_p;
-    result.hi_q = ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) >= 0
-                      ? li.hi_q
-                      : ri.hi_q;
+    if (li.lo_inf && !ri.lo_inf) {
+      result.lo_p = ri.lo_p;
+      result.lo_q = ri.lo_q;
+    } else if (!li.lo_inf && ri.lo_inf) {
+      result.lo_p = li.lo_p;
+      result.lo_q = li.lo_q;
+    } else if (ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) >= 0) {
+      result.lo_p = li.lo_p;
+      result.lo_q = li.lo_q;
+      result.lo_inf = li.lo_inf;
+    } else {
+      result.lo_p = ri.lo_p;
+      result.lo_q = ri.lo_q;
+      result.lo_inf = ri.lo_inf;
+    }
+    if (li.hi_inf || ri.hi_inf) {
+      ixs_interval_set_hi_pos_inf(&result);
+    } else if (ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) >= 0) {
+      result.hi_p = li.hi_p;
+      result.hi_q = li.hi_q;
+    } else {
+      result.hi_p = ri.hi_p;
+      result.hi_q = ri.hi_q;
+    }
     return result;
   }
   case IXS_MIN: {
@@ -509,18 +541,32 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
       return ixs_interval_unknown();
     ixs_interval result;
     result.valid = true;
-    result.lo_p = ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) <= 0
-                      ? li.lo_p
-                      : ri.lo_p;
-    result.lo_q = ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) <= 0
-                      ? li.lo_q
-                      : ri.lo_q;
-    result.hi_p = ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) <= 0
-                      ? li.hi_p
-                      : ri.hi_p;
-    result.hi_q = ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) <= 0
-                      ? li.hi_q
-                      : ri.hi_q;
+    result.lo_inf = false;
+    result.hi_inf = false;
+    if (li.lo_inf || ri.lo_inf) {
+      ixs_interval_set_lo_neg_inf(&result);
+    } else if (ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) <= 0) {
+      result.lo_p = li.lo_p;
+      result.lo_q = li.lo_q;
+    } else {
+      result.lo_p = ri.lo_p;
+      result.lo_q = ri.lo_q;
+    }
+    if (li.hi_inf && !ri.hi_inf) {
+      result.hi_p = ri.hi_p;
+      result.hi_q = ri.hi_q;
+    } else if (!li.hi_inf && ri.hi_inf) {
+      result.hi_p = li.hi_p;
+      result.hi_q = li.hi_q;
+    } else if (ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) <= 0) {
+      result.hi_p = li.hi_p;
+      result.hi_q = li.hi_q;
+      result.hi_inf = li.hi_inf;
+    } else {
+      result.hi_p = ri.hi_p;
+      result.hi_q = ri.hi_q;
+      result.hi_inf = ri.hi_inf;
+    }
     return result;
   }
   default:
@@ -538,6 +584,28 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
     }
   }
   return iv;
+}
+
+IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
+  size_t i, j;
+
+  for (i = 0; i < b->nvars; i++) {
+    if (ixs_interval_is_empty(b->vars[i].iv))
+      return true;
+  }
+
+  for (i = 0; i < b->nexprs; i++) {
+    ixs_interval iv = b->exprs[i].iv;
+    for (j = i + 1; j < b->nexprs; j++) {
+      if (b->exprs[j].expr == b->exprs[i].expr) {
+        iv = iv_intersect(iv, b->exprs[j].iv);
+        if (!iv.valid || ixs_interval_is_empty(iv))
+          return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {

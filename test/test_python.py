@@ -1522,6 +1522,27 @@ def test_check_non_cmp_returns_none() -> None:
     assert ctx.check(x + 1) is None
 
 
+def test_range_basic() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    assumptions = [x >= 0, x < 16]
+    int64_min = -(2**63)
+    int64_max = 2**63 - 1
+
+    assert ctx.range(x + 5, assumptions=assumptions) == (5, 20)
+    assert ctx.range(x, assumptions=[x >= 0]) == (0, None)
+    assert ctx.range(x / 2, assumptions=[x >= 1, x <= 3]) == (
+        Fraction(1, 2),
+        Fraction(3, 2),
+    )
+    assert ctx.range(x % 8) == (0, 7)
+    assert ctx.range(x) is None
+    assert ctx.range(x, assumptions=[x >= 10, x <= 5]) is None
+    assert ctx.range(-x, assumptions=[x >= 10, x <= 5]) is None
+    assert ctx.range(ctx.int_(int64_min)) == (int64_min, int64_min)
+    assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
+
+
 def test_has_basic() -> None:
     ctx = ixsimpl.Context()
     x, y, z = ctx.sym("x"), ctx.sym("y"), ctx.sym("z")

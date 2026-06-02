@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ixsimpl contributors
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Sequence
+from fractions import Fraction
 from typing import Self, overload
 
 INT: int
@@ -126,6 +127,12 @@ class Context:
         *,
         assumptions: Sequence[_Expr] | None = None,
     ) -> bool | None: ...
+    def range(
+        self,
+        expr: _Expr,
+        *,
+        assumptions: Sequence[_Expr] | None = None,
+    ) -> tuple[int | Fraction | None, int | Fraction | None] | None: ...
     def simplify_batch(
         self,
         exprs: Sequence[_Expr],

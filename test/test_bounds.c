@@ -39,9 +39,10 @@ static void test_iv_add_overflow_widens(void) {
   /* (-inf, -70] + [0, 63]: lo overflows, should widen to -inf. */
   ixs_interval a = ixs_interval_range(INT64_MIN, 1, -70, 1);
   ixs_interval b = ixs_interval_range(0, 1, 63, 1);
+  ixs_interval_set_lo_neg_inf(&a);
   ixs_interval r = iv_add(a, b);
   CHECK(r.valid);
-  CHECK(ixs_interval_is_neg_inf(r.lo_p, r.lo_q));
+  CHECK(r.lo_inf);
   CHECK(r.hi_p == -7 && r.hi_q == 1);
 }
 
@@ -49,10 +50,11 @@ static void test_iv_add_pos_overflow_widens(void) {
   /* [70, +inf) + [0, 63]: hi overflows, should widen to +inf. */
   ixs_interval a = ixs_interval_range(70, 1, INT64_MAX, 1);
   ixs_interval b = ixs_interval_range(0, 1, 63, 1);
+  ixs_interval_set_hi_pos_inf(&a);
   ixs_interval r = iv_add(a, b);
   CHECK(r.valid);
   CHECK(r.lo_p == 70 && r.lo_q == 1);
-  CHECK(ixs_interval_is_pos_inf(r.hi_p, r.hi_q));
+  CHECK(r.hi_inf);
 }
 
 static void test_iv_add_invalid(void) {
@@ -91,18 +93,20 @@ static void test_iv_mul_const_zero(void) {
 static void test_iv_mul_const_overflow_widens(void) {
   /* [1, INT64_MAX] * 2 should overflow and widen to +inf. */
   ixs_interval a = ixs_interval_range(1, 1, INT64_MAX, 1);
+  ixs_interval_set_hi_pos_inf(&a);
   ixs_interval r = iv_mul_const(a, 2, 1);
   CHECK(r.valid);
   CHECK(r.lo_p == 2 && r.lo_q == 1);
-  CHECK(ixs_interval_is_pos_inf(r.hi_p, r.hi_q));
+  CHECK(r.hi_inf);
 }
 
 static void test_iv_mul_const_neg_overflow_widens(void) {
   /* [INT64_MIN, -1] * 2: lo overflows negative. */
   ixs_interval a = ixs_interval_range(INT64_MIN, 1, -1, 1);
+  ixs_interval_set_lo_neg_inf(&a);
   ixs_interval r = iv_mul_const(a, 2, 1);
   CHECK(r.valid);
-  CHECK(ixs_interval_is_neg_inf(r.lo_p, r.lo_q));
+  CHECK(r.lo_inf);
   CHECK(r.hi_p == -2 && r.hi_q == 1);
 }
 
@@ -129,9 +133,10 @@ static void test_iv_mul_mixed_sign(void) {
 static void test_iv_mul_overflow_widens(void) {
   ixs_interval a = ixs_interval_range(1, 1, INT64_MAX, 1);
   ixs_interval b = ixs_interval_range(2, 1, 3, 1);
+  ixs_interval_set_hi_pos_inf(&a);
   ixs_interval r = iv_mul(a, b);
   CHECK(r.valid);
-  CHECK(ixs_interval_is_pos_inf(r.hi_p, r.hi_q));
+  CHECK(r.hi_inf);
 }
 
 static void test_iv_mul_invalid(void) {
@@ -153,6 +158,7 @@ static void test_iv_recip_basic(void) {
 static void test_iv_recip_unbounded(void) {
   /* 1/[3, +inf] = [0, 1/3] */
   ixs_interval a = ixs_interval_range(3, 1, INT64_MAX, 1);
+  ixs_interval_set_hi_pos_inf(&a);
   ixs_interval r = iv_recip(a);
   CHECK(r.valid);
   CHECK(r.lo_p == 0 && r.lo_q == 1);
@@ -212,7 +218,7 @@ static void test_bounds_sym_ge(void) {
   ixs_interval iv = ixs_bounds_get(&b, x);
   CHECK(iv.valid);
   CHECK(ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0);
-  CHECK(ixs_interval_is_pos_inf(iv.hi_p, iv.hi_q));
+  CHECK(iv.hi_inf);
 
   ixs_bounds_destroy(&b);
   ixs_ctx_destroy(ctx);
@@ -531,7 +537,7 @@ static void test_bounds_expr_le(void) {
   ixs_interval iv = ixs_bounds_get(&b, expr);
   CHECK(iv.valid);
   CHECK(ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0);
-  CHECK(ixs_interval_is_neg_inf(iv.lo_p, iv.lo_q));
+  CHECK(iv.lo_inf);
 
   /* x+y < 0 tightens upper bound to -1 */
   ixs_bounds b2;
@@ -637,6 +643,100 @@ static void test_bounds_check_non_cmp(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Bounds: public range API                                          */
+/* ------------------------------------------------------------------ */
+
+static void test_public_range_basic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *assumes[2];
+  ixs_node *expr;
+  ixs_range_result r;
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  expr = ixs_add(ctx, x, ixs_int(ctx, 5));
+
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower);
+  CHECK(r.has_upper);
+  CHECK(r.lower_p == 5 && r.lower_q == 1);
+  CHECK(r.upper_p == 20 && r.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_unbounded(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *assume = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_range_result r;
+
+  CHECK(ixs_range(ctx, x, &assume, 1, &r));
+  CHECK(r.has_lower);
+  CHECK(!r.has_upper);
+  CHECK(r.lower_p == 0 && r.lower_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_rational(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *assumes[2];
+  ixs_node *expr;
+  ixs_range_result r;
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 1));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 3));
+  expr = ixs_div(ctx, x, ixs_int(ctx, 2));
+
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower);
+  CHECK(r.has_upper);
+  CHECK(r.lower_p == 1 && r.lower_q == 2);
+  CHECK(r.upper_p == 3 && r.upper_q == 2);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_unknown(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *contradictory[2];
+  ixs_range_result r;
+
+  CHECK(!ixs_range(ctx, x, NULL, 0, &r));
+  CHECK(!ixs_range(ctx, x, NULL, 0, NULL));
+
+  contradictory[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10));
+  contradictory[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5));
+  CHECK(!ixs_range(ctx, x, contradictory, 2, &r));
+  CHECK(!ixs_range(ctx, ixs_neg(ctx, x), contradictory, 2, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_int64_extrema(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_range_result r;
+
+  CHECK(ixs_range(ctx, ixs_int(ctx, INT64_MIN), NULL, 0, &r));
+  CHECK(r.has_lower);
+  CHECK(r.has_upper);
+  CHECK(r.lower_p == INT64_MIN && r.lower_q == 1);
+  CHECK(r.upper_p == INT64_MIN && r.upper_q == 1);
+
+  CHECK(ixs_range(ctx, ixs_int(ctx, INT64_MAX), NULL, 0, &r));
+  CHECK(r.has_lower);
+  CHECK(r.has_upper);
+  CHECK(r.lower_p == INT64_MAX && r.lower_q == 1);
+  CHECK(r.upper_p == INT64_MAX && r.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+/* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -702,6 +802,13 @@ int main(void) {
   test_bounds_check_eq();
   test_bounds_check_ne();
   test_bounds_check_non_cmp();
+
+  /* Bounds: public range API */
+  test_public_range_basic();
+  test_public_range_unbounded();
+  test_public_range_rational();
+  test_public_range_unknown();
+  test_public_range_int64_extrema();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

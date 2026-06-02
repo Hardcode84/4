@@ -164,6 +164,15 @@ typedef enum {
   IXS_CHECK_UNKNOWN
 } ixs_check_result;
 
+typedef struct {
+  bool has_lower;
+  bool has_upper;
+  int64_t lower_p;
+  int64_t lower_q;
+  int64_t upper_p;
+  int64_t upper_q;
+} ixs_range_result;
+
 /* Check whether a comparison is provably true or false given the
  * assumptions, using interval propagation.  expr must be a CMP node
  * in normalized form (lhs op 0) -- this is automatic when constructed
@@ -172,6 +181,13 @@ typedef enum {
  * rewriting, just bounds setup + interval check. */
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+/* Infer an inclusive rational range for expr under assumptions.
+ * Returns false when the interval engine cannot derive a range, on OOM,
+ * for NULL/sentinel expr, or when out is NULL.  Unbounded sides are reported
+ * with has_lower/has_upper false; finite endpoints are exact p/q rationals. */
+bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
+               size_t n_assumptions, ixs_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 

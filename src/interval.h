@@ -13,6 +13,8 @@
 typedef struct {
   int64_t lo_p, lo_q; /* lower bound (rational), inclusive */
   int64_t hi_p, hi_q; /* upper bound (rational), inclusive */
+  bool lo_inf;
+  bool hi_inf;
   bool valid;
 } ixs_interval;
 
@@ -41,9 +43,21 @@ static inline void ixs_interval_set_pos_inf(int64_t *p, int64_t *q) {
   *q = 1;
 }
 
+static inline void ixs_interval_set_lo_neg_inf(ixs_interval *iv) {
+  iv->lo_inf = true;
+  ixs_interval_set_neg_inf(&iv->lo_p, &iv->lo_q);
+}
+
+static inline void ixs_interval_set_hi_pos_inf(ixs_interval *iv) {
+  iv->hi_inf = true;
+  ixs_interval_set_pos_inf(&iv->hi_p, &iv->hi_q);
+}
+
 static inline ixs_interval ixs_interval_unknown(void) {
   ixs_interval iv;
   iv.valid = false;
+  iv.lo_inf = false;
+  iv.hi_inf = false;
   iv.lo_p = iv.lo_q = iv.hi_p = iv.hi_q = 0;
   return iv;
 }
@@ -51,6 +65,8 @@ static inline ixs_interval ixs_interval_unknown(void) {
 static inline ixs_interval ixs_interval_exact(int64_t p, int64_t q) {
   ixs_interval iv;
   iv.valid = true;
+  iv.lo_inf = false;
+  iv.hi_inf = false;
   iv.lo_p = iv.hi_p = p;
   iv.lo_q = iv.hi_q = q;
   return iv;
@@ -58,7 +74,8 @@ static inline ixs_interval ixs_interval_exact(int64_t p, int64_t q) {
 
 /* True when iv is a single integer value; writes it to *val if non-NULL. */
 static inline bool ixs_interval_is_point_int(ixs_interval iv, int64_t *val) {
-  if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p == iv.hi_p) {
+  if (iv.valid && !iv.lo_inf && !iv.hi_inf && iv.lo_q == 1 && iv.hi_q == 1 &&
+      iv.lo_p == iv.hi_p) {
     if (val)
       *val = iv.lo_p;
     return true;
@@ -66,10 +83,17 @@ static inline bool ixs_interval_is_point_int(ixs_interval iv, int64_t *val) {
   return false;
 }
 
+static inline bool ixs_interval_is_empty(ixs_interval iv) {
+  return iv.valid && !iv.lo_inf && !iv.hi_inf &&
+         ixs_rat_cmp(iv.lo_p, iv.lo_q, iv.hi_p, iv.hi_q) > 0;
+}
+
 static inline ixs_interval ixs_interval_range(int64_t lo_p, int64_t lo_q,
                                               int64_t hi_p, int64_t hi_q) {
   ixs_interval iv;
   iv.valid = true;
+  iv.lo_inf = false;
+  iv.hi_inf = false;
   iv.lo_p = lo_p;
   iv.lo_q = lo_q;
   iv.hi_p = hi_p;

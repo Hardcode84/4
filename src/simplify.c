@@ -4101,3 +4101,84 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
   ixs_arena_restore(&ctx->scratch, m);
   return r;
 }
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  ixs_bounds bounds;
+  bool active;
+  bool built;
+} simp_bounds_scope;
+
+static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions) {
+  scope->ctx = ctx;
+  scope->mark = ixs_arena_save(&ctx->scratch);
+  scope->active = true;
+  scope->built = false;
+  if (!ixs_bounds_build(&scope->bounds, &ctx->scratch, assumptions,
+                        n_assumptions)) {
+    ixs_arena_restore(&ctx->scratch, scope->mark);
+    scope->active = false;
+    return false;
+  }
+  scope->built = true;
+  return true;
+}
+
+static void simp_bounds_scope_destroy(simp_bounds_scope *scope) {
+  if (!scope->active)
+    return;
+  if (scope->built)
+    ixs_bounds_destroy(&scope->bounds);
+  ixs_arena_restore(&scope->ctx->scratch, scope->mark);
+  scope->active = false;
+  scope->built = false;
+}
+
+IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
+                           ixs_node *const *assumptions, size_t n_assumptions,
+                           ixs_range_result *out) {
+  simp_bounds_scope scope;
+  ixs_interval iv;
+  bool ok = false;
+
+  if (!out)
+    return false;
+  out->has_lower = false;
+  out->has_upper = false;
+  out->lower_p = 0;
+  out->lower_q = 1;
+  out->upper_p = 0;
+  out->upper_q = 1;
+
+  if (!expr || ixs_node_is_sentinel(expr))
+    return false;
+
+  if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
+    return false;
+
+  if (ixs_bounds_has_empty(&scope.bounds))
+    goto cleanup;
+
+  iv = ixs_bounds_get(&scope.bounds, expr);
+  if (!iv.valid || ixs_interval_is_empty(iv))
+    goto cleanup;
+
+  if (!iv.lo_inf) {
+    out->has_lower = true;
+    out->lower_p = iv.lo_p;
+    out->lower_q = iv.lo_q;
+  }
+  if (!iv.hi_inf) {
+    out->has_upper = true;
+    out->upper_p = iv.hi_p;
+    out->upper_q = iv.hi_q;
+  }
+  ok = true;
+
+cleanup:
+  simp_bounds_scope_destroy(&scope);
+  return ok;
+}

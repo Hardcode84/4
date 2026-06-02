@@ -63,6 +63,9 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 
+/* True if stored bounds contain a direct contradiction. */
+IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b);
+
 /* Full modulus/remainder query.  Returns true when info is available.
  * On success *mod > 0 and 0 <= *rem < *mod. */
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,

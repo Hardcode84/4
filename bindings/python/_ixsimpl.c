@@ -1112,6 +1112,111 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
   Py_RETURN_NONE;
 }
 
+static PyObject *range_endpoint_to_py(bool has_endpoint, int64_t p, int64_t q) {
+  PyObject *fractions_mod, *fraction_cls, *num, *den, *result;
+
+  if (!has_endpoint)
+    Py_RETURN_NONE;
+  if (q == 1)
+    return PyLong_FromLongLong((long long)p);
+
+  fractions_mod = PyImport_ImportModule("fractions");
+  if (!fractions_mod)
+    return NULL;
+  fraction_cls = PyObject_GetAttrString(fractions_mod, "Fraction");
+  Py_DECREF(fractions_mod);
+  if (!fraction_cls)
+    return NULL;
+
+  num = PyLong_FromLongLong((long long)p);
+  den = PyLong_FromLongLong((long long)q);
+  if (!num || !den) {
+    Py_XDECREF(num);
+    Py_XDECREF(den);
+    Py_DECREF(fraction_cls);
+    return NULL;
+  }
+  result = PyObject_CallFunctionObjArgs(fraction_cls, num, den, NULL);
+  Py_DECREF(num);
+  Py_DECREF(den);
+  Py_DECREF(fraction_cls);
+  return result;
+}
+
+static PyObject *Context_range(ContextObject *self, PyObject *args,
+                               PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "assumptions", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL;
+  Py_ssize_t i, n_assumptions = 0;
+  ixs_node *expr, **assumptions = NULL;
+  ixs_range_result r;
+  PyObject *lo, *hi, *result;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
+                                   &assumptions_obj))
+    return NULL;
+
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  expr = ((ExprObject *)expr_obj)->node;
+
+  if (assumptions_obj && assumptions_obj != Py_None) {
+    n_assumptions = PySequence_Size(assumptions_obj);
+    if (n_assumptions < 0)
+      return NULL;
+    if (n_assumptions > 0) {
+      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      if (!assumptions)
+        return PyErr_NoMemory();
+      for (i = 0; i < n_assumptions; i++) {
+        PyObject *item = PySequence_GetItem(assumptions_obj, i);
+        if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
+          Py_XDECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+          return NULL;
+        }
+        if (((ExprObject *)item)->ctx_obj != self) {
+          Py_DECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_ValueError,
+                          "ixsimpl: assumption from different context");
+          return NULL;
+        }
+        assumptions[i] = ((ExprObject *)item)->node;
+        Py_DECREF(item);
+      }
+    }
+  }
+
+  if (!ixs_range(Context_session(self), expr, assumptions,
+                 (size_t)n_assumptions, &r)) {
+    PyMem_Free(assumptions);
+    Py_RETURN_NONE;
+  }
+  PyMem_Free(assumptions);
+
+  lo = range_endpoint_to_py(r.has_lower, r.lower_p, r.lower_q);
+  if (!lo)
+    return NULL;
+  hi = range_endpoint_to_py(r.has_upper, r.upper_p, r.upper_q);
+  if (!hi) {
+    Py_DECREF(lo);
+    return NULL;
+  }
+  result = PyTuple_Pack(2, lo, hi);
+  Py_DECREF(lo);
+  Py_DECREF(hi);
+  return result;
+}
+
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
   static char *kwlist[] = {"exprs", "assumptions", NULL};
@@ -1274,6 +1379,8 @@ static PyMethodDef Context_methods[] = {
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds."},
+    {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
+     "Return inferred inclusive range as (lower, upper), or None if unknown."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS, "Simplify a list of Expr in-place."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,

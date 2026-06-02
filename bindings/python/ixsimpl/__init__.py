@@ -128,6 +128,7 @@ def lambdify(
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from fractions import Fraction
 
     from ixsimpl._ixsimpl import Context as _Context
 
@@ -151,6 +152,12 @@ if TYPE_CHECKING:
             *,
             assumptions: Sequence[_Expr] | None = None,
         ) -> bool | None: ...
+        def range(
+            self,
+            expr: _Expr,
+            *,
+            assumptions: Sequence[_Expr] | None = None,
+        ) -> tuple[int | Fraction | None, int | Fraction | None] | None: ...
         def simplify_batch(
             self,
             exprs: Sequence[_Expr],

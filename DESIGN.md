@@ -1078,8 +1078,19 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 - **Overflow widening** (`iv_endpoint_widen`): when `ixs_rat_mul` overflows
   during interval arithmetic, the endpoint is widened to `INT64_MIN` or
   `INT64_MAX` (representing −∞ or +∞) based on the sign of the factors.
+  Actual interval endpoints also carry explicit infinity flags, so finite
+  values equal to `INT64_MIN` or `INT64_MAX` remain distinguishable from
+  unbounded sides.
   This trades precision for soundness: the interval is always a correct
   over-approximation.
+- **Public range query** (`ixs_range`, Python `Context.range`): exposes the
+  same bounds-only interval query used by entailment checks.  It returns
+  exact rational endpoints for the inferred inclusive interval, with
+  unbounded sides represented explicitly.  This is not a general optimizer or
+  constraint solver: if propagation cannot derive an interval, the query
+  reports unknown; if independent intervals lose correlations, the returned
+  interval is conservative rather than the mathematical image of the full
+  assumption set.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1368,6 +1379,17 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+// Inclusive range query under assumptions.  Returns false when unknown.
+typedef struct {
+    bool has_lower;
+    bool has_upper;
+    int64_t lower_p, lower_q;  // exact lower endpoint if has_lower
+    int64_t upper_p, upper_q;  // exact upper endpoint if has_upper
+} ixs_range_result;
+bool ixs_range(ixs_session *s, ixs_node *expr,
+               ixs_node *const *assumptions, size_t n_assumptions,
+               ixs_range_result *out);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
@@ -1965,6 +1987,11 @@ Implementation:
 - `Context.parse()` remains the backward-compatible expression parser.
   `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
   entry points.
+- `Context.check(expr, assumptions=[...])` returns `True`, `False`, or `None`
+  for bounds-only entailment checks.  `Context.range(expr,
+  assumptions=[...])` returns `(lower, upper)` from the same interval engine,
+  or `None` when unknown.  Endpoints are Python `int`,
+  `fractions.Fraction`, or `None` for an unbounded side.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__neg__`,
   `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
@@ -2184,6 +2211,16 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+typedef struct {
+  bool has_lower;
+  bool has_upper;
+  int64_t lower_p, lower_q;
+  int64_t upper_p, upper_q;
+} ixs_range_result;
+bool ixs_range(ixs_session *s, ixs_node *expr,
+               ixs_node *const *assumptions, size_t n_assumptions,
+               ixs_range_result *out);
 
 ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,

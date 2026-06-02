@@ -519,6 +519,15 @@ ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
   return result;
 }
 
+bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
+               size_t n_assumptions, ixs_range_result *out) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  bool result = simp_range(ctx, expr, assumptions, n_assumptions, out);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Comparison and substitution                                       */
 /* ------------------------------------------------------------------ */
