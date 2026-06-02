@@ -45,7 +45,6 @@ if(SKBUILD)
     set_target_properties(_ixsimpl PROPERTIES C_VISIBILITY_PRESET hidden)
 
     install(TARGETS _ixsimpl DESTINATION ixsimpl)
-    install(FILES bindings/python/ixsimpl/_ixsimpl.pyi DESTINATION ixsimpl)
     return()
 endif()
 
