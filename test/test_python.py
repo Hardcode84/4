@@ -16,7 +16,9 @@ Properties tested:
    numerical semantics.
 7. Range API soundness: reported bounds contain sampled evaluations that
    satisfy the input assumptions.
-8. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
+8. Entailment API soundness: proven modular comparisons agree with sampled
+   evaluations satisfying the input assumptions.
+9. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
    crash the forked test subprocess.
 """
 
@@ -39,6 +41,8 @@ ExprTree = str | int | tuple[Any, ...]
 CondTree = tuple[Any, ...]
 Env = dict[str, int]
 RangeBounds = dict[str, tuple[int, int]]
+ModSymbolCase = tuple[str, int, int, int, int, str]
+ModCompositeCase = tuple[str, str, int, int, int, int, int, int, int, str, str]
 
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
@@ -100,6 +104,51 @@ def _range_bounds_st(draw: st.DrawFn) -> RangeBounds:
         width = draw(st.integers(min_value=0, max_value=128))
         bounds[name] = (lo, lo + width)
     return bounds
+
+
+@st.composite
+def _mod_symbol_case_st(draw: st.DrawFn) -> ModSymbolCase:
+    """Satisfiable Mod(sym, M)==R assumption plus a provable query."""
+    sym = draw(sym_names)
+    assume_mod = draw(st.integers(min_value=2, max_value=64))
+    rem = draw(st.integers(min_value=0, max_value=assume_mod - 1))
+    query_mod = draw(st.sampled_from([d for d in range(2, assume_mod + 1) if assume_mod % d == 0]))
+    actual = rem % query_mod
+    targets = [actual, -1, query_mod, actual + query_mod]
+    if query_mod > 1:
+        targets.append((actual + 1) % query_mod)
+    target = draw(st.sampled_from(targets))
+    cmp_op = draw(st.sampled_from(["==", "!="]))
+    return sym, assume_mod, rem, query_mod, target, cmp_op
+
+
+@st.composite
+def _mod_composite_case_st(draw: st.DrawFn) -> ModCompositeCase:
+    """Composite expression that is divisible by query_mod under assumptions."""
+    names = draw(st.lists(sym_names, min_size=2, max_size=2, unique=True))
+    query_mod = draw(st.integers(min_value=2, max_value=64))
+    coeffs = [c for c in range(-8, 9) if c != 0 and c % query_mod != 0]
+    coeff_a = draw(st.sampled_from(coeffs))
+    coeff_b = draw(st.sampled_from(coeffs))
+    mod_a = query_mod
+    mod_b = query_mod
+    const = query_mod * draw(st.integers(min_value=-8, max_value=8))
+    target = draw(st.sampled_from([0, -1, query_mod]))
+    cmp_op = draw(st.sampled_from(["==", "!="]))
+    pattern = draw(st.sampled_from(["mul", "add"]))
+    return (
+        names[0],
+        names[1],
+        query_mod,
+        coeff_a,
+        coeff_b,
+        mod_a,
+        mod_b,
+        const,
+        target,
+        cmp_op,
+        pattern,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1617,6 +1666,84 @@ def test_check_modular_entailment() -> None:
     assumes = [ctx.eq(K % 32, 0), ctx.eq(N % 16, 0)]
     assert ctx.check(ctx.eq((3 * K) % 32, 0), assumptions=assumes) is True
     assert ctx.check(ctx.eq((K + N) % 16, 0), assumptions=assumes) is True
+
+
+@given(
+    case=_mod_symbol_case_st(),
+    env_mults=st.lists(
+        st.tuples(_mixed_env_st(), st.integers(min_value=-32, max_value=32)),
+        min_size=1,
+        max_size=8,
+    ),
+)
+def test_check_modular_symbol_entailment_soundness(
+    case: ModSymbolCase,
+    env_mults: list[tuple[Env, int]],
+) -> None:
+    """Proven symbol congruence checks agree with satisfying samples."""
+    sym, assume_mod, rem, query_mod, target, cmp_op = case
+    ctx = ixsimpl.Context()
+    sym_node = ctx.sym(sym)
+    assumption = ctx.eq(sym_node % assume_mod, rem)
+    lhs = sym_node % query_mod
+    query = ctx.eq(lhs, target) if cmp_op == "==" else ctx.ne(lhs, target)
+    result = ctx.check(query, assumptions=[assumption])
+    assert result is not None, f"unexpected unknown for case={case}"
+
+    checked = 0
+    for base_env, mult in env_mults:
+        env = {**base_env, sym: rem + assume_mod * mult}
+        expected = env[sym] % query_mod == target
+        if cmp_op == "!=":
+            expected = not expected
+        assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    case=_mod_composite_case_st(),
+    env_mults=st.lists(
+        st.tuples(_mixed_env_st(), st.integers(min_value=-32, max_value=32), st.integers(-32, 32)),
+        min_size=1,
+        max_size=8,
+    ),
+)
+def test_check_modular_composite_entailment_soundness(
+    case: ModCompositeCase,
+    env_mults: list[tuple[Env, int, int]],
+) -> None:
+    """Proven composite divisibility checks agree with satisfying samples."""
+    sym_a, sym_b, query_mod, coeff_a, coeff_b, mod_a, mod_b, const, target, cmp_op, pattern = case
+    ctx = ixsimpl.Context()
+    a = ctx.sym(sym_a)
+    b = ctx.sym(sym_b)
+    assumptions = [ctx.eq(a % mod_a, 0)]
+    if pattern == "mul":
+        expr = coeff_a * a
+    else:
+        assumptions.append(ctx.eq(b % mod_b, 0))
+        expr = coeff_a * a + coeff_b * b + const
+
+    lhs = expr % query_mod
+    query = ctx.eq(lhs, target) if cmp_op == "==" else ctx.ne(lhs, target)
+    result = ctx.check(query, assumptions=assumptions)
+    assert result is not None, f"unexpected unknown for case={case}"
+
+    checked = 0
+    for base_env, mult_a, mult_b in env_mults:
+        env = {**base_env, sym_a: mod_a * mult_a}
+        if pattern == "mul":
+            raw = coeff_a * env[sym_a]
+        else:
+            env[sym_b] = mod_b * mult_b
+            raw = coeff_a * env[sym_a] + coeff_b * env[sym_b] + const
+        expected = raw % query_mod == target
+        if cmp_op == "!=":
+            expected = not expected
+        assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
+        checked += 1
+    assume(checked > 0)
 
 
 def test_check_no_assumptions() -> None:
