@@ -8036,6 +8036,10 @@ static ixs_node *simp_mul_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
           {
             uint32_t k;
             for (k = 0; k < mb->u.mul.nfactors; k++) {
+              int64_t flat_exp =
+                  (int64_t)mb->u.mul.factors[k].exp * (int64_t)ej;
+              if (flat_exp > INT32_MAX || flat_exp < INT32_MIN)
+                goto overflow;
               if (nfactors >= cap) {
                 factors = scratch_grow(&ctx->scratch, factors, &cap,
                                        sizeof(*factors));
@@ -8043,7 +8047,7 @@ static ixs_node *simp_mul_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
                   return NULL;
               }
               factors[nfactors].base = mb->u.mul.factors[k].base;
-              factors[nfactors].exp = mb->u.mul.factors[k].exp * ej;
+              factors[nfactors].exp = (int32_t)flat_exp;
               nfactors++;
             }
           }
@@ -8197,7 +8201,9 @@ typedef ixs_node *(*round_fn)(ixs_ctx *, ixs_node *);
 
 /* Multiply acc by base^exp via repeated simp_mul/simp_div.
  * Caps magnitude at MAX_FOLD_EXP to prevent runaway loops on
- * degenerate exponents.  Returns NULL on OOM, sentinel on overflow. */
+ * degenerate exponents.  NULL means either OOM or "too large to
+ * expand"; callers must only use this in optional rewrites or with
+ * pre-bounded exponents.  Sentinels still report arithmetic errors. */
 static ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                            int32_t exp) {
   if (!acc || exp == 0)
@@ -10573,7 +10579,9 @@ static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       return NULL;
     }
     /* For guarded branches, fork bounds with condition assumptions so
-     * that e.g. Max(1, E) collapses when the condition proves E >= 1. */
+     * that e.g. Max(1, E) collapses when the condition proves E >= 1.
+     * Fork and per-branch memo allocation are optimization-only: on scratch
+     * OOM we rewrite under parent bounds, which is less precise but sound. */
     if (bnds && cds[i] != ctx->node_true && cds[i] != ctx->node_false) {
       ixs_arena_mark bm = ixs_arena_save(&ctx->scratch);
       ixs_bounds bbnds;
