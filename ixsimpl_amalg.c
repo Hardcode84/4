@@ -618,6 +618,119 @@ static int64_t mod_dividend_step(ixs_node *expr) {
   }
 }
 
+IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                              int64_t m) {
+  if (!b || !expr || m <= 0)
+    return false;
+
+  if (expr->tag == IXS_INT)
+    return expr->u.ival % m == 0;
+
+  if (expr->tag == IXS_SYM) {
+    int64_t sym_mod, sym_rem;
+    if (!ixs_bounds_get_modrem(b, expr->u.name, &sym_mod, &sym_rem))
+      return false;
+    return sym_mod % m == 0 && sym_rem % m == 0;
+  }
+
+  if (expr->tag == IXS_MUL && expr->u.mul.coeff->tag == IXS_INT) {
+    int64_t c = expr->u.mul.coeff->u.ival;
+    int64_t remain;
+    uint32_t i;
+    if (c == 0)
+      return true;
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
+        return false;
+    }
+    remain = m / ixs_gcd(c, m);
+    if (remain == 1)
+      return true;
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp >= 1 &&
+          ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, remain))
+        return true;
+    }
+    return false;
+  }
+
+  if (expr->tag == IXS_ADD) {
+    int64_t cp, cq;
+    uint32_t i;
+    ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+    if (cq != 1 || cp % m != 0)
+      return false;
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t tp, tq;
+      int64_t g, remain;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+      if (tq != 1)
+        return false;
+      g = ixs_gcd(tp, m);
+      remain = m / g;
+      if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, remain))
+        return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
+                                                   ixs_node *expr) {
+  if (!expr)
+    return false;
+  if (ixs_node_is_integer_valued(expr))
+    return true;
+  if (!b)
+    return false;
+
+  if (expr->tag == IXS_MUL) {
+    uint32_t i;
+    int64_t cp, cq, g, denom;
+    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp < 0)
+        return false;
+      if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
+        return false;
+    }
+    if (cq <= 1)
+      return true;
+    g = ixs_gcd(cp, cq);
+    denom = cq / g;
+    for (i = 0; i < expr->u.mul.nfactors; i++) {
+      if (expr->u.mul.factors[i].exp >= 1 &&
+          ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, denom))
+        return true;
+    }
+    return false;
+  }
+
+  if (expr->tag == IXS_ADD) {
+    uint32_t i;
+    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.coeff))
+      return false;
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t cp, cq;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
+      if (cq == 1) {
+        if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.terms[i].term))
+          return false;
+      } else {
+        int64_t g = ixs_gcd(cp, cq);
+        int64_t denom = cq / g;
+        if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, denom))
+          return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
 static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
   if (!expr)
@@ -821,11 +934,107 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
   return false;
 }
 
+typedef struct {
+  ixs_node *dividend;
+  int64_t modulus;
+  int64_t remainder;
+} ixs_mod_query;
+
+static bool bounds_extract_mod_query(ixs_node *expr, ixs_mod_query *out) {
+  ixs_node *mod_node;
+  int64_t rem_val;
+
+  if (!expr || !out)
+    return false;
+
+  if (expr->tag == IXS_MOD) {
+    mod_node = expr;
+    rem_val = 0;
+  } else if (expr->tag == IXS_ADD && expr->u.add.nterms == 1 &&
+             expr->u.add.terms[0].term->tag == IXS_MOD) {
+    int64_t cp, cq, kp, kq;
+    ixs_node_get_rat(expr->u.add.terms[0].coeff, &cp, &cq);
+    ixs_node_get_rat(expr->u.add.coeff, &kp, &kq);
+    if (cq != 1 || kq != 1)
+      return false;
+    if (cp == 1) {
+      if (kp == INT64_MIN)
+        return false;
+      rem_val = -kp;
+    } else if (cp == -1) {
+      rem_val = kp;
+    } else {
+      return false;
+    }
+    mod_node = expr->u.add.terms[0].term;
+  } else {
+    return false;
+  }
+
+  if (mod_node->u.binary.rhs->tag != IXS_INT ||
+      mod_node->u.binary.rhs->u.ival <= 0)
+    return false;
+
+  out->dividend = mod_node->u.binary.lhs;
+  out->modulus = mod_node->u.binary.rhs->u.ival;
+  out->remainder = rem_val;
+  return true;
+}
+
+static ixs_check_result bounds_check_mod_query(ixs_bounds *b, ixs_node *cmp) {
+  ixs_mod_query q;
+  int64_t actual;
+  bool known = false;
+  bool equal;
+
+  if (cmp->u.binary.cmp_op != IXS_CMP_EQ && cmp->u.binary.cmp_op != IXS_CMP_NE)
+    return IXS_CHECK_UNKNOWN;
+  if (!bounds_extract_mod_query(cmp->u.binary.lhs, &q))
+    return IXS_CHECK_UNKNOWN;
+
+  if (q.remainder < 0 || q.remainder >= q.modulus) {
+    if (cmp->u.binary.cmp_op == IXS_CMP_EQ)
+      return IXS_CHECK_FALSE;
+    return IXS_CHECK_TRUE;
+  }
+
+  if (q.dividend->tag == IXS_INT) {
+    actual = ((q.dividend->u.ival % q.modulus) + q.modulus) % q.modulus;
+    known = true;
+  } else if (q.dividend->tag == IXS_SYM) {
+    int64_t sym_mod, sym_rem;
+    if (ixs_bounds_get_modrem(b, q.dividend->u.name, &sym_mod, &sym_rem) &&
+        sym_mod % q.modulus == 0) {
+      actual = sym_rem % q.modulus;
+      known = true;
+    }
+  }
+
+  if (!known && q.remainder == 0 &&
+      ixs_bounds_is_known_divisible(b, q.dividend, q.modulus)) {
+    actual = 0;
+    known = true;
+  }
+
+  if (!known)
+    return IXS_CHECK_UNKNOWN;
+
+  equal = actual == q.remainder;
+  if (cmp->u.binary.cmp_op == IXS_CMP_EQ)
+    return equal ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+  return equal ? IXS_CHECK_FALSE : IXS_CHECK_TRUE;
+}
+
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
+  ixs_check_result mod_result;
 
   if (!cmp || cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
     return IXS_CHECK_UNKNOWN;
+
+  mod_result = bounds_check_mod_query(b, cmp);
+  if (mod_result != IXS_CHECK_UNKNOWN)
+    return mod_result;
 
   iv = ixs_bounds_get(b, cmp->u.binary.lhs);
   if (!iv.valid)
@@ -6645,8 +6854,6 @@ static ixs_node *try_rules(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n,
 /* Forward declarations for helpers defined later in this file. */
 static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n, bool is_ceil);
-static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr);
-static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m);
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
@@ -7998,13 +8205,13 @@ static bool addterm_is_integer_valued(ixs_bounds *bnds, ixs_node *coeff,
   int64_t cp, cq;
   ixs_node_get_rat(coeff, &cp, &cq);
   if (cq == 1)
-    return bnds ? is_integer_with_divinfo(bnds, term)
+    return bnds ? ixs_bounds_is_integer_with_divinfo(bnds, term)
                 : ixs_node_is_integer_valued(term);
   if (!bnds)
     return false;
   int64_t g = ixs_gcd(cp, cq);
   int64_t denom = cq / g;
-  return is_known_divisible(bnds, term, denom);
+  return ixs_bounds_is_known_divisible(bnds, term, denom);
 }
 
 /*
@@ -8109,7 +8316,7 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
 
 /* Bounds-aware integer-valued check for a fully constructed node. */
 static bool node_is_integer(ixs_bounds *bnds, ixs_node *n) {
-  return bnds ? is_integer_with_divinfo(bnds, n)
+  return bnds ? ixs_bounds_is_integer_with_divinfo(bnds, n)
               : ixs_node_is_integer_valued(n);
 }
 
@@ -8174,7 +8381,7 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_bounds *bnds,
   /* Check whether distributing outer makes any ADD term integer-valued,
    * OR whether the ADD has a nonzero integer constant and outer is
    * non-integer (distribution exposes the constant for floor_drop_const
-   * or floor_drop_const_sym).  With bounds, is_integer_with_divinfo
+   * or floor_drop_const_sym).  With bounds, ixs_bounds_is_integer_with_divinfo
    * catches rational products like (1/32)*K when 32|K. */
   bool any_int = false;
   ixs_node *coeff_product = simp_mul(ctx, outer, add_node->u.add.coeff);
@@ -8254,7 +8461,7 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
       if (bnds && tq > 1) {
         int64_t g2 = ixs_gcd(atp, tq);
         int64_t denom = tq / g2;
-        if (!is_known_divisible(bnds, x->u.add.terms[i].term, denom))
+        if (!ixs_bounds_is_known_divisible(bnds, x->u.add.terms[i].term, denom))
           return x;
         eff_num = tq; /* product is integer -- effective denom 1 */
       } else {
@@ -8392,7 +8599,8 @@ static sym_term_info classify_sym_terms(ixs_node *x, ixs_node *denom,
         other_ok = false;
         break;
       }
-      iv = bnds ? is_integer_with_divinfo(bnds, t->u.mul.factors[k].base)
+      iv = bnds ? ixs_bounds_is_integer_with_divinfo(bnds,
+                                                     t->u.mul.factors[k].base)
                 : ixs_node_is_integer_valued(t->u.mul.factors[k].base);
       if (!iv) {
         other_ok = false;
@@ -8577,7 +8785,9 @@ static ixs_node *rule_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
 static ixs_node *rule_round_integer_divinfo(ixs_ctx *ctx, ixs_bounds *bnds,
                                             ixs_node *n) {
   (void)ctx;
-  return is_integer_with_divinfo(bnds, n->u.unary.arg) ? n->u.unary.arg : n;
+  return ixs_bounds_is_integer_with_divinfo(bnds, n->u.unary.arg)
+             ? n->u.unary.arg
+             : n;
 }
 
 static ixs_node *rule_round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -9094,7 +9304,7 @@ static ixs_node *mod_scale_extract(ixs_ctx *ctx, ixs_bounds *bnds,
 
   /* When r > 0 the identity requires b/g to be integer-valued;
    * otherwise Mod(g*s + r, g*m) can wrap when s approaches m. */
-  if (kp > 0 && !is_integer_with_divinfo(bnds, new_mod))
+  if (kp > 0 && !ixs_bounds_is_integer_with_divinfo(bnds, new_mod))
     return n;
 
   ixs_node *inner;
@@ -10226,133 +10436,6 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
-/* True when expr is provably divisible by m (m > 0) given bounds.
- * Handles: sym with known congruence, c*sym, sums of divisible terms. */
-static bool is_known_divisible(ixs_bounds *bnds, ixs_node *expr, int64_t m) {
-  if (!bnds || m <= 0)
-    return false;
-
-  /* Integer constant: m | val */
-  if (expr->tag == IXS_INT)
-    return expr->u.ival % m == 0;
-
-  /* Symbol with known congruence: x == r (mod M), divisible by m iff
-   * M % m == 0 && r % m == 0. */
-  if (expr->tag == IXS_SYM) {
-    int64_t sym_mod, sym_rem;
-    if (!ixs_bounds_get_modrem(bnds, expr->u.name, &sym_mod, &sym_rem))
-      return false;
-    return sym_mod % m == 0 && sym_rem % m == 0;
-  }
-
-  /* c * f1^e1 * ... * fn^en: m divides the product when every factor
-   * is integer-valued, the integer coefficient absorbs part of m, and
-   * some factor absorbs the rest.  All factors must be integer-valued;
-   * otherwise a factor like (x+1/2) can consume divisibility from
-   * another factor without contributing an integer to the product. */
-  if (expr->tag == IXS_MUL && expr->u.mul.coeff->tag == IXS_INT) {
-    int64_t c = expr->u.mul.coeff->u.ival;
-    int64_t remain;
-    uint32_t i;
-    if (c == 0)
-      return true;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
-        return false;
-    }
-    remain = m / ixs_gcd(c, m);
-    if (remain == 1)
-      return true;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp >= 1 &&
-          is_known_divisible(bnds, expr->u.mul.factors[i].base, remain))
-        return true;
-    }
-    return false;
-  }
-
-  /* ADD: every term c_i * t_i must be divisible by m, and the constant
-   * term must also be divisible by m. */
-  if (expr->tag == IXS_ADD) {
-    int64_t cp, cq;
-    uint32_t i;
-    ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
-    if (cq != 1 || cp % m != 0)
-      return false;
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      int64_t tp, tq;
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
-      if (tq != 1)
-        return false;
-      int64_t g = ixs_gcd(tp, m);
-      int64_t remain = m / g;
-      if (!is_known_divisible(bnds, expr->u.add.terms[i].term, remain))
-        return false;
-    }
-    return true;
-  }
-
-  return false;
-}
-
-/* True when expr is provably integer-valued given congruence info.
- * Extends ixs_node_is_integer_valued with modular reasoning on MUL
- * and ADD nodes: p/q * f1^e1 * ... is integer when all factors are
- * integer-valued and some factor's congruence absorbs the reduced
- * denominator q/gcd(p,q).  Sufficient OR-of-factors test. */
-static bool is_integer_with_divinfo(ixs_bounds *bnds, ixs_node *expr) {
-  if (ixs_node_is_integer_valued(expr))
-    return true;
-  if (!bnds)
-    return false;
-
-  if (expr->tag == IXS_MUL) {
-    uint32_t i;
-    int64_t cp, cq;
-    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp < 0)
-        return false;
-      if (!is_integer_with_divinfo(bnds, expr->u.mul.factors[i].base))
-        return false;
-    }
-    if (cq <= 1)
-      return true;
-    int64_t g = ixs_gcd(cp, cq);
-    int64_t denom = cq / g;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp >= 1 &&
-          is_known_divisible(bnds, expr->u.mul.factors[i].base, denom))
-        return true;
-    }
-    return false;
-  }
-
-  /* ADD: integer coeff + all integer-valued terms */
-  if (expr->tag == IXS_ADD) {
-    uint32_t i;
-    if (!is_integer_with_divinfo(bnds, expr->u.add.coeff))
-      return false;
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      int64_t cp, cq;
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
-      if (cq == 1) {
-        if (!is_integer_with_divinfo(bnds, expr->u.add.terms[i].term))
-          return false;
-      } else {
-        /* c_i/q_i * t_i: integer if t_i divisible by q_i/gcd(|c_i|,q_i) */
-        int64_t g = ixs_gcd(cp, cq);
-        int64_t denom = cq / g;
-        if (!is_known_divisible(bnds, expr->u.add.terms[i].term, denom))
-          return false;
-      }
-    }
-    return true;
-  }
-
-  return false;
-}
-
 /* Mod(x, M) -> x when 0 <= x < M; -> r when x == r (mod m) and m % M == 0;
  * -> 0 when M | x. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
@@ -10373,7 +10456,8 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
       return ixs_node_int(ctx, sym_rem % r->u.ival);
   }
 
-  if (ixs_node_is_integer_valued(l) && is_known_divisible(bnds, l, r->u.ival))
+  if (ixs_node_is_integer_valued(l) &&
+      ixs_bounds_is_known_divisible(bnds, l, r->u.ival))
     return ixs_node_int(ctx, 0);
 
   return n;

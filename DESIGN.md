@@ -1002,6 +1002,11 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
   special case; `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`.
+- **Modular entailment**: `ixs_check` uses the same congruence facts for
+  `Mod(expr, m) == r` and `Mod(expr, m) != r` queries.  It proves exact
+  symbol remainders when the stored modulus is a multiple of the query
+  modulus, and proves zero remainders for composite expressions through
+  the same sufficient divisibility predicate used by simplification rules.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
@@ -1373,8 +1378,8 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
 // Entailment check: is a boolean expression provably true or false
-// under the given assumptions?  Uses interval propagation only (no
-// rewriting).  Returns IXS_CHECK_TRUE, IXS_CHECK_FALSE, or
+// under the given assumptions?  Uses interval propagation and modular
+// congruence facts, but no rewriting.  Returns IXS_CHECK_TRUE, IXS_CHECK_FALSE, or
 // IXS_CHECK_UNKNOWN.  Lighter than ixs_simplify for pure truth queries.
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
@@ -1991,7 +1996,7 @@ Implementation:
   `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
   entry points.
 - `Context.check(expr, assumptions=[...])` returns `True`, `False`, or `None`
-  for bounds-only entailment checks.  `Context.range(expr,
+  for interval and modular-congruence entailment checks.  `Context.range(expr,
   assumptions=[...])` returns `(lower, upper)` from the same interval engine,
   or `None` when unknown.  Endpoints are Python `int`,
   `fractions.Fraction`, or `None` for an unbounded side.

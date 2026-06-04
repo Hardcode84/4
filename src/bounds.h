@@ -71,6 +71,14 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b);
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem);
 
+/* True when expr is provably divisible by m (m > 0) given bounds. */
+IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                              int64_t m);
+
+/* True when expr is provably integer-valued given congruence info. */
+IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
+                                                   ixs_node *expr);
+
 /* Initialize bounds from an array of assumption nodes.
  * Skips NULL and sentinel assumptions.  Returns false on OOM. */
 IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,

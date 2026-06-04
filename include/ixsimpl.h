@@ -174,11 +174,11 @@ typedef struct {
 } ixs_range_result;
 
 /* Check whether a comparison is provably true or false given the
- * assumptions, using interval propagation.  expr must be a CMP node
- * in normalized form (lhs op 0) -- this is automatic when constructed
- * via ixs_cmp().  Returns UNKNOWN when bounds are insufficient, when
- * expr is not a CMP, or on OOM.  Lighter than ixs_simplify: no
- * rewriting, just bounds setup + interval check. */
+ * assumptions, using interval propagation and modular congruence facts.
+ * expr must be a CMP node in normalized form (lhs op 0) -- this is
+ * automatic when constructed via ixs_cmp().  Returns UNKNOWN when bounds
+ * are insufficient, when expr is not a CMP, or on OOM.  Lighter than
+ * ixs_simplify: no rewriting, just bounds setup + entailment checks. */
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
 

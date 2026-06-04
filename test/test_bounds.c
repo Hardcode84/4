@@ -634,6 +634,85 @@ static void test_bounds_check_ne(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_check_mod_congruence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *assume = ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 256)),
+                             IXS_CMP_EQ, ixs_int(ctx, 0));
+
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+                          ixs_int(ctx, 0)),
+                  &assume, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_NE,
+                          ixs_int(ctx, 0)),
+                  &assume, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+                          ixs_int(ctx, 1)),
+                  &assume, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_NE,
+                          ixs_int(ctx, 1)),
+                  &assume, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 512)), IXS_CMP_EQ,
+                          ixs_int(ctx, 0)),
+                  &assume, 1) == IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_check_mod_remainder(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *assume = ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 8)), IXS_CMP_EQ,
+                             ixs_int(ctx, 3));
+
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_EQ,
+                          ixs_int(ctx, 3)),
+                  &assume, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_EQ,
+                          ixs_int(ctx, 1)),
+                  &assume, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_EQ,
+                          ixs_int(ctx, 7)),
+                  &assume, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 4)), IXS_CMP_NE,
+                          ixs_int(ctx, 7)),
+                  &assume, 1) == IXS_CHECK_TRUE);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_check_composite_divisibility(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *K = ixs_sym(ctx, "K");
+  ixs_node *N = ixs_sym(ctx, "N");
+  ixs_node *assumes[2];
+
+  assumes[0] = ixs_cmp(ctx, ixs_mod(ctx, K, ixs_int(ctx, 32)), IXS_CMP_EQ,
+                       ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, ixs_mod(ctx, N, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                       ixs_int(ctx, 0));
+
+  CHECK(ixs_check(ctx,
+                  ixs_cmp(ctx,
+                          ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), K),
+                                  ixs_int(ctx, 32)),
+                          IXS_CMP_EQ, ixs_int(ctx, 0)),
+                  assumes, 2) == IXS_CHECK_TRUE);
+  CHECK(
+      ixs_check(ctx,
+                ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, K, N), ixs_int(ctx, 16)),
+                        IXS_CMP_EQ, ixs_int(ctx, 0)),
+                assumes, 2) == IXS_CHECK_TRUE);
+  ixs_ctx_destroy(ctx);
+}
+
 /* Non-CMP input returns UNKNOWN. */
 static void test_bounds_check_non_cmp(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -801,6 +880,9 @@ int main(void) {
   test_bounds_check_unknown();
   test_bounds_check_eq();
   test_bounds_check_ne();
+  test_bounds_check_mod_congruence();
+  test_bounds_check_mod_remainder();
+  test_bounds_check_composite_divisibility();
   test_bounds_check_non_cmp();
 
   /* Bounds: public range API */

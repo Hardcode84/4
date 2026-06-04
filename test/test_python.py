@@ -1596,6 +1596,29 @@ def test_check_two_sided_bounds() -> None:
     assert ctx.check(N > 5, assumptions=assumes) is None
 
 
+def test_check_modular_entailment() -> None:
+    ctx = ixsimpl.Context()
+    K = ctx.sym("K")
+    N = ctx.sym("N")
+
+    assume_k_256 = [ctx.eq(K % 256, 0)]
+    assert ctx.check(ctx.eq(K % 32, 0), assumptions=assume_k_256) is True
+    assert ctx.check(ctx.ne(K % 32, 0), assumptions=assume_k_256) is False
+    assert ctx.check(ctx.eq(K % 32, 1), assumptions=assume_k_256) is False
+    assert ctx.check(ctx.ne(K % 32, 1), assumptions=assume_k_256) is True
+    assert ctx.check(ctx.eq(K % 512, 0), assumptions=assume_k_256) is None
+
+    assume_k_rem = [ctx.eq(K % 8, 3)]
+    assert ctx.check(ctx.eq(K % 4, 3), assumptions=assume_k_rem) is True
+    assert ctx.check(ctx.eq(K % 4, 1), assumptions=assume_k_rem) is False
+    assert ctx.check(ctx.eq(K % 4, 7), assumptions=assume_k_rem) is False
+    assert ctx.check(ctx.ne(K % 4, 7), assumptions=assume_k_rem) is True
+
+    assumes = [ctx.eq(K % 32, 0), ctx.eq(N % 16, 0)]
+    assert ctx.check(ctx.eq((3 * K) % 32, 0), assumptions=assumes) is True
+    assert ctx.check(ctx.eq((K + N) % 16, 0), assumptions=assumes) is True
+
+
 def test_check_no_assumptions() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
