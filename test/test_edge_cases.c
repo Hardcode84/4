@@ -9,6 +9,7 @@
 
 #include <ixsimpl.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_check.h"
@@ -215,7 +216,46 @@ static void test_max_depth_expressions(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  7. Sentinel propagation through all operations                    */
+/*  7. Long parser prefixes: unary '-' and predicate '~'               */
+/* ------------------------------------------------------------------ */
+
+static void test_long_prefix_parse(void) {
+  enum { PREFIX_LEN = 65536 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  char *input;
+  ixs_node *r;
+
+  input = malloc(PREFIX_LEN + 6);
+  CHECK(input != NULL);
+  if (!input) {
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+
+  memset(input, '-', PREFIX_LEN);
+  input[PREFIX_LEN] = 'x';
+  input[PREFIX_LEN + 1] = '\0';
+  r = ixs_parse_expr(ctx, input, PREFIX_LEN + 1);
+  CHECK(r && !ixs_is_error(r));
+  CHECK(ixs_node_tag(r) == IXS_SYM);
+
+  memset(input, '-', PREFIX_LEN + 1);
+  input[PREFIX_LEN + 1] = 'x';
+  input[PREFIX_LEN + 2] = '\0';
+  r = ixs_parse_expr(ctx, input, PREFIX_LEN + 2);
+  CHECK(r && !ixs_is_error(r));
+
+  memset(input, '~', PREFIX_LEN);
+  memcpy(input + PREFIX_LEN, "x > 0", 6);
+  r = ixs_parse_pred(ctx, input, PREFIX_LEN + 5);
+  CHECK(r && !ixs_is_error(r));
+
+  free(input);
+  ixs_ctx_destroy(ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/*  8. Sentinel propagation through all operations                    */
 /* ------------------------------------------------------------------ */
 
 static void test_sentinel_propagation(void) {
@@ -303,7 +343,7 @@ static void test_sentinel_propagation(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  8. Large integers: parse and display near INT64_MAX                */
+/*  9. Large integers: parse and display near INT64_MAX                */
 /* ------------------------------------------------------------------ */
 
 static void test_large_integers(void) {
@@ -326,7 +366,7 @@ static void test_large_integers(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  9. Symbol edge cases: $ prefix, single-char, long names             */
+/*  10. Symbol edge cases: $ prefix, single-char, long names            */
 /* ------------------------------------------------------------------ */
 
 static void test_symbol_edge_cases(void) {
@@ -354,7 +394,7 @@ static void test_symbol_edge_cases(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  10. Print buffer: too small should truncate safely                  */
+/*  11. Print buffer: too small should truncate safely                  */
 /* ------------------------------------------------------------------ */
 
 static void test_print_buffer(void) {
@@ -396,6 +436,7 @@ int main(void) {
   test_int64_min_handling();
   test_empty_null_inputs();
   test_max_depth_expressions();
+  test_long_prefix_parse();
   test_sentinel_propagation();
   test_large_integers();
   test_symbol_edge_cases();

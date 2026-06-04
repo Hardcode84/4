@@ -152,15 +152,16 @@ Passing a node from one store to a different store is **undefined behavior**
 (dangling arena pointer, wrong hash table). Structural import is the only
 supported cross-store bridge.
 
-**Depth limit**: The parser enforces a recursion depth limit (default 256).
-Trees built programmatically via the API have no depth limit. The simplifier,
-printer, and `ixs_subs` traverse the DAG recursively. `ixs_subs` uses a
-256-slot direct-mapped memo cache (4 KB on the stack) keyed by node pointer
-to avoid exponential re-traversal of shared subexpressions; collisions only
-cause redundant work, never incorrect results. For expressions built
-from the corpus (max depth 11) this is safe. Deliberately constructing
-extremely deep trees (depth > ~10,000) via the API may cause stack overflow.
-This is considered acceptable for the target domain.
+**Depth limit**: The parser enforces a recursion depth limit (default 256) for
+nested grammar recursion. Long chains of unary `-` and predicate `~` prefixes
+are consumed iteratively. Trees built programmatically via the API have no
+depth limit. The simplifier, printer, and `ixs_subs` traverse the DAG
+recursively. `ixs_subs` uses a 256-slot direct-mapped memo cache (4 KB on the
+stack) keyed by node pointer to avoid exponential re-traversal of shared
+subexpressions; collisions only cause redundant work, never incorrect results.
+For expressions built from the corpus (max depth 11) this is safe.
+Deliberately constructing extremely deep trees (depth > ~10,000) via the API
+may cause stack overflow. This is considered acceptable for the target domain.
 
 ### Layer 0: Memory — Arena Allocator
 
@@ -586,7 +587,7 @@ deep inputs. The grammar is small:
 ```
 expr     = term (('+' | '-') term)*
 term     = unary (('*' | '/') unary)*
-unary    = '-' unary | atom
+unary    = '-'* atom
 atom     = INT | SYMBOL
          | 'floor' '(' expr ')'
          | 'ceiling' '(' expr ')'
@@ -598,8 +599,8 @@ atom     = INT | SYMBOL
          | '(' expr ')'
 pw_cases = '(' expr ',' cond ')' (',' '(' expr ',' cond ')')*
 cond     = cmp_expr (('&' | '|') cmp_expr)*
-cmp_expr = '~' cmp_expr | expr cmp_op expr | 'True' | 'False'
-           | '(' cond ')' | expr
+cmp_expr = '~'* cmp_body
+cmp_body = expr cmp_op expr | 'True' | 'False' | '(' cond ')' | expr
 cmp_op   = '>' | '<' | '>=' | '<=' | '==' | '!='
 ```
 

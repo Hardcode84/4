@@ -167,6 +167,13 @@ def test_parse_error_sentinel() -> None:
     assert e.tag == ixsimpl.PARSE_ERROR
 
 
+def test_parse_long_unary_minus_chain() -> None:
+    ctx = ixsimpl.Context()
+    expr = ctx.parse("-" * 2_000_000 + "x")
+    assert not expr.is_error
+    assert str(expr) == "x"
+
+
 def test_error_propagation() -> None:
     ctx = ixsimpl.Context()
     err = ctx.parse_expr("???")

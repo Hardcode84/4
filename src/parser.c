@@ -329,15 +329,20 @@ static ixs_node *parse_atom(parser *p) {
 }
 
 static ixs_node *parse_unary(parser *p) {
+  bool neg = false;
+  ixs_node *a;
+
   skip_ws(p);
-  if (peek(p) == '-') {
+  /* Prefix chains are input-length bounded, not grammar-depth bounded. */
+  while (peek(p) == '-') {
     match_char(p, '-');
-    ixs_node *a = parse_unary(p);
-    if (!a)
-      return NULL;
-    return simp_neg(p->ctx, a);
+    neg = !neg;
   }
-  return parse_atom(p);
+
+  a = parse_atom(p);
+  if (!a || !neg)
+    return a;
+  return simp_neg(p->ctx, a);
 }
 
 static ixs_node *parse_term(parser *p) {
@@ -415,25 +420,28 @@ static ixs_node *coerce_expr_to_pred(parser *p, ixs_node *node) {
 static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr);
 
 static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
+  bool saw_not = false;
+  bool invert = false;
+  ixs_node *result;
+
   skip_ws(p);
 
-  /* ~expr */
-  if (peek(p) == '~') {
+  /* Prefix chains are input-length bounded, not grammar-depth bounded. */
+  while (peek(p) == '~') {
     match_char(p, '~');
-    ixs_node *a = parse_cmp_expr(p, false);
-    if (!a)
-      return NULL;
-    a = coerce_expr_to_pred(p, a);
-    if (!a)
-      return NULL;
-    return simp_not(p->ctx, a);
+    saw_not = true;
+    invert = !invert;
   }
 
   /* True / False */
-  if (match_str(p, "True"))
-    return p->ctx->node_true;
-  if (match_str(p, "False"))
-    return p->ctx->node_false;
+  if (match_str(p, "True")) {
+    result = p->ctx->node_true;
+    goto apply_not;
+  }
+  if (match_str(p, "False")) {
+    result = p->ctx->node_false;
+    goto apply_not;
+  }
 
   /* (cond) */
   if (peek(p) == '(') {
@@ -443,7 +451,8 @@ static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
       return NULL;
     if (!match_char(p, ')'))
       return parse_error(p, "expected ')' in condition");
-    return c;
+    result = c;
+    goto apply_not;
   }
 
   /* expr [cmp_op expr] */
@@ -489,12 +498,20 @@ static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
     ixs_node *right = parse_expr(p);
     if (!right)
       return NULL;
-    return simp_cmp(p->ctx, left, op, right);
+    result = simp_cmp(p->ctx, left, op, right);
+    goto apply_not;
   }
 
-  if (allow_top_level_expr)
-    return left;
-  return coerce_expr_to_pred(p, left);
+  result =
+      allow_top_level_expr && !saw_not ? left : coerce_expr_to_pred(p, left);
+
+apply_not:
+  if (!result || !saw_not)
+    return result;
+  result = coerce_expr_to_pred(p, result);
+  if (!result || !invert)
+    return result;
+  return simp_not(p->ctx, result);
 }
 
 static ixs_node *parse_cond(parser *p, bool allow_top_level_expr) {
