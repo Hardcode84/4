@@ -346,6 +346,36 @@ static PyObject *Expr_mod(PyObject *a, PyObject *b) {
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
+static PyObject *Expr_and(PyObject *a, PyObject *b) {
+  ContextObject *ctx_obj = binop_ctx(a, b);
+  ixs_node *na, *nb, *result;
+  if (!ctx_obj)
+    Py_RETURN_NOTIMPLEMENTED;
+  na = coerce_arg(ctx_obj, a);
+  if (!na)
+    return NULL;
+  nb = coerce_arg(ctx_obj, b);
+  if (!nb)
+    return NULL;
+  result = ixs_and(Context_session(ctx_obj), na, nb);
+  return (PyObject *)Expr_wrap(ctx_obj, result);
+}
+
+static PyObject *Expr_or(PyObject *a, PyObject *b) {
+  ContextObject *ctx_obj = binop_ctx(a, b);
+  ixs_node *na, *nb, *result;
+  if (!ctx_obj)
+    Py_RETURN_NOTIMPLEMENTED;
+  na = coerce_arg(ctx_obj, a);
+  if (!na)
+    return NULL;
+  nb = coerce_arg(ctx_obj, b);
+  if (!nb)
+    return NULL;
+  result = ixs_or(Context_session(ctx_obj), na, nb);
+  return (PyObject *)Expr_wrap(ctx_obj, result);
+}
+
 static PyObject *Expr_neg(ExprObject *self) {
   ixs_node *result = ixs_neg(Context_session(self->ctx_obj), self->node);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
@@ -359,6 +389,8 @@ static PyNumberMethods Expr_as_number = {
     .nb_bool = (inquiry)Expr_bool,
     .nb_int = (unaryfunc)Expr_int,
     .nb_remainder = Expr_mod,
+    .nb_and = Expr_and,
+    .nb_or = Expr_or,
     .nb_true_divide = Expr_truediv,
 };
 

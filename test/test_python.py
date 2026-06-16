@@ -163,7 +163,21 @@ small_rats = st.tuples(st.integers(min_value=-64, max_value=64), pos_ints).map(
 )
 
 
-_OPS_BASE = ["add", "sub", "mul", "neg", "div", "floor", "ceiling", "mod", "max", "min", "xor"]
+_OPS_BASE = [
+    "add",
+    "sub",
+    "mul",
+    "neg",
+    "div",
+    "floor",
+    "ceiling",
+    "mod",
+    "max",
+    "min",
+    "xor",
+    "bitand",
+    "bitor",
+]
 _OPS_WITH_PW = [*_OPS_BASE, "piecewise"]
 
 
@@ -212,7 +226,7 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
         return (op, a, cond, default)
     if op == "mod" or op == "div":
         b = draw(pos_ints)
-    elif op == "xor":
+    elif op in ("xor", "bitand", "bitor"):
         if draw(st.integers(min_value=0, max_value=3)) == 0:
             a = draw(st.one_of(sym_names, small_ints))
             b = draw(st.one_of(sym_names, small_ints))
@@ -290,6 +304,10 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "xor":
         raise ValueError("xor not supported in SymPy conversion")
+    if op == "bitand":
+        return sympy.Function("bitand")(to_sympy(tree[1]), to_sympy(tree[2]))
+    if op == "bitor":
+        return sympy.Function("bitor")(to_sympy(tree[1]), to_sympy(tree[2]))
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         cases = [(to_sympy(tree[1 + 2 * i]), to_sympy_cond(tree[2 + 2 * i])) for i in range(ncases)]
@@ -356,6 +374,10 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
         return ixsimpl.min_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "xor":
         return ixsimpl.xor_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+    if op == "bitand":
+        return to_ixsimpl(ctx, tree[1]) & to_ixsimpl(ctx, tree[2])
+    if op == "bitor":
+        return to_ixsimpl(ctx, tree[1]) | to_ixsimpl(ctx, tree[2])
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         cases = [
@@ -446,6 +468,10 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
         return min(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "xor":
         return int(eval_expr(tree[1], env)) ^ int(eval_expr(tree[2], env))
+    if op == "bitand":
+        return int(eval_expr(tree[1], env)) & int(eval_expr(tree[2], env))
+    if op == "bitor":
+        return int(eval_expr(tree[1], env)) | int(eval_expr(tree[2], env))
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         for i in range(ncases):
@@ -1867,6 +1893,20 @@ def test_percent_operator_builds_mod() -> None:
     assert ixsimpl.same_node(x % 4, ixsimpl.mod(x, 4))
     assert ixsimpl.same_node(17 % x, ixsimpl.mod(ctx.int_(17), x))
     assert (x % 4).eval({"x": -7}) == 1
+
+
+def test_bitwise_operators_build_and_or() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+
+    assert ixsimpl.same_node(x & y, ixsimpl.and_(x, y))
+    assert ixsimpl.same_node(x | y, ixsimpl.or_(x, y))
+    assert ixsimpl.same_node(x & 3, ixsimpl.and_(x, 3))
+    assert ixsimpl.same_node(3 & x, ixsimpl.and_(ctx.int_(3), x))
+    assert ixsimpl.same_node(x | 1, ixsimpl.or_(x, 1))
+    assert ixsimpl.same_node(1 | x, ixsimpl.or_(ctx.int_(1), x))
+    assert (x & 3).eval({"x": 6}) == 2
+    assert (x | 1).eval({"x": 6}) == 7
 
 
 def test_lambdify_single_expr() -> None:

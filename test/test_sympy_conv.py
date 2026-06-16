@@ -192,10 +192,14 @@ def test_to_sympy_piecewise_truthy_conditions(
     assert sp.subs({sx: 2}) == 1
     assert sp.subs({sx: 0}) == 0
 
-    bitwise_pw = ixsimpl.pw((ctx.int_(1), ixsimpl.and_(x, y)), (ctx.int_(0), ctx.true_()))
+    bitwise_pw = ixsimpl.pw((ctx.int_(1), x & y), (ctx.int_(0), ctx.true_()))
     bitwise_sp = to_sympy(bitwise_pw)
     assert isinstance(bitwise_sp, sympy.Piecewise)
-    assert bitwise_sp.args[0].cond == sympy.Ne(sympy.Function("bitand")(sx, sy), 0)
+    cond = bitwise_sp.args[0].cond
+    assert isinstance(cond, sympy.Ne)
+    assert cond.lhs.func.__name__ == "bitand"
+    assert cond.lhs.args == (sx, sy)
+    assert cond.rhs == 0
 
 
 def test_to_sympy_xor_default(
@@ -314,11 +318,15 @@ def test_from_sympy_logic(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]
 
 
 def test_sympy_bitwise_and_or(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
-    bitand = to_sympy(ixsimpl.and_(syms["x"], syms["y"]))
-    bitor = to_sympy(ixsimpl.or_(syms["x"], syms["y"]))
+    bitand = to_sympy(syms["x"] & syms["y"])
+    bitor = to_sympy(syms["x"] | syms["y"])
 
     assert bitand.func.__name__ == "bitand"
     assert bitor.func.__name__ == "bitor"
+    bitand_env = {sympy.Symbol("x", integer=True): 6, sympy.Symbol("y", integer=True): 3}
+    bitor_env = {sympy.Symbol("x", integer=True): 4, sympy.Symbol("y", integer=True): 1}
+    assert bitand.subs(bitand_env) == 2
+    assert bitor.subs(bitor_env) == 5
     assert from_sympy(ctx, bitand).tag == ixsimpl.AND
     assert from_sympy(ctx, bitor).tag == ixsimpl.OR
 
@@ -331,11 +339,11 @@ def test_to_sympy_numeric_predicates_in_logic(
     sp_or = to_sympy(ixsimpl.or_(bool_num, syms["y"] > 0))
     sp_not = to_sympy(ixsimpl.not_(bool_num))
 
-    assert isinstance(sp_and, sympy.And)
-    assert isinstance(sp_or, sympy.Or)
+    assert sp_and.func.__name__ == "bitand"
+    assert sp_or.func.__name__ == "bitor"
     assert isinstance(sp_not, sympy.core.relational.Relational)
-    assert any(isinstance(arg, sympy.Ne) for arg in sp_and.args)
-    assert any(isinstance(arg, sympy.Ne) for arg in sp_or.args)
+    assert all(not isinstance(arg, sympy.core.relational.Relational) for arg in sp_and.args)
+    assert all(not isinstance(arg, sympy.core.relational.Relational) for arg in sp_or.args)
 
 
 def test_from_sympy_bool(ctx: ixsimpl.Context) -> None:

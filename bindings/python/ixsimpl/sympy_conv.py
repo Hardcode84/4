@@ -23,6 +23,28 @@ _CMP_TO_SYMPY: dict[int, type[sympy.core.relational.Relational]] = {
 }
 
 
+class bitand(sympy.Function):  # type: ignore[misc]
+    @classmethod
+    def eval(cls, *args: Any) -> sympy.Integer | None:
+        if args and all(isinstance(arg, sympy.Integer) for arg in args):
+            result = int(args[0])
+            for arg in args[1:]:
+                result &= int(arg)
+            return sympy.Integer(result)
+        return None
+
+
+class bitor(sympy.Function):  # type: ignore[misc]
+    @classmethod
+    def eval(cls, *args: Any) -> sympy.Integer | None:
+        if args and all(isinstance(arg, sympy.Integer) for arg in args):
+            result = int(args[0])
+            for arg in args[1:]:
+                result |= int(arg)
+            return sympy.Integer(result)
+        return None
+
+
 def to_sympy(
     expr: ixsimpl.Expr,
     *,
@@ -66,6 +88,19 @@ def to_sympy(
         ):
             return converted
         return sympy.Ne(converted, 0)
+
+    def _convert_bitwise_arg(node: ixsimpl.Expr) -> sympy.Basic:
+        converted = _convert(node)
+        if isinstance(
+            converted,
+            (
+                sympy.logic.boolalg.BooleanAtom,
+                sympy.logic.boolalg.BooleanFunction,
+                sympy.core.relational.Relational,
+            ),
+        ):
+            return sympy.Piecewise((sympy.Integer(1), converted), (sympy.Integer(0), True))
+        return converted
 
     tag = expr.tag
 
@@ -128,18 +163,12 @@ def to_sympy(
         return rel(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.AND:
-        if expr.is_pred:
-            args = [_convert_cond(expr.child(i)) for i in range(expr.nchildren)]
-            return sympy.And(*args)
-        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
-        return sympy.Function("bitand")(*args)
+        args = [_convert_bitwise_arg(expr.child(i)) for i in range(expr.nchildren)]
+        return bitand(*args)
 
     if tag == ixsimpl.OR:
-        if expr.is_pred:
-            args = [_convert_cond(expr.child(i)) for i in range(expr.nchildren)]
-            return sympy.Or(*args)
-        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
-        return sympy.Function("bitor")(*args)
+        args = [_convert_bitwise_arg(expr.child(i)) for i in range(expr.nchildren)]
+        return bitor(*args)
 
     if tag == ixsimpl.NOT:
         child = expr.child(0)

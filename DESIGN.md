@@ -1984,6 +1984,8 @@ e4 = ixsimpl.min_(x, y)
 e5 = ixsimpl.pw((x, x >= 0), (-x, ctx.true_()))  # piecewise
 cond = ixsimpl.and_(x >= 0, y >= 0)               # bitwise on 0/1 predicates
 cond2 = ixsimpl.or_(x >= 0, y >= 0)
+mask = x & 3                  # equivalent to ixsimpl.and_(x, 3)
+flags = x | y                 # equivalent to ixsimpl.or_(x, y)
 cond3 = ixsimpl.not_(x >= 0)
 e5 = ixsimpl.ceil(x / 4)
 
@@ -2019,8 +2021,9 @@ Implementation:
   assumptions=[...])` returns `(lower, upper)` from the same interval engine,
   or `None` when unknown.  Endpoints are Python `int`,
   `fractions.Fraction`, or `None` for an unbounded side.
-- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__neg__`,
-  `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__` (comparisons return
+- Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__and__`,
+  `__or__`, `__neg__`, `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__`
+  (comparisons return
   `Expr` nodes, not Python `bool`, so they can be used as assumptions).
 - `Context.int_(val)` creates an `IXS_INT` node (wraps `ixs_int`).
 - NULL (OOM) raises `MemoryError`. Sentinel propagates as a regular Expr.
