@@ -193,7 +193,7 @@ def test_kind_aware_parse_surface() -> None:
     assert expr.is_expr
     assert not expr.is_pred
     assert pred.is_pred
-    assert not pred.is_expr
+    assert pred.is_expr
 
     ctx.clear_errors()
     wrong_kind = ctx.parse_pred("x + 1")
@@ -210,10 +210,11 @@ def test_kind_aware_parse_surface() -> None:
     assert legacy_wrong_kind.is_parse_error
     assert any("expected expression, got predicate" in err for err in ctx.errors)
 
-    ctx.clear_errors()
-    bool_wrong_kind = ctx.parse_expr("True")
-    assert bool_wrong_kind.is_parse_error
-    assert any("expected expression, got predicate" in err for err in ctx.errors)
+    expr_true = ctx.parse_expr("True")
+    assert expr_true.tag == ixsimpl.INT
+    assert int(expr_true) == 1
+    assert expr_true.is_expr
+    assert expr_true.is_pred
 
     ctx.clear_errors()
     bare_expr_pred = ctx.parse_pred("x")
@@ -229,6 +230,14 @@ def test_kind_aware_parse_surface() -> None:
     legacy_domain = ctx.parse("x > 1/0")
     assert legacy_domain.is_domain_error
     assert any("division by zero" in err for err in ctx.errors)
+
+
+def test_is_pred_deep_binary_chain() -> None:
+    ctx = ixsimpl.Context()
+    expr = ctx.true_()
+    for i in range(5000):
+        expr = ixsimpl.and_(expr, ctx.sym(f"p{i}") > 0)
+    assert expr.is_pred
 
 
 def test_is_error_on_valid() -> None:

@@ -101,15 +101,14 @@ ixs_ctx *ixs_ctx_create(void) {
   /* Create singletons. */
   tmp.sentinel_error = make_singleton(&tmp, IXS_ERROR, 0xDEAD);
   tmp.sentinel_parse_error = make_singleton(&tmp, IXS_PARSE_ERROR, 0xBEEF);
-  tmp.node_true = make_singleton(&tmp, IXS_TRUE, 1);
-  tmp.node_false = make_singleton(&tmp, IXS_FALSE, 0);
 
-  if (!tmp.sentinel_error || !tmp.sentinel_parse_error || !tmp.node_true ||
-      !tmp.node_false)
+  if (!tmp.sentinel_error || !tmp.sentinel_parse_error)
     goto fail;
 
   tmp.node_zero = ixs_node_int(&tmp, 0);
   tmp.node_one = ixs_node_int(&tmp, 1);
+  tmp.node_false = tmp.node_zero;
+  tmp.node_true = tmp.node_one;
 
   if (!tmp.node_zero || !tmp.node_one)
     goto fail;

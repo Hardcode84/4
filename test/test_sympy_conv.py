@@ -180,6 +180,24 @@ def test_to_sympy_piecewise(
     assert len(sp.args) == 2
 
 
+def test_to_sympy_piecewise_truthy_conditions(
+    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
+) -> None:
+    x, y = syms["x"], syms["y"]
+    sx, sy = sp_syms["x"], sp_syms["y"]
+
+    pw = ixsimpl.pw((ctx.int_(1), x), (ctx.int_(0), ctx.true_()))
+    sp = to_sympy(pw)
+    assert isinstance(sp, sympy.Piecewise)
+    assert sp.subs({sx: 2}) == 1
+    assert sp.subs({sx: 0}) == 0
+
+    bitwise_pw = ixsimpl.pw((ctx.int_(1), ixsimpl.and_(x, y)), (ctx.int_(0), ctx.true_()))
+    bitwise_sp = to_sympy(bitwise_pw)
+    assert isinstance(bitwise_sp, sympy.Piecewise)
+    assert bitwise_sp.args[0].cond == sympy.Ne(sympy.Function("bitand")(sx, sy), 0)
+
+
 def test_to_sympy_xor_default(
     ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
 ) -> None:
@@ -207,8 +225,8 @@ def test_to_sympy_symbol_map_propagates(
 
 
 def test_to_sympy_bool(ctx: ixsimpl.Context) -> None:
-    assert to_sympy(ctx.true_()) is sympy.true
-    assert to_sympy(ctx.false_()) is sympy.false
+    assert to_sympy(ctx.true_()) == sympy.Integer(1)
+    assert to_sympy(ctx.false_()) == sympy.Integer(0)
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +313,38 @@ def test_from_sympy_logic(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]
     assert o.tag == ixsimpl.OR
 
 
+def test_sympy_bitwise_and_or(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
+    bitand = to_sympy(ixsimpl.and_(syms["x"], syms["y"]))
+    bitor = to_sympy(ixsimpl.or_(syms["x"], syms["y"]))
+
+    assert bitand.func.__name__ == "bitand"
+    assert bitor.func.__name__ == "bitor"
+    assert from_sympy(ctx, bitand).tag == ixsimpl.AND
+    assert from_sympy(ctx, bitor).tag == ixsimpl.OR
+
+
+def test_to_sympy_numeric_predicates_in_logic(
+    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]
+) -> None:
+    bool_num = ixsimpl.pw((ctx.int_(1), syms["x"] > 0), (ctx.int_(0), ctx.true_()))
+    sp_and = to_sympy(ixsimpl.and_(bool_num, syms["y"] > 0))
+    sp_or = to_sympy(ixsimpl.or_(bool_num, syms["y"] > 0))
+    sp_not = to_sympy(ixsimpl.not_(bool_num))
+
+    assert isinstance(sp_and, sympy.And)
+    assert isinstance(sp_or, sympy.Or)
+    assert isinstance(sp_not, sympy.core.relational.Relational)
+    assert any(isinstance(arg, sympy.Ne) for arg in sp_and.args)
+    assert any(isinstance(arg, sympy.Ne) for arg in sp_or.args)
+
+
 def test_from_sympy_bool(ctx: ixsimpl.Context) -> None:
-    assert from_sympy(ctx, sympy.true).tag == ixsimpl.TRUE
-    assert from_sympy(ctx, sympy.false).tag == ixsimpl.FALSE
+    t = from_sympy(ctx, sympy.true)
+    f = from_sympy(ctx, sympy.false)
+    assert t.tag == ixsimpl.INT
+    assert int(t) == 1
+    assert f.tag == ixsimpl.INT
+    assert int(f) == 0
 
 
 def test_from_sympy_huge_exponent(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:

@@ -809,7 +809,7 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
 
     # SymPy Max/Min reject unevaluated Mod nodes as "not comparable".
     try:
-        sp_converted = conv_to_sympy(ixs_expr)
+        sp_converted = conv_to_sympy(ixs_expr, xor_fn=sympy.Function("xor"))
     except (ValueError, TypeError):
         assume(False)
 
@@ -898,7 +898,7 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
     # as "not comparable", and some ixsimpl constructs have no SymPy
     # equivalent.  Skip rather than fail.
     try:
-        sp_expr = conv_to_sympy(original)
+        sp_expr = conv_to_sympy(original, xor_fn=sympy.Function("xor"))
     except (ValueError, TypeError):
         assume(False)
     try:

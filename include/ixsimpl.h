@@ -153,6 +153,7 @@ ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_not(ixs_session *s, ixs_node *a);
+/* Convenience names for integer 1 and 0. */
 ixs_node *ixs_true(ixs_session *s);
 ixs_node *ixs_false(ixs_session *s);
 
@@ -362,7 +363,8 @@ uint32_t ixs_node_pw_ncases(ixs_node *node);
 ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i);
 ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
 
-/* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
+/* Only valid when tag is IXS_AND or IXS_OR.  New nodes are binary, but
+ * deserialized legacy nodes may have more children. i must be < nargs. */
 uint32_t ixs_node_logic_nargs(ixs_node *node);
 ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
 

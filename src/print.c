@@ -314,7 +314,12 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
       pb_char(pb, '(');
       print_node(pb, n->u.pw.cases[i].value, PREC_TOP);
       pb_str(pb, ", ");
-      print_node(pb, n->u.pw.cases[i].cond, PREC_TOP);
+      if (ixs_node_is_known_true(n->u.pw.cases[i].cond))
+        pb_str(pb, "True");
+      else if (ixs_node_is_known_false(n->u.pw.cases[i].cond))
+        pb_str(pb, "False");
+      else
+        print_node(pb, n->u.pw.cases[i].cond, PREC_TOP);
       pb_char(pb, ')');
     }
     pb_char(pb, ')');

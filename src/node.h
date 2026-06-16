@@ -189,10 +189,14 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b);
 IXS_STATIC bool ixs_node_is_const(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_zero(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_one(const ixs_node *n);
+IXS_STATIC bool ixs_node_is_true_value(const ixs_node *n);
+IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n);
+IXS_STATIC bool ixs_node_is_known_true(const ixs_node *n);
 IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q);
 IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n);
+IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n);
 
 /* True if the node is guaranteed to produce an integer for all
  * variable assignments.  Conservative: may return false for some

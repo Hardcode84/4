@@ -365,22 +365,48 @@ static void test_mod_rules(void) {
 static void test_boolean(void) {
   ixs_ctx *ctx = get_ctx();
 
-  /* True & x -> x */
+  /* Boolean constants are integer 1/0. */
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *cmp = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
-  CHECK(ixs_and(ctx, ixs_true(ctx), cmp) == cmp);
+  CHECK(ixs_node_tag(ixs_true(ctx)) == IXS_INT);
+  CHECK(ixs_node_int_val(ixs_true(ctx)) == 1);
+  CHECK(ixs_node_tag(ixs_false(ctx)) == IXS_INT);
+  CHECK(ixs_node_int_val(ixs_false(ctx)) == 0);
 
-  /* False & x -> False */
+  /* 1 & bool -> bool, but 1 & arbitrary integer stays bitwise. */
+  CHECK(ixs_and(ctx, ixs_true(ctx), cmp) == cmp);
+  CHECK(ixs_node_tag(ixs_and(ctx, ixs_true(ctx), x)) == IXS_AND);
+
+  /* 0 & x -> 0 */
   CHECK(ixs_and(ctx, ixs_false(ctx), cmp) == ixs_false(ctx));
 
-  /* True | x -> True */
+  /* 1 | bool -> 1, but 1 | arbitrary integer stays bitwise. */
   CHECK(ixs_or(ctx, ixs_true(ctx), cmp) == ixs_true(ctx));
+  CHECK(ixs_node_tag(ixs_or(ctx, ixs_true(ctx), x)) == IXS_OR);
 
-  /* ~True -> False */
+  /* Integer constants fold with bitwise semantics. */
+  CHECK(ixs_node_int_val(ixs_and(ctx, ixs_int(ctx, 6), ixs_int(ctx, 3))) == 2);
+  CHECK(ixs_node_int_val(ixs_or(ctx, ixs_int(ctx, 4), ixs_int(ctx, 1))) == 5);
+
+  /* Bitwise nodes are integer-valued only when their operands are. */
+  {
+    ixs_node *bad = ixs_and(ctx, ixs_rat(ctx, 1, 2), x);
+    CHECK(ixs_node_tag(ixs_floor(ctx, bad)) == IXS_FLOOR);
+  }
+
+  /* ~ is logical truthiness, not bitwise complement. */
   CHECK(ixs_not(ctx, ixs_true(ctx)) == ixs_false(ctx));
+  CHECK(ixs_not(ctx, ixs_int(ctx, 42)) == ixs_false(ctx));
 
-  /* ~~x -> x */
+  /* ~~bool -> bool */
   CHECK(ixs_not(ctx, ixs_not(ctx, cmp)) == cmp);
+
+  /* ~~arbitrary integer -> x != 0 */
+  {
+    ixs_node *nnx = ixs_not(ctx, ixs_not(ctx, x));
+    CHECK(ixs_node_tag(nnx) == IXS_CMP);
+    CHECK(ixs_node_cmp_op(nnx) == IXS_CMP_NE);
+  }
 }
 
 static void test_simplify_with_bounds(void) {
@@ -970,6 +996,20 @@ static void test_large_expressions(void) {
     CHECK(ixs_node_tag(conj) == IXS_AND);
   }
 
+  /* Deep binary predicate chain: is_pred must not recurse through it. */
+  {
+    ixs_node *conj = ixs_true(ctx);
+    char name[16];
+    for (i = 0; i < 5000; i++) {
+      snprintf(name, sizeof(name), "bp%d", i);
+      ixs_node *cmp =
+          ixs_cmp(ctx, ixs_sym(ctx, name), IXS_CMP_GT, ixs_int(ctx, 0));
+      conj = ixs_and(ctx, conj, cmp);
+      CHECK(conj != NULL && !ixs_is_error(conj));
+    }
+    CHECK(ixs_node_is_pred(conj));
+  }
+
   /* Piecewise with >256 cases. */
   {
     ixs_node **vals = malloc(300 * sizeof(*vals));
@@ -1266,6 +1306,24 @@ static void test_pw_fold_in_add(void) {
   ixs_node *pw3 = ixs_pw(ctx, 2, v3, c3);
   ixs_node *no_fold = ixs_add(ctx, ixs_sub(ctx, A, pw1), pw3);
   CHECK(no_fold != ixs_int(ctx, 0));
+
+  /* Adjacent equal values merge conditions as truthiness predicates, not
+   * bitwise OR.  The catch-all branch makes the whole Piecewise constant. */
+  {
+    ixs_node *five = ixs_int(ctx, 5);
+    ixs_node *vals[] = {five, five, ixs_int(ctx, 0)};
+    ixs_node *conds[] = {x, ixs_true(ctx), ixs_true(ctx)};
+    CHECK(ixs_pw(ctx, 3, vals, conds) == five);
+  }
+
+  /* Same bug shape with a truthy rational condition: must not build a
+   * bitwise-rational condition such as x | 1/2. */
+  {
+    ixs_node *five = ixs_int(ctx, 5);
+    ixs_node *vals[] = {five, five, ixs_int(ctx, 0)};
+    ixs_node *conds[] = {x, ixs_rat(ctx, 1, 2), ixs_true(ctx)};
+    CHECK(ixs_pw(ctx, 3, vals, conds) == five);
+  }
 }
 
 static void test_piecewise_branch_bounds(void) {
@@ -1290,6 +1348,26 @@ static void test_piecewise_branch_bounds(void) {
   {
     char buf[512];
     ixs_print(result, buf, sizeof(buf));
+    CHECK(strstr(buf, "Max(") == NULL);
+  }
+
+  {
+    char buf[512];
+    ixs_node *n = ixs_sym(ctx, "n");
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *hidden_bounds =
+        ixs_and(ctx, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+                ixs_cmp(ctx, x, IXS_CMP_LE, n));
+    ixs_node *nested_cond = ixs_and(
+        ctx, hidden_bounds, ixs_cmp(ctx, y, IXS_CMP_GT, ixs_int(ctx, 0)));
+    ixs_node *nested_vals[] = {ixs_max(ctx, x, ixs_int(ctx, 0)),
+                               ixs_int(ctx, 7)};
+    ixs_node *nested_cds[] = {nested_cond, ixs_true(ctx)};
+    ixs_node *nested_pw = ixs_pw(ctx, 2, nested_vals, nested_cds);
+    ixs_node *outer_assume = ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *nested_result = ixs_simplify(ctx, nested_pw, &outer_assume, 1);
+    CHECK(nested_result != NULL);
+    ixs_print(nested_result, buf, sizeof(buf));
     CHECK(strstr(buf, "Max(") == NULL);
   }
 }
@@ -2172,20 +2250,19 @@ static void test_round_unwrap_inner(void) {
   }
 }
 
-/* A|~A = True, A&~A = False, and CMP complement pairs. */
+/* Bool A|~A = 1, A&~A = 0, and CMP complement pairs. */
 static void test_complement_annihilation(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *zero = ixs_int(ctx, 0);
 
-  /* NOT complement: sym | NOT(sym) = True */
-  CHECK(ixs_or(ctx, x, ixs_not(ctx, x)) == ixs_true(ctx));
-  CHECK(ixs_or(ctx, ixs_not(ctx, x), x) == ixs_true(ctx));
+  /* NOT complement does not apply to arbitrary integer symbols. */
+  CHECK(ixs_or(ctx, x, ixs_not(ctx, x)) != ixs_true(ctx));
+  CHECK(ixs_or(ctx, ixs_not(ctx, x), x) != ixs_true(ctx));
 
-  /* NOT complement: sym & NOT(sym) = False */
-  CHECK(ixs_and(ctx, x, ixs_not(ctx, x)) == ixs_false(ctx));
-  CHECK(ixs_and(ctx, ixs_not(ctx, x), x) == ixs_false(ctx));
+  CHECK(ixs_and(ctx, x, ixs_not(ctx, x)) != ixs_false(ctx));
+  CHECK(ixs_and(ctx, ixs_not(ctx, x), x) != ixs_false(ctx));
 
   /* CMP complement: (x > 0) | (x <= 0) = True */
   {

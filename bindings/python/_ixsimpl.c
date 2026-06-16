@@ -256,6 +256,13 @@ static PyObject *Expr_richcompare(ExprObject *self, PyObject *other, int op) {
 
 static int Expr_bool(ExprObject *self) {
   ixs_tag tag = ixs_node_tag(self->node);
+  if (tag == IXS_INT) {
+    int64_t val = ixs_node_int_val(self->node);
+    if (val == 0)
+      return 0;
+    if (val == 1)
+      return 1;
+  }
   if (tag == IXS_TRUE)
     return 1;
   if (tag == IXS_FALSE)
@@ -1639,10 +1646,11 @@ static PyMethodDef module_methods[] = {
     {"xor_", (PyCFunction)mod_xor_, METH_VARARGS,
      "xor_(a, b) -> Expr: bitwise xor."},
     {"and_", (PyCFunction)mod_and_, METH_VARARGS,
-     "and_(a, b) -> Expr: logical and."},
+     "and_(a, b) -> Expr: bitwise and; boolean and for 0/1 predicates."},
     {"or_", (PyCFunction)mod_or_, METH_VARARGS,
-     "or_(a, b) -> Expr: logical or."},
-    {"not_", (PyCFunction)mod_not_, METH_O, "not_(a) -> Expr: logical not."},
+     "or_(a, b) -> Expr: bitwise or; boolean or for 0/1 predicates."},
+    {"not_", (PyCFunction)mod_not_, METH_O,
+     "not_(a) -> Expr: logical truthiness not."},
     {"pw", (PyCFunction)mod_pw, METH_VARARGS,
      "pw((val, cond), ...) -> Expr: piecewise expression. "
      "Each arg is a (value, condition) tuple; last condition should be true."},

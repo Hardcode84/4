@@ -710,6 +710,10 @@ IXS_STATIC bool ixs_node_is_one(const ixs_node *n) {
   return n->tag == IXS_INT && n->u.ival == 1;
 }
 
+IXS_STATIC bool ixs_node_is_true_value(const ixs_node *n) {
+  return n && (n->tag == IXS_TRUE || (n->tag == IXS_INT && n->u.ival == 1));
+}
+
 IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
   if (n->tag == IXS_INT) {
     *p = n->u.ival;
@@ -721,6 +725,32 @@ IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
     *p = 0;
     *q = 1;
   }
+}
+
+IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n) {
+  int64_t p, q;
+  if (!n)
+    return false;
+  if (n->tag == IXS_FALSE)
+    return true;
+  if (!ixs_node_is_const(n))
+    return false;
+  ixs_node_get_rat(n, &p, &q);
+  (void)q;
+  return p == 0;
+}
+
+IXS_STATIC bool ixs_node_is_known_true(const ixs_node *n) {
+  int64_t p, q;
+  if (!n)
+    return false;
+  if (n->tag == IXS_TRUE)
+    return true;
+  if (!ixs_node_is_const(n))
+    return false;
+  ixs_node_get_rat(n, &p, &q);
+  (void)q;
+  return p != 0;
 }
 
 IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n) {
@@ -743,13 +773,13 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
-    return true;
   case IXS_CMP:
   case IXS_AND:
   case IXS_OR:
   case IXS_NOT:
   case IXS_TRUE:
   case IXS_FALSE:
+    return true;
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return false;
@@ -757,34 +787,93 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
   return false;
 }
 
-IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n) {
-  if (!n)
+#define IXS_BOOL_STACK_CAP 1024u
+
+static bool bool_value_needs_children(const ixs_node *n) {
+  return n &&
+         (n->tag == IXS_AND || n->tag == IXS_OR || n->tag == IXS_PIECEWISE);
+}
+
+static bool bool_value_push(const ixs_node **stack, size_t *nstack,
+                            const ixs_node *n) {
+  if (!n || *nstack >= IXS_BOOL_STACK_CAP)
     return false;
-  switch (n->tag) {
-  case IXS_CMP:
-  case IXS_AND:
-  case IXS_OR:
-  case IXS_NOT:
-  case IXS_TRUE:
-  case IXS_FALSE:
-    return true;
-  case IXS_INT:
-  case IXS_RAT:
-  case IXS_SYM:
-  case IXS_ADD:
-  case IXS_MUL:
-  case IXS_FLOOR:
-  case IXS_CEIL:
-  case IXS_MOD:
-  case IXS_PIECEWISE:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
-  case IXS_ERROR:
-  case IXS_PARSE_ERROR:
+  stack[(*nstack)++] = n;
+  return true;
+}
+
+IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n) {
+  const ixs_node *stack[IXS_BOOL_STACK_CAP];
+  size_t nstack = 0;
+
+  if (!bool_value_push(stack, &nstack, n))
     return false;
+
+  while (nstack > 0) {
+    uint32_t i;
+    const ixs_node *cur = stack[--nstack];
+    switch (cur->tag) {
+    case IXS_INT:
+      if (cur->u.ival != 0 && cur->u.ival != 1)
+        return false;
+      break;
+    case IXS_TRUE:
+    case IXS_FALSE:
+    case IXS_CMP:
+    case IXS_NOT:
+      break;
+    case IXS_AND:
+    case IXS_OR:
+      if (cur->u.logic.nargs == 0)
+        return false;
+      /* Containers are pushed first so non-containers are checked before
+       * descending into long binary chains.  Stack overflow is conservative. */
+      for (i = 0; i < cur->u.logic.nargs; i++) {
+        if (bool_value_needs_children(cur->u.logic.args[i]) &&
+            !bool_value_push(stack, &nstack, cur->u.logic.args[i]))
+          return false;
+      }
+      for (i = 0; i < cur->u.logic.nargs; i++) {
+        if (!bool_value_needs_children(cur->u.logic.args[i]) &&
+            !bool_value_push(stack, &nstack, cur->u.logic.args[i]))
+          return false;
+      }
+      break;
+    case IXS_PIECEWISE:
+      if (cur->u.pw.ncases == 0)
+        return false;
+      for (i = 0; i < cur->u.pw.ncases; i++) {
+        if (bool_value_needs_children(cur->u.pw.cases[i].value) &&
+            !bool_value_push(stack, &nstack, cur->u.pw.cases[i].value))
+          return false;
+      }
+      for (i = 0; i < cur->u.pw.ncases; i++) {
+        if (!bool_value_needs_children(cur->u.pw.cases[i].value) &&
+            !bool_value_push(stack, &nstack, cur->u.pw.cases[i].value))
+          return false;
+      }
+      break;
+    case IXS_RAT:
+    case IXS_SYM:
+    case IXS_ADD:
+    case IXS_MUL:
+    case IXS_FLOOR:
+    case IXS_CEIL:
+    case IXS_MOD:
+    case IXS_MAX:
+    case IXS_MIN:
+    case IXS_XOR:
+    case IXS_ERROR:
+    case IXS_PARSE_ERROR:
+      return false;
+    }
   }
-  return false;
+
+  return true;
+}
+
+IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n) {
+  return ixs_node_is_bool_valued(n);
 }
 
 /* ------------------------------------------------------------------ */
@@ -860,7 +949,22 @@ IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_CEIL:
   case IXS_SYM:
   case IXS_XOR:
+  case IXS_CMP:
+  case IXS_NOT:
+  case IXS_TRUE:
+  case IXS_FALSE:
     return true;
+  case IXS_AND:
+  case IXS_OR: {
+    uint32_t i;
+    if (n->u.logic.nargs == 0)
+      return false;
+    for (i = 0; i < n->u.logic.nargs; i++) {
+      if (!ixs_node_is_integer_valued(n->u.logic.args[i]))
+        return false;
+    }
+    return true;
+  }
   case IXS_ADD: {
     uint32_t i;
     int64_t cp, cq;

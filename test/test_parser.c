@@ -171,7 +171,7 @@ static void test_kind_parsers_and_predicates(void) {
   pred = ixs_parse_pred(ctx, "x > 0", 5);
   CHECK(pred && !ixs_is_error(pred));
   CHECK(ixs_node_is_pred(pred));
-  CHECK(!ixs_node_is_expr(pred));
+  CHECK(ixs_node_is_expr(pred));
 
   err = ixs_parse_pred(ctx, "x + 1", 5);
   CHECK(err && ixs_is_parse_error(err));
@@ -194,12 +194,11 @@ static void test_kind_parsers_and_predicates(void) {
                "expected expression, got predicate") != NULL);
   ixs_ctx_clear_errors(ctx);
 
-  err = ixs_parse_expr(ctx, "True", 4);
-  CHECK(err && ixs_is_parse_error(err));
-  CHECK(ixs_ctx_nerrors(ctx) > 0);
-  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1),
-               "expected expression, got predicate") != NULL);
-  ixs_ctx_clear_errors(ctx);
+  expr = ixs_parse_expr(ctx, "True", 4);
+  CHECK(expr && !ixs_is_error(expr));
+  CHECK(ixs_node_tag(expr) == IXS_INT && ixs_node_int_val(expr) == 1);
+  CHECK(ixs_node_is_expr(expr));
+  CHECK(ixs_node_is_pred(expr));
 
   err = ixs_parse_pred(ctx, "x", 1);
   CHECK(err && ixs_is_parse_error(err));
@@ -224,7 +223,9 @@ static void test_kind_parsers_and_predicates(void) {
 
   CHECK(ixs_node_is_pred(ixs_true(ctx)));
   CHECK(ixs_node_is_pred(ixs_false(ctx)));
-  CHECK(!ixs_node_is_expr(ixs_true(ctx)));
+  CHECK(ixs_node_is_expr(ixs_true(ctx)));
+  CHECK(ixs_node_tag(ixs_true(ctx)) == IXS_INT);
+  CHECK(ixs_node_tag(ixs_false(ctx)) == IXS_INT);
 
   err = ixs_parse_expr(ctx, "???", 3);
   domain = ixs_parse_expr(ctx, "1/0", 3);

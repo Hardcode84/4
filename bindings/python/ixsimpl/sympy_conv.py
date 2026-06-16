@@ -50,6 +50,23 @@ def to_sympy(
     def _convert(node: ixsimpl.Expr) -> sympy.Basic:
         return to_sympy(node, symbols=symbols, xor_fn=xor_fn)
 
+    def _convert_cond(node: ixsimpl.Expr) -> sympy.Basic:
+        if node.tag == ixsimpl.INT:
+            return sympy.false if int(node) == 0 else sympy.true
+        if node.tag == ixsimpl.RAT:
+            return sympy.false if node.rat_num == 0 else sympy.true
+        converted = _convert(node)
+        if isinstance(
+            converted,
+            (
+                sympy.logic.boolalg.BooleanAtom,
+                sympy.logic.boolalg.BooleanFunction,
+                sympy.core.relational.Relational,
+            ),
+        ):
+            return converted
+        return sympy.Ne(converted, 0)
+
     tag = expr.tag
 
     if tag == ixsimpl.INT:
@@ -111,21 +128,30 @@ def to_sympy(
         return rel(_convert(expr.child(0)), _convert(expr.child(1)))
 
     if tag == ixsimpl.AND:
+        if expr.is_pred:
+            args = [_convert_cond(expr.child(i)) for i in range(expr.nchildren)]
+            return sympy.And(*args)
         args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
-        return sympy.And(*args)
+        return sympy.Function("bitand")(*args)
 
     if tag == ixsimpl.OR:
+        if expr.is_pred:
+            args = [_convert_cond(expr.child(i)) for i in range(expr.nchildren)]
+            return sympy.Or(*args)
         args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
-        return sympy.Or(*args)
+        return sympy.Function("bitor")(*args)
 
     if tag == ixsimpl.NOT:
-        return sympy.Not(_convert(expr.child(0)))
+        child = expr.child(0)
+        if child.is_pred:
+            return sympy.Not(_convert_cond(child))
+        return sympy.Eq(_convert(child), 0)
 
     if tag == ixsimpl.PIECEWISE:
         pieces: list[tuple[Any, Any]] = []
         for i in range(expr.pw_ncases):
             val = _convert(expr.pw_value(i))
-            cond = _convert(expr.pw_cond(i))
+            cond = _convert_cond(expr.pw_cond(i))
             pieces.append((val, cond))
         return sympy.Piecewise(*pieces)
 
@@ -271,6 +297,15 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
             result = ixsimpl.xor_(args[0], args[1])
             for a in args[2:]:
                 result = ixsimpl.xor_(result, a)
+            return result
+        if name in {"bitand", "bitor"}:
+            args = [from_sympy(ctx, a) for a in expr.args]
+            if len(args) < 2:
+                raise ValueError(f"{name} requires at least 2 arguments, got {len(args)}")
+            op = ixsimpl.and_ if name == "bitand" else ixsimpl.or_
+            result = op(args[0], args[1])
+            for a in args[2:]:
+                result = op(result, a)
             return result
 
     raise ValueError(f"unsupported sympy expression type: {type(expr).__name__}: {expr}")

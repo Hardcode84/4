@@ -427,12 +427,12 @@ typedef enum {
     IXS_MAX,         // Max(a, b)
     IXS_MIN,         // Min(a, b)
     IXS_XOR,         // bitwise xor(a, b) (integer domain)
-    IXS_CMP,         // comparison: a op b (see ixs_cmp_op below)
-    IXS_AND,         // boolean and
-    IXS_OR,          // boolean or
-    IXS_NOT,         // boolean not
-    IXS_TRUE,        // boolean constant
-    IXS_FALSE,       // boolean constant
+    IXS_CMP,         // comparison: a op b, returns 0 or 1
+    IXS_AND,         // bitwise and(a, b)
+    IXS_OR,          // bitwise or(a, b)
+    IXS_NOT,         // logical not: (a == 0) ? 1 : 0
+    IXS_TRUE,        // legacy boolean constant tag; new true is IXS_INT(1)
+    IXS_FALSE,       // legacy boolean constant tag; new false is IXS_INT(0)
     IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
     IXS_PARSE_ERROR, // sentinel: syntax error from ixs_parse
 } ixs_tag;
@@ -479,9 +479,9 @@ typedef struct ixs_node {
             uint32_t ncases;
             struct ixs_pwcase *cases;     //  array of {value, condition}
         } pw;
-        struct {                          // IXS_AND, IXS_OR (n-ary, flattened)
+        struct {                          // IXS_AND, IXS_OR
             uint32_t nargs;
-            struct ixs_node **args;       // sorted by canonical order
+            struct ixs_node **args;       // new nodes use exactly 2 args
         } logic;
         struct {                          // IXS_NOT
             struct ixs_node *arg;
@@ -489,6 +489,16 @@ typedef struct ixs_node {
     } u;
 } ixs_node;
 ```
+
+`IXS_TRUE` and `IXS_FALSE` remain in the enum and wire format for compatibility,
+but normal constructors no longer allocate those tags. `ixs_true(s)` returns
+the interned integer `1`, and `ixs_false(s)` returns the interned integer `0`.
+Deserialization and cross-context import map legacy true/false nodes to those
+integer constants.
+
+New `IXS_AND` and `IXS_OR` nodes are binary bitwise operators. The storage still
+records `nargs` so old serialized n-ary logic nodes can be imported, but smart
+constructors build two-child nodes.
 
 Helper structs for compound nodes:
 
@@ -610,16 +620,17 @@ corpus patterns like `$MMA_LHS_SCALE | $MMA_RHS_SCALE | $MMA_SCALE_FP4` in
 Piecewise conditions, where integer-valued flag variables are used as boolean
 tests. A bare expression `e` in condition context is desugared to `e != 0`
 (i.e., `ixs_cmp(ctx, e, IXS_CMP_NE, ixs_int(ctx, 0))`). The `|` and `&`
-operators in conditions are always boolean (`IXS_OR`, `IXS_AND`), never
-bitwise. For the 0/1 flag variables in the corpus, boolean and bitwise OR
-produce identical truth values. True multi-bit integer bitwise OR is a
-non-goal (not present in the corpus).
+operators in condition grammar coerce both operands to 0/1 predicates first.
+The resulting `IXS_OR` and `IXS_AND` nodes are still integer bitwise operators,
+but on 0/1 operands they have the same truth tables as boolean OR and AND.
 
 Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.
 
 The parser accepts SymPy's `ceiling`; the C API uses `ixs_ceil` for brevity.
-Similarly, the parser accepts `True`/`False`; the API uses `ixs_true`/`ixs_false`.
+Similarly, the parser accepts `True`/`False`; both parse to integer `1`/`0`.
+The API convenience functions `ixs_true`/`ixs_false` return the same integer
+nodes.
 
 Integer literals: sequences of digits. Rationals are not parsed directly —
 they arise from `3/8` being parsed as `IXS_INT(3) / IXS_INT(8)` and
@@ -963,19 +974,30 @@ XOR appears only 116 times in the corpus and only in specific patterns
 (`xor(Mod($T0, 8), floor(Mod($T0, 64)/16) + offset)`). These are bit
 manipulation patterns and may not need deep algebraic simplification.
 
-#### 4.9 Boolean Simplification
+#### 4.9 Bitwise And/Or And Logical Not
 
 ```
-True & x        → x
-False & x       → False
-True | x        → True
-False | x       → x
-~True           → False
-~False          → True
-~(~x)           → x
+0 & x           → 0
+-1 & x          → x
+0 | x           → x
+-1 | x          → -1
+c1 & c2         → c1 & c2  (constant fold)
+c1 | c2         → c1 | c2  (constant fold)
+1 & bool        → bool
+1 | bool        → 1
+~0              → 1
+~nonzero_const  → 0
+~(~bool)        → bool
+~(~x)           → x != 0
 ~(a > b)        → a <= b
-(a > b) & (a >= b) → a > b
+bool & ~bool    → 0
+bool | ~bool    → 1
 ```
+
+`IXS_AND` and `IXS_OR` are binary bitwise integer operators. They are also
+boolean operators when both operands are known 0/1-valued. `IXS_NOT` is logical
+truthiness, not bitwise complement: it returns `1` exactly when its operand is
+zero and `0` otherwise.
 
 #### 4.10 Comparison Simplification
 
@@ -1964,7 +1986,7 @@ e2 = x % 4                  # equivalent to ixsimpl.mod(x, 4)
 e3 = ixsimpl.max_(x, y)   # trailing _ avoids shadowing builtin max
 e4 = ixsimpl.min_(x, y)
 e5 = ixsimpl.pw((x, x >= 0), (-x, ctx.true_()))  # piecewise
-cond = ixsimpl.and_(x >= 0, y >= 0)               # boolean combinators
+cond = ixsimpl.and_(x >= 0, y >= 0)               # bitwise on 0/1 predicates
 cond2 = ixsimpl.or_(x >= 0, y >= 0)
 cond3 = ixsimpl.not_(x >= 0)
 e5 = ixsimpl.ceil(x / 4)
@@ -1987,8 +2009,8 @@ Implementation:
 - `__hash__` returns the node's precomputed hash.
 - `Expr.is_error` property — `True` for either sentinel.
 - `Expr.is_parse_error` / `Expr.is_domain_error` — specific checks.
-- `Expr.is_expr` / `Expr.is_pred` — root-kind checks for callers that
-  distinguish numeric expressions from predicates.
+- `Expr.is_expr` / `Expr.is_pred` — root-kind checks. Predicate values are also
+  expressions; `is_pred` means the node is known to produce only `0` or `1`.
 - `Expr.node_ptr` — raw `ixs_node*` address exposed as a Python `int`.
   This is for identity/debug/FFI plumbing only.  It is not a stable semantic
   ID, and it is only meaningful while the owning `Context` is alive.
@@ -2253,8 +2275,8 @@ Node-only APIs stay unchanged:
 Store inspection APIs that do not create nodes stay on `ixs_ctx`. That
 includes rule-hit statistics and any future store-level counters.
 
-Kind predicates are needed for callers that distinguish numeric expressions
-from predicates:
+Kind predicates are needed for callers that distinguish arbitrary numeric
+expressions from 0/1 predicate values:
 
 ```c
 bool ixs_node_is_expr(const ixs_node *node);
@@ -2263,17 +2285,17 @@ bool ixs_node_is_pred(const ixs_node *node);
 
 Exact classification:
 
-- expression nodes: `IXS_INT`, `IXS_RAT`, `IXS_SYM`, `IXS_ADD`, `IXS_MUL`,
-  `IXS_FLOOR`, `IXS_CEIL`, `IXS_MOD`, `IXS_MAX`, `IXS_MIN`, `IXS_XOR`,
-  `IXS_PIECEWISE`
-- predicate nodes: `IXS_CMP`, `IXS_AND`, `IXS_OR`, `IXS_NOT`, `IXS_TRUE`,
-  `IXS_FALSE`
+- expression nodes: all non-sentinel arithmetic and predicate-value nodes,
+  including `IXS_CMP`, `IXS_AND`, `IXS_OR`, and `IXS_NOT`
+- predicate nodes: nodes known to produce only `0` or `1`; this includes
+  `IXS_CMP`, `IXS_NOT`, integer constants `0` and `1`, legacy `IXS_TRUE` and
+  `IXS_FALSE`, `IXS_AND`/`IXS_OR` whose operands are predicate nodes, and
+  `IXS_PIECEWISE` whose values are predicate nodes
 - sentinels are neither
 
 `ixs_pw` remains expression-valued: every non-sentinel branch value must be an
-expression, every branch condition must be a predicate, and the final condition
-must be `ixs_true(s)`. Predicate-valued `Piecewise` is out of scope for this
-API.
+expression, every branch condition is evaluated with logical truthiness, and a
+final catch-all condition should be `ixs_true(s)` / integer `1`.
 
 `ixs_parse` is a backward-compatible wrapper for `ixs_parse_expr`.
 `ixs_parse_expr` accepts only expression roots. `ixs_parse_pred` accepts only
