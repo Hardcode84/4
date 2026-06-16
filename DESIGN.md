@@ -496,6 +496,12 @@ New `IXS_AND` and `IXS_OR` nodes are binary bitwise operators. The storage still
 records `nargs` so old serialized n-ary logic nodes can be imported, but smart
 constructors build two-child nodes.
 
+Bitwise operations use unbounded integer two's-complement semantics, matching
+Python and SymPy-style integer bitwise behavior. There is no fixed bit-width,
+no signed/unsigned reinterpretation, and no wraparound in the core expression
+model. `IXS_NOT` remains logical truthiness, not bitwise complement; adding
+bitwise complement would require a distinct node.
+
 Helper structs for compound nodes:
 
 ```c
@@ -1026,19 +1032,55 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   symbol remainders when the stored modulus is a multiple of the query
   modulus, and proves zero remainders for composite expressions through
   the same sufficient divisibility predicate used by simplification rules.
+- **Bitwise facts**: Power-of-two and mask assumptions use a small
+  bitfact domain stored alongside per-symbol bounds:
+
+  ```c
+  typedef enum {
+      IXS_POW2_UNKNOWN,
+      IXS_POW2_OR_ZERO,
+      IXS_POW2_POSITIVE
+  } ixs_pow2_fact;
+
+  typedef struct {
+      uint64_t known_zero;      /* low 64 bits known to be zero */
+      uint64_t known_one;       /* low 64 bits known to be one */
+      ixs_pow2_fact pow2;
+  } ixs_bitfacts;
+  ```
+
+  `known_zero` and `known_one` are a low-64-bit KnownBits-style abstraction.
+  They are intentionally finite even though expression semantics are unbounded:
+  this is enough for `int64_t` constants, masks, tile sizes, and power-of-two
+  divisibility checks without turning the core engine into a fixed-width
+  bit-vector solver. `pow2` is separate because "zero or exactly one bit set"
+  is a cardinality fact, not expressible as independent known-zero/known-one
+  bits unless the bit position is already known.
+
+  Initial storage is symbol-level in `ixs_var_bound`. Expression-level
+  bitfacts are computed on demand for constants, symbols, comparisons,
+  logical NOT, and bounded-depth `AND`/`OR`/`XOR` trees. A pointer-keyed side
+  table can be added later if expression-level assumptions need to persist.
+  Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
+  assumptions remain isolated.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
 
-**Conflicting assumptions**: Detecting contradictory assumptions is
-**best-effort**. When a contradiction is detected (e.g., interval
-intersection yields `lo > hi` for a variable), the simplifier returns
-`IXS_ERROR` and appends a diagnostic (e.g., `"contradictory assumptions:
-$T0 >= 5 and $T0 < 3"`). However, not all contradictions are detectable
-(cross-variable constraints like `x >= y, y >= x + 1` require constraint
-solving, which is out of scope). When a contradiction goes undetected, the
-expression may be simplified incorrectly or returned unchanged. Passing
-consistent assumptions is the caller's responsibility.
+**Conflicting assumptions**: User-assumption validation and error reporting are
+**best-effort**. Direct contradictions are detected where the local domains can
+see them: empty interval intersections, duplicate expression bounds that
+intersect to empty, and future bitfact conflicts such as a bit known both zero
+and one. Query APIs treat detected contradictions as unknown/no-result rather
+than manufacturing a concrete answer. Simplification may return `IXS_ERROR` and
+append a diagnostic when the reporting path has enough context, but callers must
+not rely on every contradictory assumption set producing an error string.
+
+Not all contradictions are detectable. Cross-variable constraints like
+`x >= y, y >= x + 1` require relational constraint solving, which is out of
+scope. When a contradiction goes undetected, the result is undefined with
+respect to that inconsistent assumption set; passing consistent assumptions is
+the caller's responsibility.
 
 This enables rules like:
 
@@ -1069,6 +1111,24 @@ This enables rules like:
 - `floor(a + (p/q)*sym + rest)` → `(p/q)*sym + floor(a + rest)` when
   `q/gcd(|p|,q)` divides sym's known modulus (the rational addend is
   integer per congruence and can be extracted from the floor)
+
+**Bitwise-fact extraction and consumers**:
+
+- `(sym & (sym - 1)) == 0` records `pow2_or_zero(sym)` and the interval fact
+  `sym >= 0`. Combined with `sym > 0` or `sym >= 1`, this upgrades to
+  `pow2_positive(sym)`.
+- `(sym & mask) == 0`, where `mask` is an integer constant, marks all mask bits
+  as known zero in `sym`.
+- `(sym & mask) == mask` and `(sym | mask) == sym` mark all mask bits as known
+  one in `sym`.
+- `(sym | mask) == mask` marks all tracked low bits outside `mask` as known
+  zero in `sym`.
+- `sym ≡ r (mod 2^k)` reduces to exact known low `k` bits; conversely,
+  contiguous known low zero bits imply divisibility by `2^k`.
+- `ixs_check` uses these facts to prove mask equalities/inequalities and
+  power-of-two predicates. Simplification should consume them only through
+  conservative helpers such as `ixs_bounds_is_pow2_positive` and
+  `ixs_bounds_is_known_divisible`.
 
 **Algebraic rewrites** (no bounds needed):
 

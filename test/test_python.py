@@ -1694,6 +1694,32 @@ def test_check_modular_entailment() -> None:
     assert ctx.check(ctx.eq((K + N) % 16, 0), assumptions=assumes) is True
 
 
+def test_check_bitwise_fact_entailment() -> None:
+    ctx = ixsimpl.Context()
+    d = ctx.sym("d")
+    x = ctx.sym("x")
+
+    pow2_expr = d & (d - 1)
+    pow2_assume = ctx.eq(pow2_expr, 0)
+    assert ctx.check(ctx.eq(pow2_expr, 0), assumptions=[pow2_assume]) is True
+    assert ctx.check(ctx.ne(pow2_expr, 0), assumptions=[pow2_assume]) is False
+    assert ctx.check(ctx.eq(pow2_expr, 4), assumptions=[pow2_assume]) is False
+    assert ctx.check(d >= 0, assumptions=[pow2_assume]) is True
+    assert ctx.range(d, assumptions=[pow2_assume]) == (0, None)
+
+    mask_assume = ctx.eq(x & 15, 5)
+    assert ctx.check(ctx.eq(x & 7, 5), assumptions=[mask_assume]) is True
+    assert ctx.check(ctx.eq(x & 7, 1), assumptions=[mask_assume]) is False
+    assert ctx.check(ctx.eq(x & 16, 0), assumptions=[mask_assume]) is None
+
+
+def test_check_contradictory_assumptions_unknown() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+
+    assert ctx.check(x >= 0, assumptions=[x >= 10, x <= 5]) is None
+
+
 @given(
     case=_mod_symbol_case_st(),
     env_mults=st.lists(

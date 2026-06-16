@@ -16,6 +16,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nexprs = 0;
   b->expr_cap = 0;
   b->exprs = NULL;
+  b->contradiction = false;
   return b->vars != NULL;
 }
 
@@ -35,6 +36,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nexprs = src->nexprs;
   dst->expr_cap = src->nexprs ? src->nexprs : 0;
   dst->exprs = NULL;
+  dst->contradiction = src->contradiction;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
         dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
@@ -80,12 +82,136 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   ixs_interval_set_hi_pos_inf(&v->iv);
   v->modulus = 0;
   v->remainder = 0;
+  v->bits.known_zero = 0;
+  v->bits.known_one = 0;
+  v->bits.pow2 = IXS_POW2_UNKNOWN;
   return v;
 }
 
+static void bitfacts_unknown(ixs_bitfacts *bits) {
+  bits->known_zero = 0;
+  bits->known_one = 0;
+  bits->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static unsigned bit_popcount64(uint64_t v) {
+  unsigned n = 0;
+  while (v) {
+    n += (unsigned)(v & 1u);
+    v >>= 1;
+  }
+  return n;
+}
+
+static bool uint64_is_pow2(uint64_t v) { return v != 0 && (v & (v - 1u)) == 0; }
+
+static bool int64_is_positive_pow2(int64_t v) {
+  return v > 0 && uint64_is_pow2((uint64_t)v);
+}
+
+static bool int64_modulus_is_pow2(int64_t v) {
+  return v > 0 && uint64_is_pow2((uint64_t)v);
+}
+
+static bool bitfacts_conflict(const ixs_bitfacts *bits) {
+  if ((bits->known_zero & bits->known_one) != 0)
+    return true;
+  if ((bits->pow2 == IXS_POW2_OR_ZERO || bits->pow2 == IXS_POW2_POSITIVE) &&
+      bit_popcount64(bits->known_one) > 1)
+    return true;
+  return false;
+}
+
+static bool interval_lower_at_least(const ixs_interval *iv, int64_t p,
+                                    int64_t q) {
+  return iv->valid && !iv->lo_inf && ixs_rat_cmp(iv->lo_p, iv->lo_q, p, q) >= 0;
+}
+
+static bool interval_upper_less_than(const ixs_interval *iv, int64_t p,
+                                     int64_t q) {
+  return iv->valid && !iv->hi_inf && ixs_rat_cmp(iv->hi_p, iv->hi_q, p, q) < 0;
+}
+
+static bool interval_exact_int(const ixs_interval *iv, int64_t *value) {
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || iv->lo_q != 1 ||
+      iv->hi_q != 1 || iv->lo_p != iv->hi_p)
+    return false;
+  *value = iv->lo_p;
+  return true;
+}
+
+static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
+  int64_t exact;
+  if (!v)
+    return;
+  if (v->bits.pow2 == IXS_POW2_OR_ZERO && interval_lower_at_least(&v->iv, 1, 1))
+    v->bits.pow2 = IXS_POW2_POSITIVE;
+  if ((v->bits.pow2 == IXS_POW2_OR_ZERO &&
+       interval_upper_less_than(&v->iv, 0, 1)) ||
+      (v->bits.pow2 == IXS_POW2_POSITIVE &&
+       interval_upper_less_than(&v->iv, 1, 1)))
+    b->contradiction = true;
+  if (interval_exact_int(&v->iv, &exact)) {
+    uint64_t u = (uint64_t)exact;
+    if ((v->bits.known_zero & u) != 0 || (v->bits.known_one & ~u) != 0)
+      b->contradiction = true;
+    if ((v->bits.pow2 == IXS_POW2_OR_ZERO ||
+         v->bits.pow2 == IXS_POW2_POSITIVE) &&
+        exact != 0 && !int64_is_positive_pow2(exact))
+      b->contradiction = true;
+    if (v->bits.pow2 == IXS_POW2_POSITIVE && exact == 0)
+      b->contradiction = true;
+  }
+  if (bitfacts_conflict(&v->bits))
+    b->contradiction = true;
+}
+
+static void apply_var_known_bits(ixs_bounds *b, ixs_var_bound *v,
+                                 uint64_t known_zero, uint64_t known_one) {
+  if (!v)
+    return;
+  v->bits.known_zero |= known_zero;
+  v->bits.known_one |= known_one;
+  refine_var_bit_consistency(b, v);
+}
+
+static void apply_known_bits(ixs_bounds *b, const char *name,
+                             uint64_t known_zero, uint64_t known_one) {
+  ixs_var_bound *v = get_or_create_var(b, name);
+  apply_var_known_bits(b, v, known_zero, known_one);
+}
+
+static void apply_exact_int_bits(ixs_bounds *b, ixs_var_bound *v, int64_t val) {
+  uint64_t u = (uint64_t)val;
+  if (!v)
+    return;
+  apply_var_known_bits(b, v, ~u, u);
+  if (val == 0) {
+    if (v->bits.pow2 == IXS_POW2_POSITIVE)
+      b->contradiction = true;
+    else
+      v->bits.pow2 = IXS_POW2_OR_ZERO;
+  } else if (int64_is_positive_pow2(val)) {
+    v->bits.pow2 = IXS_POW2_POSITIVE;
+  } else if (v->bits.pow2 == IXS_POW2_OR_ZERO ||
+             v->bits.pow2 == IXS_POW2_POSITIVE) {
+    b->contradiction = true;
+  }
+  refine_var_bit_consistency(b, v);
+}
+
+static void apply_congruence_known_bits(ixs_bounds *b, ixs_var_bound *v) {
+  uint64_t mask, rem;
+  if (!v || !int64_modulus_is_pow2(v->modulus))
+    return;
+  mask = (uint64_t)v->modulus - 1u;
+  rem = (uint64_t)v->remainder & mask;
+  apply_var_known_bits(b, v, (~rem) & mask, rem & mask);
+}
+
 /* Record sym ≡ rem (mod m).  Merges with existing info via CRT.
- * Contradictory or overflowing constraints are silently ignored
- * (best-effort, consistent with the interval contradiction policy). */
+ * Overflowing constraints are silently ignored.  Direct contradictions are
+ * recorded on the bounds object so query APIs can decline concrete answers. */
 static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
                          int64_t rem) {
   ixs_var_bound *v;
@@ -99,12 +225,15 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   if (v->modulus == 0) {
     v->modulus = m;
     v->remainder = rem;
+    apply_congruence_known_bits(b, v);
     return;
   }
   old_mod = v->modulus;
   g = ixs_gcd(old_mod, m);
-  if (((rem - v->remainder) % g + g) % g != 0)
+  if (((rem - v->remainder) % g + g) % g != 0) {
+    b->contradiction = true;
     return;
+  }
   if (old_mod > INT64_MAX / (m / g))
     return;
   new_mod = old_mod / g * m;
@@ -124,6 +253,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   v->remainder =
       (int64_t)(((uint64_t)v->remainder + (uint64_t)old_mod * (uint64_t)k) %
                 (uint64_t)new_mod);
+  apply_congruence_known_bits(b, v);
 }
 
 /* Recognize Mod(sym, M) == R as a modular congruence.
@@ -252,9 +382,256 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     v->iv.hi_q = cq;
     v->iv.lo_inf = false;
     v->iv.hi_inf = false;
+    if (cq == 1)
+      apply_exact_int_bits(b, v, cp);
     break;
   case IXS_CMP_NE:
     break;
+  }
+  refine_var_bit_consistency(b, v);
+}
+
+static bool node_get_int_const(ixs_node *n, int64_t *out) {
+  if (!n || !out)
+    return false;
+  if (n->tag == IXS_INT) {
+    *out = n->u.ival;
+    return true;
+  }
+  if (n->tag == IXS_RAT && n->u.rat.q == 1) {
+    *out = n->u.rat.p;
+    return true;
+  }
+  return false;
+}
+
+static bool node_coeff_is(ixs_node *n, int64_t value) {
+  int64_t p, q;
+  if (!n)
+    return false;
+  ixs_node_get_rat(n, &p, &q);
+  return p == value && q == 1;
+}
+
+static bool extract_add_term_eq_const(ixs_node *n, ixs_node **expr,
+                                      int64_t *value) {
+  int64_t kp, kq, cp, cq;
+  if (!n || n->tag != IXS_ADD || n->u.add.nterms != 1)
+    return false;
+  ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
+  ixs_node_get_rat(n->u.add.terms[0].coeff, &cp, &cq);
+  if (kq != 1 || cq != 1)
+    return false;
+  if (cp == 1) {
+    if (kp == INT64_MIN)
+      return false;
+    *value = -kp;
+  } else if (cp == -1) {
+    *value = kp;
+  } else {
+    return false;
+  }
+  *expr = n->u.add.terms[0].term;
+  return true;
+}
+
+/* Recover "expr == integer" from either direct comparisons or the normalized
+ * ADD(k, +/-expr) == 0 form produced by cmp_normalize_to_zero. */
+static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
+                                   int64_t *value) {
+  int64_t c;
+  if (!cmp || cmp->tag != IXS_CMP || !expr || !value)
+    return false;
+
+  if (ixs_node_is_zero(cmp->u.binary.rhs) &&
+      extract_add_term_eq_const(cmp->u.binary.lhs, expr, value))
+    return true;
+  if (ixs_node_is_zero(cmp->u.binary.lhs) &&
+      extract_add_term_eq_const(cmp->u.binary.rhs, expr, value))
+    return true;
+
+  if (node_get_int_const(cmp->u.binary.rhs, &c) &&
+      !ixs_node_is_const(cmp->u.binary.lhs)) {
+    *expr = cmp->u.binary.lhs;
+    *value = c;
+    return true;
+  }
+  if (node_get_int_const(cmp->u.binary.lhs, &c) &&
+      !ixs_node_is_const(cmp->u.binary.rhs)) {
+    *expr = cmp->u.binary.rhs;
+    *value = c;
+    return true;
+  }
+
+  return false;
+}
+
+static bool extract_add_node_equality(ixs_node *n, ixs_node **a, ixs_node **b) {
+  int64_t kp, kq;
+  ixs_addterm *t0, *t1;
+  if (!n || n->tag != IXS_ADD || n->u.add.nterms != 2)
+    return false;
+  ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
+  if (kp != 0 || kq != 1)
+    return false;
+  t0 = &n->u.add.terms[0];
+  t1 = &n->u.add.terms[1];
+  if (node_coeff_is(t0->coeff, 1) && node_coeff_is(t1->coeff, -1)) {
+    *a = t0->term;
+    *b = t1->term;
+    return true;
+  }
+  if (node_coeff_is(t0->coeff, -1) && node_coeff_is(t1->coeff, 1)) {
+    *a = t0->term;
+    *b = t1->term;
+    return true;
+  }
+  return false;
+}
+
+static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
+                                      ixs_node **b) {
+  if (!cmp || cmp->tag != IXS_CMP || cmp->u.binary.cmp_op != IXS_CMP_EQ)
+    return false;
+  if (ixs_node_is_zero(cmp->u.binary.rhs))
+    return extract_add_node_equality(cmp->u.binary.lhs, a, b);
+  if (ixs_node_is_zero(cmp->u.binary.lhs))
+    return extract_add_node_equality(cmp->u.binary.rhs, a, b);
+  if (!ixs_node_is_const(cmp->u.binary.lhs) &&
+      !ixs_node_is_const(cmp->u.binary.rhs)) {
+    *a = cmp->u.binary.lhs;
+    *b = cmp->u.binary.rhs;
+    return true;
+  }
+  return false;
+}
+
+static bool sym_name_matches(ixs_node *n, const char *name) {
+  return n && n->tag == IXS_SYM && n->u.name == name;
+}
+
+static bool node_is_sym_minus_one(ixs_node *n, const char *name) {
+  int64_t kp, kq, cp, cq;
+  if (!n || n->tag != IXS_ADD || n->u.add.nterms != 1 ||
+      !sym_name_matches(n->u.add.terms[0].term, name))
+    return false;
+  ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
+  ixs_node_get_rat(n->u.add.terms[0].coeff, &cp, &cq);
+  return kp == -1 && kq == 1 && cp == 1 && cq == 1;
+}
+
+static bool extract_pow2_and(ixs_node *expr, const char **name) {
+  ixs_node *a, *b;
+  if (!expr || expr->tag != IXS_AND || expr->u.logic.nargs != 2 || !name)
+    return false;
+  a = expr->u.logic.args[0];
+  b = expr->u.logic.args[1];
+  if (a->tag == IXS_SYM && node_is_sym_minus_one(b, a->u.name)) {
+    *name = a->u.name;
+    return true;
+  }
+  if (b->tag == IXS_SYM && node_is_sym_minus_one(a, b->u.name)) {
+    *name = b->u.name;
+    return true;
+  }
+  return false;
+}
+
+static bool extract_bitop_sym_mask(ixs_node *expr, ixs_tag tag,
+                                   const char **name, int64_t *mask) {
+  ixs_node *a, *b;
+  if (!expr || expr->tag != tag || expr->u.logic.nargs != 2 || !name || !mask)
+    return false;
+  a = expr->u.logic.args[0];
+  b = expr->u.logic.args[1];
+  if (a->tag == IXS_SYM && node_get_int_const(b, mask)) {
+    *name = a->u.name;
+    return true;
+  }
+  if (b->tag == IXS_SYM && node_get_int_const(a, mask)) {
+    *name = b->u.name;
+    return true;
+  }
+  return false;
+}
+
+static void apply_pow2_or_zero(ixs_bounds *b, const char *name) {
+  ixs_var_bound *v = get_or_create_var(b, name);
+  if (!v)
+    return;
+  if (v->bits.pow2 == IXS_POW2_UNKNOWN)
+    v->bits.pow2 = IXS_POW2_OR_ZERO;
+  refine_var_bit_consistency(b, v);
+  apply_sym_cmp_const(b, name, IXS_CMP_GE, 0, 1);
+}
+
+static void extract_bitfacts_from_const_eq(ixs_bounds *b, ixs_node *expr,
+                                           int64_t value) {
+  const char *name;
+  int64_t mask;
+  uint64_t mask_bits, value_bits;
+
+  if (extract_pow2_and(expr, &name)) {
+    if (value == 0)
+      apply_pow2_or_zero(b, name);
+    return;
+  }
+
+  if (extract_bitop_sym_mask(expr, IXS_AND, &name, &mask)) {
+    mask_bits = (uint64_t)mask;
+    value_bits = (uint64_t)value;
+    if ((value_bits & ~mask_bits) != 0) {
+      b->contradiction = true;
+      return;
+    }
+    apply_known_bits(b, name, (~value_bits) & mask_bits,
+                     value_bits & mask_bits);
+    return;
+  }
+
+  if (extract_bitop_sym_mask(expr, IXS_OR, &name, &mask)) {
+    mask_bits = (uint64_t)mask;
+    value_bits = (uint64_t)value;
+    if ((value_bits & mask_bits) != mask_bits) {
+      b->contradiction = true;
+      return;
+    }
+    apply_known_bits(b, name, ~value_bits, value_bits & ~mask_bits);
+  }
+}
+
+static void extract_bitfacts_from_node_eq(ixs_bounds *b, ixs_node *a,
+                                          ixs_node *other) {
+  const char *name;
+  int64_t mask;
+  uint64_t mask_bits;
+
+  if (other->tag != IXS_SYM)
+    return;
+  if (extract_bitop_sym_mask(a, IXS_OR, &name, &mask) &&
+      name == other->u.name) {
+    apply_known_bits(b, name, 0, (uint64_t)mask);
+    return;
+  }
+  if (extract_bitop_sym_mask(a, IXS_AND, &name, &mask) &&
+      name == other->u.name) {
+    mask_bits = (uint64_t)mask;
+    apply_known_bits(b, name, ~mask_bits, 0);
+  }
+}
+
+static void extract_bitfacts(ixs_bounds *b, ixs_node *a) {
+  ixs_node *expr, *lhs, *rhs;
+  int64_t value;
+  if (a->tag != IXS_CMP || a->u.binary.cmp_op != IXS_CMP_EQ)
+    return;
+
+  if (extract_cmp_expr_const(a, &expr, &value))
+    extract_bitfacts_from_const_eq(b, expr, value);
+
+  if (extract_cmp_node_equality(a, &lhs, &rhs)) {
+    extract_bitfacts_from_node_eq(b, lhs, rhs);
+    extract_bitfacts_from_node_eq(b, rhs, lhs);
   }
 }
 
@@ -288,6 +665,7 @@ IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     return;
 
   extract_modrem(b, a);
+  extract_bitfacts(b, a);
 
   ixs_node *lhs = a->u.binary.lhs;
   ixs_node *rhs = a->u.binary.rhs;
@@ -405,10 +783,161 @@ static int64_t mod_dividend_step(ixs_node *expr) {
   }
 }
 
+#define BITFACTS_DEPTH_LIMIT 64u
+
+static void bitfacts_apply_exact(ixs_bitfacts *bits, int64_t val) {
+  uint64_t u = (uint64_t)val;
+  bits->known_zero |= ~u;
+  bits->known_one |= u;
+  if (val == 0)
+    bits->pow2 = IXS_POW2_OR_ZERO;
+  else if (int64_is_positive_pow2(val))
+    bits->pow2 = IXS_POW2_POSITIVE;
+}
+
+static void bitfacts_apply_modrem(ixs_bitfacts *bits, int64_t modulus,
+                                  int64_t remainder) {
+  uint64_t mask, rem;
+  if (!int64_modulus_is_pow2(modulus))
+    return;
+  mask = (uint64_t)modulus - 1u;
+  rem = (uint64_t)remainder & mask;
+  bits->known_zero |= (~rem) & mask;
+  bits->known_one |= rem & mask;
+}
+
+static bool bounds_get_symbol_bitfacts(ixs_bounds *b, const char *name,
+                                       ixs_bitfacts *out) {
+  int64_t exact;
+  ixs_var_bound *v = find_var(b, name);
+  bitfacts_unknown(out);
+  if (v) {
+    *out = v->bits;
+    bitfacts_apply_modrem(out, v->modulus, v->remainder);
+    if (interval_exact_int(&v->iv, &exact))
+      bitfacts_apply_exact(out, exact);
+    if (out->pow2 == IXS_POW2_OR_ZERO && interval_lower_at_least(&v->iv, 1, 1))
+      out->pow2 = IXS_POW2_POSITIVE;
+  }
+  return true;
+}
+
+static void bitfacts_apply_and(ixs_bitfacts *out, const ixs_bitfacts *a,
+                               const ixs_bitfacts *b) {
+  out->known_one = a->known_one & b->known_one;
+  out->known_zero = a->known_zero | b->known_zero;
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static void bitfacts_apply_or(ixs_bitfacts *out, const ixs_bitfacts *a,
+                              const ixs_bitfacts *b) {
+  out->known_one = a->known_one | b->known_one;
+  out->known_zero = a->known_zero & b->known_zero;
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static void bitfacts_apply_xor(ixs_bitfacts *out, const ixs_bitfacts *a,
+                               const ixs_bitfacts *b) {
+  out->known_one =
+      (a->known_one & b->known_zero) | (a->known_zero & b->known_one);
+  out->known_zero =
+      (a->known_zero & b->known_zero) | (a->known_one & b->known_one);
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
+                                      ixs_bitfacts *out, unsigned depth) {
+  ixs_bitfacts lhs, rhs;
+
+  bitfacts_unknown(out);
+  if (!expr || depth == 0)
+    return false;
+
+  switch (expr->tag) {
+  case IXS_INT:
+    bitfacts_apply_exact(out, expr->u.ival);
+    return true;
+  case IXS_RAT:
+    if (expr->u.rat.q != 1)
+      return false;
+    bitfacts_apply_exact(out, expr->u.rat.p);
+    return true;
+  case IXS_SYM: {
+    return bounds_get_symbol_bitfacts(b, expr->u.name, out);
+  }
+  case IXS_CMP:
+  case IXS_NOT:
+    out->known_zero = ~(uint64_t)1;
+    out->known_one = 0;
+    return true;
+  case IXS_AND:
+  case IXS_OR:
+    if (expr->u.logic.nargs != 2)
+      return false;
+    if (!bounds_get_bitfacts_depth(b, expr->u.logic.args[0], &lhs, depth - 1) ||
+        !bounds_get_bitfacts_depth(b, expr->u.logic.args[1], &rhs, depth - 1))
+      return false;
+    if (expr->tag == IXS_AND)
+      bitfacts_apply_and(out, &lhs, &rhs);
+    else
+      bitfacts_apply_or(out, &lhs, &rhs);
+    return true;
+  case IXS_XOR:
+    if (!bounds_get_bitfacts_depth(b, expr->u.binary.lhs, &lhs, depth - 1) ||
+        !bounds_get_bitfacts_depth(b, expr->u.binary.rhs, &rhs, depth - 1))
+      return false;
+    bitfacts_apply_xor(out, &lhs, &rhs);
+    return true;
+  case IXS_ADD:
+  case IXS_MUL:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_MOD:
+  case IXS_PIECEWISE:
+  case IXS_MAX:
+  case IXS_MIN:
+    return ixs_node_is_integer_valued(expr);
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return false;
+  }
+  return false;
+}
+
+IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out) {
+  if (!b || !out)
+    return false;
+  return bounds_get_bitfacts_depth(b, expr, out, BITFACTS_DEPTH_LIMIT);
+}
+
+IXS_STATIC bool ixs_bounds_is_pow2_positive(ixs_bounds *b, ixs_node *expr) {
+  ixs_bitfacts bits;
+  if (!ixs_bounds_get_bitfacts(b, expr, &bits))
+    return false;
+  return bits.pow2 == IXS_POW2_POSITIVE;
+}
+
+IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr) {
+  ixs_bitfacts bits;
+  if (!ixs_bounds_get_bitfacts(b, expr, &bits))
+    return false;
+  return bits.pow2 == IXS_POW2_OR_ZERO || ixs_bounds_is_pow2_positive(b, expr);
+}
+
 IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
                                               int64_t m) {
+  ixs_bitfacts bits;
+  uint64_t low_mask;
   if (!b || !expr || m <= 0)
     return false;
+
+  if (int64_modulus_is_pow2(m)) {
+    low_mask = (uint64_t)m - 1u;
+    if (ixs_bounds_get_bitfacts(b, expr, &bits) &&
+        (bits.known_zero & low_mask) == low_mask)
+      return true;
+  }
 
   if (expr->tag == IXS_INT)
     return expr->u.ival % m == 0;
@@ -702,7 +1231,13 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
   size_t i, j;
 
+  if (b->contradiction)
+    return true;
+
   for (i = 0; i < b->nvars; i++) {
+    refine_var_bit_consistency(b, &b->vars[i]);
+    if (b->contradiction)
+      return true;
     if (ixs_interval_is_empty(b->vars[i].iv))
       return true;
   }
@@ -812,16 +1347,104 @@ static ixs_check_result bounds_check_mod_query(ixs_bounds *b, ixs_node *cmp) {
   return equal ? IXS_CHECK_FALSE : IXS_CHECK_TRUE;
 }
 
+static ixs_check_result check_equal_result(ixs_cmp_op op, bool equal) {
+  if (op == IXS_CMP_EQ)
+    return equal ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+  if (op == IXS_CMP_NE)
+    return equal ? IXS_CHECK_FALSE : IXS_CHECK_TRUE;
+  return IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result bounds_check_pow2_query(ixs_bounds *b, ixs_node *cmp,
+                                                ixs_node *expr, int64_t value) {
+  const char *name;
+  ixs_node sym_tmp;
+  if (!extract_pow2_and(expr, &name))
+    return IXS_CHECK_UNKNOWN;
+  memset(&sym_tmp, 0, sizeof(sym_tmp));
+  sym_tmp.tag = IXS_SYM;
+  sym_tmp.u.name = name;
+  if (!ixs_bounds_is_pow2_or_zero(b, &sym_tmp))
+    return IXS_CHECK_UNKNOWN;
+  return check_equal_result(cmp->u.binary.cmp_op, value == 0);
+}
+
+static ixs_check_result bounds_check_and_mask_query(ixs_bounds *b,
+                                                    ixs_node *cmp,
+                                                    ixs_node *expr,
+                                                    int64_t value) {
+  const char *name;
+  int64_t mask;
+  uint64_t mask_bits, value_bits, known;
+  ixs_node sym_tmp;
+  ixs_bitfacts bits;
+  bool equal;
+
+  if (!extract_bitop_sym_mask(expr, IXS_AND, &name, &mask))
+    return IXS_CHECK_UNKNOWN;
+
+  /* A non-negative constant mask makes the result a finite int64 value whose
+   * high bits are all zero.  Negative masks leave untracked high bits live. */
+  if (mask < 0)
+    return IXS_CHECK_UNKNOWN;
+
+  mask_bits = (uint64_t)mask;
+  value_bits = (uint64_t)value;
+  if (value < 0 || (value_bits & ~mask_bits) != 0)
+    return check_equal_result(cmp->u.binary.cmp_op, false);
+
+  sym_tmp.tag = IXS_SYM;
+  sym_tmp.hash = 0;
+  sym_tmp.u.name = name;
+  if (!ixs_bounds_get_bitfacts(b, &sym_tmp, &bits))
+    return IXS_CHECK_UNKNOWN;
+
+  if ((bits.known_one & mask_bits & ~value_bits) != 0 ||
+      (bits.known_zero & mask_bits & value_bits) != 0)
+    return check_equal_result(cmp->u.binary.cmp_op, false);
+
+  known = (bits.known_zero | bits.known_one) & mask_bits;
+  if (known != mask_bits)
+    return IXS_CHECK_UNKNOWN;
+
+  equal = (bits.known_one & mask_bits) == (value_bits & mask_bits);
+  return check_equal_result(cmp->u.binary.cmp_op, equal);
+}
+
+static ixs_check_result bounds_check_bit_query(ixs_bounds *b, ixs_node *cmp) {
+  ixs_node *expr;
+  int64_t value;
+  ixs_check_result r;
+
+  if (cmp->u.binary.cmp_op != IXS_CMP_EQ && cmp->u.binary.cmp_op != IXS_CMP_NE)
+    return IXS_CHECK_UNKNOWN;
+  if (!extract_cmp_expr_const(cmp, &expr, &value))
+    return IXS_CHECK_UNKNOWN;
+
+  r = bounds_check_pow2_query(b, cmp, expr, value);
+  if (r != IXS_CHECK_UNKNOWN)
+    return r;
+
+  return bounds_check_and_mask_query(b, cmp, expr, value);
+}
+
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
-  ixs_check_result mod_result;
+  ixs_check_result mod_result, bit_result;
 
   if (!cmp || cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
+    return IXS_CHECK_UNKNOWN;
+
+  if (ixs_bounds_has_empty(b))
     return IXS_CHECK_UNKNOWN;
 
   mod_result = bounds_check_mod_query(b, cmp);
   if (mod_result != IXS_CHECK_UNKNOWN)
     return mod_result;
+
+  bit_result = bounds_check_bit_query(b, cmp);
+  if (bit_result != IXS_CHECK_UNKNOWN)
+    return bit_result;
 
   iv = ixs_bounds_get(b, cmp->u.binary.lhs);
   if (!iv.valid)

@@ -22,11 +22,24 @@
  * already designed to make that a drop-in replacement.
  */
 
+typedef enum {
+  IXS_POW2_UNKNOWN,
+  IXS_POW2_OR_ZERO,
+  IXS_POW2_POSITIVE
+} ixs_pow2_fact;
+
+typedef struct {
+  uint64_t known_zero; /* low 64 bits known to be zero */
+  uint64_t known_one;  /* low 64 bits known to be one */
+  ixs_pow2_fact pow2;
+} ixs_bitfacts;
+
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
   int64_t modulus;   /* 0 = no info, >0 = sym ≡ remainder (mod modulus) */
   int64_t remainder; /* in [0, modulus) when modulus > 0                */
+  ixs_bitfacts bits;
 } ixs_var_bound;
 
 typedef struct {
@@ -41,6 +54,7 @@ typedef struct {
   ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
   size_t nexprs;
   size_t expr_cap;
+  bool contradiction;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
@@ -70,6 +84,12 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b);
  * On success *mod > 0 and 0 <= *rem < *mod. */
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem);
+
+/* Low-bit and power-of-two facts inferred from assumptions and constants. */
+IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out);
+IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr);
+IXS_STATIC bool ixs_bounds_is_pow2_positive(ixs_bounds *b, ixs_node *expr);
 
 /* True when expr is provably divisible by m (m > 0) given bounds. */
 IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
