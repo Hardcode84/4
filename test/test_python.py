@@ -16,8 +16,8 @@ Properties tested:
    numerical semantics.
 7. Range API soundness: reported bounds contain sampled evaluations that
    satisfy the input assumptions.
-8. Entailment API soundness: proven modular comparisons agree with sampled
-   evaluations satisfying the input assumptions.
+8. Entailment API soundness: proven modular, mask, and power-of-two
+   comparisons agree with sampled evaluations satisfying the input assumptions.
 9. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
    crash the forked test subprocess.
 """
@@ -43,6 +43,8 @@ Env = dict[str, int]
 RangeBounds = dict[str, tuple[int, int]]
 ModSymbolCase = tuple[str, int, int, int, int, str]
 ModCompositeCase = tuple[str, str, int, int, int, int, int, int, int, str, str]
+BitMaskCase = tuple[str, str, int, int, int, int, str]
+Pow2Case = tuple[str, bool, str, int, str]
 
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
@@ -70,6 +72,7 @@ def _wide_env_st() -> st.SearchStrategy[Env]:
 
 _PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 127, 251, 509, 1021]
 _POW2 = [1 << k for k in range(1, 16)]
+_POW2_OR_ZERO = [0] + [1 << k for k in range(0, 16)]
 _POW2_ADJ = [v + d for v in _POW2 for d in (-1, 1)]
 _INTERESTING = sorted(set(_PRIMES + _POW2 + _POW2_ADJ + [0, 1, -1]))
 
@@ -149,6 +152,48 @@ def _mod_composite_case_st(draw: st.DrawFn) -> ModCompositeCase:
         cmp_op,
         pattern,
     )
+
+
+@st.composite
+def _bit_mask_case_st(draw: st.DrawFn) -> BitMaskCase:
+    """Satisfiable bit-mask assumption plus a mask equality query."""
+    sym = draw(sym_names)
+    pattern = draw(st.sampled_from(["and_eq", "or_eq", "or_self", "and_self"]))
+    mask = draw(st.integers(min_value=0, max_value=255))
+
+    if pattern == "and_eq":
+        assume_value = draw(st.integers(min_value=0, max_value=255)) & mask
+    elif pattern == "or_eq":
+        assume_value = draw(st.integers(min_value=0, max_value=255)) | mask
+    else:
+        assume_value = 0
+
+    query_mask = draw(st.integers(min_value=0, max_value=255))
+    query_known_one, query_known_zero = _bit_mask_known_bits(pattern, mask, assume_value)
+    known = (query_known_one | query_known_zero) & query_mask
+    known_value = query_known_one & query_mask
+    mismatch = 1 if query_mask == 0 else known_value ^ (query_mask & -query_mask)
+    targets = [known_value, mismatch, query_mask + 1, -1]
+    if known != query_mask:
+        targets.append(draw(st.integers(min_value=0, max_value=255)))
+    target = draw(st.sampled_from(targets))
+    cmp_op = draw(st.sampled_from(["==", "!="]))
+    return sym, pattern, mask, assume_value, query_mask, target, cmp_op
+
+
+@st.composite
+def _pow2_case_st(draw: st.DrawFn) -> Pow2Case:
+    """Power-of-two-or-zero assumption plus a query check."""
+    sym = draw(sym_names)
+    positive = draw(st.booleans())
+    query_kind = draw(st.sampled_from(["pow2_expr", "lower_bound"]))
+    if query_kind == "pow2_expr":
+        target = draw(st.sampled_from([0, -1, 1, 2, 4, 8]))
+        cmp_op = draw(st.sampled_from(["==", "!="]))
+    else:
+        target = draw(st.sampled_from([-1, 0, 1, 2]))
+        cmp_op = draw(st.sampled_from([">=", "<"]))
+    return sym, positive, query_kind, target, cmp_op
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +624,61 @@ def _env_within_bounds(env: Env, bounds: RangeBounds) -> Env:
     for name, (lo, hi) in bounds.items():
         bounded[name] = max(lo, min(hi, bounded[name]))
     return bounded
+
+
+def _bit_mask_known_bits(pattern: str, mask: int, assume_value: int) -> tuple[int, int]:
+    tracked = (1 << 64) - 1
+    if pattern == "and_eq":
+        return assume_value & mask, (~assume_value) & mask & tracked
+    if pattern == "or_eq":
+        return assume_value & ~mask & tracked, ~assume_value & tracked
+    if pattern == "or_self":
+        return mask & tracked, 0
+    if pattern == "and_self":
+        return 0, ~mask & tracked
+    raise ValueError(f"unknown bit mask pattern: {pattern}")
+
+
+def _bit_mask_assumption(
+    ctx: ixsimpl.Context,
+    sym: ixsimpl.Expr,
+    pattern: str,
+    mask: int,
+    assume_value: int,
+) -> ixsimpl.Expr:
+    if pattern == "and_eq":
+        return ctx.eq(sym & mask, assume_value)
+    if pattern == "or_eq":
+        return ctx.eq(sym | mask, assume_value)
+    if pattern == "or_self":
+        return ctx.eq(sym | mask, sym)
+    if pattern == "and_self":
+        return ctx.eq(sym & mask, sym)
+    raise ValueError(f"unknown bit mask pattern: {pattern}")
+
+
+def _bit_mask_sample_value(pattern: str, mask: int, assume_value: int, base: int) -> int:
+    if pattern == "and_eq":
+        return assume_value | (base & ~mask)
+    if pattern == "or_eq":
+        return (assume_value & ~mask) | (base & mask)
+    if pattern == "or_self":
+        return base | mask
+    if pattern == "and_self":
+        return base & mask
+    raise ValueError(f"unknown bit mask pattern: {pattern}")
+
+
+def _bit_mask_sample_satisfies(pattern: str, mask: int, assume_value: int, value: int) -> bool:
+    if pattern == "and_eq":
+        return (value & mask) == assume_value
+    if pattern == "or_eq":
+        return (value | mask) == assume_value
+    if pattern == "or_self":
+        return (value | mask) == value
+    if pattern == "and_self":
+        return (value & mask) == value
+    raise ValueError(f"unknown bit mask pattern: {pattern}")
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +1893,80 @@ def test_check_modular_composite_entailment_soundness(
         expected = raw % query_mod == target
         if cmp_op == "!=":
             expected = not expected
+        assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    case=_bit_mask_case_st(),
+    base_values=st.lists(st.integers(min_value=0, max_value=1023), min_size=1, max_size=8),
+)
+def test_check_bit_mask_entailment_soundness(
+    case: BitMaskCase,
+    base_values: list[int],
+) -> None:
+    """Proven mask checks agree with satisfying samples."""
+    sym, pattern, mask, assume_value, query_mask, target, cmp_op = case
+    ctx = ixsimpl.Context()
+    sym_node = ctx.sym(sym)
+    assumption = _bit_mask_assumption(ctx, sym_node, pattern, mask, assume_value)
+    lhs = sym_node & query_mask
+    query = ctx.eq(lhs, target) if cmp_op == "==" else ctx.ne(lhs, target)
+    result = ctx.check(query, assumptions=[assumption])
+    if result is None:
+        return
+
+    checked = 0
+    for base in base_values:
+        value = _bit_mask_sample_value(pattern, mask, assume_value, base)
+        assert _bit_mask_sample_satisfies(pattern, mask, assume_value, value)
+        env = {sym: value}
+        expected = (value & query_mask) == target
+        if cmp_op == "!=":
+            expected = not expected
+        assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
+        checked += 1
+    assume(checked > 0)
+
+
+@given(
+    case=_pow2_case_st(),
+    values=st.lists(st.sampled_from(_POW2_OR_ZERO), min_size=1, max_size=8),
+)
+def test_check_pow2_entailment_soundness(
+    case: Pow2Case,
+    values: list[int],
+) -> None:
+    """Proven power-of-two checks agree with satisfying samples."""
+    sym, positive, query_kind, target, cmp_op = case
+    ctx = ixsimpl.Context()
+    sym_node = ctx.sym(sym)
+    pow2_expr = sym_node & (sym_node - 1)
+    assumptions = [ctx.eq(pow2_expr, 0)]
+    if positive:
+        assumptions.append(sym_node > 0)
+
+    if query_kind == "pow2_expr":
+        query = ctx.eq(pow2_expr, target) if cmp_op == "==" else ctx.ne(pow2_expr, target)
+    else:
+        query = sym_node >= target if cmp_op == ">=" else sym_node < target
+    result = ctx.check(query, assumptions=assumptions)
+    if result is None:
+        return
+
+    checked = 0
+    for raw in values:
+        value = 1 if positive and raw == 0 else raw
+        env = {sym: value}
+        if query_kind == "pow2_expr":
+            expected = (value & (value - 1)) == target
+            if cmp_op == "!=":
+                expected = not expected
+        elif cmp_op == ">=":
+            expected = value >= target
+        else:
+            expected = value < target
         assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
         checked += 1
     assume(checked > 0)
