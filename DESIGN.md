@@ -630,9 +630,12 @@ The resulting `IXS_OR` and `IXS_AND` nodes are still integer bitwise operators,
 but on 0/1 operands they have the same truth tables as boolean OR and AND.
 The same tokens are also accepted as bitwise integer operators in expression
 grammar. In predicate comparisons, the left operand may be a full bitwise
-expression (`x & 3 == 1`). The right operand uses arithmetic grammar unless a
-bitwise expression is parenthesized (`x == (y | 1)`), preserving the older
-condition shorthand `x > 0 | y > 0`.
+expression for mask-like spellings (`x & 3 == 1`). A leading bare flag followed
+by a symbolic condition operand remains condition shorthand (`x | y == 0`
+means `x != 0 | y == 0`); write `(x | y) == 0` for a bitwise var-var
+comparison. The right operand uses arithmetic grammar unless a bitwise
+expression is parenthesized (`x == (y | 1)`), preserving the older condition
+shorthand `x > 0 | y > 0`.
 
 Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.

@@ -5028,9 +5028,38 @@ static bool parse_cmp_op_token(parser *p, ixs_cmp_op *op) {
   return false;
 }
 
+static bool expr_cmp_would_steal_condition_op(parser *p, size_t start,
+                                              size_t end) {
+  int parens = 0;
+  size_t i;
+
+  for (i = start; i < end; i++) {
+    char c = p->input[i];
+    if (c == '(') {
+      parens++;
+    } else if (c == ')') {
+      if (parens > 0)
+        parens--;
+    } else if (parens == 0 && (c == '&' || c == '|')) {
+      size_t rhs = i + 1;
+      while (rhs < end && (p->input[rhs] == ' ' || p->input[rhs] == '\t' ||
+                           p->input[rhs] == '\n' || p->input[rhs] == '\r'))
+        rhs++;
+      /* Keep legacy flag shorthand like "x | y == 0" as a condition chain.
+       * Mask-like spellings such as "x & 3 == 1" still parse bitwise. */
+      if (rhs < end && (isalpha((unsigned char)p->input[rhs]) ||
+                        p->input[rhs] == '_' || p->input[rhs] == '$'))
+        return true;
+      return false;
+    }
+  }
+  return false;
+}
+
 static ixs_node *try_parse_expr_cmp(parser *p, bool *done) {
   parser_state state;
   size_t start_pos = p->pos;
+  size_t cmp_pos;
   int start_depth = p->depth;
   ixs_node *left;
   ixs_node *right;
@@ -5051,7 +5080,15 @@ static ixs_node *try_parse_expr_cmp(parser *p, bool *done) {
     return NULL;
   }
 
+  skip_ws(p);
+  cmp_pos = p->pos;
   if (!parse_cmp_op_token(p, &op)) {
+    parser_state_restore(p->ctx, &state);
+    p->pos = start_pos;
+    p->depth = start_depth;
+    return NULL;
+  }
+  if (expr_cmp_would_steal_condition_op(p, start_pos, cmp_pos)) {
     parser_state_restore(p->ctx, &state);
     p->pos = start_pos;
     p->depth = start_depth;
