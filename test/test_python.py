@@ -74,6 +74,7 @@ _PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 127, 251, 509
 _POW2 = [1 << k for k in range(1, 16)]
 _POW2_OR_ZERO = [0] + [1 << k for k in range(0, 16)]
 _POW2_ADJ = [v + d for v in _POW2 for d in (-1, 1)]
+_POW2_FACT_VALUES = sorted(set([0, *_POW2, *_POW2_ADJ, -8, -1, 3, 5, 6, 9, 12, 17]))
 _INTERESTING = sorted(set(_PRIMES + _POW2 + _POW2_ADJ + [0, 1, -1]))
 
 
@@ -679,6 +680,18 @@ def _bit_mask_sample_satisfies(pattern: str, mask: int, assume_value: int, value
     if pattern == "and_self":
         return (value & mask) == value
     raise ValueError(f"unknown bit mask pattern: {pattern}")
+
+
+def _is_positive_pow2(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
+def _expected_pow2_fact(value: int) -> str | None:
+    if value == 0:
+        return "or_zero"
+    if _is_positive_pow2(value):
+        return "positive"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1799,8 +1812,16 @@ def test_check_bitwise_fact_entailment() -> None:
     d = ctx.sym("d")
     x = ctx.sym("x")
 
+    assert ctx.pow2_fact(ctx.int_(0)) == "or_zero"
+    assert ctx.pow2_fact(ctx.int_(8)) == "positive"
+    assert ctx.pow2_fact(ctx.int_(6)) is None
+
     pow2_expr = d & (d - 1)
     pow2_assume = ctx.eq(pow2_expr, 0)
+    assert ctx.pow2_fact(d, assumptions=[pow2_assume]) == "or_zero"
+    assert ctx.pow2_fact(d, assumptions=[pow2_assume, d > 0]) == "positive"
+    assert ctx.pow2_fact(x + 1, assumptions=[ctx.eq(x, 7)]) == "positive"
+    assert ctx.pow2_fact(x + 1, assumptions=[ctx.eq(x, -1)]) == "or_zero"
     assert ctx.check(ctx.eq(pow2_expr, 0), assumptions=[pow2_assume]) is True
     assert ctx.check(ctx.ne(pow2_expr, 0), assumptions=[pow2_assume]) is False
     assert ctx.check(ctx.eq(pow2_expr, 4), assumptions=[pow2_assume]) is False
@@ -1818,6 +1839,7 @@ def test_check_contradictory_assumptions_unknown() -> None:
     x = ctx.sym("x")
 
     assert ctx.check(x >= 0, assumptions=[x >= 10, x <= 5]) is None
+    assert ctx.pow2_fact(x, assumptions=[x >= 10, x <= 5]) is None
 
 
 @given(
@@ -1947,6 +1969,9 @@ def test_check_pow2_entailment_soundness(
     if positive:
         assumptions.append(sym_node > 0)
 
+    fact = ctx.pow2_fact(sym_node, assumptions=assumptions)
+    assert fact == ("positive" if positive else "or_zero")
+
     if query_kind == "pow2_expr":
         query = ctx.eq(pow2_expr, target) if cmp_op == "==" else ctx.ne(pow2_expr, target)
     else:
@@ -1959,6 +1984,10 @@ def test_check_pow2_entailment_soundness(
     for raw in values:
         value = 1 if positive and raw == 0 else raw
         env = {sym: value}
+        if fact == "positive":
+            assert _is_positive_pow2(value), f"fact={fact}, env={env}, case={case}"
+        elif fact == "or_zero":
+            assert value == 0 or _is_positive_pow2(value), f"fact={fact}, env={env}, case={case}"
         if query_kind == "pow2_expr":
             expected = (value & (value - 1)) == target
             if cmp_op == "!=":
@@ -1970,6 +1999,21 @@ def test_check_pow2_entailment_soundness(
         assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
         checked += 1
     assume(checked > 0)
+
+
+@given(
+    value=st.sampled_from(_POW2_FACT_VALUES),
+    offset=st.integers(min_value=-16, max_value=16),
+)
+def test_pow2_fact_exact_arithmetic_soundness(value: int, offset: int) -> None:
+    """Exact arithmetic ranges feed the public power-of-two fact query."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    expr = x + offset
+
+    assert ctx.pow2_fact(expr, assumptions=[ctx.eq(x, value - offset)]) == _expected_pow2_fact(
+        value
+    )
 
 
 def test_check_no_assumptions() -> None:

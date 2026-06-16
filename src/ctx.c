@@ -518,6 +518,17 @@ ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
   return result;
 }
 
+ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
+                                ixs_node *const *assumptions,
+                                size_t n_assumptions) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_pow2_fact result =
+      simp_get_pow2_fact(ctx, expr, assumptions, n_assumptions);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
                size_t n_assumptions, ixs_range_result *out) {
   ixs_session_binding binding;

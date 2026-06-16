@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from ixsimpl._ixsimpl import (
     ADD,
@@ -150,6 +150,12 @@ if TYPE_CHECKING:
             *,
             assumptions: Sequence[_Expr] | None = None,
         ) -> bool | None: ...
+        def pow2_fact(
+            self,
+            expr: _Expr,
+            *,
+            assumptions: Sequence[_Expr] | None = None,
+        ) -> Literal["or_zero", "positive"] | None: ...
         def range(
             self,
             expr: _Expr,

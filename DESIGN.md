@@ -1175,6 +1175,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   reports unknown; if independent intervals lose correlations, the returned
   interval is conservative rather than the mathematical image of the full
   assumption set.
+- **Public power-of-two query** (`ixs_get_pow2_fact`, Python
+  `Context.pow2_fact`): exposes only the semantic pow2 lattice
+  (`unknown`, `or_zero`, `positive`), not the internal known-bit masks.
+  It uses both direct bitfacts and exact integer intervals inferred for
+  arithmetic expressions.  Detected contradictory assumptions return unknown.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1463,6 +1468,17 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+// Power-of-two fact query under assumptions.  Returns the strongest provable
+// fact, or UNKNOWN when no fact is proven.
+typedef enum {
+    IXS_POW2_UNKNOWN,
+    IXS_POW2_OR_ZERO,
+    IXS_POW2_POSITIVE
+} ixs_pow2_fact;
+ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
+                                ixs_node *const *assumptions,
+                                size_t n_assumptions);
 
 // Inclusive range query under assumptions.  Returns false when unknown.
 typedef struct {
@@ -2301,6 +2317,10 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
+                                ixs_node *const *assumptions,
+                                size_t n_assumptions);
 
 typedef struct {
   bool has_lower;

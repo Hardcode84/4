@@ -165,6 +165,12 @@ typedef enum {
   IXS_CHECK_UNKNOWN
 } ixs_check_result;
 
+typedef enum {
+  IXS_POW2_UNKNOWN,
+  IXS_POW2_OR_ZERO,
+  IXS_POW2_POSITIVE
+} ixs_pow2_fact;
+
 typedef struct {
   bool has_lower;
   bool has_upper;
@@ -175,13 +181,22 @@ typedef struct {
 } ixs_range_result;
 
 /* Check whether a comparison is provably true or false given the
- * assumptions, using interval propagation and modular congruence facts.
+ * assumptions, using interval propagation, modular congruence facts, and
+ * bitwise facts.
  * expr must be a CMP node in normalized form (lhs op 0) -- this is
  * automatic when constructed via ixs_cmp().  Returns UNKNOWN when bounds
  * are insufficient, when expr is not a CMP, or on OOM.  Lighter than
  * ixs_simplify: no rewriting, just bounds setup + entailment checks. */
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+/* Return the strongest known power-of-two fact for expr under assumptions.
+ * POSITIVE means expr > 0 and exactly one bit is set.  OR_ZERO additionally
+ * permits expr == 0.  UNKNOWN is returned when the fact is not provable, on
+ * OOM, for NULL/sentinel expr, or for detected contradictory assumptions. */
+ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
+                                ixs_node *const *assumptions,
+                                size_t n_assumptions);
 
 /* Infer an inclusive rational range for expr under assumptions.
  * Returns false when the interval engine cannot derive a range, on OOM,

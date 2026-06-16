@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Sequence
 from fractions import Fraction
-from typing import Self, overload
+from typing import Literal, Self, overload
 
 INT: int
 RAT: int
@@ -131,6 +131,12 @@ class Context:
         *,
         assumptions: Sequence[_Expr] | None = None,
     ) -> bool | None: ...
+    def pow2_fact(
+        self,
+        expr: _Expr,
+        *,
+        assumptions: Sequence[_Expr] | None = None,
+    ) -> Literal["or_zero", "positive"] | None: ...
     def range(
         self,
         expr: _Expr,

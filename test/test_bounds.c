@@ -856,6 +856,38 @@ static void test_bounds_check_contradiction_unknown(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_pow2_fact(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *d = ixs_sym(ctx, "d");
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *dm1 = ixs_sub(ctx, d, ixs_int(ctx, 1));
+  ixs_node *pow2_expr = ixs_and(ctx, d, dm1);
+  ixs_node *assumes[2];
+
+  assumes[0] = ixs_cmp(ctx, pow2_expr, IXS_CMP_EQ, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0));
+
+  CHECK(ixs_get_pow2_fact(ctx, ixs_int(ctx, 0), NULL, 0) == IXS_POW2_OR_ZERO);
+  CHECK(ixs_get_pow2_fact(ctx, ixs_int(ctx, 8), NULL, 0) == IXS_POW2_POSITIVE);
+  CHECK(ixs_get_pow2_fact(ctx, ixs_int(ctx, 6), NULL, 0) == IXS_POW2_UNKNOWN);
+
+  CHECK(ixs_get_pow2_fact(ctx, d, assumes, 1) == IXS_POW2_OR_ZERO);
+  CHECK(ixs_get_pow2_fact(ctx, d, assumes, 2) == IXS_POW2_POSITIVE);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7));
+  CHECK(ixs_get_pow2_fact(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), assumes, 1) ==
+        IXS_POW2_POSITIVE);
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, -1));
+  CHECK(ixs_get_pow2_fact(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), assumes, 1) ==
+        IXS_POW2_OR_ZERO);
+
+  assumes[0] = ixs_cmp(ctx, d, IXS_CMP_GE, ixs_int(ctx, 10));
+  assumes[1] = ixs_cmp(ctx, d, IXS_CMP_LE, ixs_int(ctx, 5));
+  CHECK(ixs_get_pow2_fact(ctx, d, assumes, 2) == IXS_POW2_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* Non-CMP input returns UNKNOWN. */
 static void test_bounds_check_non_cmp(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -1034,6 +1066,7 @@ int main(void) {
   test_bounds_check_pow2_fact();
   test_bounds_check_mask_fact();
   test_bounds_check_contradiction_unknown();
+  test_public_pow2_fact();
   test_bounds_check_non_cmp();
 
   /* Bounds: public range API */

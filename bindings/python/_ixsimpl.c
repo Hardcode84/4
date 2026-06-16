@@ -1153,6 +1153,69 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
   Py_RETURN_NONE;
 }
 
+static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
+                                   PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "assumptions", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL;
+  Py_ssize_t i, n_assumptions = 0;
+  ixs_node *expr, **assumptions = NULL;
+  ixs_pow2_fact r;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
+                                   &assumptions_obj))
+    return NULL;
+
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  expr = ((ExprObject *)expr_obj)->node;
+
+  if (assumptions_obj && assumptions_obj != Py_None) {
+    n_assumptions = PySequence_Size(assumptions_obj);
+    if (n_assumptions < 0)
+      return NULL;
+    if (n_assumptions > 0) {
+      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      if (!assumptions)
+        return PyErr_NoMemory();
+      for (i = 0; i < n_assumptions; i++) {
+        PyObject *item = PySequence_GetItem(assumptions_obj, i);
+        if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
+          Py_XDECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+          return NULL;
+        }
+        if (((ExprObject *)item)->ctx_obj != self) {
+          Py_DECREF(item);
+          PyMem_Free(assumptions);
+          PyErr_SetString(PyExc_ValueError,
+                          "ixsimpl: assumption from different context");
+          return NULL;
+        }
+        assumptions[i] = ((ExprObject *)item)->node;
+        Py_DECREF(item);
+      }
+    }
+  }
+
+  r = ixs_get_pow2_fact(Context_session(self), expr, assumptions,
+                        (size_t)n_assumptions);
+  PyMem_Free(assumptions);
+
+  if (r == IXS_POW2_OR_ZERO)
+    return PyUnicode_FromString("or_zero");
+  if (r == IXS_POW2_POSITIVE)
+    return PyUnicode_FromString("positive");
+  Py_RETURN_NONE;
+}
+
 static PyObject *range_endpoint_to_py(bool has_endpoint, int64_t p, int64_t q) {
   PyObject *fractions_mod, *fraction_cls, *num, *den, *result;
 
@@ -1420,6 +1483,8 @@ static PyMethodDef Context_methods[] = {
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds."},
+    {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
+     "Return 'or_zero', 'positive', or None for a power-of-two fact."},
     {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
      "Return inferred inclusive range as (lower, upper), or None if unknown."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,

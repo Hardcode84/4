@@ -22,12 +22,6 @@
  * already designed to make that a drop-in replacement.
  */
 
-typedef enum {
-  IXS_POW2_UNKNOWN,
-  IXS_POW2_OR_ZERO,
-  IXS_POW2_POSITIVE
-} ixs_pow2_fact;
-
 typedef struct {
   uint64_t known_zero; /* low 64 bits known to be zero */
   uint64_t known_one;  /* low 64 bits known to be one */

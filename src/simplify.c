@@ -4030,6 +4030,47 @@ static void simp_bounds_scope_destroy(simp_bounds_scope *scope) {
   scope->built = false;
 }
 
+static ixs_pow2_fact pow2_fact_from_int64(int64_t value) {
+  uint64_t u;
+  if (value == 0)
+    return IXS_POW2_OR_ZERO;
+  if (value < 0)
+    return IXS_POW2_UNKNOWN;
+  u = (uint64_t)value;
+  return (u & (u - 1u)) == 0 ? IXS_POW2_POSITIVE : IXS_POW2_UNKNOWN;
+}
+
+IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
+                                            ixs_node *const *assumptions,
+                                            size_t n_assumptions) {
+  simp_bounds_scope scope;
+  ixs_bitfacts bits;
+  ixs_interval iv;
+  int64_t exact;
+  ixs_pow2_fact result = IXS_POW2_UNKNOWN;
+
+  if (!expr || ixs_node_is_sentinel(expr))
+    return IXS_POW2_UNKNOWN;
+
+  if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
+    return IXS_POW2_UNKNOWN;
+
+  if (ixs_bounds_has_empty(&scope.bounds))
+    goto cleanup;
+
+  if (ixs_bounds_get_bitfacts(&scope.bounds, expr, &bits))
+    result = bits.pow2;
+  if (result == IXS_POW2_UNKNOWN) {
+    iv = ixs_bounds_get(&scope.bounds, expr);
+    if (ixs_interval_is_point_int(iv, &exact))
+      result = pow2_fact_from_int64(exact);
+  }
+
+cleanup:
+  simp_bounds_scope_destroy(&scope);
+  return result;
+}
+
 IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions,
                            ixs_range_result *out) {
