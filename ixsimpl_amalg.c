@@ -1754,8 +1754,6 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return node;
@@ -2038,12 +2036,6 @@ import_map_direct(ixs_ctx *dst_ctx, const ixs_node *src, ixs_node **out) {
   case IXS_SYM:
     dst = ixs_node_sym(dst_ctx, src->u.name, strlen(src->u.name));
     break;
-  case IXS_TRUE:
-    dst = dst_ctx->node_true;
-    break;
-  case IXS_FALSE:
-    dst = dst_ctx->node_false;
-    break;
   default:
     *out = NULL;
     return IMPORT_DIRECT_NONE;
@@ -2071,8 +2063,6 @@ static bool import_child_count(const ixs_node *src, uint32_t *out) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     *out = 0;
@@ -2800,12 +2790,6 @@ static uint32_t compute_hash(const ixs_node *n) {
   case IXS_NOT:
     h = hash_mix(h, n->u.unary_bool.arg->hash);
     break;
-  case IXS_TRUE:
-    h = hash_mix(h, 1);
-    break;
-  case IXS_FALSE:
-    h = hash_mix(h, 0);
-    break;
   case IXS_ERROR:
     h = hash_mix(h, 0xDEAD);
     break;
@@ -2890,8 +2874,6 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return true;
   case IXS_NOT:
     return a->u.unary_bool.arg == b->u.unary_bool.arg;
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return true;
@@ -2992,8 +2974,6 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
     return 0;
   case IXS_NOT:
     return ixs_node_cmp(a->u.unary_bool.arg, b->u.unary_bool.arg);
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return 0;
@@ -3414,7 +3394,7 @@ IXS_STATIC bool ixs_node_is_one(const ixs_node *n) {
 }
 
 IXS_STATIC bool ixs_node_is_true_value(const ixs_node *n) {
-  return n && (n->tag == IXS_TRUE || (n->tag == IXS_INT && n->u.ival == 1));
+  return n && n->tag == IXS_INT && n->u.ival == 1;
 }
 
 IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
@@ -3434,8 +3414,6 @@ IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n) {
   int64_t p, q;
   if (!n)
     return false;
-  if (n->tag == IXS_FALSE)
-    return true;
   if (!ixs_node_is_const(n))
     return false;
   ixs_node_get_rat(n, &p, &q);
@@ -3447,8 +3425,6 @@ IXS_STATIC bool ixs_node_is_known_true(const ixs_node *n) {
   int64_t p, q;
   if (!n)
     return false;
-  if (n->tag == IXS_TRUE)
-    return true;
   if (!ixs_node_is_const(n))
     return false;
   ixs_node_get_rat(n, &p, &q);
@@ -3480,8 +3456,6 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
   case IXS_AND:
   case IXS_OR:
   case IXS_NOT:
-  case IXS_TRUE:
-  case IXS_FALSE:
     return true;
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
@@ -3520,8 +3494,6 @@ IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n) {
       if (cur->u.ival != 0 && cur->u.ival != 1)
         return false;
       break;
-    case IXS_TRUE:
-    case IXS_FALSE:
     case IXS_CMP:
     case IXS_NOT:
       break;
@@ -3654,8 +3626,6 @@ IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_XOR:
   case IXS_CMP:
   case IXS_NOT:
-  case IXS_TRUE:
-  case IXS_FALSE:
     return true;
   case IXS_AND:
   case IXS_OR: {
@@ -4915,14 +4885,6 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
     print_wrapped(pb, n->u.unary_bool.arg, PREC_NOT);
     break;
 
-  case IXS_TRUE:
-    pb_str(pb, "True");
-    break;
-
-  case IXS_FALSE:
-    pb_str(pb, "False");
-    break;
-
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     pb_str(pb, "<error>");
@@ -5720,8 +5682,6 @@ static bool serial_child_count(const ixs_node *node, uint32_t *out) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     *out = 0;
@@ -6073,10 +6033,6 @@ static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
     return serial_write_logic(ctx, w, state, node);
   case IXS_NOT:
     return serial_write_unary(ctx, w, state, WIRE_NOT, node->u.unary_bool.arg);
-  case IXS_TRUE:
-    return writer_u8(w, WIRE_TRUE);
-  case IXS_FALSE:
-    return writer_u8(w, WIRE_FALSE);
   case IXS_ERROR:
     return writer_u8(w, WIRE_ERROR);
   case IXS_PARSE_ERROR:
@@ -9943,14 +9899,6 @@ static bool node_is_minus_one(const ixs_node *n) {
   return n && n->tag == IXS_INT && n->u.ival == -1;
 }
 
-static ixs_node *normalize_legacy_bool_const(ixs_ctx *ctx, ixs_node *n) {
-  if (n && n->tag == IXS_TRUE)
-    return ctx->node_true;
-  if (n && n->tag == IXS_FALSE)
-    return ctx->node_false;
-  return n;
-}
-
 static bool bool_complement_pair(ixs_node *a, ixs_node *b) {
   if (a->tag == IXS_NOT && a->u.unary_bool.arg == b &&
       ixs_node_is_bool_valued(b))
@@ -9986,9 +9934,6 @@ IXS_STATIC ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (prop)
     return prop;
 
-  a = normalize_legacy_bool_const(ctx, a);
-  b = normalize_legacy_bool_const(ctx, b);
-
   if (a->tag == IXS_INT && b->tag == IXS_INT)
     return ixs_node_int(ctx, a->u.ival & b->u.ival);
 
@@ -10016,9 +9961,6 @@ IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop = ixs_propagate2(a, b);
   if (prop)
     return prop;
-
-  a = normalize_legacy_bool_const(ctx, a);
-  b = normalize_legacy_bool_const(ctx, b);
 
   if (a->tag == IXS_INT && b->tag == IXS_INT)
     return ixs_node_int(ctx, a->u.ival | b->u.ival);
@@ -10271,8 +10213,6 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return expr;
@@ -10747,8 +10687,6 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   switch (n->tag) {
   case IXS_INT:
   case IXS_RAT:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return n;

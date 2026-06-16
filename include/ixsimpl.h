@@ -309,8 +309,6 @@ typedef enum {
   IXS_AND,
   IXS_OR,
   IXS_NOT,
-  IXS_TRUE,
-  IXS_FALSE,
   IXS_ERROR,
   IXS_PARSE_ERROR
 } ixs_tag;

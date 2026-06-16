@@ -317,8 +317,6 @@ static bool serial_child_count(const ixs_node *node, uint32_t *out) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     *out = 0;
@@ -670,10 +668,6 @@ static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
     return serial_write_logic(ctx, w, state, node);
   case IXS_NOT:
     return serial_write_unary(ctx, w, state, WIRE_NOT, node->u.unary_bool.arg);
-  case IXS_TRUE:
-    return writer_u8(w, WIRE_TRUE);
-  case IXS_FALSE:
-    return writer_u8(w, WIRE_FALSE);
   case IXS_ERROR:
     return writer_u8(w, WIRE_ERROR);
   case IXS_PARSE_ERROR:

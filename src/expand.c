@@ -53,8 +53,6 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return node;

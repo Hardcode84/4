@@ -346,14 +346,6 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
     print_wrapped(pb, n->u.unary_bool.arg, PREC_NOT);
     break;
 
-  case IXS_TRUE:
-    pb_str(pb, "True");
-    break;
-
-  case IXS_FALSE:
-    pb_str(pb, "False");
-    break;
-
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     pb_str(pb, "<error>");

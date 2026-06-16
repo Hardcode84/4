@@ -97,12 +97,6 @@ static uint32_t compute_hash(const ixs_node *n) {
   case IXS_NOT:
     h = hash_mix(h, n->u.unary_bool.arg->hash);
     break;
-  case IXS_TRUE:
-    h = hash_mix(h, 1);
-    break;
-  case IXS_FALSE:
-    h = hash_mix(h, 0);
-    break;
   case IXS_ERROR:
     h = hash_mix(h, 0xDEAD);
     break;
@@ -187,8 +181,6 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return true;
   case IXS_NOT:
     return a->u.unary_bool.arg == b->u.unary_bool.arg;
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return true;
@@ -289,8 +281,6 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
     return 0;
   case IXS_NOT:
     return ixs_node_cmp(a->u.unary_bool.arg, b->u.unary_bool.arg);
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return 0;
@@ -711,7 +701,7 @@ IXS_STATIC bool ixs_node_is_one(const ixs_node *n) {
 }
 
 IXS_STATIC bool ixs_node_is_true_value(const ixs_node *n) {
-  return n && (n->tag == IXS_TRUE || (n->tag == IXS_INT && n->u.ival == 1));
+  return n && n->tag == IXS_INT && n->u.ival == 1;
 }
 
 IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
@@ -731,8 +721,6 @@ IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n) {
   int64_t p, q;
   if (!n)
     return false;
-  if (n->tag == IXS_FALSE)
-    return true;
   if (!ixs_node_is_const(n))
     return false;
   ixs_node_get_rat(n, &p, &q);
@@ -744,8 +732,6 @@ IXS_STATIC bool ixs_node_is_known_true(const ixs_node *n) {
   int64_t p, q;
   if (!n)
     return false;
-  if (n->tag == IXS_TRUE)
-    return true;
   if (!ixs_node_is_const(n))
     return false;
   ixs_node_get_rat(n, &p, &q);
@@ -777,8 +763,6 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
   case IXS_AND:
   case IXS_OR:
   case IXS_NOT:
-  case IXS_TRUE:
-  case IXS_FALSE:
     return true;
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
@@ -817,8 +801,6 @@ IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n) {
       if (cur->u.ival != 0 && cur->u.ival != 1)
         return false;
       break;
-    case IXS_TRUE:
-    case IXS_FALSE:
     case IXS_CMP:
     case IXS_NOT:
       break;
@@ -951,8 +933,6 @@ IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_XOR:
   case IXS_CMP:
   case IXS_NOT:
-  case IXS_TRUE:
-  case IXS_FALSE:
     return true;
   case IXS_AND:
   case IXS_OR: {

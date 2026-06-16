@@ -169,12 +169,6 @@ import_map_direct(ixs_ctx *dst_ctx, const ixs_node *src, ixs_node **out) {
   case IXS_SYM:
     dst = ixs_node_sym(dst_ctx, src->u.name, strlen(src->u.name));
     break;
-  case IXS_TRUE:
-    dst = dst_ctx->node_true;
-    break;
-  case IXS_FALSE:
-    dst = dst_ctx->node_false;
-    break;
   default:
     *out = NULL;
     return IMPORT_DIRECT_NONE;
@@ -202,8 +196,6 @@ static bool import_child_count(const ixs_node *src, uint32_t *out) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     *out = 0;

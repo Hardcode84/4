@@ -431,8 +431,6 @@ typedef enum {
     IXS_AND,         // bitwise and(a, b)
     IXS_OR,          // bitwise or(a, b)
     IXS_NOT,         // logical not: (a == 0) ? 1 : 0
-    IXS_TRUE,        // legacy boolean constant tag; new true is IXS_INT(1)
-    IXS_FALSE,       // legacy boolean constant tag; new false is IXS_INT(0)
     IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
     IXS_PARSE_ERROR, // sentinel: syntax error from ixs_parse
 } ixs_tag;
@@ -490,11 +488,9 @@ typedef struct ixs_node {
 } ixs_node;
 ```
 
-`IXS_TRUE` and `IXS_FALSE` remain in the enum and wire format for compatibility,
-but normal constructors no longer allocate those tags. `ixs_true(s)` returns
-the interned integer `1`, and `ixs_false(s)` returns the interned integer `0`.
-Deserialization and cross-context import map legacy true/false nodes to those
-integer constants.
+`ixs_true(s)` returns the interned integer `1`, and `ixs_false(s)` returns the
+interned integer `0`. The v1 binary format still accepts legacy true/false wire
+tags and maps them to those integer constants during deserialization.
 
 New `IXS_AND` and `IXS_OR` nodes are binary bitwise operators. The storage still
 records `nargs` so old serialized n-ary logic nodes can be imported, but smart
@@ -2288,9 +2284,9 @@ Exact classification:
 - expression nodes: all non-sentinel arithmetic and predicate-value nodes,
   including `IXS_CMP`, `IXS_AND`, `IXS_OR`, and `IXS_NOT`
 - predicate nodes: nodes known to produce only `0` or `1`; this includes
-  `IXS_CMP`, `IXS_NOT`, integer constants `0` and `1`, legacy `IXS_TRUE` and
-  `IXS_FALSE`, `IXS_AND`/`IXS_OR` whose operands are predicate nodes, and
-  `IXS_PIECEWISE` whose values are predicate nodes
+  `IXS_CMP`, `IXS_NOT`, integer constants `0` and `1`, `IXS_AND`/`IXS_OR`
+  whose operands are predicate nodes, and `IXS_PIECEWISE` whose values are
+  predicate nodes
 - sentinels are neither
 
 `ixs_pw` remains expression-valued: every non-sentinel branch value must be an

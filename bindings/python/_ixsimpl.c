@@ -263,10 +263,6 @@ static int Expr_bool(ExprObject *self) {
     if (val == 1)
       return 1;
   }
-  if (tag == IXS_TRUE)
-    return 1;
-  if (tag == IXS_FALSE)
-    return 0;
   PyErr_SetString(PyExc_TypeError,
                   "cannot determine truth value of symbolic expression; "
                   "use .simplify() or ixsimpl.same_node()");
@@ -1718,8 +1714,6 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
   PyModule_AddIntConstant(m, "AND", IXS_AND);
   PyModule_AddIntConstant(m, "OR", IXS_OR);
   PyModule_AddIntConstant(m, "NOT", IXS_NOT);
-  PyModule_AddIntConstant(m, "TRUE", IXS_TRUE);
-  PyModule_AddIntConstant(m, "FALSE", IXS_FALSE);
   PyModule_AddIntConstant(m, "ERROR", IXS_ERROR);
   PyModule_AddIntConstant(m, "PARSE_ERROR", IXS_PARSE_ERROR);
 

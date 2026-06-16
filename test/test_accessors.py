@@ -101,6 +101,11 @@ def test_cmp_constants_distinct() -> None:
     assert len(vals) == len(set(vals))
 
 
+def test_boolean_tag_constants_removed() -> None:
+    assert not hasattr(ixsimpl, "TRUE")
+    assert not hasattr(ixsimpl, "FALSE")
+
+
 def test_int_value() -> None:
     ctx = ixsimpl.Context()
     assert int(ctx.int_(42)) == 42

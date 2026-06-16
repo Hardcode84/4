@@ -155,12 +155,6 @@ def to_sympy(
             pieces.append((val, cond))
         return sympy.Piecewise(*pieces)
 
-    if tag == ixsimpl.TRUE:
-        return sympy.true
-
-    if tag == ixsimpl.FALSE:
-        return sympy.false
-
     raise ValueError(f"unsupported ixsimpl tag: {tag}")
 
 

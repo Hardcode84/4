@@ -20,8 +20,6 @@ CMP: int
 AND: int
 OR: int
 NOT: int
-TRUE: int
-FALSE: int
 ERROR: int
 PARSE_ERROR: int
 

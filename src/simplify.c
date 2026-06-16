@@ -3009,14 +3009,6 @@ static bool node_is_minus_one(const ixs_node *n) {
   return n && n->tag == IXS_INT && n->u.ival == -1;
 }
 
-static ixs_node *normalize_legacy_bool_const(ixs_ctx *ctx, ixs_node *n) {
-  if (n && n->tag == IXS_TRUE)
-    return ctx->node_true;
-  if (n && n->tag == IXS_FALSE)
-    return ctx->node_false;
-  return n;
-}
-
 static bool bool_complement_pair(ixs_node *a, ixs_node *b) {
   if (a->tag == IXS_NOT && a->u.unary_bool.arg == b &&
       ixs_node_is_bool_valued(b))
@@ -3052,9 +3044,6 @@ IXS_STATIC ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (prop)
     return prop;
 
-  a = normalize_legacy_bool_const(ctx, a);
-  b = normalize_legacy_bool_const(ctx, b);
-
   if (a->tag == IXS_INT && b->tag == IXS_INT)
     return ixs_node_int(ctx, a->u.ival & b->u.ival);
 
@@ -3082,9 +3071,6 @@ IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   ixs_node *prop = ixs_propagate2(a, b);
   if (prop)
     return prop;
-
-  a = normalize_legacy_bool_const(ctx, a);
-  b = normalize_legacy_bool_const(ctx, b);
 
   if (a->tag == IXS_INT && b->tag == IXS_INT)
     return ixs_node_int(ctx, a->u.ival | b->u.ival);
@@ -3337,8 +3323,6 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   case IXS_INT:
   case IXS_RAT:
   case IXS_SYM:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return expr;
@@ -3813,8 +3797,6 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   switch (n->tag) {
   case IXS_INT:
   case IXS_RAT:
-  case IXS_TRUE:
-  case IXS_FALSE:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
     return n;
