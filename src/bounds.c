@@ -113,6 +113,30 @@ static bool int64_modulus_is_pow2(int64_t v) {
   return v > 0 && uint64_is_pow2((uint64_t)v);
 }
 
+static unsigned bit_ctz64(uint64_t v) {
+  unsigned n = 0;
+  while (v != 0 && (v & 1u) == 0) {
+    n++;
+    v >>= 1;
+  }
+  return n;
+}
+
+static uint64_t low_mask(unsigned nbits) {
+  if (nbits >= 64u)
+    return ~(uint64_t)0;
+  return (((uint64_t)1) << nbits) - 1u;
+}
+
+static uint64_t value_span_mask(uint64_t hi) {
+  uint64_t mask = 0;
+  while (hi) {
+    mask = (mask << 1) | 1u;
+    hi >>= 1;
+  }
+  return mask;
+}
+
 static bool bitfacts_conflict(const ixs_bitfacts *bits) {
   if ((bits->known_zero & bits->known_one) != 0)
     return true;
@@ -785,6 +809,9 @@ static int64_t mod_dividend_step(ixs_node *expr) {
 
 #define BITFACTS_DEPTH_LIMIT 64u
 
+static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
+                                      ixs_bitfacts *out, unsigned depth);
+
 static void bitfacts_apply_exact(ixs_bitfacts *bits, int64_t val) {
   uint64_t u = (uint64_t)val;
   bits->known_zero |= ~u;
@@ -793,6 +820,35 @@ static void bitfacts_apply_exact(ixs_bitfacts *bits, int64_t val) {
     bits->pow2 = IXS_POW2_OR_ZERO;
   else if (int64_is_positive_pow2(val))
     bits->pow2 = IXS_POW2_POSITIVE;
+}
+
+static void bitfacts_apply_interval(ixs_bitfacts *bits,
+                                    const ixs_interval *iv) {
+  int64_t exact;
+  if (interval_exact_int(iv, &exact)) {
+    bitfacts_apply_exact(bits, exact);
+    return;
+  }
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || iv->hi_q != 1 || iv->hi_p < 0 ||
+      !interval_lower_at_least(iv, 0, 1))
+    return;
+  bits->known_zero |= ~value_span_mask((uint64_t)iv->hi_p);
+}
+
+static bool bitfacts_low_value(const ixs_bitfacts *bits, unsigned nbits,
+                               uint64_t *value) {
+  uint64_t mask = low_mask(nbits);
+  if (((bits->known_zero | bits->known_one) & mask) != mask)
+    return false;
+  *value = bits->known_one & mask;
+  return true;
+}
+
+static void bitfacts_set_low_value(ixs_bitfacts *bits, unsigned nbits,
+                                   uint64_t value) {
+  uint64_t mask = low_mask(nbits);
+  bits->known_one |= value & mask;
+  bits->known_zero |= (~value) & mask;
 }
 
 static void bitfacts_apply_modrem(ixs_bitfacts *bits, int64_t modulus,
@@ -845,13 +901,150 @@ static void bitfacts_apply_xor(ixs_bitfacts *out, const ixs_bitfacts *a,
   out->pow2 = IXS_POW2_UNKNOWN;
 }
 
+static bool bitfacts_apply_add(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
+                               unsigned depth) {
+  unsigned nbits;
+  int64_t cp, cq;
+
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1)
+    return true;
+
+  for (nbits = 1; nbits <= 64u; nbits++) {
+    uint64_t mask = low_mask(nbits);
+    uint64_t sum = (uint64_t)cp & mask;
+    uint32_t i;
+    bool known = true;
+
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      ixs_bitfacts term_bits;
+      uint64_t term_value;
+      int64_t tp, tq;
+
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+      if (tq != 1 ||
+          !bounds_get_bitfacts_depth(b, expr->u.add.terms[i].term, &term_bits,
+                                     depth - 1) ||
+          !bitfacts_low_value(&term_bits, nbits, &term_value)) {
+        known = false;
+        break;
+      }
+      sum = (sum + (((uint64_t)tp * term_value) & mask)) & mask;
+    }
+
+    if (!known)
+      break;
+    bitfacts_set_low_value(out, nbits, sum);
+    if (nbits == 64u)
+      break;
+  }
+  return true;
+}
+
+static bool bitfacts_apply_mul(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
+                               unsigned depth) {
+  ixs_bitfacts base_bits;
+  uint64_t coeff;
+  unsigned shift, i;
+
+  if (expr->u.mul.coeff->tag != IXS_INT || expr->u.mul.coeff->u.ival <= 0 ||
+      expr->u.mul.nfactors != 1 || expr->u.mul.factors[0].exp != 1 ||
+      !ixs_node_is_integer_valued(expr))
+    return true;
+
+  coeff = (uint64_t)expr->u.mul.coeff->u.ival;
+  if (!uint64_is_pow2(coeff) ||
+      !bounds_get_bitfacts_depth(b, expr->u.mul.factors[0].base, &base_bits,
+                                 depth - 1))
+    return true;
+
+  shift = bit_ctz64(coeff);
+  out->known_zero |= low_mask(shift);
+  for (i = shift; i < 64u; i++) {
+    uint64_t src = ((uint64_t)1) << (i - shift);
+    uint64_t dst = ((uint64_t)1) << i;
+    if (base_bits.known_zero & src)
+      out->known_zero |= dst;
+    if (base_bits.known_one & src)
+      out->known_one |= dst;
+  }
+  return true;
+}
+
+static bool extract_pow2_dividend(ixs_node *expr, ixs_node **dividend,
+                                  uint64_t *denom) {
+  int64_t cp, cq;
+  if (!expr || expr->tag != IXS_MUL || expr->u.mul.nfactors != 1 ||
+      expr->u.mul.factors[0].exp != 1)
+    return false;
+  ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+  if (cp != 1 || cq <= 0 || !int64_modulus_is_pow2(cq))
+    return false;
+  *dividend = expr->u.mul.factors[0].base;
+  *denom = (uint64_t)cq;
+  return true;
+}
+
+static bool bitfacts_apply_floor_div(ixs_bounds *b, ixs_node *expr,
+                                     ixs_bitfacts *out, unsigned depth) {
+  ixs_node *dividend;
+  ixs_interval iv;
+  ixs_bitfacts bits;
+  uint64_t denom;
+  unsigned shift, i;
+
+  if (!extract_pow2_dividend(expr->u.unary.arg, &dividend, &denom))
+    return true;
+
+  iv = ixs_bounds_get(b, dividend);
+  if (!interval_lower_at_least(&iv, 0, 1) ||
+      !bounds_get_bitfacts_depth(b, dividend, &bits, depth - 1))
+    return true;
+
+  shift = bit_ctz64(denom);
+  for (i = 0; i + shift < 64u; i++) {
+    uint64_t src = ((uint64_t)1) << (i + shift);
+    uint64_t dst = ((uint64_t)1) << i;
+    if (bits.known_zero & src)
+      out->known_zero |= dst;
+    if (bits.known_one & src)
+      out->known_one |= dst;
+  }
+  return true;
+}
+
+static bool bitfacts_apply_mod(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
+                               unsigned depth) {
+  ixs_bitfacts lhs;
+  uint64_t mask;
+  int64_t modulus;
+
+  if (expr->u.binary.rhs->tag != IXS_INT ||
+      !int64_modulus_is_pow2(expr->u.binary.rhs->u.ival) ||
+      !ixs_node_is_integer_valued(expr->u.binary.lhs))
+    return true;
+
+  modulus = expr->u.binary.rhs->u.ival;
+  mask = (uint64_t)modulus - 1u;
+  out->known_zero |= ~mask;
+  if (bounds_get_bitfacts_depth(b, expr->u.binary.lhs, &lhs, depth - 1)) {
+    out->known_zero |= lhs.known_zero & mask;
+    out->known_one |= lhs.known_one & mask;
+  }
+  return true;
+}
+
 static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
                                       ixs_bitfacts *out, unsigned depth) {
   ixs_bitfacts lhs, rhs;
+  ixs_interval iv;
 
   bitfacts_unknown(out);
   if (!expr || depth == 0)
     return false;
+
+  iv = ixs_bounds_get(b, expr);
+  bitfacts_apply_interval(out, &iv);
 
   switch (expr->tag) {
   case IXS_INT:
@@ -889,10 +1082,14 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
     bitfacts_apply_xor(out, &lhs, &rhs);
     return true;
   case IXS_ADD:
+    return bitfacts_apply_add(b, expr, out, depth);
   case IXS_MUL:
+    return bitfacts_apply_mul(b, expr, out, depth);
   case IXS_FLOOR:
-  case IXS_CEIL:
+    return bitfacts_apply_floor_div(b, expr, out, depth);
   case IXS_MOD:
+    return bitfacts_apply_mod(b, expr, out, depth);
+  case IXS_CEIL:
   case IXS_PIECEWISE:
   case IXS_MAX:
   case IXS_MIN:
@@ -1045,6 +1242,23 @@ IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
   }
 
   return false;
+}
+
+static ixs_interval bounds_get_and_mask(ixs_node *expr) {
+  int64_t mask;
+  if (expr->u.logic.nargs != 2)
+    return ixs_interval_unknown();
+  if (expr->u.logic.args[0]->tag == IXS_INT &&
+      expr->u.logic.args[0]->u.ival >= 0) {
+    mask = expr->u.logic.args[0]->u.ival;
+    return ixs_interval_range(0, 1, mask, 1);
+  }
+  if (expr->u.logic.args[1]->tag == IXS_INT &&
+      expr->u.logic.args[1]->u.ival >= 0) {
+    mask = expr->u.logic.args[1]->u.ival;
+    return ixs_interval_range(0, 1, mask, 1);
+  }
+  return ixs_interval_unknown();
 }
 
 static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
@@ -1211,6 +1425,8 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
     }
     return result;
   }
+  case IXS_AND:
+    return bounds_get_and_mask(expr);
   default:
     return ixs_interval_unknown();
   }

@@ -981,11 +981,21 @@ xor(a, a)       → 0
 xor(a, 0)       → a
 xor(0, b)       → b
 xor(c1, c2)     → c1 ^ c2  (constant fold)
+xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
+
+k*xor(a, b + 2^n) - k*xor(a, b)
+                → k*(2^n - 2*(a & 2^n))
+                  when bit n of the pre-toggle operand is known zero
 ```
 
-XOR appears only 116 times in the corpus and only in specific patterns
-(`xor(Mod($T0, 8), floor(Mod($T0, 64)/16) + offset)`). These are bit
-manipulation patterns and may not need deep algebraic simplification.
+The known-bit query merges exact interval facts and propagates low 64-bit
+facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
+non-negative `x`, and `Mod(x, 2^n)`. `MUL` and `Mod` only produce bitfacts
+for integer-valued expressions. The XOR-to-ADD rule is deliberately
+bounds-aware: both operands must be proven non-negative with finite int64
+bounds, because the known-bit lattice tracks only the low 64 bits. The
+XOR-delta rule leaves the largest int64 power-of-two delta untouched to avoid
+overflowing temporary arithmetic.
 
 #### 4.9 Bitwise And/Or And Logical Not
 

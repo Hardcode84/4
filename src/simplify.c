@@ -47,6 +47,8 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n, bool is_ceil);
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
+static ixs_node *simp_xor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
+                               ixs_node *b);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *n);
@@ -90,6 +92,12 @@ static ixs_node *make_const(ixs_ctx *ctx, int64_t p, int64_t q) {
   if (q == 1)
     return ixs_node_int(ctx, p);
   return ixs_node_rat(ctx, p, q);
+}
+
+static bool uint64_pow2(uint64_t v) { return v != 0 && (v & (v - 1u)) == 0; }
+
+static bool int64_positive_pow2(int64_t v) {
+  return v > 0 && uint64_pow2((uint64_t)v);
 }
 
 /*
@@ -898,6 +906,157 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
   }
 }
 
+static bool split_const_offset(ixs_node *expr, ixs_node **base,
+                               int64_t *offset) {
+  int64_t cp, cq, tp, tq;
+  if (expr->tag != IXS_ADD) {
+    *base = expr;
+    *offset = 0;
+    return true;
+  }
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1)
+    return false;
+  if (expr->u.add.nterms == 0) {
+    return false;
+  }
+  if (expr->u.add.nterms != 1)
+    return false;
+  ixs_node_get_rat(expr->u.add.terms[0].coeff, &tp, &tq);
+  if (tp != 1 || tq != 1)
+    return false;
+  *base = expr->u.add.terms[0].term;
+  *offset = cp;
+  return true;
+}
+
+static bool xor_offset_delta(ixs_node *a, ixs_node *b, ixs_node **selector,
+                             ixs_node **toggle_operand, int64_t *delta) {
+  ixs_node *base_a, *base_b;
+  int64_t off_a, off_b;
+  int side_a, side_b;
+
+  for (side_a = 0; side_a < 2; side_a++) {
+    ixs_node *common_a = side_a == 0 ? a->u.binary.lhs : a->u.binary.rhs;
+    ixs_node *other_a = side_a == 0 ? a->u.binary.rhs : a->u.binary.lhs;
+    for (side_b = 0; side_b < 2; side_b++) {
+      ixs_node *common_b = side_b == 0 ? b->u.binary.lhs : b->u.binary.rhs;
+      ixs_node *other_b = side_b == 0 ? b->u.binary.rhs : b->u.binary.lhs;
+      if (common_a != common_b)
+        continue;
+      if (!split_const_offset(other_a, &base_a, &off_a) ||
+          !split_const_offset(other_b, &base_b, &off_b) || base_a != base_b)
+        continue;
+      if (!ixs_safe_sub(off_a, off_b, delta))
+        return false;
+      *selector = common_a;
+      *toggle_operand = *delta > 0 ? other_b : other_a;
+      return *delta != 0;
+    }
+  }
+  return false;
+}
+
+static bool bit_known_zero_without_assumptions(ixs_ctx *ctx, ixs_node *expr,
+                                               uint64_t bit) {
+  ixs_bounds bnds;
+  ixs_bitfacts bits;
+  bool result;
+  if (!ixs_bounds_init(&bnds, &ctx->scratch))
+    return false;
+  result = ixs_bounds_get_bitfacts(&bnds, expr, &bits) &&
+           (bits.known_zero & bit) != 0;
+  ixs_bounds_destroy(&bnds);
+  return result;
+}
+
+static ixs_node *xor_delta_expr(ixs_ctx *ctx, ixs_node *selector, int64_t delta,
+                                ixs_node *scale) {
+  ixs_node *mask_node, *selected, *twice_selected, *inner, *scaled;
+  int64_t mag;
+  bool negate = false;
+
+  if (delta == INT64_MIN)
+    return NULL;
+  if (delta < 0) {
+    negate = true;
+    mag = -delta;
+  } else {
+    mag = delta;
+  }
+  if (!int64_positive_pow2(mag))
+    return NULL;
+
+  mask_node = ixs_node_int(ctx, mag);
+  selected = simp_and(ctx, selector, mask_node);
+  twice_selected =
+      selected ? simp_mul(ctx, ixs_node_int(ctx, 2), selected) : NULL;
+  inner = twice_selected ? simp_sub(ctx, mask_node, twice_selected) : NULL;
+  if (inner && negate)
+    inner = simp_neg(ctx, inner);
+  scaled = inner ? simp_mul(ctx, scale, inner) : NULL;
+  return scaled;
+}
+
+static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
+                                       uint32_t nterms, int64_t const_p,
+                                       int64_t const_q) {
+  uint32_t i, j, k;
+
+  for (i = 0; i < nterms; i++) {
+    int64_t ci_p, ci_q;
+    if (!terms[i].term || terms[i].term->tag != IXS_XOR)
+      continue;
+    ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
+
+    for (j = i + 1; j < nterms; j++) {
+      int64_t cj_p, cj_q, sum_p, sum_q, delta;
+      ixs_node *selector, *toggle_operand, *replacement, *result;
+      uint64_t bit;
+      if (!terms[j].term || terms[j].term->tag != IXS_XOR)
+        continue;
+      ixs_node_get_rat(terms[j].coeff, &cj_p, &cj_q);
+      if (!ixs_rat_add(ci_p, ci_q, cj_p, cj_q, &sum_p, &sum_q) ||
+          !ixs_rat_is_zero(sum_p))
+        continue;
+      if (!xor_offset_delta(terms[i].term, terms[j].term, &selector,
+                            &toggle_operand, &delta))
+        continue;
+      if (delta == INT64_MIN || delta == 0)
+        continue;
+      bit = (uint64_t)(delta < 0 ? -delta : delta);
+      if (bit > (uint64_t)(INT64_MAX / 2))
+        continue;
+      if (!uint64_pow2(bit) ||
+          !bit_known_zero_without_assumptions(ctx, toggle_operand, bit))
+        continue;
+
+      replacement = xor_delta_expr(ctx, selector, delta, terms[i].coeff);
+      if (!replacement)
+        return NULL;
+
+      IXS_STAT_HIT(ctx);
+      result = make_const(ctx, const_p, const_q);
+      if (!result)
+        return NULL;
+      for (k = 0; k < nterms; k++) {
+        ixs_node *t;
+        if (k == i || k == j || !terms[k].term)
+          continue;
+        t = simp_mul(ctx, terms[k].coeff, terms[k].term);
+        if (!t)
+          return NULL;
+        result = simp_add(ctx, result, t);
+        if (!result)
+          return NULL;
+      }
+      result = simp_add(ctx, result, replacement);
+      return result;
+    }
+  }
+  return NULL;
+}
+
 /* Fold PW terms in an ADD when 2+ share the same condition structure.
  * Distributes non-PW addends into each branch and merges PW values.
  * Returns the merged PW, or NULL if inapplicable or OOM. */
@@ -1093,6 +1252,13 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
         cancel_floor_mod_pairs(ctx, terms, nterms, const_p, const_q);
     if (fmc)
       return fmc;
+  }
+
+  {
+    ixs_node *xor_result =
+        xor_difference_in_add(ctx, terms, nterms, const_p, const_q);
+    if (xor_result)
+      return xor_result;
   }
 
   {
@@ -2778,6 +2944,41 @@ IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return ixs_node_binary(ctx, IXS_XOR, a, b, (ixs_cmp_op)0);
 }
 
+static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
+  ixs_interval iv;
+  if (!bnds || !expr || !ixs_node_is_integer_valued(expr))
+    return false;
+  iv = ixs_bounds_get(bnds, expr);
+  if (!iv.valid || iv.lo_inf || iv.hi_inf || iv.hi_q != 1 || iv.hi_p < 0)
+    return false;
+  return ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0;
+}
+
+static ixs_node *simp_xor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
+                               ixs_node *b) {
+  ixs_node *node;
+  ixs_bitfacts lhs, rhs;
+  uint64_t possible_overlap;
+
+  node = simp_xor(ctx, a, b);
+  if (!node || node->tag != IXS_XOR || !bnds)
+    return node;
+
+  if (!bounds_int_nonnegative_finite(bnds, node->u.binary.lhs) ||
+      !bounds_int_nonnegative_finite(bnds, node->u.binary.rhs))
+    return node;
+
+  if (!ixs_bounds_get_bitfacts(bnds, node->u.binary.lhs, &lhs) ||
+      !ixs_bounds_get_bitfacts(bnds, node->u.binary.rhs, &rhs))
+    return node;
+
+  possible_overlap = (~lhs.known_zero) & (~rhs.known_zero);
+  if (possible_overlap != 0)
+    return node;
+
+  return simp_add(ctx, node->u.binary.lhs, node->u.binary.rhs);
+}
+
 /* ------------------------------------------------------------------ */
 /*  simp_cmp                                                          */
 /* ------------------------------------------------------------------ */
@@ -3727,7 +3928,7 @@ static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   case IXS_MIN:
     return simp_min_bnds(ctx, bnds, l, r);
   case IXS_XOR:
-    return simp_xor(ctx, l, r);
+    return simp_xor_bnds(ctx, bnds, l, r);
   case IXS_CMP:
     return simp_cmp_bnds(ctx, bnds, l, n->u.binary.cmp_op, r);
   default: /* unreachable: only called from rewrite_impl's binary-op labels */

@@ -128,91 +128,91 @@ Piecewise((1, $MMA_ACC == 0), (16, $MMA_ACC != 0))
 1
 1
 1
-16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 - 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
 24*K
-24*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-24*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 24*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
+-64 + 24*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
 24*K
-24*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-24*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 24*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
+-64 + 24*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
 32*K
-32*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 32*K - 32*(4 & Mod($T0, 8))
 40*K
-40*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 40*K - 32*(4 & Mod($T0, 8))
 48*K
-48*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 48*K - 32*(4 & Mod($T0, 8))
 56*K
-56*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-32*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-40*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-48*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-56*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 56*K - 32*(4 & Mod($T0, 8))
+-64 + 32*K + 32*(4 & Mod($T0, 8))
+-64 + 40*K + 32*(4 & Mod($T0, 8))
+-64 + 48*K + 32*(4 & Mod($T0, 8))
+-64 + 56*K + 32*(4 & Mod($T0, 8))
 24*K
-24*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 24*K - 32*(4 & Mod($T0, 8))
 32*K
-32*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 32*K - 32*(4 & Mod($T0, 8))
 40*K
-40*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 40*K - 32*(4 & Mod($T0, 8))
 48*K
-48*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-24*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-32*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-40*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-48*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 48*K - 32*(4 & Mod($T0, 8))
+-64 + 24*K + 32*(4 & Mod($T0, 8))
+-64 + 32*K + 32*(4 & Mod($T0, 8))
+-64 + 40*K + 32*(4 & Mod($T0, 8))
+-64 + 48*K + 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
 24*K
-24*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 24*K - 32*(4 & Mod($T0, 8))
 32*K
-32*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 32*K - 32*(4 & Mod($T0, 8))
 40*K
-40*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-24*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-32*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-40*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 40*K - 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
+-64 + 24*K + 32*(4 & Mod($T0, 8))
+-64 + 32*K + 32*(4 & Mod($T0, 8))
+-64 + 40*K + 32*(4 & Mod($T0, 8))
 8*K
-8*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 8*K - 32*(4 & Mod($T0, 8))
 16*K
-16*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 16*K - 32*(4 & Mod($T0, 8))
 24*K
-24*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 24*K - 32*(4 & Mod($T0, 8))
 32*K
-32*K + 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) - 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-8*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-16*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-24*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
-32*K - 16*xor(4 + floor(1/16*Mod($T0, 64)), Mod($T0, 8)) + 16*xor(floor(1/16*Mod($T0, 64)), Mod($T0, 8))
+64 + 32*K - 32*(4 & Mod($T0, 8))
+-64 + 8*K + 32*(4 & Mod($T0, 8))
+-64 + 16*K + 32*(4 & Mod($T0, 8))
+-64 + 24*K + 32*(4 & Mod($T0, 8))
+-64 + 32*K + 32*(4 & Mod($T0, 8))
 BLOCK_M*Piecewise((floor($WG0*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) + $WG1*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) - GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N)), $WG0 + $WG1*ceiling(1/BLOCK_M*M) - GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M) >= 0 & -Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) < 0), (Mod(floor($WG0*1/GROUP_SIZE_N + $WG1*1/GROUP_SIZE_N*ceiling(1/BLOCK_M*M)), ceiling(1/BLOCK_M*M)), True)) - BLOCK_M*Piecewise((floor(-GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N)), -Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) < 0 & GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M) <= 0), (0, True))
 0
 32*floor(1/32*BLOCK_M*Piecewise((floor($WG0*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) + $WG1*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) - GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N)), $WG0 + $WG1*ceiling(1/BLOCK_M*M) - GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M) >= 0 & -Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) < 0), (Mod(floor($WG0*1/GROUP_SIZE_N + $WG1*1/GROUP_SIZE_N*ceiling(1/BLOCK_M*M)), ceiling(1/BLOCK_M*M)), True))) - 32*floor(1/32*BLOCK_M*Piecewise((floor(-GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M)*1/Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N)), -Mod(ceiling(1/BLOCK_N*N), GROUP_SIZE_N) < 0 & GROUP_SIZE_N*floor(1/GROUP_SIZE_N*ceiling(1/BLOCK_N*N))*ceiling(1/BLOCK_M*M) <= 0), (0, True)))

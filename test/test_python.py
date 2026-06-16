@@ -2016,6 +2016,69 @@ def test_pow2_fact_exact_arithmetic_soundness(value: int, offset: int) -> None:
     )
 
 
+@given(t0_values=st.lists(st.integers(min_value=0, max_value=255), min_size=1, max_size=16))
+def test_xor_delta_simplification_soundness(t0_values: list[int]) -> None:
+    """The corpus-shaped xor(a,b+4)-xor(a,b) rewrite preserves values."""
+    ctx = ixsimpl.Context()
+    t0 = ctx.sym("$T0")
+    low = t0 % 8
+    quad = ixsimpl.floor((t0 % 64) / 16)
+    expr = 16 * ixsimpl.xor_(low, quad + 4) - 16 * ixsimpl.xor_(low, quad)
+    simplified = expr.simplify()
+
+    assert "xor" not in str(simplified)
+    for value in t0_values:
+        env = {"$T0": value}
+        assert expr.eval(env) == simplified.eval(env)
+
+
+def test_xor_delta_requires_actual_offset_operand() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    a = ctx.sym("a")
+    base = x & 3
+    expr = 16 * ixsimpl.xor_(a, base + 5) - 16 * ixsimpl.xor_(a, base + 1)
+    simplified = expr.simplify()
+
+    env = {"x": 3, "a": 4}
+    assert expr.eval(env) == 192
+    assert simplified.eval(env) == expr.eval(env)
+
+
+def test_xor_delta_large_pow2_does_not_overflow() -> None:
+    ctx = ixsimpl.Context()
+    y = ctx.sym("y")
+    big = 1 << 62
+    expr = ixsimpl.xor_(ctx.int_(big), (y & 3) + big) - ixsimpl.xor_(ctx.int_(big), y & 3)
+    simplified = expr.simplify()
+
+    assert not simplified.is_error
+    for value in range(4):
+        env = {"y": value}
+        assert simplified.eval(env) == expr.eval(env)
+
+
+def test_noninteger_mod_does_not_feed_divisibility_rewrite() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    z = ctx.sym("z")
+    expr = ixsimpl.ceil(z / 3 + ((x / 2) % 1) / 2)
+    simplified = expr.simplify()
+
+    env = {"x": 1, "z": 0}
+    assert expr.eval(env) == 1
+    assert simplified.eval(env) == expr.eval(env)
+
+
+def test_fractional_mul_does_not_feed_divisibility_check() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    y = ctx.sym("y")
+    expr = 2 * (y + x / 4)
+
+    assert ctx.check(ctx.eq(expr % 2, 0)) is None
+
+
 def test_check_no_assumptions() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
@@ -2161,6 +2224,12 @@ def test_bitwise_operators_build_and_or() -> None:
     assert str(ctx.parse_pred("x & y == 0")) == "y == 0 & x != 0"
     assert str(ctx.parse_pred("x | y == 0")) == "y == 0 | x != 0"
     assert str(ctx.parse_pred("x > 0 | y > 0")) == "x > 0 | y > 0"
+
+    simplified = ixsimpl.xor_(x & 7, x & 24).simplify()
+    assert "xor" not in str(simplified)
+    for value in range(32):
+        env = {"x": value}
+        assert ixsimpl.xor_(x & 7, x & 24).eval(env) == simplified.eval(env)
 
 
 def test_lambdify_single_expr() -> None:

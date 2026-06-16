@@ -563,6 +563,74 @@ static void test_bounds_bitfacts_masks(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_bitfacts_arithmetic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_bitfacts bits;
+  ixs_node *x = ixs_sym(ctx, "x");
+
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+
+  ixs_bounds_add_assumption(&b, ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 15)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 5)));
+
+  CHECK(ixs_bounds_get_bitfacts(&b, ixs_mod(ctx, x, ixs_int(ctx, 8)), &bits));
+  CHECK((bits.known_one & 7u) == 5u);
+  CHECK((bits.known_zero & 7u) == 2u);
+  CHECK((bits.known_zero & ~(uint64_t)7) == ~(uint64_t)7);
+
+  CHECK(ixs_bounds_get_bitfacts(&b, ixs_add(ctx, x, ixs_int(ctx, 3)), &bits));
+  CHECK((bits.known_zero & 7u) == 7u);
+
+  CHECK(ixs_bounds_get_bitfacts(
+      &b, ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, x, ixs_int(ctx, 1))),
+      &bits));
+  CHECK((bits.known_zero & 7u) == 7u);
+
+  CHECK(ixs_bounds_get_bitfacts(
+      &b,
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
+                             ixs_int(ctx, 16))),
+      &bits));
+  CHECK((bits.known_zero & ~(uint64_t)3) == ~(uint64_t)3);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_bitfacts_mod_requires_integer_dividend(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *mod =
+      ixs_mod(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), ixs_int(ctx, 1));
+
+  CHECK(ixs_node_tag(mod) == IXS_MOD);
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  CHECK(!ixs_bounds_is_known_divisible(&b, mod, 2));
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_bitfacts_mul_requires_integer_product(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *frac = ixs_add(ctx, y, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  ixs_node *prod = ixs_mul(ctx, ixs_int(ctx, 2), frac);
+  ixs_node *query = ixs_cmp(ctx, ixs_mod(ctx, prod, ixs_int(ctx, 2)),
+                            IXS_CMP_EQ, ixs_int(ctx, 0));
+
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  CHECK(!ixs_bounds_is_known_divisible(&b, prod, 2));
+  CHECK(ixs_check(ctx, query, NULL, 0) == IXS_CHECK_UNKNOWN);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_bitfacts_contradiction(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -1048,6 +1116,9 @@ int main(void) {
   /* Bounds: bitwise facts */
   test_bounds_bitfacts_pow2();
   test_bounds_bitfacts_masks();
+  test_bounds_bitfacts_arithmetic();
+  test_bounds_bitfacts_mod_requires_integer_dividend();
+  test_bounds_bitfacts_mul_requires_integer_product();
   test_bounds_bitfacts_contradiction();
 
   /* Bounds: expression overrides */

@@ -287,6 +287,26 @@ static void test_mod_rules(void) {
     CHECK(r != ixs_int(ctx, 0));
   }
 
+  /* Non-integer Mod dividends must not feed divisibility bitfacts.
+   * At x=1,z=0 this is ceil(1/4) == 1; the unsafe rewrite produced 1/4. */
+  {
+    ixs_node *z = ixs_sym(ctx, "z");
+    ixs_node *m =
+        ixs_mod(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), ixs_int(ctx, 1));
+    ixs_node *expr =
+        ixs_ceil(ctx, ixs_add(ctx, ixs_div(ctx, z, ixs_int(ctx, 3)),
+                              ixs_mul(ctx, ixs_rat(ctx, 1, 2), m)));
+    ixs_node *r = ixs_simplify(ctx, expr, NULL, 0);
+    ixs_node *targets[] = {x, z};
+    ixs_node *repls[] = {ixs_int(ctx, 1), ixs_int(ctx, 0)};
+    ixs_node *raw_v = ixs_simplify(
+        ctx, ixs_subs_multi(ctx, expr, 2, targets, repls), NULL, 0);
+    ixs_node *simp_v =
+        ixs_simplify(ctx, ixs_subs_multi(ctx, r, 2, targets, repls), NULL, 0);
+    CHECK(raw_v == ixs_int(ctx, 1));
+    CHECK(simp_v == raw_v);
+  }
+
   /* Division with compound MUL divisor: a / (a/c) -> c */
   {
     ixs_node *K = ixs_sym(ctx, "K");
@@ -406,6 +426,86 @@ static void test_boolean(void) {
     ixs_node *nnx = ixs_not(ctx, ixs_not(ctx, x));
     CHECK(ixs_node_tag(nnx) == IXS_CMP);
     CHECK(ixs_node_cmp_op(nnx) == IXS_CMP_NE);
+  }
+}
+
+static void test_xor_known_bit_simplification(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *t0 = ixs_sym(ctx, "$T0");
+  ixs_node *low = ixs_mod(ctx, t0, ixs_int(ctx, 8));
+  ixs_node *quad = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, t0, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
+  ixs_node *shifted = ixs_mul(ctx, ixs_int(ctx, 8), quad);
+  ixs_node *expr = ixs_xor(ctx, low, shifted);
+  ixs_node *r = ixs_simplify(ctx, expr, NULL, 0);
+  ixs_node *expected = ixs_simplify(ctx, ixs_add(ctx, low, shifted), NULL, 0);
+
+  CHECK(r == expected);
+
+  {
+    ixs_node *delta_expr =
+        ixs_add(ctx,
+                ixs_mul(ctx, ixs_int(ctx, 16),
+                        ixs_xor(ctx, low, ixs_add(ctx, quad, ixs_int(ctx, 4)))),
+                ixs_mul(ctx, ixs_int(ctx, -16), ixs_xor(ctx, low, quad)));
+    int v;
+
+    r = ixs_simplify(ctx, delta_expr, NULL, 0);
+    CHECK(strstr(pr(r), "xor") == NULL);
+
+    for (v = 0; v < 64; v++) {
+      ixs_node *replacement = ixs_int(ctx, v);
+      ixs_node *raw_v = ixs_simplify(
+          ctx, ixs_subs(ctx, delta_expr, t0, replacement), NULL, 0);
+      ixs_node *simp_v =
+          ixs_simplify(ctx, ixs_subs(ctx, r, t0, replacement), NULL, 0);
+      CHECK(raw_v == simp_v);
+    }
+  }
+
+  {
+    ixs_node *x = ixs_sym(ctx, "x");
+    ixs_node *a = ixs_sym(ctx, "a");
+    ixs_node *base = ixs_and(ctx, x, ixs_int(ctx, 3));
+    ixs_node *delta_expr =
+        ixs_add(ctx,
+                ixs_mul(ctx, ixs_int(ctx, 16),
+                        ixs_xor(ctx, a, ixs_add(ctx, base, ixs_int(ctx, 5)))),
+                ixs_mul(ctx, ixs_int(ctx, -16),
+                        ixs_xor(ctx, a, ixs_add(ctx, base, ixs_int(ctx, 1)))));
+    ixs_node *targets[] = {x, a};
+    ixs_node *repls[] = {ixs_int(ctx, 3), ixs_int(ctx, 4)};
+    ixs_node *raw_v = ixs_simplify(
+        ctx, ixs_subs_multi(ctx, delta_expr, 2, targets, repls), NULL, 0);
+    ixs_node *simp_v;
+
+    r = ixs_simplify(ctx, delta_expr, NULL, 0);
+    simp_v =
+        ixs_simplify(ctx, ixs_subs_multi(ctx, r, 2, targets, repls), NULL, 0);
+    CHECK(raw_v == ixs_int(ctx, 192));
+    CHECK(simp_v == raw_v);
+  }
+
+  {
+    int64_t big = (int64_t)1 << 62;
+    ixs_node *y = ixs_sym(ctx, "y");
+    ixs_node *base = ixs_and(ctx, y, ixs_int(ctx, 3));
+    ixs_node *delta_expr = ixs_sub(
+        ctx,
+        ixs_xor(ctx, ixs_int(ctx, big), ixs_add(ctx, base, ixs_int(ctx, big))),
+        ixs_xor(ctx, ixs_int(ctx, big), base));
+    ixs_node *r = ixs_simplify(ctx, delta_expr, NULL, 0);
+    int v;
+
+    CHECK(r != NULL && !ixs_is_error(r));
+    for (v = 0; v < 4; v++) {
+      ixs_node *replacement = ixs_int(ctx, v);
+      ixs_node *raw_v =
+          ixs_simplify(ctx, ixs_subs(ctx, delta_expr, y, replacement), NULL, 0);
+      ixs_node *simp_v =
+          ixs_simplify(ctx, ixs_subs(ctx, r, y, replacement), NULL, 0);
+      CHECK(raw_v == simp_v);
+    }
   }
 }
 
@@ -2698,6 +2798,7 @@ int main(void) {
   test_floor_rules();
   test_mod_rules();
   test_boolean();
+  test_xor_known_bit_simplification();
   test_simplify_with_bounds();
   test_eq_substitution();
   test_pw_branch_eq_substitution();
