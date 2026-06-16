@@ -2151,6 +2151,13 @@ def test_bitwise_operators_build_and_or() -> None:
     assert ixsimpl.same_node(1 | x, ixsimpl.or_(ctx.int_(1), x))
     assert (x & 3).eval({"x": 6}) == 2
     assert (x | 1).eval({"x": 6}) == 7
+    assert ixsimpl.same_node(ctx.parse_expr("x & 3"), x & 3)
+    assert ixsimpl.same_node(ctx.parse_expr("x | y"), x | y)
+    assert ixsimpl.same_node(ctx.parse_expr("1 | x & 3"), ctx.int_(1) | (x & 3))
+    assert ixsimpl.same_node(ctx.parse_pred("x & 3 == 1"), ctx.eq(x & 3, 1))
+    assert ixsimpl.same_node(ctx.parse_pred("(x & 3) == 1"), ctx.eq(x & 3, 1))
+    assert str(ctx.parse_pred("x & y")) == "x != 0 & y != 0"
+    assert str(ctx.parse_pred("x > 0 | y > 0")) == "x > 0 | y > 0"
 
 
 def test_lambdify_single_expr() -> None:

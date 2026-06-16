@@ -597,7 +597,10 @@ recursion depth limit (default 256) prevents stack overflow on maliciously
 deep inputs. The grammar is small:
 
 ```
-expr     = term (('+' | '-') term)*
+expr     = bit_or
+bit_or   = bit_and ('|' bit_and)*
+bit_and  = sum ('&' sum)*
+sum      = term (('+' | '-') term)*
 term     = unary (('*' | '/') unary)*
 unary    = '-'* atom
 atom     = INT | SYMBOL
@@ -612,12 +615,12 @@ atom     = INT | SYMBOL
 pw_cases = '(' expr ',' cond ')' (',' '(' expr ',' cond ')')*
 cond     = cmp_expr (('&' | '|') cmp_expr)*
 cmp_expr = '~'* cmp_body
-cmp_body = expr cmp_op expr | 'True' | 'False' | '(' cond ')' | expr
+cmp_body = expr cmp_op sum | 'True' | 'False' | '(' cond ')' | sum
 cmp_op   = '>' | '<' | '>=' | '<=' | '==' | '!='
 ```
 
-**Bare expressions in conditions**: The grammar allows a bare `expr` in
-condition context (the `| expr` alternative in `cmp_expr`). This handles
+**Bare expressions in conditions**: The grammar allows a bare arithmetic
+expression in condition context (the `| sum` alternative in `cmp_expr`). This handles
 corpus patterns like `$MMA_LHS_SCALE | $MMA_RHS_SCALE | $MMA_SCALE_FP4` in
 Piecewise conditions, where integer-valued flag variables are used as boolean
 tests. A bare expression `e` in condition context is desugared to `e != 0`
@@ -625,6 +628,11 @@ tests. A bare expression `e` in condition context is desugared to `e != 0`
 operators in condition grammar coerce both operands to 0/1 predicates first.
 The resulting `IXS_OR` and `IXS_AND` nodes are still integer bitwise operators,
 but on 0/1 operands they have the same truth tables as boolean OR and AND.
+The same tokens are also accepted as bitwise integer operators in expression
+grammar. In predicate comparisons, the left operand may be a full bitwise
+expression (`x & 3 == 1`). The right operand uses arithmetic grammar unless a
+bitwise expression is parenthesized (`x == (y | 1)`), preserving the older
+condition shorthand `x > 0 | y > 0`.
 
 Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.

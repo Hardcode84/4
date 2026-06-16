@@ -155,6 +155,96 @@ static void test_comparisons(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bitwise_condition_roundtrip(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *expr_node;
+  ixs_node *and_node;
+  ixs_node *or_node;
+  ixs_node *cmp_node;
+  ixs_node *roundtrip;
+  const char *printed;
+
+  expr_node = ixs_parse_expr(ctx, "x & 3", 5);
+  CHECK(expr_node && !ixs_is_error(expr_node));
+  CHECK(ixs_node_tag(expr_node) == IXS_AND);
+  CHECK(ixs_node_logic_nargs(expr_node) == 2);
+  CHECK(!ixs_node_is_pred(expr_node));
+  printed = pr(expr_node);
+  roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(expr_node, roundtrip));
+
+  expr_node = ixs_parse_expr(ctx, "x | y", 5);
+  CHECK(expr_node && !ixs_is_error(expr_node));
+  CHECK(ixs_node_tag(expr_node) == IXS_OR);
+  CHECK(ixs_node_logic_nargs(expr_node) == 2);
+  CHECK(!ixs_node_is_pred(expr_node));
+  printed = pr(expr_node);
+  roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(expr_node, roundtrip));
+
+  expr_node = ixs_parse_expr(ctx, "1 | x & 3", 9);
+  CHECK(expr_node && !ixs_is_error(expr_node));
+  CHECK(ixs_node_tag(expr_node) == IXS_OR);
+  CHECK(ixs_node_tag(ixs_node_logic_arg(expr_node, 0)) == IXS_AND ||
+        ixs_node_tag(ixs_node_logic_arg(expr_node, 1)) == IXS_AND);
+  printed = pr(expr_node);
+  roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(expr_node, roundtrip));
+
+  cmp_node = ixs_parse_pred(ctx, "x & 3 == 1", 10);
+  CHECK(cmp_node && !ixs_is_error(cmp_node));
+  CHECK(ixs_node_tag(cmp_node) == IXS_CMP);
+  CHECK(ixs_node_is_pred(cmp_node));
+  CHECK(strcmp(pr(cmp_node), "-1 + (3 & x) == 0") == 0);
+
+  printed = pr(cmp_node);
+  roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(cmp_node, roundtrip));
+
+  cmp_node = ixs_parse_pred(ctx, "(x & 3) == 1", 12);
+  CHECK(cmp_node && !ixs_is_error(cmp_node));
+  CHECK(ixs_node_tag(cmp_node) == IXS_CMP);
+  CHECK(ixs_node_is_pred(cmp_node));
+  CHECK(strcmp(pr(cmp_node), "-1 + (3 & x) == 0") == 0);
+
+  and_node = ixs_parse_pred(ctx, "x & y", 5);
+  CHECK(and_node && !ixs_is_error(and_node));
+  CHECK(ixs_node_tag(and_node) == IXS_AND);
+  CHECK(ixs_node_logic_nargs(and_node) == 2);
+  CHECK(ixs_node_is_pred(and_node));
+  CHECK(strcmp(pr(and_node), "x != 0 & y != 0") == 0);
+
+  printed = pr(and_node);
+  roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(and_node, roundtrip));
+
+  or_node = ixs_parse_pred(ctx, "x > 0 | y > 0", 13);
+  CHECK(or_node && !ixs_is_error(or_node));
+  CHECK(ixs_node_tag(or_node) == IXS_OR);
+  CHECK(ixs_node_logic_nargs(or_node) == 2);
+  CHECK(ixs_node_is_pred(or_node));
+  CHECK(strcmp(pr(or_node), "x > 0 | y > 0") == 0);
+
+  or_node = ixs_parse_pred(ctx, "(x > 0) | (y > 0)", 17);
+  CHECK(or_node && !ixs_is_error(or_node));
+  CHECK(ixs_node_tag(or_node) == IXS_OR);
+  CHECK(ixs_node_logic_nargs(or_node) == 2);
+  CHECK(ixs_node_is_pred(or_node));
+  CHECK(strcmp(pr(or_node), "x > 0 | y > 0") == 0);
+
+  printed = pr(or_node);
+  roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(or_node, roundtrip));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_kind_parsers_and_predicates(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *expr;
@@ -296,6 +386,7 @@ int main(void) {
   test_max_min_xor();
   test_piecewise();
   test_comparisons();
+  test_bitwise_condition_roundtrip();
   test_kind_parsers_and_predicates();
   test_errors();
   test_complex_expr();

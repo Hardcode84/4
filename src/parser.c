@@ -83,9 +83,34 @@ static bool depth_push(parser *p) {
 
 static void depth_pop(parser *p) { p->depth--; }
 
+typedef struct {
+  ixs_arena_mark scratch_mark;
+  ixs_arena_mark diag_mark;
+  const char **errors;
+  size_t nerrors;
+  size_t errors_cap;
+} parser_state;
+
+static void parser_state_save(ixs_ctx *ctx, parser_state *state) {
+  state->scratch_mark = ixs_arena_save(&ctx->scratch);
+  state->diag_mark = ixs_arena_save(&ctx->diag);
+  state->errors = ctx->errors;
+  state->nerrors = ctx->nerrors;
+  state->errors_cap = ctx->errors_cap;
+}
+
+static void parser_state_restore(ixs_ctx *ctx, const parser_state *state) {
+  ixs_arena_restore(&ctx->scratch, state->scratch_mark);
+  ixs_arena_restore(&ctx->diag, state->diag_mark);
+  ctx->errors = state->errors;
+  ctx->nerrors = state->nerrors;
+  ctx->errors_cap = state->errors_cap;
+}
+
 /* --- Forward declarations --- */
 
 static ixs_node *parse_expr(parser *p);
+static ixs_node *parse_arith_expr(parser *p);
 static ixs_node *parse_cond(parser *p, bool allow_top_level_expr);
 
 /* --- Grammar implementation --- */
@@ -379,7 +404,7 @@ static ixs_node *parse_term(parser *p) {
   return left;
 }
 
-static ixs_node *parse_expr(parser *p) {
+static ixs_node *parse_arith_expr(parser *p) {
   ixs_node *left = parse_term(p);
   if (!left)
     return NULL;
@@ -409,6 +434,46 @@ static ixs_node *parse_expr(parser *p) {
   return left;
 }
 
+static ixs_node *parse_bitand_expr(parser *p) {
+  ixs_node *left = parse_arith_expr(p);
+  if (!left)
+    return NULL;
+
+  for (;;) {
+    skip_ws(p);
+    if (peek(p) != '&')
+      break;
+    match_char(p, '&');
+    ixs_node *right = parse_arith_expr(p);
+    if (!right)
+      return NULL;
+    left = simp_and(p->ctx, left, right);
+    if (!left)
+      return NULL;
+  }
+  return left;
+}
+
+static ixs_node *parse_expr(parser *p) {
+  ixs_node *left = parse_bitand_expr(p);
+  if (!left)
+    return NULL;
+
+  for (;;) {
+    skip_ws(p);
+    if (peek(p) != '|')
+      break;
+    match_char(p, '|');
+    ixs_node *right = parse_bitand_expr(p);
+    if (!right)
+      return NULL;
+    left = simp_or(p->ctx, left, right);
+    if (!left)
+      return NULL;
+  }
+  return left;
+}
+
 /* --- Condition parsing --- */
 
 static ixs_node *coerce_expr_to_pred(parser *p, ixs_node *node) {
@@ -417,11 +482,91 @@ static ixs_node *coerce_expr_to_pred(parser *p, ixs_node *node) {
   return simp_cmp(p->ctx, node, IXS_CMP_NE, ixs_node_int(p->ctx, 0));
 }
 
+static bool parse_cmp_op_token(parser *p, ixs_cmp_op *op) {
+  skip_ws(p);
+  if (p->pos + 1 < p->len && p->input[p->pos] == '>' &&
+      p->input[p->pos + 1] == '=') {
+    p->pos += 2;
+    *op = IXS_CMP_GE;
+    return true;
+  }
+  if (p->pos + 1 < p->len && p->input[p->pos] == '<' &&
+      p->input[p->pos + 1] == '=') {
+    p->pos += 2;
+    *op = IXS_CMP_LE;
+    return true;
+  }
+  if (p->pos + 1 < p->len && p->input[p->pos] == '=' &&
+      p->input[p->pos + 1] == '=') {
+    p->pos += 2;
+    *op = IXS_CMP_EQ;
+    return true;
+  }
+  if (p->pos + 1 < p->len && p->input[p->pos] == '!' &&
+      p->input[p->pos + 1] == '=') {
+    p->pos += 2;
+    *op = IXS_CMP_NE;
+    return true;
+  }
+  if (p->pos < p->len && p->input[p->pos] == '>') {
+    p->pos++;
+    *op = IXS_CMP_GT;
+    return true;
+  }
+  if (p->pos < p->len && p->input[p->pos] == '<') {
+    p->pos++;
+    *op = IXS_CMP_LT;
+    return true;
+  }
+  return false;
+}
+
+static ixs_node *try_parse_expr_cmp(parser *p, bool *done) {
+  parser_state state;
+  size_t start_pos = p->pos;
+  int start_depth = p->depth;
+  ixs_node *left;
+  ixs_node *right;
+  ixs_cmp_op op;
+
+  *done = false;
+  parser_state_save(p->ctx, &state);
+
+  left = parse_expr(p);
+  if (!left) {
+    *done = true;
+    return NULL;
+  }
+  if (left->tag == IXS_PARSE_ERROR) {
+    parser_state_restore(p->ctx, &state);
+    p->pos = start_pos;
+    p->depth = start_depth;
+    return NULL;
+  }
+
+  if (!parse_cmp_op_token(p, &op)) {
+    parser_state_restore(p->ctx, &state);
+    p->pos = start_pos;
+    p->depth = start_depth;
+    return NULL;
+  }
+
+  right = parse_arith_expr(p);
+  if (!right) {
+    *done = true;
+    return NULL;
+  }
+
+  *done = true;
+  return simp_cmp(p->ctx, left, op, right);
+}
+
 static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr);
 
 static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
   bool saw_not = false;
   bool invert = false;
+  bool have_cmp = false;
   ixs_node *result;
 
   skip_ws(p);
@@ -432,6 +577,10 @@ static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
     saw_not = true;
     invert = !invert;
   }
+
+  result = try_parse_expr_cmp(p, &have_cmp);
+  if (have_cmp)
+    goto apply_not;
 
   /* True / False */
   if (match_str(p, "True")) {
@@ -456,46 +605,17 @@ static ixs_node *parse_cmp_expr(parser *p, bool allow_top_level_expr) {
   }
 
   /* expr [cmp_op expr] */
-  ixs_node *left = parse_expr(p);
+  ixs_node *left = parse_arith_expr(p);
   if (!left)
     return NULL;
 
   skip_ws(p);
   ixs_cmp_op op;
-  bool have_cmp = false;
 
-  if (p->pos + 1 < p->len && p->input[p->pos] == '>' &&
-      p->input[p->pos + 1] == '=') {
-    p->pos += 2;
-    op = IXS_CMP_GE;
-    have_cmp = true;
-  } else if (p->pos + 1 < p->len && p->input[p->pos] == '<' &&
-             p->input[p->pos + 1] == '=') {
-    p->pos += 2;
-    op = IXS_CMP_LE;
-    have_cmp = true;
-  } else if (p->pos + 1 < p->len && p->input[p->pos] == '=' &&
-             p->input[p->pos + 1] == '=') {
-    p->pos += 2;
-    op = IXS_CMP_EQ;
-    have_cmp = true;
-  } else if (p->pos + 1 < p->len && p->input[p->pos] == '!' &&
-             p->input[p->pos + 1] == '=') {
-    p->pos += 2;
-    op = IXS_CMP_NE;
-    have_cmp = true;
-  } else if (p->pos < p->len && p->input[p->pos] == '>') {
-    p->pos++;
-    op = IXS_CMP_GT;
-    have_cmp = true;
-  } else if (p->pos < p->len && p->input[p->pos] == '<') {
-    p->pos++;
-    op = IXS_CMP_LT;
-    have_cmp = true;
-  }
+  have_cmp = parse_cmp_op_token(p, &op);
 
   if (have_cmp) {
-    ixs_node *right = parse_expr(p);
+    ixs_node *right = parse_arith_expr(p);
     if (!right)
       return NULL;
     result = simp_cmp(p->ctx, left, op, right);
@@ -557,30 +677,6 @@ static ixs_node *parse_cond(parser *p, bool allow_top_level_expr) {
 }
 
 /* --- Public entry point --- */
-
-typedef struct {
-  ixs_arena_mark scratch_mark;
-  ixs_arena_mark diag_mark;
-  const char **errors;
-  size_t nerrors;
-  size_t errors_cap;
-} parser_state;
-
-static void parser_state_save(ixs_ctx *ctx, parser_state *state) {
-  state->scratch_mark = ixs_arena_save(&ctx->scratch);
-  state->diag_mark = ixs_arena_save(&ctx->diag);
-  state->errors = ctx->errors;
-  state->nerrors = ctx->nerrors;
-  state->errors_cap = ctx->errors_cap;
-}
-
-static void parser_state_restore(ixs_ctx *ctx, const parser_state *state) {
-  ixs_arena_restore(&ctx->scratch, state->scratch_mark);
-  ixs_arena_restore(&ctx->diag, state->diag_mark);
-  ctx->errors = state->errors;
-  ctx->nerrors = state->nerrors;
-  ctx->errors_cap = state->errors_cap;
-}
 
 static ixs_node *parse_full(ixs_ctx *ctx, const char *input, size_t len,
                             bool pred_root) {
