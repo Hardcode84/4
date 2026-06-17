@@ -42,12 +42,19 @@ typedef struct {
 } ixs_expr_bound;
 
 typedef struct {
+  ixs_node *expr;
+  ixs_interval iv;
+} ixs_bounds_cache_entry;
+
+typedef struct {
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
   ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
   size_t nexprs;
   size_t expr_cap;
+  ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
+  size_t cache_cap;
   bool contradiction;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;

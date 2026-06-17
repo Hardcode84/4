@@ -111,8 +111,60 @@ static uint32_t compute_hash(const ixs_node *n) {
 /*  Node equality (structural)                                        */
 /* ------------------------------------------------------------------ */
 
-IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
+static bool node_equal_add(const ixs_node *a, const ixs_node *b) {
   uint32_t i;
+  if (a->u.add.coeff != b->u.add.coeff)
+    return false;
+  if (a->u.add.nterms != b->u.add.nterms)
+    return false;
+  for (i = 0; i < a->u.add.nterms; i++) {
+    if (a->u.add.terms[i].term != b->u.add.terms[i].term)
+      return false;
+    if (a->u.add.terms[i].coeff != b->u.add.terms[i].coeff)
+      return false;
+  }
+  return true;
+}
+
+static bool node_equal_mul(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  if (a->u.mul.coeff != b->u.mul.coeff)
+    return false;
+  if (a->u.mul.nfactors != b->u.mul.nfactors)
+    return false;
+  for (i = 0; i < a->u.mul.nfactors; i++) {
+    if (a->u.mul.factors[i].base != b->u.mul.factors[i].base)
+      return false;
+    if (a->u.mul.factors[i].exp != b->u.mul.factors[i].exp)
+      return false;
+  }
+  return true;
+}
+
+static bool node_equal_pw(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  if (a->u.pw.ncases != b->u.pw.ncases)
+    return false;
+  for (i = 0; i < a->u.pw.ncases; i++) {
+    if (a->u.pw.cases[i].value != b->u.pw.cases[i].value)
+      return false;
+    if (a->u.pw.cases[i].cond != b->u.pw.cases[i].cond)
+      return false;
+  }
+  return true;
+}
+
+static bool node_equal_logic(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  if (a->u.logic.nargs != b->u.logic.nargs)
+    return false;
+  for (i = 0; i < a->u.logic.nargs; i++)
+    if (a->u.logic.args[i] != b->u.logic.args[i])
+      return false;
+  return true;
+}
+
+IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
   if (a == b)
     return true;
   if (a->tag != b->tag)
@@ -125,29 +177,9 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
   case IXS_SYM:
     return strcmp(a->u.name, b->u.name) == 0;
   case IXS_ADD:
-    if (a->u.add.coeff != b->u.add.coeff)
-      return false;
-    if (a->u.add.nterms != b->u.add.nterms)
-      return false;
-    for (i = 0; i < a->u.add.nterms; i++) {
-      if (a->u.add.terms[i].term != b->u.add.terms[i].term)
-        return false;
-      if (a->u.add.terms[i].coeff != b->u.add.terms[i].coeff)
-        return false;
-    }
-    return true;
+    return node_equal_add(a, b);
   case IXS_MUL:
-    if (a->u.mul.coeff != b->u.mul.coeff)
-      return false;
-    if (a->u.mul.nfactors != b->u.mul.nfactors)
-      return false;
-    for (i = 0; i < a->u.mul.nfactors; i++) {
-      if (a->u.mul.factors[i].base != b->u.mul.factors[i].base)
-        return false;
-      if (a->u.mul.factors[i].exp != b->u.mul.factors[i].exp)
-        return false;
-    }
-    return true;
+    return node_equal_mul(a, b);
   case IXS_FLOOR:
   case IXS_CEIL:
     return a->u.unary.arg == b->u.unary.arg;
@@ -162,23 +194,10 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return a->u.binary.lhs == b->u.binary.lhs &&
            a->u.binary.rhs == b->u.binary.rhs;
   case IXS_PIECEWISE:
-    if (a->u.pw.ncases != b->u.pw.ncases)
-      return false;
-    for (i = 0; i < a->u.pw.ncases; i++) {
-      if (a->u.pw.cases[i].value != b->u.pw.cases[i].value)
-        return false;
-      if (a->u.pw.cases[i].cond != b->u.pw.cases[i].cond)
-        return false;
-    }
-    return true;
+    return node_equal_pw(a, b);
   case IXS_AND:
   case IXS_OR:
-    if (a->u.logic.nargs != b->u.logic.nargs)
-      return false;
-    for (i = 0; i < a->u.logic.nargs; i++)
-      if (a->u.logic.args[i] != b->u.logic.args[i])
-        return false;
-    return true;
+    return node_equal_logic(a, b);
   case IXS_NOT:
     return a->u.unary_bool.arg == b->u.unary_bool.arg;
   case IXS_ERROR:
@@ -198,9 +217,85 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
  * Next: compare by precomputed structural hash (O(1), deterministic).
  * Recursive fallback fires only on the rare 32-bit hash collision.
  */
-IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
+static int cmp_u32(uint32_t a, uint32_t b) { return (a > b) - (a < b); }
+
+static int cmp_i32(int32_t a, int32_t b) { return (a > b) - (a < b); }
+
+static int node_cmp_add(const ixs_node *a, const ixs_node *b) {
   uint32_t i;
-  int c;
+  int c = ixs_node_cmp(a->u.add.coeff, b->u.add.coeff);
+  if (c)
+    return c;
+  c = cmp_u32(a->u.add.nterms, b->u.add.nterms);
+  if (c)
+    return c;
+  for (i = 0; i < a->u.add.nterms; i++) {
+    c = ixs_node_cmp(a->u.add.terms[i].term, b->u.add.terms[i].term);
+    if (c)
+      return c;
+    c = ixs_node_cmp(a->u.add.terms[i].coeff, b->u.add.terms[i].coeff);
+    if (c)
+      return c;
+  }
+  return 0;
+}
+
+static int node_cmp_mul(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  int c = ixs_node_cmp(a->u.mul.coeff, b->u.mul.coeff);
+  if (c)
+    return c;
+  c = cmp_u32(a->u.mul.nfactors, b->u.mul.nfactors);
+  if (c)
+    return c;
+  for (i = 0; i < a->u.mul.nfactors; i++) {
+    c = ixs_node_cmp(a->u.mul.factors[i].base, b->u.mul.factors[i].base);
+    if (c)
+      return c;
+    c = cmp_i32(a->u.mul.factors[i].exp, b->u.mul.factors[i].exp);
+    if (c)
+      return c;
+  }
+  return 0;
+}
+
+static int node_cmp_binary(const ixs_node *a, const ixs_node *b) {
+  int c = ixs_node_cmp(a->u.binary.lhs, b->u.binary.lhs);
+  if (c)
+    return c;
+  return ixs_node_cmp(a->u.binary.rhs, b->u.binary.rhs);
+}
+
+static int node_cmp_pw(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  int c = cmp_u32(a->u.pw.ncases, b->u.pw.ncases);
+  if (c)
+    return c;
+  for (i = 0; i < a->u.pw.ncases; i++) {
+    c = ixs_node_cmp(a->u.pw.cases[i].value, b->u.pw.cases[i].value);
+    if (c)
+      return c;
+    c = ixs_node_cmp(a->u.pw.cases[i].cond, b->u.pw.cases[i].cond);
+    if (c)
+      return c;
+  }
+  return 0;
+}
+
+static int node_cmp_logic(const ixs_node *a, const ixs_node *b) {
+  uint32_t i;
+  int c = cmp_u32(a->u.logic.nargs, b->u.logic.nargs);
+  if (c)
+    return c;
+  for (i = 0; i < a->u.logic.nargs; i++) {
+    c = ixs_node_cmp(a->u.logic.args[i], b->u.logic.args[i]);
+    if (c)
+      return c;
+  }
+  return 0;
+}
+
+IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   if (a == b)
     return 0;
   if ((int)a->tag != (int)b->tag)
@@ -214,34 +309,9 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   case IXS_SYM:
     return strcmp(a->u.name, b->u.name);
   case IXS_ADD:
-    c = ixs_node_cmp(a->u.add.coeff, b->u.add.coeff);
-    if (c)
-      return c;
-    if (a->u.add.nterms != b->u.add.nterms)
-      return a->u.add.nterms < b->u.add.nterms ? -1 : 1;
-    for (i = 0; i < a->u.add.nterms; i++) {
-      c = ixs_node_cmp(a->u.add.terms[i].term, b->u.add.terms[i].term);
-      if (c)
-        return c;
-      c = ixs_node_cmp(a->u.add.terms[i].coeff, b->u.add.terms[i].coeff);
-      if (c)
-        return c;
-    }
-    return 0;
+    return node_cmp_add(a, b);
   case IXS_MUL:
-    c = ixs_node_cmp(a->u.mul.coeff, b->u.mul.coeff);
-    if (c)
-      return c;
-    if (a->u.mul.nfactors != b->u.mul.nfactors)
-      return a->u.mul.nfactors < b->u.mul.nfactors ? -1 : 1;
-    for (i = 0; i < a->u.mul.nfactors; i++) {
-      c = ixs_node_cmp(a->u.mul.factors[i].base, b->u.mul.factors[i].base);
-      if (c)
-        return c;
-      if (a->u.mul.factors[i].exp != b->u.mul.factors[i].exp)
-        return a->u.mul.factors[i].exp < b->u.mul.factors[i].exp ? -1 : 1;
-    }
-    return 0;
+    return node_cmp_mul(a, b);
   case IXS_FLOOR:
   case IXS_CEIL:
     return ixs_node_cmp(a->u.unary.arg, b->u.unary.arg);
@@ -253,32 +323,12 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
-    c = ixs_node_cmp(a->u.binary.lhs, b->u.binary.lhs);
-    if (c)
-      return c;
-    return ixs_node_cmp(a->u.binary.rhs, b->u.binary.rhs);
+    return node_cmp_binary(a, b);
   case IXS_PIECEWISE:
-    if (a->u.pw.ncases != b->u.pw.ncases)
-      return a->u.pw.ncases < b->u.pw.ncases ? -1 : 1;
-    for (i = 0; i < a->u.pw.ncases; i++) {
-      c = ixs_node_cmp(a->u.pw.cases[i].value, b->u.pw.cases[i].value);
-      if (c)
-        return c;
-      c = ixs_node_cmp(a->u.pw.cases[i].cond, b->u.pw.cases[i].cond);
-      if (c)
-        return c;
-    }
-    return 0;
+    return node_cmp_pw(a, b);
   case IXS_AND:
   case IXS_OR:
-    if (a->u.logic.nargs != b->u.logic.nargs)
-      return a->u.logic.nargs < b->u.logic.nargs ? -1 : 1;
-    for (i = 0; i < a->u.logic.nargs; i++) {
-      c = ixs_node_cmp(a->u.logic.args[i], b->u.logic.args[i]);
-      if (c)
-        return c;
-    }
-    return 0;
+    return node_cmp_logic(a, b);
   case IXS_NOT:
     return ixs_node_cmp(a->u.unary_bool.arg, b->u.unary_bool.arg);
   case IXS_ERROR:
@@ -786,6 +836,61 @@ static bool bool_value_push(const ixs_node **stack, size_t *nstack,
   return true;
 }
 
+static bool bool_value_push_ordered(const ixs_node **stack, size_t *nstack,
+                                    const ixs_node **children,
+                                    uint32_t nchildren) {
+  uint32_t pass, i;
+  if (nchildren == 0)
+    return false;
+  /* Containers are pushed first so non-containers are checked before
+   * descending into long binary chains.  Stack overflow is conservative. */
+  for (pass = 0; pass < 2; pass++) {
+    bool want_container = pass == 0;
+    for (i = 0; i < nchildren; i++) {
+      bool is_container = bool_value_needs_children(children[i]);
+      if (is_container == want_container &&
+          !bool_value_push(stack, nstack, children[i]))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool bool_value_push_logic(const ixs_node **stack, size_t *nstack,
+                                  const ixs_node *n) {
+  return bool_value_push_ordered(
+      stack, nstack, (const ixs_node **)n->u.logic.args, n->u.logic.nargs);
+}
+
+static bool bool_value_push_pw(const ixs_node **stack, size_t *nstack,
+                               const ixs_node *n) {
+  uint32_t i;
+  const ixs_node *values[IXS_BOOL_STACK_CAP];
+  if (n->u.pw.ncases > IXS_BOOL_STACK_CAP)
+    return false;
+  for (i = 0; i < n->u.pw.ncases; i++)
+    values[i] = n->u.pw.cases[i].value;
+  return bool_value_push_ordered(stack, nstack, values, n->u.pw.ncases);
+}
+
+static bool bool_value_visit(const ixs_node **stack, size_t *nstack,
+                             const ixs_node *cur) {
+  switch (cur->tag) {
+  case IXS_INT:
+    return cur->u.ival == 0 || cur->u.ival == 1;
+  case IXS_CMP:
+  case IXS_NOT:
+    return true;
+  case IXS_AND:
+  case IXS_OR:
+    return bool_value_push_logic(stack, nstack, cur);
+  case IXS_PIECEWISE:
+    return bool_value_push_pw(stack, nstack, cur);
+  default:
+    return false;
+  }
+}
+
 IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n) {
   const ixs_node *stack[IXS_BOOL_STACK_CAP];
   size_t nstack = 0;
@@ -794,61 +899,9 @@ IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n) {
     return false;
 
   while (nstack > 0) {
-    uint32_t i;
     const ixs_node *cur = stack[--nstack];
-    switch (cur->tag) {
-    case IXS_INT:
-      if (cur->u.ival != 0 && cur->u.ival != 1)
-        return false;
-      break;
-    case IXS_CMP:
-    case IXS_NOT:
-      break;
-    case IXS_AND:
-    case IXS_OR:
-      if (cur->u.logic.nargs == 0)
-        return false;
-      /* Containers are pushed first so non-containers are checked before
-       * descending into long binary chains.  Stack overflow is conservative. */
-      for (i = 0; i < cur->u.logic.nargs; i++) {
-        if (bool_value_needs_children(cur->u.logic.args[i]) &&
-            !bool_value_push(stack, &nstack, cur->u.logic.args[i]))
-          return false;
-      }
-      for (i = 0; i < cur->u.logic.nargs; i++) {
-        if (!bool_value_needs_children(cur->u.logic.args[i]) &&
-            !bool_value_push(stack, &nstack, cur->u.logic.args[i]))
-          return false;
-      }
-      break;
-    case IXS_PIECEWISE:
-      if (cur->u.pw.ncases == 0)
-        return false;
-      for (i = 0; i < cur->u.pw.ncases; i++) {
-        if (bool_value_needs_children(cur->u.pw.cases[i].value) &&
-            !bool_value_push(stack, &nstack, cur->u.pw.cases[i].value))
-          return false;
-      }
-      for (i = 0; i < cur->u.pw.ncases; i++) {
-        if (!bool_value_needs_children(cur->u.pw.cases[i].value) &&
-            !bool_value_push(stack, &nstack, cur->u.pw.cases[i].value))
-          return false;
-      }
-      break;
-    case IXS_RAT:
-    case IXS_SYM:
-    case IXS_ADD:
-    case IXS_MUL:
-    case IXS_FLOOR:
-    case IXS_CEIL:
-    case IXS_MOD:
-    case IXS_MAX:
-    case IXS_MIN:
-    case IXS_XOR:
-    case IXS_ERROR:
-    case IXS_PARSE_ERROR:
+    if (!bool_value_visit(stack, &nstack, cur))
       return false;
-    }
   }
 
   return true;
@@ -922,6 +975,59 @@ IXS_STATIC ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
 /*  Integer-valued predicate                                          */
 /* ------------------------------------------------------------------ */
 
+static bool node_rat_is_integer(const ixs_node *n) {
+  int64_t p, q;
+  ixs_node_get_rat(n, &p, &q);
+  (void)p;
+  return q == 1;
+}
+
+static bool logic_is_integer_valued(const ixs_node *n) {
+  uint32_t i;
+  if (n->u.logic.nargs == 0)
+    return false;
+  for (i = 0; i < n->u.logic.nargs; i++) {
+    if (!ixs_node_is_integer_valued(n->u.logic.args[i]))
+      return false;
+  }
+  return true;
+}
+
+static bool add_is_integer_valued(const ixs_node *n) {
+  uint32_t i;
+  if (!node_rat_is_integer(n->u.add.coeff))
+    return false;
+  for (i = 0; i < n->u.add.nterms; i++) {
+    if (!node_rat_is_integer(n->u.add.terms[i].coeff))
+      return false;
+    if (!ixs_node_is_integer_valued(n->u.add.terms[i].term))
+      return false;
+  }
+  return true;
+}
+
+static bool mul_is_integer_valued(const ixs_node *n) {
+  uint32_t i;
+  if (!node_rat_is_integer(n->u.mul.coeff))
+    return false;
+  for (i = 0; i < n->u.mul.nfactors; i++) {
+    if (n->u.mul.factors[i].exp < 0)
+      return false;
+    if (!ixs_node_is_integer_valued(n->u.mul.factors[i].base))
+      return false;
+  }
+  return true;
+}
+
+static bool pw_is_integer_valued(const ixs_node *n) {
+  uint32_t i;
+  for (i = 0; i < n->u.pw.ncases; i++) {
+    if (!ixs_node_is_integer_valued(n->u.pw.cases[i].value))
+      return false;
+  }
+  return n->u.pw.ncases > 0;
+}
+
 IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   if (!n)
     return false;
@@ -935,58 +1041,19 @@ IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_NOT:
     return true;
   case IXS_AND:
-  case IXS_OR: {
-    uint32_t i;
-    if (n->u.logic.nargs == 0)
-      return false;
-    for (i = 0; i < n->u.logic.nargs; i++) {
-      if (!ixs_node_is_integer_valued(n->u.logic.args[i]))
-        return false;
-    }
-    return true;
-  }
-  case IXS_ADD: {
-    uint32_t i;
-    int64_t cp, cq;
-    ixs_node_get_rat(n->u.add.coeff, &cp, &cq);
-    if (cq != 1)
-      return false;
-    for (i = 0; i < n->u.add.nterms; i++) {
-      ixs_node_get_rat(n->u.add.terms[i].coeff, &cp, &cq);
-      if (cq != 1)
-        return false;
-      if (!ixs_node_is_integer_valued(n->u.add.terms[i].term))
-        return false;
-    }
-    return true;
-  }
-  case IXS_MUL: {
-    uint32_t i;
-    int64_t cp, cq;
-    ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
-    if (cq != 1)
-      return false;
-    for (i = 0; i < n->u.mul.nfactors; i++) {
-      if (n->u.mul.factors[i].exp < 0)
-        return false;
-      if (!ixs_node_is_integer_valued(n->u.mul.factors[i].base))
-        return false;
-    }
-    return true;
-  }
+  case IXS_OR:
+    return logic_is_integer_valued(n);
+  case IXS_ADD:
+    return add_is_integer_valued(n);
+  case IXS_MUL:
+    return mul_is_integer_valued(n);
   case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
     return ixs_node_is_integer_valued(n->u.binary.lhs) &&
            ixs_node_is_integer_valued(n->u.binary.rhs);
-  case IXS_PIECEWISE: {
-    uint32_t i;
-    for (i = 0; i < n->u.pw.ncases; i++) {
-      if (!ixs_node_is_integer_valued(n->u.pw.cases[i].value))
-        return false;
-    }
-    return n->u.pw.ncases > 0;
-  }
+  case IXS_PIECEWISE:
+    return pw_is_integer_valued(n);
   default:
     return false;
   }

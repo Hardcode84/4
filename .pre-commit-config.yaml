@@ -64,10 +64,10 @@ repos:
         files: ^(src/.*\.[ch]|include/ixsimpl\.h|ixsimpl_amalg\.c)$
         pass_filenames: false
       - id: lizard
-        name: cyclomatic complexity (CCN <= 50)
+        name: cyclomatic complexity (CCN <= 25)
         language: python
         additional_dependencies: [lizard]
         entry: lizard
-        args: [src/, include/, -l, c, --CCN, '50', --length, '300', -W, whitelizard.txt, -w]
+        args: [src/, include/, -l, c, --CCN, '25', --length, '300', -W, whitelizard.txt, -w]
         types: [c]
         pass_filenames: false

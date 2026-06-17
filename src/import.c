@@ -280,128 +280,195 @@ static ixs_node *import_memo_dst(import_state *state, const ixs_node *src) {
  * Imported source nodes are already in canonical structural form. Rebuild the
  * same shape in the destination store and let hash-consing collapse duplicates.
  */
+static ixs_node *import_build_add(ixs_ctx *dst_ctx, import_state *state,
+                                  const ixs_node *src) {
+  uint32_t i;
+  ixs_node *coeff = import_memo_dst(state, src->u.add.coeff);
+  ixs_addterm *terms = NULL;
+
+  if (!coeff)
+    return NULL;
+  if (src->u.add.nterms > 0) {
+    size_t sz = (size_t)src->u.add.nterms * sizeof(ixs_addterm);
+    if (sz / sizeof(ixs_addterm) != src->u.add.nterms)
+      return NULL;
+    terms = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
+    if (!terms)
+      return NULL;
+    for (i = 0; i < src->u.add.nterms; i++) {
+      terms[i].term = import_memo_dst(state, src->u.add.terms[i].term);
+      terms[i].coeff = import_memo_dst(state, src->u.add.terms[i].coeff);
+      if (!terms[i].term || !terms[i].coeff)
+        return NULL;
+    }
+  }
+  return ixs_node_add(dst_ctx, coeff, src->u.add.nterms, terms);
+}
+
+static ixs_node *import_build_mul(ixs_ctx *dst_ctx, import_state *state,
+                                  const ixs_node *src) {
+  uint32_t i;
+  ixs_node *coeff = import_memo_dst(state, src->u.mul.coeff);
+  ixs_mulfactor *factors = NULL;
+
+  if (!coeff)
+    return NULL;
+  if (src->u.mul.nfactors > 0) {
+    size_t sz = (size_t)src->u.mul.nfactors * sizeof(ixs_mulfactor);
+    if (sz / sizeof(ixs_mulfactor) != src->u.mul.nfactors)
+      return NULL;
+    factors = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
+    if (!factors)
+      return NULL;
+    for (i = 0; i < src->u.mul.nfactors; i++) {
+      factors[i].base = import_memo_dst(state, src->u.mul.factors[i].base);
+      factors[i].exp = src->u.mul.factors[i].exp;
+      if (!factors[i].base)
+        return NULL;
+    }
+  }
+  return ixs_node_mul(dst_ctx, coeff, src->u.mul.nfactors, factors);
+}
+
+static ixs_node *import_build_unary(ixs_ctx *dst_ctx, import_state *state,
+                                    const ixs_node *src) {
+  ixs_node *arg = import_memo_dst(state, src->u.unary.arg);
+  if (!arg)
+    return NULL;
+  return src->tag == IXS_FLOOR ? ixs_node_floor(dst_ctx, arg)
+                               : ixs_node_ceil(dst_ctx, arg);
+}
+
+static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
+                                     const ixs_node *src) {
+  ixs_node *lhs = import_memo_dst(state, src->u.binary.lhs);
+  ixs_node *rhs = import_memo_dst(state, src->u.binary.rhs);
+  if (!lhs || !rhs)
+    return NULL;
+  return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
+}
+
+static ixs_node *import_build_pw(ixs_ctx *dst_ctx, import_state *state,
+                                 const ixs_node *src) {
+  uint32_t i;
+  ixs_pwcase *cases = NULL;
+
+  if (src->u.pw.ncases > 0) {
+    size_t sz = (size_t)src->u.pw.ncases * sizeof(ixs_pwcase);
+    if (sz / sizeof(ixs_pwcase) != src->u.pw.ncases)
+      return NULL;
+    cases = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
+    if (!cases)
+      return NULL;
+    for (i = 0; i < src->u.pw.ncases; i++) {
+      cases[i].value = import_memo_dst(state, src->u.pw.cases[i].value);
+      cases[i].cond = import_memo_dst(state, src->u.pw.cases[i].cond);
+      if (!cases[i].value || !cases[i].cond)
+        return NULL;
+    }
+  }
+  return ixs_node_pw(dst_ctx, src->u.pw.ncases, cases);
+}
+
+static ixs_node *import_build_logic(ixs_ctx *dst_ctx, import_state *state,
+                                    const ixs_node *src) {
+  uint32_t i;
+  ixs_node **args = NULL;
+
+  if (src->u.logic.nargs > 0) {
+    size_t sz = (size_t)src->u.logic.nargs * sizeof(ixs_node *);
+    if (sz / sizeof(ixs_node *) != src->u.logic.nargs)
+      return NULL;
+    args = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
+    if (!args)
+      return NULL;
+    for (i = 0; i < src->u.logic.nargs; i++) {
+      args[i] = import_memo_dst(state, src->u.logic.args[i]);
+      if (!args[i])
+        return NULL;
+    }
+  }
+  return ixs_node_logic(dst_ctx, src->tag, src->u.logic.nargs, args);
+}
+
+static ixs_node *import_build_not(ixs_ctx *dst_ctx, import_state *state,
+                                  const ixs_node *src) {
+  ixs_node *arg = import_memo_dst(state, src->u.unary_bool.arg);
+  if (!arg)
+    return NULL;
+  return ixs_node_not(dst_ctx, arg);
+}
+
 static ixs_node *import_build_node(ixs_ctx *dst_ctx, import_state *state,
                                    const ixs_node *src) {
-  uint32_t i;
-
   switch (src->tag) {
-  case IXS_ADD: {
-    ixs_node *coeff = import_memo_dst(state, src->u.add.coeff);
-    ixs_addterm *terms = NULL;
-
-    if (!coeff)
-      return NULL;
-    if (src->u.add.nterms > 0) {
-      size_t sz = (size_t)src->u.add.nterms * sizeof(ixs_addterm);
-      if (sz / sizeof(ixs_addterm) != src->u.add.nterms)
-        return NULL;
-      terms = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
-      if (!terms)
-        return NULL;
-      for (i = 0; i < src->u.add.nterms; i++) {
-        terms[i].term = import_memo_dst(state, src->u.add.terms[i].term);
-        terms[i].coeff = import_memo_dst(state, src->u.add.terms[i].coeff);
-        if (!terms[i].term || !terms[i].coeff)
-          return NULL;
-      }
-    }
-    return ixs_node_add(dst_ctx, coeff, src->u.add.nterms, terms);
-  }
-
-  case IXS_MUL: {
-    ixs_node *coeff = import_memo_dst(state, src->u.mul.coeff);
-    ixs_mulfactor *factors = NULL;
-
-    if (!coeff)
-      return NULL;
-    if (src->u.mul.nfactors > 0) {
-      size_t sz = (size_t)src->u.mul.nfactors * sizeof(ixs_mulfactor);
-      if (sz / sizeof(ixs_mulfactor) != src->u.mul.nfactors)
-        return NULL;
-      factors = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
-      if (!factors)
-        return NULL;
-      for (i = 0; i < src->u.mul.nfactors; i++) {
-        factors[i].base = import_memo_dst(state, src->u.mul.factors[i].base);
-        factors[i].exp = src->u.mul.factors[i].exp;
-        if (!factors[i].base)
-          return NULL;
-      }
-    }
-    return ixs_node_mul(dst_ctx, coeff, src->u.mul.nfactors, factors);
-  }
-
+  case IXS_ADD:
+    return import_build_add(dst_ctx, state, src);
+  case IXS_MUL:
+    return import_build_mul(dst_ctx, state, src);
   case IXS_FLOOR:
-  case IXS_CEIL: {
-    ixs_node *arg = import_memo_dst(state, src->u.unary.arg);
-    if (!arg)
-      return NULL;
-    return src->tag == IXS_FLOOR ? ixs_node_floor(dst_ctx, arg)
-                                 : ixs_node_ceil(dst_ctx, arg);
-  }
-
+  case IXS_CEIL:
+    return import_build_unary(dst_ctx, state, src);
   case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
-  case IXS_CMP: {
-    ixs_node *lhs = import_memo_dst(state, src->u.binary.lhs);
-    ixs_node *rhs = import_memo_dst(state, src->u.binary.rhs);
-    if (!lhs || !rhs)
-      return NULL;
-    return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
-  }
-
-  case IXS_PIECEWISE: {
-    ixs_pwcase *cases = NULL;
-
-    if (src->u.pw.ncases > 0) {
-      size_t sz = (size_t)src->u.pw.ncases * sizeof(ixs_pwcase);
-      if (sz / sizeof(ixs_pwcase) != src->u.pw.ncases)
-        return NULL;
-      cases = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
-      if (!cases)
-        return NULL;
-      for (i = 0; i < src->u.pw.ncases; i++) {
-        cases[i].value = import_memo_dst(state, src->u.pw.cases[i].value);
-        cases[i].cond = import_memo_dst(state, src->u.pw.cases[i].cond);
-        if (!cases[i].value || !cases[i].cond)
-          return NULL;
-      }
-    }
-    return ixs_node_pw(dst_ctx, src->u.pw.ncases, cases);
-  }
-
+  case IXS_CMP:
+    return import_build_binary(dst_ctx, state, src);
+  case IXS_PIECEWISE:
+    return import_build_pw(dst_ctx, state, src);
   case IXS_AND:
-  case IXS_OR: {
-    ixs_node **args = NULL;
-
-    if (src->u.logic.nargs > 0) {
-      size_t sz = (size_t)src->u.logic.nargs * sizeof(ixs_node *);
-      if (sz / sizeof(ixs_node *) != src->u.logic.nargs)
-        return NULL;
-      args = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
-      if (!args)
-        return NULL;
-      for (i = 0; i < src->u.logic.nargs; i++) {
-        args[i] = import_memo_dst(state, src->u.logic.args[i]);
-        if (!args[i])
-          return NULL;
-      }
-    }
-    return ixs_node_logic(dst_ctx, src->tag, src->u.logic.nargs, args);
-  }
-
-  case IXS_NOT: {
-    ixs_node *arg = import_memo_dst(state, src->u.unary_bool.arg);
-    if (!arg)
-      return NULL;
-    return ixs_node_not(dst_ctx, arg);
-  }
-
+  case IXS_OR:
+    return import_build_logic(dst_ctx, state, src);
+  case IXS_NOT:
+    return import_build_not(dst_ctx, state, src);
   default:
     return NULL;
   }
+}
+
+static bool import_memo_set(ixs_ctx *dst_ctx, import_state *state,
+                            const ixs_node *src, ixs_node *dst) {
+  import_entry *slot = import_memo_find(state, src);
+  if (!slot)
+    slot = import_memo_ensure(dst_ctx, state, src);
+  if (!slot)
+    return false;
+  slot->dst = dst;
+  return true;
+}
+
+static bool import_push_child(ixs_ctx *dst_ctx, import_state *state,
+                              const ixs_node *child, size_t *depth) {
+  import_entry *child_slot;
+  ixs_node *mapped;
+  import_direct_result direct;
+
+  if (!child)
+    return false;
+  child_slot = import_memo_find(state, child);
+  if (child_slot && child_slot->dst)
+    return true;
+
+  direct = import_map_direct(dst_ctx, child, &mapped);
+  if (direct == IMPORT_DIRECT_OOM)
+    return false;
+  if (direct == IMPORT_DIRECT_READY)
+    return import_memo_set(dst_ctx, state, child, mapped);
+
+  if (!child_slot)
+    child_slot = import_memo_ensure(dst_ctx, state, child);
+  if (!child_slot)
+    return false;
+  if (child_slot->dst)
+    return true;
+
+  if (!import_stack_reserve(dst_ctx, state, *depth + 1u))
+    return false;
+  state->stack[*depth].src = child;
+  state->stack[*depth].next_child = 0;
+  (*depth)++;
+  return true;
 }
 
 static ixs_node *import_root(ixs_ctx *dst_ctx, import_state *state,
@@ -423,11 +490,8 @@ static ixs_node *import_root(ixs_ctx *dst_ctx, import_state *state,
   if (direct == IMPORT_DIRECT_OOM)
     return NULL;
   if (direct == IMPORT_DIRECT_READY) {
-    if (!slot)
-      slot = import_memo_ensure(dst_ctx, state, src);
-    if (!slot)
+    if (!import_memo_set(dst_ctx, state, src, mapped))
       return NULL;
-    slot->dst = mapped;
     return mapped;
   }
 
@@ -451,39 +515,8 @@ static ixs_node *import_root(ixs_ctx *dst_ctx, import_state *state,
 
     if (frame->next_child < nchildren) {
       const ixs_node *child = import_child_at(cur, frame->next_child++);
-      import_entry *child_slot;
-
-      if (!child)
+      if (!import_push_child(dst_ctx, state, child, &depth))
         return NULL;
-      child_slot = import_memo_find(state, child);
-
-      if (child_slot && child_slot->dst)
-        continue;
-
-      direct = import_map_direct(dst_ctx, child, &mapped);
-      if (direct == IMPORT_DIRECT_OOM)
-        return NULL;
-      if (direct == IMPORT_DIRECT_READY) {
-        if (!child_slot)
-          child_slot = import_memo_ensure(dst_ctx, state, child);
-        if (!child_slot)
-          return NULL;
-        child_slot->dst = mapped;
-        continue;
-      }
-
-      if (!child_slot)
-        child_slot = import_memo_ensure(dst_ctx, state, child);
-      if (!child_slot)
-        return NULL;
-      if (child_slot->dst)
-        continue;
-
-      if (!import_stack_reserve(dst_ctx, state, depth + 1u))
-        return NULL;
-      state->stack[depth].src = child;
-      state->stack[depth].next_child = 0;
-      depth++;
       continue;
     }
 

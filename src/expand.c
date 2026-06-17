@@ -8,6 +8,8 @@
 #define EXPAND_MAX_DEPTH 256
 #define EXPAND_MAX_EXP 64
 
+static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth);
+
 /*
  * Multiply a * b, distributing over ADD on either side.
  * Both operands must already be expanded (no MUL-over-ADD internally).
@@ -38,6 +40,110 @@ static ixs_node *mul_expand(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   return simp_mul(ctx, a, b);
 }
 
+static ixs_node *expand_add(ixs_ctx *ctx, ixs_node *node, int depth) {
+  uint32_t i;
+  ixs_node *result = node->u.add.coeff;
+  for (i = 0; i < node->u.add.nterms; i++) {
+    ixs_node *tc = node->u.add.terms[i].coeff;
+    ixs_node *tt = do_expand(ctx, node->u.add.terms[i].term, depth + 1);
+    result = simp_add(ctx, result, mul_expand(ctx, tc, tt));
+  }
+  return result;
+}
+
+static bool expand_exp_mag(ixs_ctx *ctx, int32_t exp, int32_t *mag) {
+  *mag = (exp > 0) ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
+  if (*mag <= EXPAND_MAX_EXP)
+    return true;
+  ixs_ctx_push_error(ctx, "expand: exponent magnitude (%d) exceeds limit",
+                     *mag);
+  return false;
+}
+
+static ixs_node *expand_negative_power(ixs_ctx *ctx, ixs_node *result,
+                                       ixs_node *base, int32_t mag) {
+  int32_t e;
+  ixs_node *pow = base;
+  for (e = 1; e < mag; e++)
+    pow = simp_mul(ctx, pow, base);
+  return simp_div(ctx, result, pow);
+}
+
+static ixs_node *expand_mul(ixs_ctx *ctx, ixs_node *node, int depth) {
+  uint32_t i;
+  ixs_node *result = node->u.mul.coeff;
+  for (i = 0; i < node->u.mul.nfactors; i++) {
+    int32_t e, mag;
+    ixs_node *base = do_expand(ctx, node->u.mul.factors[i].base, depth + 1);
+    int32_t exp = node->u.mul.factors[i].exp;
+    if (!expand_exp_mag(ctx, exp, &mag))
+      return ctx->sentinel_error;
+    if (exp > 0) {
+      for (e = 0; e < exp; e++)
+        result = mul_expand(ctx, result, base);
+    } else {
+      result = expand_negative_power(ctx, result, base, mag);
+    }
+  }
+  return result;
+}
+
+static ixs_node *expand_binary(ixs_ctx *ctx, ixs_node *node, int depth) {
+  ixs_node *lhs = do_expand(ctx, node->u.binary.lhs, depth + 1);
+  ixs_node *rhs = do_expand(ctx, node->u.binary.rhs, depth + 1);
+  switch (node->tag) {
+  case IXS_MOD:
+    return simp_mod(ctx, lhs, rhs);
+  case IXS_MAX:
+    return simp_max(ctx, lhs, rhs);
+  case IXS_MIN:
+    return simp_min(ctx, lhs, rhs);
+  case IXS_XOR:
+    return simp_xor(ctx, lhs, rhs);
+  case IXS_CMP:
+    return simp_cmp(ctx, lhs, node->u.binary.cmp_op, rhs);
+  default:
+    return node;
+  }
+}
+
+static ixs_node *expand_pw(ixs_ctx *ctx, ixs_node *node, int depth) {
+  uint32_t i;
+  uint32_t nc = node->u.pw.ncases;
+  ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
+  ixs_node **vals =
+      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
+  ixs_node **conds =
+      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*conds), sizeof(void *));
+  ixs_node *result;
+  if (!vals || !conds) {
+    ixs_arena_restore(&ctx->scratch, sm);
+    return NULL;
+  }
+  for (i = 0; i < nc; i++) {
+    vals[i] = do_expand(ctx, node->u.pw.cases[i].value, depth + 1);
+    conds[i] = do_expand(ctx, node->u.pw.cases[i].cond, depth + 1);
+  }
+  result = simp_pw(ctx, nc, vals, conds);
+  ixs_arena_restore(&ctx->scratch, sm);
+  return result;
+}
+
+static ixs_node *expand_logic(ixs_ctx *ctx, ixs_node *node, int depth) {
+  uint32_t i;
+  uint32_t na = node->u.logic.nargs;
+  ixs_node *result;
+  if (na < 2)
+    return node;
+  result = do_expand(ctx, node->u.logic.args[0], depth + 1);
+  for (i = 1; i < na; i++) {
+    ixs_node *arg = do_expand(ctx, node->u.logic.args[i], depth + 1);
+    result = (node->tag == IXS_AND) ? simp_and(ctx, result, arg)
+                                    : simp_or(ctx, result, arg);
+  }
+  return result;
+}
+
 static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
   if (!node)
     return NULL;
@@ -57,40 +163,11 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
   case IXS_PARSE_ERROR:
     return node;
 
-  case IXS_ADD: {
-    ixs_node *result = node->u.add.coeff;
-    for (uint32_t i = 0; i < node->u.add.nterms; i++) {
-      ixs_node *tc = node->u.add.terms[i].coeff;
-      ixs_node *tt = do_expand(ctx, node->u.add.terms[i].term, depth + 1);
-      result = simp_add(ctx, result, mul_expand(ctx, tc, tt));
-    }
-    return result;
-  }
+  case IXS_ADD:
+    return expand_add(ctx, node, depth);
 
-  case IXS_MUL: {
-    ixs_node *result = node->u.mul.coeff;
-    for (uint32_t i = 0; i < node->u.mul.nfactors; i++) {
-      ixs_node *base = do_expand(ctx, node->u.mul.factors[i].base, depth + 1);
-      int32_t exp = node->u.mul.factors[i].exp;
-      /* -INT32_MIN overflows; clamp to INT32_MAX */
-      int32_t mag = (exp > 0) ? exp : (exp == INT32_MIN) ? INT32_MAX : -exp;
-      if (mag > EXPAND_MAX_EXP) {
-        ixs_ctx_push_error(ctx, "expand: exponent magnitude (%d) exceeds limit",
-                           mag);
-        return ctx->sentinel_error;
-      }
-      if (exp > 0) {
-        for (int32_t e = 0; e < exp; e++)
-          result = mul_expand(ctx, result, base);
-      } else {
-        ixs_node *pow = base;
-        for (int32_t e = 1; e < mag; e++)
-          pow = simp_mul(ctx, pow, base);
-        result = simp_div(ctx, result, pow);
-      }
-    }
-    return result;
-  }
+  case IXS_MUL:
+    return expand_mul(ctx, node, depth);
 
   case IXS_FLOOR:
     return simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
@@ -98,55 +175,18 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
 
   case IXS_MOD:
-    return simp_mod(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_MAX:
-    return simp_max(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_MIN:
-    return simp_min(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_XOR:
-    return simp_xor(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                    do_expand(ctx, node->u.binary.rhs, depth + 1));
   case IXS_CMP:
-    return simp_cmp(ctx, do_expand(ctx, node->u.binary.lhs, depth + 1),
-                    node->u.binary.cmp_op,
-                    do_expand(ctx, node->u.binary.rhs, depth + 1));
+    return expand_binary(ctx, node, depth);
 
-  case IXS_PIECEWISE: {
-    uint32_t nc = node->u.pw.ncases;
-    ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
-    ixs_node **vals =
-        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
-    ixs_node **conds =
-        ixs_arena_alloc(&ctx->scratch, nc * sizeof(*conds), sizeof(void *));
-    if (!vals || !conds) {
-      ixs_arena_restore(&ctx->scratch, sm);
-      return NULL;
-    }
-    for (uint32_t i = 0; i < nc; i++) {
-      vals[i] = do_expand(ctx, node->u.pw.cases[i].value, depth + 1);
-      conds[i] = do_expand(ctx, node->u.pw.cases[i].cond, depth + 1);
-    }
-    ixs_node *result = simp_pw(ctx, nc, vals, conds);
-    ixs_arena_restore(&ctx->scratch, sm);
-    return result;
-  }
+  case IXS_PIECEWISE:
+    return expand_pw(ctx, node, depth);
 
   case IXS_AND:
-  case IXS_OR: {
-    uint32_t na = node->u.logic.nargs;
-    if (na < 2)
-      return node;
-    ixs_node *result = do_expand(ctx, node->u.logic.args[0], depth + 1);
-    for (uint32_t i = 1; i < na; i++) {
-      ixs_node *arg = do_expand(ctx, node->u.logic.args[i], depth + 1);
-      result = (node->tag == IXS_AND) ? simp_and(ctx, result, arg)
-                                      : simp_or(ctx, result, arg);
-    }
-    return result;
-  }
+  case IXS_OR:
+    return expand_logic(ctx, node, depth);
 
   case IXS_NOT:
     return simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));

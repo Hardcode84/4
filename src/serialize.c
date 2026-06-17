@@ -1229,6 +1229,95 @@ static ixs_node *decode_build_plain_binary(ixs_ctx *ctx, ixs_tag tag,
   return ixs_node_binary(ctx, tag, lhs, rhs, IXS_CMP_EQ);
 }
 
+static ixs_node *decode_build_add(ixs_ctx *ctx, const decode_node *node,
+                                  ixs_node *const *built) {
+  uint32_t i;
+  ixs_addterm *terms = NULL;
+  size_t bytes = 0;
+
+  if (!size_mul_ok((size_t)node->u.add.nterms, sizeof(*terms), &bytes))
+    return NULL;
+  if (bytes > 0) {
+    terms = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!terms)
+      return NULL;
+  }
+  for (i = 0; i < node->u.add.nterms; i++) {
+    terms[i].term = built[node->u.add.terms[i].term];
+    terms[i].coeff = built[node->u.add.terms[i].coeff];
+  }
+  return ixs_node_add(ctx, built[node->u.add.coeff], node->u.add.nterms, terms);
+}
+
+static ixs_node *decode_build_mul(ixs_ctx *ctx, const decode_node *node,
+                                  ixs_node *const *built) {
+  uint32_t i;
+  ixs_mulfactor *factors = NULL;
+  size_t bytes = 0;
+
+  if (!size_mul_ok((size_t)node->u.mul.nfactors, sizeof(*factors), &bytes))
+    return NULL;
+  if (bytes > 0) {
+    factors = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!factors)
+      return NULL;
+  }
+  for (i = 0; i < node->u.mul.nfactors; i++) {
+    factors[i].base = built[node->u.mul.factors[i].base];
+    factors[i].exp = node->u.mul.factors[i].exp;
+  }
+  return ixs_node_mul(ctx, built[node->u.mul.coeff], node->u.mul.nfactors,
+                      factors);
+}
+
+static ixs_node *decode_build_pw(ixs_ctx *ctx, const decode_node *node,
+                                 ixs_node *const *built) {
+  uint32_t i;
+  ixs_pwcase *cases = NULL;
+  size_t bytes = 0;
+
+  if (!size_mul_ok((size_t)node->u.pw.ncases, sizeof(*cases), &bytes))
+    return NULL;
+  if (bytes > 0) {
+    cases = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!cases)
+      return NULL;
+  }
+  for (i = 0; i < node->u.pw.ncases; i++) {
+    cases[i].value = built[node->u.pw.cases[i].value];
+    cases[i].cond = built[node->u.pw.cases[i].cond];
+  }
+  return ixs_node_pw(ctx, node->u.pw.ncases, cases);
+}
+
+static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
+                                  ixs_node *const *built) {
+  ixs_cmp_op op;
+  if (!ixs_cmp_from_wire(node->u.binary.op, &op))
+    return NULL;
+  return ixs_node_binary(ctx, IXS_CMP, built[node->u.binary.lhs],
+                         built[node->u.binary.rhs], op);
+}
+
+static ixs_node *decode_build_logic(ixs_ctx *ctx, const decode_node *node,
+                                    ixs_node *const *built) {
+  uint32_t i;
+  ixs_node **args = NULL;
+  ixs_tag tag = node->tag == WIRE_AND ? IXS_AND : IXS_OR;
+  size_t bytes = 0;
+
+  if (!size_mul_ok((size_t)node->u.logic.nargs, sizeof(*args), &bytes))
+    return NULL;
+  if (bytes > 0) {
+    args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!args)
+      return NULL;
+  }
+  for (i = 0; i < node->u.logic.nargs; i++)
+    args[i] = built[node->u.logic.args[i]];
+  return ixs_node_logic(ctx, tag, node->u.logic.nargs, args);
+}
+
 static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
                                    ixs_node *const *built, uint32_t index) {
   const decode_node *node = &nodes[index];
@@ -1240,44 +1329,10 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
     return ixs_node_rat(ctx, node->u.rat.p, node->u.rat.q);
   case WIRE_SYM:
     return ixs_node_sym(ctx, node->u.sym.name, node->u.sym.len);
-  case WIRE_ADD: {
-    ixs_addterm *terms = NULL;
-    uint32_t i;
-    size_t bytes = 0;
-
-    if (!size_mul_ok((size_t)node->u.add.nterms, sizeof(*terms), &bytes))
-      return NULL;
-    if (bytes > 0) {
-      terms = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-      if (!terms)
-        return NULL;
-    }
-    for (i = 0; i < node->u.add.nterms; i++) {
-      terms[i].term = built[node->u.add.terms[i].term];
-      terms[i].coeff = built[node->u.add.terms[i].coeff];
-    }
-    return ixs_node_add(ctx, built[node->u.add.coeff], node->u.add.nterms,
-                        terms);
-  }
-  case WIRE_MUL: {
-    ixs_mulfactor *factors = NULL;
-    uint32_t i;
-    size_t bytes = 0;
-
-    if (!size_mul_ok((size_t)node->u.mul.nfactors, sizeof(*factors), &bytes))
-      return NULL;
-    if (bytes > 0) {
-      factors = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-      if (!factors)
-        return NULL;
-    }
-    for (i = 0; i < node->u.mul.nfactors; i++) {
-      factors[i].base = built[node->u.mul.factors[i].base];
-      factors[i].exp = node->u.mul.factors[i].exp;
-    }
-    return ixs_node_mul(ctx, built[node->u.mul.coeff], node->u.mul.nfactors,
-                        factors);
-  }
+  case WIRE_ADD:
+    return decode_build_add(ctx, node, built);
+  case WIRE_MUL:
+    return decode_build_mul(ctx, node, built);
   case WIRE_FLOOR:
     return ixs_node_floor(ctx, built[node->u.unary.arg]);
   case WIRE_CEIL:
@@ -1285,24 +1340,8 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
   case WIRE_MOD:
     return decode_build_plain_binary(ctx, IXS_MOD, built[node->u.binary.lhs],
                                      built[node->u.binary.rhs]);
-  case WIRE_PIECEWISE: {
-    ixs_pwcase *cases = NULL;
-    uint32_t i;
-    size_t bytes = 0;
-
-    if (!size_mul_ok((size_t)node->u.pw.ncases, sizeof(*cases), &bytes))
-      return NULL;
-    if (bytes > 0) {
-      cases = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-      if (!cases)
-        return NULL;
-    }
-    for (i = 0; i < node->u.pw.ncases; i++) {
-      cases[i].value = built[node->u.pw.cases[i].value];
-      cases[i].cond = built[node->u.pw.cases[i].cond];
-    }
-    return ixs_node_pw(ctx, node->u.pw.ncases, cases);
-  }
+  case WIRE_PIECEWISE:
+    return decode_build_pw(ctx, node, built);
   case WIRE_MAX:
     return decode_build_plain_binary(ctx, IXS_MAX, built[node->u.binary.lhs],
                                      built[node->u.binary.rhs]);
@@ -1312,31 +1351,11 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
   case WIRE_XOR:
     return decode_build_plain_binary(ctx, IXS_XOR, built[node->u.binary.lhs],
                                      built[node->u.binary.rhs]);
-  case WIRE_CMP: {
-    ixs_cmp_op op;
-    if (!ixs_cmp_from_wire(node->u.binary.op, &op))
-      return NULL;
-    return ixs_node_binary(ctx, IXS_CMP, built[node->u.binary.lhs],
-                           built[node->u.binary.rhs], op);
-  }
+  case WIRE_CMP:
+    return decode_build_cmp(ctx, node, built);
   case WIRE_AND:
-  case WIRE_OR: {
-    ixs_node **args = NULL;
-    ixs_tag tag = node->tag == WIRE_AND ? IXS_AND : IXS_OR;
-    uint32_t i;
-    size_t bytes = 0;
-
-    if (!size_mul_ok((size_t)node->u.logic.nargs, sizeof(*args), &bytes))
-      return NULL;
-    if (bytes > 0) {
-      args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-      if (!args)
-        return NULL;
-    }
-    for (i = 0; i < node->u.logic.nargs; i++)
-      args[i] = built[node->u.logic.args[i]];
-    return ixs_node_logic(ctx, tag, node->u.logic.nargs, args);
-  }
+  case WIRE_OR:
+    return decode_build_logic(ctx, node, built);
   case WIRE_NOT:
     return ixs_node_not(ctx, built[node->u.unary.arg]);
   case WIRE_TRUE:

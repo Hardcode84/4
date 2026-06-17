@@ -256,6 +256,25 @@ static void test_bounds_sym_eq(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_assumption_invalidates_cache(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_interval iv = ixs_bounds_get(&b, x);
+  CHECK(!iv.valid);
+
+  ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 5)));
+  iv = ixs_bounds_get(&b, x);
+  CHECK(iv.valid);
+  CHECK(iv.lo_p == 5 && iv.lo_q == 1);
+  CHECK(iv.hi_p == 5 && iv.hi_q == 1);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_two_sided(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -678,6 +697,28 @@ static void test_bounds_expr_override(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_expr_override_invalidates_cache(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *expr = ixs_add(ctx, x, y);
+
+  ixs_interval iv = ixs_bounds_get(&b, expr);
+  CHECK(!iv.valid);
+
+  ixs_bounds_add_expr(&b, expr, ixs_interval_exact(7, 1));
+  iv = ixs_bounds_get(&b, expr);
+  CHECK(iv.valid);
+  CHECK(iv.lo_p == 7 && iv.lo_q == 1);
+  CHECK(iv.hi_p == 7 && iv.hi_q == 1);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_expr_le(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -1094,6 +1135,7 @@ int main(void) {
   test_bounds_sym_ge();
   test_bounds_sym_lt();
   test_bounds_sym_eq();
+  test_bounds_assumption_invalidates_cache();
   test_bounds_two_sided();
   test_bounds_sym_gt();
   test_bounds_unknown_sym();
@@ -1123,6 +1165,7 @@ int main(void) {
 
   /* Bounds: expression overrides */
   test_bounds_expr_override();
+  test_bounds_expr_override_invalidates_cache();
   test_bounds_expr_le();
 
   /* Bounds: entailment check */

@@ -176,8 +176,111 @@ static void print_add(printbuf *pb, ixs_node *n) {
     pb_str(pb, "0");
 }
 
-static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
+static void print_mul_node(printbuf *pb, ixs_node *n) {
   uint32_t i;
+  int64_t cp, cq;
+  bool need_sep = false;
+  ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
+
+  if (cp == -1 && cq == 1) {
+    pb_str(pb, "-");
+  } else if (!(cp == 1 && cq == 1)) {
+    print_node(pb, n->u.mul.coeff, PREC_MUL);
+    need_sep = true;
+  }
+
+  for (i = 0; i < n->u.mul.nfactors; i++) {
+    if (need_sep)
+      pb_char(pb, '*');
+    if (n->u.mul.factors[i].exp == 1) {
+      print_wrapped(pb, n->u.mul.factors[i].base, PREC_MUL);
+    } else if (n->u.mul.factors[i].exp == -1) {
+      pb_str(pb, "1/");
+      print_wrapped(pb, n->u.mul.factors[i].base, PREC_MUL);
+    } else {
+      print_wrapped(pb, n->u.mul.factors[i].base, PREC_ATOM);
+      pb_str(pb, "**");
+      pb_i64(pb, n->u.mul.factors[i].exp);
+    }
+    need_sep = true;
+  }
+}
+
+static void print_unary_func(printbuf *pb, const char *name, ixs_node *arg) {
+  pb_str(pb, name);
+  pb_char(pb, '(');
+  print_node(pb, arg, PREC_TOP);
+  pb_char(pb, ')');
+}
+
+static void print_binary_func(printbuf *pb, const char *name, ixs_node *n) {
+  pb_str(pb, name);
+  pb_char(pb, '(');
+  print_node(pb, n->u.binary.lhs, PREC_TOP);
+  pb_str(pb, ", ");
+  print_node(pb, n->u.binary.rhs, PREC_TOP);
+  pb_char(pb, ')');
+}
+
+static const char *cmp_op_str(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return " > ";
+  case IXS_CMP_GE:
+    return " >= ";
+  case IXS_CMP_LT:
+    return " < ";
+  case IXS_CMP_LE:
+    return " <= ";
+  case IXS_CMP_EQ:
+    return " == ";
+  case IXS_CMP_NE:
+    return " != ";
+  }
+  return "??";
+}
+
+static void print_cmp_node(printbuf *pb, ixs_node *n) {
+  print_wrapped(pb, n->u.binary.lhs, PREC_CMP);
+  pb_str(pb, cmp_op_str(n->u.binary.cmp_op));
+  print_wrapped(pb, n->u.binary.rhs, PREC_CMP);
+}
+
+static void print_pw_cond(printbuf *pb, ixs_node *cond) {
+  if (ixs_node_is_known_true(cond))
+    pb_str(pb, "True");
+  else if (ixs_node_is_known_false(cond))
+    pb_str(pb, "False");
+  else
+    print_node(pb, cond, PREC_TOP);
+}
+
+static void print_pw_node(printbuf *pb, ixs_node *n) {
+  uint32_t i;
+  pb_str(pb, "Piecewise(");
+  for (i = 0; i < n->u.pw.ncases; i++) {
+    if (i > 0)
+      pb_str(pb, ", ");
+    pb_char(pb, '(');
+    print_node(pb, n->u.pw.cases[i].value, PREC_TOP);
+    pb_str(pb, ", ");
+    print_pw_cond(pb, n->u.pw.cases[i].cond);
+    pb_char(pb, ')');
+  }
+  pb_char(pb, ')');
+}
+
+static void print_logic_node(printbuf *pb, ixs_node *n, const char *sep,
+                             prec_t prec) {
+  uint32_t i;
+  for (i = 0; i < n->u.logic.nargs; i++) {
+    if (i > 0)
+      pb_str(pb, sep);
+    print_wrapped(pb, n->u.logic.args[i], prec);
+  }
+}
+
+static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   (void)parent_prec;
 
   if (!n) {
@@ -204,141 +307,48 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
     print_add(pb, n);
     break;
 
-  case IXS_MUL: {
-    int64_t cp, cq;
-    ixs_node_get_rat(n->u.mul.coeff, &cp, &cq);
-    bool need_sep = false;
-
-    if (cp == -1 && cq == 1) {
-      pb_str(pb, "-");
-    } else if (!(cp == 1 && cq == 1)) {
-      print_node(pb, n->u.mul.coeff, PREC_MUL);
-      need_sep = true;
-    }
-
-    for (i = 0; i < n->u.mul.nfactors; i++) {
-      if (need_sep)
-        pb_char(pb, '*');
-      if (n->u.mul.factors[i].exp == 1) {
-        print_wrapped(pb, n->u.mul.factors[i].base, PREC_MUL);
-      } else if (n->u.mul.factors[i].exp == -1) {
-        pb_str(pb, "1/");
-        print_wrapped(pb, n->u.mul.factors[i].base, PREC_MUL);
-      } else {
-        print_wrapped(pb, n->u.mul.factors[i].base, PREC_ATOM);
-        pb_str(pb, "**");
-        pb_i64(pb, n->u.mul.factors[i].exp);
-      }
-      need_sep = true;
-    }
+  case IXS_MUL:
+    print_mul_node(pb, n);
     break;
-  }
 
   case IXS_FLOOR:
-    pb_str(pb, "floor(");
-    print_node(pb, n->u.unary.arg, PREC_TOP);
-    pb_char(pb, ')');
+    print_unary_func(pb, "floor", n->u.unary.arg);
     break;
 
   case IXS_CEIL:
-    pb_str(pb, "ceiling(");
-    print_node(pb, n->u.unary.arg, PREC_TOP);
-    pb_char(pb, ')');
+    print_unary_func(pb, "ceiling", n->u.unary.arg);
     break;
 
   case IXS_MOD:
-    pb_str(pb, "Mod(");
-    print_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_binary_func(pb, "Mod", n);
     break;
 
   case IXS_MAX:
-    pb_str(pb, "Max(");
-    print_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_binary_func(pb, "Max", n);
     break;
 
   case IXS_MIN:
-    pb_str(pb, "Min(");
-    print_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_binary_func(pb, "Min", n);
     break;
 
   case IXS_XOR:
-    pb_str(pb, "xor(");
-    print_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_binary_func(pb, "xor", n);
     break;
 
-  case IXS_CMP: {
-    const char *opstr = "??";
-    switch (n->u.binary.cmp_op) {
-    case IXS_CMP_GT:
-      opstr = " > ";
-      break;
-    case IXS_CMP_GE:
-      opstr = " >= ";
-      break;
-    case IXS_CMP_LT:
-      opstr = " < ";
-      break;
-    case IXS_CMP_LE:
-      opstr = " <= ";
-      break;
-    case IXS_CMP_EQ:
-      opstr = " == ";
-      break;
-    case IXS_CMP_NE:
-      opstr = " != ";
-      break;
-    }
-    print_wrapped(pb, n->u.binary.lhs, PREC_CMP);
-    pb_str(pb, opstr);
-    print_wrapped(pb, n->u.binary.rhs, PREC_CMP);
+  case IXS_CMP:
+    print_cmp_node(pb, n);
     break;
-  }
 
   case IXS_PIECEWISE:
-    pb_str(pb, "Piecewise(");
-    for (i = 0; i < n->u.pw.ncases; i++) {
-      if (i > 0)
-        pb_str(pb, ", ");
-      pb_char(pb, '(');
-      print_node(pb, n->u.pw.cases[i].value, PREC_TOP);
-      pb_str(pb, ", ");
-      if (ixs_node_is_known_true(n->u.pw.cases[i].cond))
-        pb_str(pb, "True");
-      else if (ixs_node_is_known_false(n->u.pw.cases[i].cond))
-        pb_str(pb, "False");
-      else
-        print_node(pb, n->u.pw.cases[i].cond, PREC_TOP);
-      pb_char(pb, ')');
-    }
-    pb_char(pb, ')');
+    print_pw_node(pb, n);
     break;
 
   case IXS_AND:
-    for (i = 0; i < n->u.logic.nargs; i++) {
-      if (i > 0)
-        pb_str(pb, " & ");
-      print_wrapped(pb, n->u.logic.args[i], PREC_AND);
-    }
+    print_logic_node(pb, n, " & ", PREC_AND);
     break;
 
   case IXS_OR:
-    for (i = 0; i < n->u.logic.nargs; i++) {
-      if (i > 0)
-        pb_str(pb, " | ");
-      print_wrapped(pb, n->u.logic.args[i], PREC_OR);
-    }
+    print_logic_node(pb, n, " | ", PREC_OR);
     break;
 
   case IXS_NOT:

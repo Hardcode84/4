@@ -6,6 +6,54 @@
 #include <string.h>
 
 #define BOUNDS_INIT_CAP 16
+#define BOUNDS_CACHE_CAP 32u
+#define BOUNDS_CACHE_DISABLED ((size_t)-1)
+
+static void bounds_cache_clear(ixs_bounds *b) {
+  if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
+    memset(b->cache, 0, b->cache_cap * sizeof(*b->cache));
+}
+
+static void bounds_cache_alloc(ixs_bounds *b) {
+  if (!b || b->cache_cap == BOUNDS_CACHE_DISABLED)
+    return;
+  if (b->cache)
+    return;
+  b->cache = ixs_arena_alloc(b->scratch, BOUNDS_CACHE_CAP * sizeof(*b->cache),
+                             sizeof(void *));
+  if (!b->cache) {
+    b->cache_cap = BOUNDS_CACHE_DISABLED;
+    return;
+  }
+  b->cache_cap = BOUNDS_CACHE_CAP;
+  memset(b->cache, 0, b->cache_cap * sizeof(*b->cache));
+}
+
+static bool bounds_cache_lookup(ixs_bounds *b, ixs_node *expr,
+                                ixs_interval *out) {
+  size_t idx;
+  if (!b || !expr || !out || !b->cache || b->cache_cap == BOUNDS_CACHE_DISABLED)
+    return false;
+  idx = expr->hash & (b->cache_cap - 1u);
+  if (b->cache[idx].expr != expr)
+    return false;
+  *out = b->cache[idx].iv;
+  return true;
+}
+
+static void bounds_cache_store(ixs_bounds *b, ixs_node *expr, ixs_interval iv) {
+  size_t idx;
+  if (!expr || !b || !b->cache || b->cache_cap == BOUNDS_CACHE_DISABLED)
+    return;
+  idx = expr->hash & (b->cache_cap - 1u);
+  b->cache[idx].expr = expr;
+  b->cache[idx].iv = iv;
+}
+
+static bool bounds_cacheable_expr(ixs_node *expr) {
+  return expr && expr->tag != IXS_INT && expr->tag != IXS_RAT &&
+         expr->tag != IXS_SYM;
+}
 
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->scratch = scratch;
@@ -16,7 +64,11 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nexprs = 0;
   b->expr_cap = 0;
   b->exprs = NULL;
+  b->cache = NULL;
+  b->cache_cap = 0;
   b->contradiction = false;
+  if (b->vars)
+    bounds_cache_alloc(b);
   return b->vars != NULL;
 }
 
@@ -36,6 +88,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nexprs = src->nexprs;
   dst->expr_cap = src->nexprs ? src->nexprs : 0;
   dst->exprs = NULL;
+  dst->cache = NULL;
+  dst->cache_cap = BOUNDS_CACHE_DISABLED;
   dst->contradiction = src->contradiction;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
@@ -678,6 +732,7 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
   eb = &b->exprs[b->nexprs++];
   eb->expr = expr;
   eb->iv = iv;
+  bounds_cache_clear(b);
 }
 
 /*
@@ -687,6 +742,7 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
 IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   if (a->tag != IXS_CMP)
     return;
+  bounds_cache_clear(b);
 
   extract_modrem(b, a);
   extract_bitfacts(b, a);
@@ -1034,9 +1090,39 @@ static bool bitfacts_apply_mod(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
   return true;
 }
 
+static inline bool bitfacts_apply_logic(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out, unsigned depth) {
+  ixs_bitfacts lhs, rhs;
+  if (expr->u.logic.nargs != 2)
+    return false;
+  if (!bounds_get_bitfacts_depth(b, expr->u.logic.args[0], &lhs, depth - 1) ||
+      !bounds_get_bitfacts_depth(b, expr->u.logic.args[1], &rhs, depth - 1))
+    return false;
+  if (expr->tag == IXS_AND)
+    bitfacts_apply_and(out, &lhs, &rhs);
+  else
+    bitfacts_apply_or(out, &lhs, &rhs);
+  return true;
+}
+
+static inline bool bitfacts_apply_xor_node(ixs_bounds *b, ixs_node *expr,
+                                           ixs_bitfacts *out, unsigned depth) {
+  ixs_bitfacts lhs, rhs;
+  if (!bounds_get_bitfacts_depth(b, expr->u.binary.lhs, &lhs, depth - 1) ||
+      !bounds_get_bitfacts_depth(b, expr->u.binary.rhs, &rhs, depth - 1))
+    return false;
+  bitfacts_apply_xor(out, &lhs, &rhs);
+  return true;
+}
+
+static inline bool bitfacts_apply_bool_value(ixs_bitfacts *out) {
+  out->known_zero = ~(uint64_t)1;
+  out->known_one = 0;
+  return true;
+}
+
 static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
                                       ixs_bitfacts *out, unsigned depth) {
-  ixs_bitfacts lhs, rhs;
   ixs_interval iv;
 
   bitfacts_unknown(out);
@@ -1060,27 +1146,12 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
   }
   case IXS_CMP:
   case IXS_NOT:
-    out->known_zero = ~(uint64_t)1;
-    out->known_one = 0;
-    return true;
+    return bitfacts_apply_bool_value(out);
   case IXS_AND:
   case IXS_OR:
-    if (expr->u.logic.nargs != 2)
-      return false;
-    if (!bounds_get_bitfacts_depth(b, expr->u.logic.args[0], &lhs, depth - 1) ||
-        !bounds_get_bitfacts_depth(b, expr->u.logic.args[1], &rhs, depth - 1))
-      return false;
-    if (expr->tag == IXS_AND)
-      bitfacts_apply_and(out, &lhs, &rhs);
-    else
-      bitfacts_apply_or(out, &lhs, &rhs);
-    return true;
+    return bitfacts_apply_logic(b, expr, out, depth);
   case IXS_XOR:
-    if (!bounds_get_bitfacts_depth(b, expr->u.binary.lhs, &lhs, depth - 1) ||
-        !bounds_get_bitfacts_depth(b, expr->u.binary.rhs, &rhs, depth - 1))
-      return false;
-    bitfacts_apply_xor(out, &lhs, &rhs);
-    return true;
+    return bitfacts_apply_xor_node(b, expr, out, depth);
   case IXS_ADD:
     return bitfacts_apply_add(b, expr, out, depth);
   case IXS_MUL:
@@ -1122,6 +1193,56 @@ IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr) {
   return bits.pow2 == IXS_POW2_OR_ZERO || ixs_bounds_is_pow2_positive(b, expr);
 }
 
+static inline bool bounds_symbol_divisible(ixs_bounds *b, const char *name,
+                                           int64_t m) {
+  int64_t sym_mod, sym_rem;
+  if (!ixs_bounds_get_modrem(b, name, &sym_mod, &sym_rem))
+    return false;
+  return sym_mod % m == 0 && sym_rem % m == 0;
+}
+
+static inline bool bounds_mul_divisible(ixs_bounds *b, ixs_node *expr,
+                                        int64_t m) {
+  int64_t c = expr->u.mul.coeff->u.ival;
+  int64_t remain;
+  uint32_t i;
+  if (c == 0)
+    return true;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
+      return false;
+  }
+  remain = m / ixs_gcd(c, m);
+  if (remain == 1)
+    return true;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    if (expr->u.mul.factors[i].exp >= 1 &&
+        ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, remain))
+      return true;
+  }
+  return false;
+}
+
+static inline bool bounds_add_divisible(ixs_bounds *b, ixs_node *expr,
+                                        int64_t m) {
+  int64_t cp, cq;
+  uint32_t i;
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1 || cp % m != 0)
+    return false;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t tp, tq, g, remain;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+    if (tq != 1)
+      return false;
+    g = ixs_gcd(tp, m);
+    remain = m / g;
+    if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, remain))
+      return false;
+  }
+  return true;
+}
+
 IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
                                               int64_t m) {
   ixs_bitfacts bits;
@@ -1140,51 +1261,15 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
     return expr->u.ival % m == 0;
 
   if (expr->tag == IXS_SYM) {
-    int64_t sym_mod, sym_rem;
-    if (!ixs_bounds_get_modrem(b, expr->u.name, &sym_mod, &sym_rem))
-      return false;
-    return sym_mod % m == 0 && sym_rem % m == 0;
+    return bounds_symbol_divisible(b, expr->u.name, m);
   }
 
   if (expr->tag == IXS_MUL && expr->u.mul.coeff->tag == IXS_INT) {
-    int64_t c = expr->u.mul.coeff->u.ival;
-    int64_t remain;
-    uint32_t i;
-    if (c == 0)
-      return true;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
-        return false;
-    }
-    remain = m / ixs_gcd(c, m);
-    if (remain == 1)
-      return true;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp >= 1 &&
-          ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, remain))
-        return true;
-    }
-    return false;
+    return bounds_mul_divisible(b, expr, m);
   }
 
   if (expr->tag == IXS_ADD) {
-    int64_t cp, cq;
-    uint32_t i;
-    ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
-    if (cq != 1 || cp % m != 0)
-      return false;
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      int64_t tp, tq;
-      int64_t g, remain;
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
-      if (tq != 1)
-        return false;
-      g = ixs_gcd(tp, m);
-      remain = m / g;
-      if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, remain))
-        return false;
-    }
-    return true;
+    return bounds_add_divisible(b, expr, m);
   }
 
   return false;
@@ -1261,8 +1346,174 @@ static ixs_interval bounds_get_and_mask(ixs_node *expr) {
   return ixs_interval_unknown();
 }
 
-static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
+static inline ixs_interval bounds_get_symbol(ixs_bounds *b, ixs_node *expr) {
+  ixs_var_bound *v = find_var(b, expr->u.name);
+  return v ? v->iv : ixs_interval_unknown();
+}
+
+static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
+  ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t cp, cq;
+    ixs_interval ti = ixs_bounds_get(b, expr->u.add.terms[i].term);
+    ixs_interval scaled;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
+    scaled = iv_mul_const(ti, cp, cq);
+    result = iv_add(result, scaled);
+  }
+  return result;
+}
+
+static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
+  uint32_t i;
+  int64_t cp, cq;
+  ixs_interval result;
+  ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+  result = ixs_interval_exact(cp, cq);
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    int32_t exp = expr->u.mul.factors[i].exp;
+    ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[i].base);
+    if (!fi.valid)
+      return ixs_interval_unknown();
+    if (exp == 1) {
+      result = iv_mul(result, fi);
+    } else if (exp == -1) {
+      ixs_interval ri = iv_recip(fi);
+      if (!ri.valid)
+        return ixs_interval_unknown();
+      result = iv_mul(result, ri);
+    } else {
+      return ixs_interval_unknown();
+    }
+  }
+  return result;
+}
+
+static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
+  ixs_node *m = expr->u.binary.rhs;
+  if (m->tag == IXS_INT && m->u.ival > 0) {
+    ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
+    if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
+        pi.hi_p < m->u.ival)
+      return pi;
+    if (ixs_node_is_integer_valued(expr->u.binary.lhs)) {
+      int64_t step = mod_dividend_step(expr->u.binary.lhs);
+      int64_t g = ixs_gcd(step, m->u.ival);
+      return ixs_interval_range(0, 1, m->u.ival - g, 1);
+    }
+  }
+  return ixs_interval_unknown();
+}
+
+static inline ixs_interval bounds_get_round(ixs_bounds *b, ixs_node *expr,
+                                            bool is_ceil) {
+  ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
+  ixs_interval result;
+  if (!ai.valid)
+    return ixs_interval_unknown();
+  if (is_ceil) {
+    result = ixs_interval_range(ixs_rat_ceil(ai.lo_p, ai.lo_q), 1,
+                                ixs_rat_ceil(ai.hi_p, ai.hi_q), 1);
+  } else {
+    result = ixs_interval_range(ixs_rat_floor(ai.lo_p, ai.lo_q), 1,
+                                ixs_rat_floor(ai.hi_p, ai.hi_q), 1);
+  }
+  result.lo_inf = ai.lo_inf;
+  result.hi_inf = ai.hi_inf;
+  return result;
+}
+
+static inline void interval_set_max_lower(ixs_interval *result,
+                                          const ixs_interval *li,
+                                          const ixs_interval *ri) {
+  if (li->lo_inf && !ri->lo_inf) {
+    result->lo_p = ri->lo_p;
+    result->lo_q = ri->lo_q;
+  } else if (!li->lo_inf && ri->lo_inf) {
+    result->lo_p = li->lo_p;
+    result->lo_q = li->lo_q;
+  } else if (ixs_rat_cmp(li->lo_p, li->lo_q, ri->lo_p, ri->lo_q) >= 0) {
+    result->lo_p = li->lo_p;
+    result->lo_q = li->lo_q;
+    result->lo_inf = li->lo_inf;
+  } else {
+    result->lo_p = ri->lo_p;
+    result->lo_q = ri->lo_q;
+    result->lo_inf = ri->lo_inf;
+  }
+}
+
+static inline void interval_set_max_upper(ixs_interval *result,
+                                          const ixs_interval *li,
+                                          const ixs_interval *ri) {
+  if (li->hi_inf || ri->hi_inf) {
+    ixs_interval_set_hi_pos_inf(result);
+  } else if (ixs_rat_cmp(li->hi_p, li->hi_q, ri->hi_p, ri->hi_q) >= 0) {
+    result->hi_p = li->hi_p;
+    result->hi_q = li->hi_q;
+  } else {
+    result->hi_p = ri->hi_p;
+    result->hi_q = ri->hi_q;
+  }
+}
+
+static inline void interval_set_min_lower(ixs_interval *result,
+                                          const ixs_interval *li,
+                                          const ixs_interval *ri) {
+  if (li->lo_inf || ri->lo_inf) {
+    ixs_interval_set_lo_neg_inf(result);
+  } else if (ixs_rat_cmp(li->lo_p, li->lo_q, ri->lo_p, ri->lo_q) <= 0) {
+    result->lo_p = li->lo_p;
+    result->lo_q = li->lo_q;
+  } else {
+    result->lo_p = ri->lo_p;
+    result->lo_q = ri->lo_q;
+  }
+}
+
+static inline void interval_set_min_upper(ixs_interval *result,
+                                          const ixs_interval *li,
+                                          const ixs_interval *ri) {
+  if (li->hi_inf && !ri->hi_inf) {
+    result->hi_p = ri->hi_p;
+    result->hi_q = ri->hi_q;
+  } else if (!li->hi_inf && ri->hi_inf) {
+    result->hi_p = li->hi_p;
+    result->hi_q = li->hi_q;
+  } else if (ixs_rat_cmp(li->hi_p, li->hi_q, ri->hi_p, ri->hi_q) <= 0) {
+    result->hi_p = li->hi_p;
+    result->hi_q = li->hi_q;
+    result->hi_inf = li->hi_inf;
+  } else {
+    result->hi_p = ri->hi_p;
+    result->hi_q = ri->hi_q;
+    result->hi_inf = ri->hi_inf;
+  }
+}
+
+static inline ixs_interval bounds_get_extrema(ixs_bounds *b, ixs_node *expr,
+                                              bool is_max) {
+  ixs_interval li = ixs_bounds_get(b, expr->u.binary.lhs);
+  ixs_interval ri = ixs_bounds_get(b, expr->u.binary.rhs);
+  ixs_interval result;
+  if (!li.valid || !ri.valid)
+    return ixs_interval_unknown();
+  result.valid = true;
+  result.lo_inf = false;
+  result.hi_inf = false;
+  if (is_max) {
+    interval_set_max_lower(&result, &li, &ri);
+    interval_set_max_upper(&result, &li, &ri);
+  } else {
+    interval_set_min_lower(&result, &li, &ri);
+    interval_set_min_upper(&result, &li, &ri);
+  }
+  return result;
+}
+
+static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
+                                                 ixs_node *expr) {
   if (!expr)
     return ixs_interval_unknown();
 
@@ -1271,160 +1522,22 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
     return ixs_interval_exact(expr->u.ival, 1);
   case IXS_RAT:
     return ixs_interval_exact(expr->u.rat.p, expr->u.rat.q);
-  case IXS_SYM: {
-    ixs_var_bound *v = find_var(b, expr->u.name);
-    if (v)
-      return v->iv;
-    return ixs_interval_unknown();
-  }
-  case IXS_ADD: {
-    /* Start with constant term. */
-    ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      ixs_interval ti = ixs_bounds_get(b, expr->u.add.terms[i].term);
-      int64_t cp, cq;
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
-      ixs_interval scaled = iv_mul_const(ti, cp, cq);
-      result = iv_add(result, scaled);
-    }
-    return result;
-  }
-  case IXS_MUL: {
-    int64_t cp, cq;
-    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
-    ixs_interval result = ixs_interval_exact(cp, cq);
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[i].base);
-      if (!fi.valid)
-        return ixs_interval_unknown();
-      int32_t exp = expr->u.mul.factors[i].exp;
-      if (exp == 1) {
-        result = iv_mul(result, fi);
-      } else if (exp == -1) {
-        ixs_interval ri = iv_recip(fi);
-        if (!ri.valid)
-          return ixs_interval_unknown();
-        result = iv_mul(result, ri);
-      } else {
-        return ixs_interval_unknown();
-      }
-    }
-    return result;
-  }
-  case IXS_MOD: {
-    /* Mod(x, m) in [0, m-1] only when x is integer-valued and m is a
-     * positive integer.  For non-integer dividends the range is the
-     * half-open [0, m) which we cannot represent tightly.
-     *
-     * Tighter: if x is always a multiple of d, Mod(x, m) is a multiple
-     * of gcd(d, m), so the upper bound drops to m - gcd(d, m). */
-    ixs_node *m = expr->u.binary.rhs;
-    if (m->tag == IXS_INT && m->u.ival > 0) {
-      ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
-      if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
-          pi.hi_p < m->u.ival)
-        return pi;
-      if (ixs_node_is_integer_valued(expr->u.binary.lhs)) {
-        int64_t step = mod_dividend_step(expr->u.binary.lhs);
-        int64_t g = ixs_gcd(step, m->u.ival);
-        return ixs_interval_range(0, 1, m->u.ival - g, 1);
-      }
-    }
-    return ixs_interval_unknown();
-  }
-  case IXS_FLOOR: {
-    ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
-    ixs_interval result;
-    if (!ai.valid)
-      return ixs_interval_unknown();
-    result = ixs_interval_range(ixs_rat_floor(ai.lo_p, ai.lo_q), 1,
-                                ixs_rat_floor(ai.hi_p, ai.hi_q), 1);
-    result.lo_inf = ai.lo_inf;
-    result.hi_inf = ai.hi_inf;
-    return result;
-  }
-  case IXS_CEIL: {
-    ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
-    ixs_interval result;
-    if (!ai.valid)
-      return ixs_interval_unknown();
-    result = ixs_interval_range(ixs_rat_ceil(ai.lo_p, ai.lo_q), 1,
-                                ixs_rat_ceil(ai.hi_p, ai.hi_q), 1);
-    result.lo_inf = ai.lo_inf;
-    result.hi_inf = ai.hi_inf;
-    return result;
-  }
-  case IXS_MAX: {
-    ixs_interval li = ixs_bounds_get(b, expr->u.binary.lhs);
-    ixs_interval ri = ixs_bounds_get(b, expr->u.binary.rhs);
-    if (!li.valid || !ri.valid)
-      return ixs_interval_unknown();
-    ixs_interval result;
-    result.valid = true;
-    result.lo_inf = false;
-    result.hi_inf = false;
-    /* max(lo_l, lo_r) <= max(l, r) <= max(hi_l, hi_r) */
-    if (li.lo_inf && !ri.lo_inf) {
-      result.lo_p = ri.lo_p;
-      result.lo_q = ri.lo_q;
-    } else if (!li.lo_inf && ri.lo_inf) {
-      result.lo_p = li.lo_p;
-      result.lo_q = li.lo_q;
-    } else if (ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) >= 0) {
-      result.lo_p = li.lo_p;
-      result.lo_q = li.lo_q;
-      result.lo_inf = li.lo_inf;
-    } else {
-      result.lo_p = ri.lo_p;
-      result.lo_q = ri.lo_q;
-      result.lo_inf = ri.lo_inf;
-    }
-    if (li.hi_inf || ri.hi_inf) {
-      ixs_interval_set_hi_pos_inf(&result);
-    } else if (ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) >= 0) {
-      result.hi_p = li.hi_p;
-      result.hi_q = li.hi_q;
-    } else {
-      result.hi_p = ri.hi_p;
-      result.hi_q = ri.hi_q;
-    }
-    return result;
-  }
-  case IXS_MIN: {
-    ixs_interval li = ixs_bounds_get(b, expr->u.binary.lhs);
-    ixs_interval ri = ixs_bounds_get(b, expr->u.binary.rhs);
-    if (!li.valid || !ri.valid)
-      return ixs_interval_unknown();
-    ixs_interval result;
-    result.valid = true;
-    result.lo_inf = false;
-    result.hi_inf = false;
-    if (li.lo_inf || ri.lo_inf) {
-      ixs_interval_set_lo_neg_inf(&result);
-    } else if (ixs_rat_cmp(li.lo_p, li.lo_q, ri.lo_p, ri.lo_q) <= 0) {
-      result.lo_p = li.lo_p;
-      result.lo_q = li.lo_q;
-    } else {
-      result.lo_p = ri.lo_p;
-      result.lo_q = ri.lo_q;
-    }
-    if (li.hi_inf && !ri.hi_inf) {
-      result.hi_p = ri.hi_p;
-      result.hi_q = ri.hi_q;
-    } else if (!li.hi_inf && ri.hi_inf) {
-      result.hi_p = li.hi_p;
-      result.hi_q = li.hi_q;
-    } else if (ixs_rat_cmp(li.hi_p, li.hi_q, ri.hi_p, ri.hi_q) <= 0) {
-      result.hi_p = li.hi_p;
-      result.hi_q = li.hi_q;
-      result.hi_inf = li.hi_inf;
-    } else {
-      result.hi_p = ri.hi_p;
-      result.hi_q = ri.hi_q;
-      result.hi_inf = ri.hi_inf;
-    }
-    return result;
-  }
+  case IXS_SYM:
+    return bounds_get_symbol(b, expr);
+  case IXS_ADD:
+    return bounds_get_add(b, expr);
+  case IXS_MUL:
+    return bounds_get_mul(b, expr);
+  case IXS_MOD:
+    return bounds_get_mod(b, expr);
+  case IXS_FLOOR:
+    return bounds_get_round(b, expr, false);
+  case IXS_CEIL:
+    return bounds_get_round(b, expr, true);
+  case IXS_MAX:
+    return bounds_get_extrema(b, expr, true);
+  case IXS_MIN:
+    return bounds_get_extrema(b, expr, false);
   case IXS_AND:
     return bounds_get_and_mask(expr);
   default:
@@ -1433,7 +1546,13 @@ static ixs_interval bounds_get_propagated(ixs_bounds *b, ixs_node *expr) {
 }
 
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
-  ixs_interval iv = bounds_get_propagated(b, expr);
+  ixs_interval iv;
+  if (!b)
+    return ixs_interval_unknown();
+  if (bounds_cacheable_expr(expr) && bounds_cache_lookup(b, expr, &iv))
+    return iv;
+
+  iv = bounds_get_propagated(b, expr);
   if (b->nexprs && expr) {
     size_t j;
     for (j = 0; j < b->nexprs; j++) {
@@ -1441,6 +1560,8 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
         iv = iv_intersect(iv, b->exprs[j].iv);
     }
   }
+  if (bounds_cacheable_expr(expr))
+    bounds_cache_store(b, expr, iv);
   return iv;
 }
 
@@ -1644,6 +1765,51 @@ static ixs_check_result bounds_check_bit_query(ixs_bounds *b, ixs_node *cmp) {
   return bounds_check_and_mask_query(b, cmp, expr, value);
 }
 
+static ixs_check_result interval_check_zero(const ixs_interval *iv,
+                                            ixs_cmp_op op) {
+  int lo_cmp = ixs_rat_cmp(iv->lo_p, iv->lo_q, 0, 1);
+  int hi_cmp = ixs_rat_cmp(iv->hi_p, iv->hi_q, 0, 1);
+  switch (op) {
+  case IXS_CMP_GT:
+    if (lo_cmp > 0)
+      return IXS_CHECK_TRUE;
+    if (hi_cmp <= 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_GE:
+    if (lo_cmp >= 0)
+      return IXS_CHECK_TRUE;
+    if (hi_cmp < 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_LT:
+    if (hi_cmp < 0)
+      return IXS_CHECK_TRUE;
+    if (lo_cmp >= 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_LE:
+    if (hi_cmp <= 0)
+      return IXS_CHECK_TRUE;
+    if (lo_cmp > 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_EQ:
+    if (lo_cmp == 0 && hi_cmp == 0)
+      return IXS_CHECK_TRUE;
+    if (lo_cmp > 0 || hi_cmp < 0)
+      return IXS_CHECK_FALSE;
+    break;
+  case IXS_CMP_NE:
+    if (lo_cmp > 0 || hi_cmp < 0)
+      return IXS_CHECK_TRUE;
+    if (lo_cmp == 0 && hi_cmp == 0)
+      return IXS_CHECK_FALSE;
+    break;
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
   ixs_check_result mod_result, bit_result;
@@ -1666,49 +1832,7 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   if (!iv.valid)
     return IXS_CHECK_UNKNOWN;
 
-  switch (cmp->u.binary.cmp_op) {
-  case IXS_CMP_GT:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0)
-      return IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_GE:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
-      return IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_LT:
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0)
-      return IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_LE:
-    if (ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0)
-      return IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_EQ:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0 &&
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
-      return IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_NE:
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0 ||
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0)
-      return IXS_CHECK_TRUE;
-    if (ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0 &&
-        ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) == 0)
-      return IXS_CHECK_FALSE;
-    break;
-  }
-  return IXS_CHECK_UNKNOWN;
+  return interval_check_zero(&iv, cmp->u.binary.cmp_op);
 }
 
 IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,
