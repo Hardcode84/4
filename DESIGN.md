@@ -9,7 +9,7 @@ Compilers for tiled computational kernels generate hundreds of index
 expressions to compute memory addresses, loop bounds, and data mappings.
 These expressions must be simplified to produce efficient code.
 
-Currently SymPy is used for this task. On a representative workload of 609
+Currently SymPy is used for this task. On a representative workload of 615
 expressions from a single kernel compilation:
 
 | Metric | Value |
@@ -567,9 +567,9 @@ Error Model). Not UB, not assert. `INT64_MIN` is explicitly handled throughout:
 
 - `neg(INT64_MIN)` → sentinel + error.
 - `floor_div(INT64_MIN, -1)` → sentinel + error.
-- `ixs_rat(ctx, INT64_MIN, q)` for any `q < 0` → sentinel + error (negating
+- `ixs_rat(s, INT64_MIN, q)` for any `q < 0` → sentinel + error (negating
   `p` overflows). Includes `q = -1, -2, ...`.
-- `ixs_rat(ctx, p, INT64_MIN)` → sentinel + error (`-q` overflows).
+- `ixs_rat(s, p, INT64_MIN)` → sentinel + error (`-q` overflows).
 - `gcd(|p|, |q|)` where `p == INT64_MIN` or `q == INT64_MIN` → the GCD
   implementation must handle this without computing `abs(INT64_MIN)`. Use
   binary GCD or special-case: `gcd(INT64_MIN, q)` treats `INT64_MIN` as
@@ -580,7 +580,7 @@ should be rare. Rational comparison nevertheless includes a portable emulated
 128-bit cross-multiply fallback when direct 64-bit multiplication would
 overflow.
 
-**Division by zero**: `ixs_rat(ctx, p, 0)` returns sentinel. `Mod(x, 0)` and
+**Division by zero**: `ixs_rat(s, p, 0)` returns sentinel. `Mod(x, 0)` and
 any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
 `q < 0` normalizes to `(-p, -q)`.
 
@@ -624,7 +624,7 @@ expression in condition context (the `| sum` alternative in `cmp_expr`). This ha
 corpus patterns like `$MMA_LHS_SCALE | $MMA_RHS_SCALE | $MMA_SCALE_FP4` in
 Piecewise conditions, where integer-valued flag variables are used as boolean
 tests. A bare expression `e` in condition context is desugared to `e != 0`
-(i.e., `ixs_cmp(ctx, e, IXS_CMP_NE, ixs_int(ctx, 0))`). The `|` and `&`
+(i.e., `ixs_cmp(s, e, IXS_CMP_NE, ixs_int(s, 0))`). The `|` and `&`
 operators in condition grammar coerce both operands to 0/1 predicates first.
 The resulting `IXS_OR` and `IXS_AND` nodes are still integer bitwise operators,
 but on 0/1 operands they have the same truth tables as boolean OR and AND.
@@ -1770,7 +1770,7 @@ Use cases:
    `__hash__`, `__eq__` in Python. In C, it's a hash table lookup and a
    pointer.
 
-2. **Hash-consing eliminates redundant work**: The 609 expressions share most
+2. **Hash-consing eliminates redundant work**: The 615 expressions share most
    of their subexpressions. In SymPy, each expression re-creates and
    re-simplifies common subtrees. With hash-consing, `ceiling(M/128)` is
    created once, stored once, and every expression that uses it gets the
@@ -1783,7 +1783,7 @@ Use cases:
    logarithmic simplification, polynomial factoring, etc. on every expression.
    This library checks only for the ~30 rules that actually apply.
 
-5. **Batch mode**: Processing all 609 expressions in one context means the
+5. **Batch mode**: Processing all 615 expressions in one context means the
    hash-consing table is warmed up, and later expressions (which are variants
    of earlier ones) are nearly free.
 
@@ -1791,13 +1791,13 @@ Use cases:
 
 | Metric | SymPy (current) | Target |
 |---|---|---|
-| 609 expressions total | 41.4 s | < 50 ms |
+| 615 expressions total | 41.4 s | < 50 ms |
 | Average per expression | 68 ms | < 0.1 ms |
 | Worst case | 388 ms | < 5 ms |
 
 ### Memory budget
 
-Estimated peak memory for one `ixs_ctx` processing all 609 corpus expressions
+Estimated peak memory for one `ixs_ctx` processing all 615 corpus expressions
 in batch mode (the primary use case):
 
 - Unique nodes (after hash-consing): ~10,000-30,000
@@ -1890,7 +1890,7 @@ ixsimpl/
 │   ├── corpus_expected.txt
 │   └── corpus_assumptions.txt # shared assumption set for corpus tests
 ├── bench/
-│   └── bench_corpus.c       # benchmark: time all 609 expressions
+│   └── bench_corpus.c       # benchmark: time all 615 expressions
 ├── scripts/
 │   ├── amalgamate.py        # generate ixsimpl_amalg.c
 │   ├── check_exports.py     # verify public symbol surface
@@ -2575,7 +2575,7 @@ not a restart from Phase 1.
 - Canonical Add/Mul construction with flattening and term collection
 - Basic constant folding
 - SymPy-format printer
-- Generate `test/corpus_expected.txt` by running SymPy on all 609 corpus
+- Generate `test/corpus_expected.txt` by running SymPy on all 615 corpus
   expressions (one-time script `scripts/gen_expected.py`, checked in). The
   script reads `corpus.txt` and `corpus_assumptions.txt`, applies the
   `Mod(p, q, evaluate=False)` workaround (see SymPy #28744 section), and
@@ -2593,7 +2593,7 @@ expected outputs are available for comparison.
 - `Mod()` constructor with basic rules
 - `Max()`, `Min()`, `xor()` constructors
 
-**Milestone**: Can parse and round-trip all 609 expressions. Simplification of
+**Milestone**: Can parse and round-trip all 615 expressions. Simplification of
 constant subexpressions works.
 
 ### Phase 3: Piecewise + Boolean
@@ -2614,7 +2614,7 @@ expressions in the corpus should already simplify significantly.
 - Full test against corpus
 - Benchmark against SymPy baseline
 
-**Milestone**: All 609 expressions produce correct results. Performance target
+**Milestone**: All 615 expressions produce correct results. Performance target
 met (< 50ms total).
 
 ### Phase 5: Bindings
@@ -2636,7 +2636,7 @@ met (< 50ms total).
 ## Testing Strategy
 
 1. **Unit tests**: Each rule in isolation (test_rational, test_simplify).
-2. **Corpus test**: Parse all 609 expressions, simplify, verify output matches
+2. **Corpus test**: Parse all 615 expressions, simplify, verify output matches
    SymPy's output (or is provably equivalent via random evaluation).
 
    **Corpus file format** — `corpus.txt` uses one expression per non-blank
@@ -2677,15 +2677,15 @@ met (< 50ms total).
    - Parse errors: `"foo bar +"` → `IXS_PARSE_ERROR`
    - Depth limit: deeply nested input → `IXS_PARSE_ERROR`
    - Domain error in parsed input: `"1/0 + x"` → `IXS_ERROR`
-   - Division by zero via API: `ixs_mod(ctx, x, zero)` → `IXS_ERROR`
+   - Division by zero via API: `ixs_mod(s, x, zero)` → `IXS_ERROR`
    - Integer literal overflow: `"99999999999999999999"` → `IXS_ERROR`
-   - `ixs_rat(ctx, 1, 0)` → `IXS_ERROR`
-   - NULL propagation: `ixs_add(ctx, NULL, x)` → NULL
-   - Sentinel propagation: `ixs_floor(ctx, sentinel)` → same sentinel, no new error
+   - `ixs_rat(s, 1, 0)` → `IXS_ERROR`
+   - NULL propagation: `ixs_add(s, NULL, x)` → NULL
+   - Sentinel propagation: `ixs_floor(s, sentinel)` → same sentinel, no new error
    - Piecewise sentinel in dead branch: drops cleanly
    - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
 5. **Fuzz testing**: Hypothesis-based (see below).
-6. **Benchmark**: Time all 609 expressions, compare against SymPy baseline.
+6. **Benchmark**: Time all 615 expressions, compare against SymPy baseline.
    Track regressions in CI.  `bench/bench_sympy.py` runs ixsimpl vs
    `sympy.simplify` and `sympy.cancel` on the full corpus.  Typical
    results: ixsimpl ~23 ms total vs sympy.cancel ~25 s (~1000x) and

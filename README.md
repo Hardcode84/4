@@ -7,20 +7,20 @@ compilers.
 
 ## Performance
 
-On a representative workload of 609 expressions from a single kernel
-compilation (vs `sympy.cancel`, best of 3 iterations):
+On the current 615-expression corpus from a single kernel compilation
+(vs `sympy.cancel`, best of 3 iterations):
 
 | | SymPy | ixsimpl | Speedup |
 |---|---|---|---|
-| Total | 23.7 s | 30 ms | **~790x** |
-| Per expression (avg) | 39 ms | 49 us | **~790x** |
+| Total | 23.7 s | 26 ms | **~900x** |
+| Per expression (avg) | 39 ms | 42 us | **~900x** |
 | Median speedup | | | **625x** |
 
 ## Features
 
-- **20 node types**: integers, rationals, symbols, `+`, `*`, `floor`,
-  `ceil`, `Mod`, `Piecewise`, `Max`, `Min`, `xor`, comparisons,
-  boolean logic
+- **Expression DAG nodes**: integers, rationals, symbols, `+`, `*`, `floor`,
+  `ceil`, `Mod`, `Piecewise`, `Max`, `Min`, `xor`, bitwise `&`/`|`,
+  logical not, and comparisons
 - **Hash-consed DAG** with automatic deduplication of shared
   subexpressions
 - **Arena allocation** -- all memory freed in one shot via
@@ -56,19 +56,22 @@ ctest --test-dir build
 
 int main(void) {
     ixs_ctx *ctx = ixs_ctx_create();
+    ixs_session session;
+    ixs_session_init(&session, ctx);
 
     /* Parse a SymPy-format expression */
     const char *input = "floor((4*x + 2*x)/3)";
-    ixs_node *expr = ixs_parse(ctx, input, strlen(input));
+    ixs_node *expr = ixs_parse(&session, input, strlen(input));
 
     /* Simplify (no assumptions) */
-    ixs_node *result = ixs_simplify(ctx, expr, NULL, 0);
+    ixs_node *result = ixs_simplify(&session, expr, NULL, 0);
 
     /* Print */
     char buf[256];
     ixs_print(result, buf, sizeof buf);
     printf("%s\n", buf);
 
+    ixs_session_destroy(&session);
     ixs_ctx_destroy(ctx);
     return 0;
 }
@@ -128,13 +131,16 @@ API. Key functions:
 | Function | Purpose |
 |---|---|
 | `ixs_ctx_create` / `ixs_ctx_destroy` | Context lifecycle |
-| `ixs_parse` | Parse SymPy-format string |
+| `ixs_session_init` / `ixs_session_destroy` | Reusable scratch and diagnostics |
+| `ixs_parse`, `ixs_parse_expr`, `ixs_parse_pred` | Parse SymPy-format strings |
 | `ixs_int`, `ixs_sym`, `ixs_add`, ... | Build expressions programmatically |
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
 | `ixs_check`, `ixs_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
 | `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |
+| `ixs_import_node` / `ixs_import_many` | Structural import across contexts |
+| `ixs_serialize_node` / `ixs_deserialize_node` | Stable binary serialization |
 | `ixs_print` / `ixs_print_c` | Output as SymPy or C syntax |
 | `ixs_same_node` | Pointer equality (hash-consed) |
 | `ixs_walk_pre` / `ixs_walk_post` | Pre- and post-order tree traversal |
@@ -152,7 +158,7 @@ cmake --build build
 ```
 
 ```c
-ixs_node *result = ixs_simplify(ctx, expr, assumptions, n);
+ixs_node *result = ixs_simplify(&session, expr, assumptions, n);
 for (size_t i = 0; i < ixs_ctx_nstats(ctx); i++) {
     const char *name;
     uint64_t count = ixs_ctx_stat(ctx, i, &name);
@@ -175,14 +181,19 @@ Three tiers, in priority order:
 
 Check with `ixs_is_error()` (either sentinel),
 `ixs_is_parse_error()`, or `ixs_is_domain_error()` for specific
-kinds. Human-readable messages accumulate in the context error list
-(`ixs_ctx_nerrors`, `ixs_ctx_error`).
+kinds. Human-readable messages accumulate in the active session error
+list (`ixs_session_nerrors`, `ixs_session_error`).
 
 ## Testing
 
 ```bash
-# C tests (ASAN-enabled by default)
+# C tests
 ctest --test-dir build
+
+# ASAN build, when wanted
+cmake -B build-asan -DENABLE_ASAN=ON
+cmake --build build-asan
+ctest --test-dir build-asan
 
 # Python tests (installs all test deps: pytest, xdist, hypothesis, sympy)
 pip install -e ".[test]"
@@ -191,7 +202,7 @@ pytest test/
 
 The test suite includes:
 - Unit tests for rationals, parser, simplifier
-- 609-expression corpus regression test
+- 615-expression corpus regression test
 - Edge-case tests (overflow, division by zero, deep nesting, sentinel
   propagation, etc.)
 - Hypothesis-based property tests (2,000 examples per test by default;
