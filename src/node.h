@@ -262,9 +262,8 @@ static inline bool ixs_session_is_active(const ixs_session_impl *impl) {
  * scratch/diagnostic state onto the context on outermost entry, but allow
  * same-session reentry without replaying stale state over the live scratch.
  */
-static inline ixs_ctx *ixs_session_bind(ixs_session_binding *binding,
-                                        ixs_session *s) {
-  ixs_session_impl *impl = ixs_session_get(s);
+static inline ixs_ctx *ixs_session_bind_impl(ixs_session_binding *binding,
+                                             ixs_session_impl *impl) {
   ixs_ctx *ctx = impl->ctx;
 
   memset(binding, 0, sizeof(*binding));
@@ -294,6 +293,11 @@ static inline ixs_ctx *ixs_session_bind(ixs_session_binding *binding,
   ctx->active_session_depth = 1;
   binding->swapped = true;
   return ctx;
+}
+
+static inline ixs_ctx *ixs_session_bind(ixs_session_binding *binding,
+                                        ixs_session *s) {
+  return ixs_session_bind_impl(binding, ixs_session_get(s));
 }
 
 static inline void ixs_session_unbind(ixs_session_binding *binding) {

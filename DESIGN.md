@@ -1044,6 +1044,13 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   drop-in replacement.
 - **Interval bounds**: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
   extracts interval bounds from comparison assumptions automatically
+- **Expression range facts**: explicit or derived facts of the form
+  `range(expr) = [lo, hi]` are stored in the same bounds context as
+  symbol intervals.  They are keyed by hash-consed expression node and by an
+  expanded canonical alias, so `2*(A + 8*B)` and `2*A + 16*B` can prove the
+  same range when both normalize to the same expanded form.  Comparison
+  assumptions over integer-valued expressions also materialize expression
+  range facts; for example `-C + expr <= 0` records `expr <= C`.
 - **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
@@ -1201,6 +1208,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   (`unknown`, `or_zero`, `positive`), not the internal known-bit masks.
   It uses both direct bitfacts and exact integer intervals inferred for
   arithmetic expressions.  Detected contradictory assumptions return unknown.
+- **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
+  proof contexts for callers that carry facts through IR rewrites instead of
+  re-encoding everything as predicates.  A fact set accepts predicate facts,
+  explicit expression ranges, affine range transfer (`scale*base + offset`),
+  and substitution transfer.  `Context.range(..., facts=f)`,
+  `Context.check(..., facts=f)`, and `Context.pow2_fact(..., facts=f)` query
+  these facts directly before relying on structural interval propagation.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1511,6 +1525,23 @@ typedef struct {
 bool ixs_range(ixs_session *s, ixs_node *expr,
                ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
+
+// Session-owned fact sets.  The pointer remains valid until session reset or
+// destroy.  Use these when facts must survive expression transforms directly
+// instead of being rediscovered from predicates.
+typedef struct ixs_facts ixs_facts;
+ixs_facts *ixs_facts_create(ixs_session *s);
+bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
+bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+                            const ixs_range_result *range);
+bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
+                             int64_t offset, ixs_node *derived);
+bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
+                          ixs_node *target, ixs_node *replacement);
+ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
+                     ixs_range_result *out);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
@@ -2051,8 +2082,8 @@ Key properties:
 
 ### Python Binding — `_ixsimpl.c`
 
-A CPython C extension module (no pybind11/ctypes dependency). Exposes two
-Python types: `Context` and `Expr`.
+A CPython C extension module (no pybind11/ctypes dependency). Exposes three
+Python types: `Context`, `Expr`, and `Facts`.
 
 ```python
 import ixsimpl
@@ -2089,6 +2120,16 @@ e5 = ixsimpl.ceil(x / 4)
 # Batch
 exprs = [ctx.parse(line) for line in lines]
 ctx.simplify_batch(exprs, assumptions=assumptions)
+
+# First-class expression range facts
+facts = ctx.facts()
+orig = ctx.sym("orig")
+A = ctx.sym("A")
+B = ctx.sym("B")
+facts.assume_range(orig, 0, 1073741815)
+facts.derive_affine(orig, 2, 0, 2*orig)
+subst_facts = facts.subs(orig, A + 8*B)
+print(ctx.range(2*A + 16*B, facts=subst_facts))  # (0, 2147483630)
 ```
 
 Implementation:
@@ -2118,6 +2159,13 @@ Implementation:
   assumptions=[...])` returns `(lower, upper)` from the same interval engine,
   or `None` when unknown.  Endpoints are Python `int`,
   `fractions.Fraction`, or `None` for an unbounded side.
+- `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
+  imports predicates, `Facts.assume_range()` attaches direct expression
+  ranges, `Facts.derive_affine()` transfers ranges through
+  `scale*base + offset`, and `Facts.subs()` transfers expression ranges
+  through substitution.  `Context.check`, `Context.range`, and
+  `Context.pow2_fact` accept `facts=...` as an alternative to
+  `assumptions=[...]`.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__and__`,
   `__or__`, `__neg__`, `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__`
   (comparisons return
@@ -2352,6 +2400,20 @@ typedef struct {
 bool ixs_range(ixs_session *s, ixs_node *expr,
                ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
+
+typedef struct ixs_facts ixs_facts;
+ixs_facts *ixs_facts_create(ixs_session *s);
+bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
+bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+                            const ixs_range_result *range);
+bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
+                             int64_t offset, ixs_node *derived);
+bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
+                          ixs_node *target, ixs_node *replacement);
+ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
+                     ixs_range_result *out);
 
 ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,

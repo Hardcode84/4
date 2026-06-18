@@ -32,6 +32,7 @@ from ixsimpl._ixsimpl import (
     RAT,
     SYM,
     XOR,
+    Facts,
     _Expr,
     _set_expr_class,
 )
@@ -129,6 +130,7 @@ if TYPE_CHECKING:
     from fractions import Fraction
 
     from ixsimpl._ixsimpl import Context as _Context
+    from ixsimpl._ixsimpl import Facts
 
     class Context(_Context):
         def sym(self, name: str) -> Expr: ...
@@ -139,6 +141,7 @@ if TYPE_CHECKING:
         def rat(self, p: int, q: int) -> Expr: ...
         def true_(self) -> Expr: ...
         def false_(self) -> Expr: ...
+        def facts(self) -> Facts: ...
         def import_(self, expr: _Expr) -> Expr: ...
         def serialize(self, expr: _Expr) -> bytes: ...
         def deserialize(self, data: bytes | bytearray | memoryview) -> Expr: ...
@@ -149,18 +152,21 @@ if TYPE_CHECKING:
             expr: _Expr,
             *,
             assumptions: Sequence[_Expr] | None = None,
+            facts: Facts | None = None,
         ) -> bool | None: ...
         def pow2_fact(
             self,
             expr: _Expr,
             *,
             assumptions: Sequence[_Expr] | None = None,
+            facts: Facts | None = None,
         ) -> Literal["or_zero", "positive"] | None: ...
         def range(
             self,
             expr: _Expr,
             *,
             assumptions: Sequence[_Expr] | None = None,
+            facts: Facts | None = None,
         ) -> tuple[int | Fraction | None, int | Fraction | None] | None: ...
         def simplify_batch(
             self,
@@ -232,6 +238,7 @@ __all__ = [
     "XOR",
     "Context",
     "Expr",
+    "Facts",
     "abs_",
     "and_",
     "ceil",

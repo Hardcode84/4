@@ -2114,6 +2114,123 @@ def test_range_basic() -> None:
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
 
 
+def test_range_composite_predicate_fact() -> None:
+    ctx = ixsimpl.Context()
+    a, b = ctx.sym("A"), ctx.sym("B")
+    expr = 2 * a + 16 * b
+    factored = 2 * (a + 8 * b)
+    assumptions = [expr >= 0, -2147483630 + expr <= 0]
+
+    assert ctx.range(expr, assumptions=assumptions) == (0, 2147483630)
+    assert ctx.range(factored, assumptions=assumptions) == (0, 2147483630)
+    assert ctx.check(factored <= 2147483630, assumptions=assumptions) is True
+
+
+def test_facts_range_transfer_and_substitution() -> None:
+    ctx = ixsimpl.Context()
+    orig = ctx.sym("orig")
+    a, b = ctx.sym("A"), ctx.sym("B")
+    replacement = a + 8 * b
+    facts = ctx.facts()
+    facts.assume_range(orig, 0, 1073741815)
+    facts.derive_affine(orig, 2, 0, 2 * orig)
+
+    assert ctx.range(2 * orig, facts=facts) == (0, 2147483630)
+
+    subst = facts.subs(orig, replacement)
+    assert ctx.range(replacement, facts=subst) == (0, 1073741815)
+    assert ctx.range(2 * (a + 8 * b), facts=subst) == (0, 2147483630)
+    assert ctx.range(2 * a + 16 * b, facts=subst) == (0, 2147483630)
+
+
+def test_facts_assume_decomposes_conjunction() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    facts = ctx.facts()
+
+    facts.assume(ixsimpl.and_(x >= 0, x <= 10))
+    assert ctx.range(x, facts=facts) == (0, 10)
+
+    with pytest.raises(ValueError):
+        facts.assume(ixsimpl.or_(x >= 0, x <= 10))
+
+
+def test_facts_assume_deep_conjunction() -> None:
+    ctx = ixsimpl.Context()
+    facts = ctx.facts()
+    symbols = [ctx.sym(f"d{i}") for i in range(300)]
+    pred = symbols[0] >= 0
+
+    for i, sym in enumerate(symbols[1:], start=1):
+        pred = ixsimpl.and_(pred, sym >= i)
+
+    facts.assume(pred)
+    assert ctx.range(symbols[0], facts=facts) == (0, None)
+    assert ctx.range(symbols[-1], facts=facts) == (299, None)
+
+
+def test_facts_canonical_expansion_does_not_record_errors() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    x65 = x
+    facts = ctx.facts()
+
+    for _ in range(64):
+        x65 = x65 * x
+
+    ctx.clear_errors()
+    facts.assume_range(x65, 5, None)
+    assert ctx.errors == []
+    assert ctx.range(x65, facts=facts) == (5, None)
+    assert ctx.errors == []
+
+
+@given(
+    lo=st.integers(min_value=-128, max_value=128),
+    width=st.integers(min_value=0, max_value=256),
+    scale=st.integers(min_value=-8, max_value=8),
+    offset=st.integers(min_value=-128, max_value=128),
+)
+def test_facts_affine_transfer_fuzz(lo: int, width: int, scale: int, offset: int) -> None:
+    ctx = ixsimpl.Context()
+    orig = ctx.sym("orig")
+    hi = lo + width
+    derived = scale * orig + offset
+    expected = sorted((scale * lo + offset, scale * hi + offset))
+    facts = ctx.facts()
+
+    facts.assume_range(orig, lo, hi)
+    facts.derive_affine(orig, scale, offset, derived)
+
+    assert ctx.range(derived, facts=facts) == (expected[0], expected[1])
+
+
+@given(
+    lo=st.integers(min_value=-128, max_value=128),
+    width=st.integers(min_value=0, max_value=256),
+    scale=st.integers(min_value=-8, max_value=8).filter(lambda x: x != 0),
+    stride=st.integers(min_value=-8, max_value=8).filter(lambda x: x != 0),
+    offset=st.integers(min_value=-64, max_value=64),
+)
+def test_facts_canonical_affine_spelling_fuzz(
+    lo: int,
+    width: int,
+    scale: int,
+    stride: int,
+    offset: int,
+) -> None:
+    ctx = ixsimpl.Context()
+    a, b = ctx.sym("A"), ctx.sym("B")
+    hi = lo + width
+    expanded = scale * a + (scale * stride) * b + offset
+    factored = scale * (a + stride * b) + offset
+    facts = ctx.facts()
+
+    facts.assume_range(expanded, lo, hi)
+
+    assert ctx.range(factored, facts=facts) == (lo, hi)
+
+
 def test_has_basic() -> None:
     ctx = ixsimpl.Context()
     x, y, z = ctx.sym("x"), ctx.sym("y"), ctx.sym("z")

@@ -32,6 +32,7 @@ extern "C" {
 
 typedef struct ixs_ctx ixs_ctx;
 typedef struct ixs_node ixs_node;
+typedef struct ixs_facts ixs_facts;
 
 #define IXS_SESSION_BYTES 4096u
 
@@ -204,6 +205,36 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
  * with has_lower/has_upper false; finite endpoints are exact p/q rationals. */
 bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
                size_t n_assumptions, ixs_range_result *out);
+
+/* --- Fact sets --------------------------------------------------------- */
+
+/* Create a session-owned fact set.  The pointer remains valid until the
+ * session is reset or destroyed.  Fact sets are mutable and bound to the
+ * session/context that created them. */
+ixs_facts *ixs_facts_create(ixs_session *s);
+
+/* Import a predicate into the fact set.  This is the fact-set equivalent of
+ * passing the predicate through an assumptions[] array. */
+bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
+
+/* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;
+ * finite endpoints are exact rationals from ixs_range_result. */
+bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+                            const ixs_range_result *range);
+
+/* Derive range(derived) from range(base) using derived = scale*base + offset.
+ * The caller supplies the already-built derived expression node. */
+bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
+                             int64_t offset, ixs_node *derived);
+
+/* Copy facts from src to dst and add range facts for every known expression
+ * after substituting target with replacement. */
+bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
+                          ixs_node *target, ixs_node *replacement);
+
+ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 

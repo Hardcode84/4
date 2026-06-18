@@ -47,6 +47,7 @@ typedef struct {
 } ixs_bounds_cache_entry;
 
 typedef struct {
+  ixs_ctx *ctx;        /* optional; enables expression canonical aliases */
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
@@ -59,8 +60,15 @@ typedef struct {
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
+struct ixs_facts {
+  ixs_session_impl *impl;
+  ixs_bounds bounds;
+};
+
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
+IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
+                                    ixs_arena *scratch);
 
 /* No-op; bounds memory is reclaimed by scratch arena restore. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
@@ -100,11 +108,10 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr);
 
-/* Initialize bounds from an array of assumption nodes.
- * Skips NULL and sentinel assumptions.  Returns false on OOM. */
-IXS_STATIC bool ixs_bounds_build(ixs_bounds *b, ixs_arena *scratch,
-                                 ixs_node *const *assumptions,
-                                 size_t n_assumptions);
+IXS_STATIC bool ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx,
+                                     ixs_arena *scratch,
+                                     ixs_node *const *assumptions,
+                                     size_t n_assumptions);
 
 /* Check a normalized CMP node (lhs op 0) against current bounds.
  * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or

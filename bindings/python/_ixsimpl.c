@@ -17,6 +17,7 @@
 /* Forward declarations */
 static PyTypeObject ContextType;
 static PyTypeObject _ExprType;
+static PyTypeObject FactsType;
 
 /* Module-level type used by Expr_wrap to allocate instances.
  * Defaults to &_ExprType; overridden by _set_expr_class() so that a
@@ -41,6 +42,11 @@ typedef struct ExprObject {
   ContextObject *ctx_obj;
 } ExprObject;
 
+typedef struct FactsObject {
+  PyObject_HEAD ixs_facts *facts;
+  ContextObject *ctx_obj;
+} FactsObject;
+
 static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
   ExprObject *self;
   if (!node) {
@@ -51,6 +57,21 @@ static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
   if (!self)
     return NULL;
   self->node = node;
+  self->ctx_obj = ctx_obj;
+  Py_INCREF(ctx_obj);
+  return self;
+}
+
+static FactsObject *Facts_wrap(ContextObject *ctx_obj, ixs_facts *facts) {
+  FactsObject *self;
+  if (!facts) {
+    PyErr_SetString(PyExc_MemoryError, "ixsimpl: out of memory");
+    return NULL;
+  }
+  self = (FactsObject *)FactsType.tp_alloc(&FactsType, 0);
+  if (!self)
+    return NULL;
+  self->facts = facts;
   self->ctx_obj = ctx_obj;
   Py_INCREF(ctx_obj);
   return self;
@@ -117,6 +138,11 @@ static size_t BytesReader_remaining(void *userdata) {
 }
 
 static void Expr_dealloc(ExprObject *self) {
+  Py_XDECREF(self->ctx_obj);
+  Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static void Facts_dealloc(FactsObject *self) {
   Py_XDECREF(self->ctx_obj);
   Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -887,6 +913,183 @@ static PyTypeObject _ExprType = {
 };
 
 /* ------------------------------------------------------------------ */
+/*  Facts type                                                        */
+/* ------------------------------------------------------------------ */
+
+static bool py_int64(PyObject *obj, int64_t *out, const char *what) {
+  int overflow = 0;
+  long long v;
+  if (!PyLong_Check(obj)) {
+    PyErr_Format(PyExc_TypeError, "%s must be an int", what);
+    return false;
+  }
+  v = PyLong_AsLongLongAndOverflow(obj, &overflow);
+  if (overflow || (v == -1 && PyErr_Occurred())) {
+    PyErr_Format(PyExc_OverflowError, "%s is out of int64 range", what);
+    return false;
+  }
+  *out = (int64_t)v;
+  return true;
+}
+
+static bool range_endpoint_from_py(PyObject *obj, bool *has_endpoint,
+                                   int64_t *p, int64_t *q, const char *what) {
+  PyObject *num, *den;
+  if (!obj || obj == Py_None) {
+    *has_endpoint = false;
+    *p = 0;
+    *q = 1;
+    return true;
+  }
+  *has_endpoint = true;
+  if (PyLong_Check(obj)) {
+    *q = 1;
+    return py_int64(obj, p, what);
+  }
+
+  num = PyObject_GetAttrString(obj, "numerator");
+  den = PyObject_GetAttrString(obj, "denominator");
+  if (!num || !den) {
+    Py_XDECREF(num);
+    Py_XDECREF(den);
+    PyErr_Format(PyExc_TypeError,
+                 "%s must be an int, Fraction-like object, or None", what);
+    return false;
+  }
+  if (!py_int64(num, p, what) || !py_int64(den, q, what)) {
+    Py_DECREF(num);
+    Py_DECREF(den);
+    return false;
+  }
+  Py_DECREF(num);
+  Py_DECREF(den);
+  return true;
+}
+
+static ixs_node *facts_expr_arg(FactsObject *self, PyObject *obj,
+                                const char *what) {
+  if (!PyObject_TypeCheck(obj, &_ExprType)) {
+    PyErr_Format(PyExc_TypeError, "%s must be an Expr", what);
+    return NULL;
+  }
+  if (((ExprObject *)obj)->ctx_obj != self->ctx_obj) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  return ((ExprObject *)obj)->node;
+}
+
+static PyObject *Facts_assume(FactsObject *self, PyObject *arg) {
+  ixs_node *pred = facts_expr_arg(self, arg, "predicate");
+  if (!pred)
+    return NULL;
+  if (!ixs_facts_assume_pred(self->facts, pred)) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid fact predicate");
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
+static PyObject *Facts_assume_range(FactsObject *self, PyObject *args,
+                                    PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "lower", "upper", NULL};
+  PyObject *expr_obj, *lower_obj = Py_None, *upper_obj = Py_None;
+  ixs_node *expr;
+  ixs_range_result r;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
+                                   &lower_obj, &upper_obj))
+    return NULL;
+
+  expr = facts_expr_arg(self, expr_obj, "expr");
+  if (!expr)
+    return NULL;
+  if (!range_endpoint_from_py(lower_obj, &r.has_lower, &r.lower_p, &r.lower_q,
+                              "lower") ||
+      !range_endpoint_from_py(upper_obj, &r.has_upper, &r.upper_p, &r.upper_q,
+                              "upper"))
+    return NULL;
+
+  if (!ixs_facts_assume_range(self->facts, expr, &r)) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid range fact");
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
+static PyObject *Facts_derive_affine(FactsObject *self, PyObject *args,
+                                     PyObject *kwargs) {
+  static char *kwlist[] = {"base", "scale", "offset", "derived", NULL};
+  PyObject *base_obj, *scale_obj, *offset_obj, *derived_obj;
+  ixs_node *base, *derived;
+  int64_t scale, offset;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &base_obj,
+                                   &scale_obj, &offset_obj, &derived_obj))
+    return NULL;
+  base = facts_expr_arg(self, base_obj, "base");
+  derived = facts_expr_arg(self, derived_obj, "derived");
+  if (!base || !derived)
+    return NULL;
+  if (!py_int64(scale_obj, &scale, "scale") ||
+      !py_int64(offset_obj, &offset, "offset"))
+    return NULL;
+  if (!ixs_facts_derive_affine(self->facts, base, scale, offset, derived)) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: cannot derive affine fact");
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
+static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
+  PyObject *target_obj, *replacement_obj;
+  ixs_node *target, *replacement;
+  ixs_facts *new_facts;
+  FactsObject *wrapped;
+
+  if (!PyArg_ParseTuple(args, "OO", &target_obj, &replacement_obj))
+    return NULL;
+  target = facts_expr_arg(self, target_obj, "target");
+  if (!target)
+    return NULL;
+  replacement = coerce_arg(self->ctx_obj, replacement_obj);
+  if (!replacement)
+    return NULL;
+
+  new_facts = ixs_facts_create(Context_session(self->ctx_obj));
+  wrapped = Facts_wrap(self->ctx_obj, new_facts);
+  if (!wrapped)
+    return NULL;
+  if (!ixs_facts_substitute(wrapped->facts, self->facts, target, replacement)) {
+    Py_DECREF(wrapped);
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: cannot substitute facts");
+    return NULL;
+  }
+  return (PyObject *)wrapped;
+}
+
+static PyMethodDef Facts_methods[] = {
+    {"assume", (PyCFunction)Facts_assume, METH_O, "Add a predicate fact."},
+    {"assume_range", (PyCFunction)Facts_assume_range,
+     METH_VARARGS | METH_KEYWORDS, "Add an explicit expression range fact."},
+    {"derive_affine", (PyCFunction)Facts_derive_affine,
+     METH_VARARGS | METH_KEYWORDS,
+     "Derive range(derived) from range(base) via scale*base + offset."},
+    {"subs", (PyCFunction)Facts_subs, METH_VARARGS,
+     "Return a fact set with expression ranges substituted."},
+    {NULL}};
+
+static PyTypeObject FactsType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0).tp_name = "ixsimpl.Facts",
+    .tp_basicsize = sizeof(FactsObject),
+    .tp_dealloc = (destructor)Facts_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "ixsimpl fact set.",
+    .tp_methods = Facts_methods,
+};
+
+/* ------------------------------------------------------------------ */
 /*  Context methods and type                                          */
 /* ------------------------------------------------------------------ */
 
@@ -1090,16 +1293,20 @@ static PyObject *Context_ne(ContextObject *self, PyObject *args) {
   return (PyObject *)Expr_wrap(self, result);
 }
 
+static PyObject *Context_facts(ContextObject *self, PyObject *Py_UNUSED(args)) {
+  return (PyObject *)Facts_wrap(self, ixs_facts_create(Context_session(self)));
+}
+
 static PyObject *Context_check(ContextObject *self, PyObject *args,
                                PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "assumptions", NULL};
-  PyObject *expr_obj, *assumptions_obj = NULL;
+  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
   ixs_check_result r;
 
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
-                                   &assumptions_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
+                                   &assumptions_obj, &facts_obj))
     return NULL;
 
   if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
@@ -1112,6 +1319,29 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
     return NULL;
   }
   expr = ((ExprObject *)expr_obj)->node;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+    r = ixs_check_facts(((FactsObject *)facts_obj)->facts, expr);
+    if (r == IXS_CHECK_TRUE)
+      Py_RETURN_TRUE;
+    if (r == IXS_CHECK_FALSE)
+      Py_RETURN_FALSE;
+    Py_RETURN_NONE;
+  }
 
   if (assumptions_obj && assumptions_obj != Py_None) {
     n_assumptions = PySequence_Size(assumptions_obj);
@@ -1155,14 +1385,14 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
 
 static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "assumptions", NULL};
-  PyObject *expr_obj, *assumptions_obj = NULL;
+  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
   ixs_pow2_fact r;
 
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
-                                   &assumptions_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
+                                   &assumptions_obj, &facts_obj))
     return NULL;
 
   if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
@@ -1175,6 +1405,29 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
     return NULL;
   }
   expr = ((ExprObject *)expr_obj)->node;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+    r = ixs_get_pow2_fact_facts(((FactsObject *)facts_obj)->facts, expr);
+    if (r == IXS_POW2_OR_ZERO)
+      return PyUnicode_FromString("or_zero");
+    if (r == IXS_POW2_POSITIVE)
+      return PyUnicode_FromString("positive");
+    Py_RETURN_NONE;
+  }
 
   if (assumptions_obj && assumptions_obj != Py_None) {
     n_assumptions = PySequence_Size(assumptions_obj);
@@ -1249,15 +1502,15 @@ static PyObject *range_endpoint_to_py(bool has_endpoint, int64_t p, int64_t q) {
 
 static PyObject *Context_range(ContextObject *self, PyObject *args,
                                PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "assumptions", NULL};
-  PyObject *expr_obj, *assumptions_obj = NULL;
+  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
   ixs_range_result r;
   PyObject *lo, *hi, *result;
 
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &expr_obj,
-                                   &assumptions_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
+                                   &assumptions_obj, &facts_obj))
     return NULL;
 
   if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
@@ -1270,6 +1523,37 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
     return NULL;
   }
   expr = ((ExprObject *)expr_obj)->node;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+    if (!ixs_range_facts(((FactsObject *)facts_obj)->facts, expr, &r))
+      Py_RETURN_NONE;
+    lo = range_endpoint_to_py(r.has_lower, r.lower_p, r.lower_q);
+    if (!lo)
+      return NULL;
+    hi = range_endpoint_to_py(r.has_upper, r.upper_p, r.upper_q);
+    if (!hi) {
+      Py_DECREF(lo);
+      return NULL;
+    }
+    result = PyTuple_Pack(2, lo, hi);
+    Py_DECREF(lo);
+    Py_DECREF(hi);
+    return result;
+  }
 
   if (assumptions_obj && assumptions_obj != Py_None) {
     n_assumptions = PySequence_Size(assumptions_obj);
@@ -1480,6 +1764,8 @@ static PyMethodDef Context_methods[] = {
      "Build an equality CMP node: ctx.eq(a, b)."},
     {"ne", (PyCFunction)Context_ne, METH_VARARGS,
      "Build an inequality CMP node: ctx.ne(a, b)."},
+    {"facts", (PyCFunction)Context_facts, METH_NOARGS,
+     "Create a session-owned fact set."},
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds."},
@@ -1774,6 +2060,8 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
     return NULL;
   if (PyType_Ready(&_ExprType) < 0)
     return NULL;
+  if (PyType_Ready(&FactsType) < 0)
+    return NULL;
 
   expr_wrap_type = &_ExprType;
   Py_INCREF(&_ExprType);
@@ -1791,6 +2079,12 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
   Py_INCREF(&_ExprType);
   if (PyModule_AddObject(m, "_Expr", (PyObject *)&_ExprType) < 0) {
     Py_DECREF(&_ExprType);
+    goto fail_module;
+  }
+
+  Py_INCREF(&FactsType);
+  if (PyModule_AddObject(m, "Facts", (PyObject *)&FactsType) < 0) {
+    Py_DECREF(&FactsType);
     goto fail_module;
   }
 
