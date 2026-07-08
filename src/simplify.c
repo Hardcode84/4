@@ -1955,6 +1955,62 @@ static ixs_node *floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
   return sum;
 }
 
+static bool interval_nonnegative_below(ixs_interval iv, int64_t p, int64_t q) {
+  return iv.valid && !iv.lo_inf && !iv.hi_inf &&
+         ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0 &&
+         ixs_rat_cmp(iv.hi_p, iv.hi_q, p, q) < 0;
+}
+
+static ixs_node *floor_rebuild_without_term(ixs_ctx *ctx, ixs_node *x,
+                                            uint32_t skip) {
+  ixs_node *sum = x->u.add.coeff;
+  uint32_t i;
+  for (i = 0; i < x->u.add.nterms && sum; i++) {
+    if (i == skip)
+      continue;
+    sum = simp_add(
+        ctx, sum,
+        simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
+  }
+  return sum;
+}
+
+static ixs_node *floor_drop_small_bounded_term(ixs_ctx *ctx, ixs_bounds *bnds,
+                                               ixs_node *x) {
+  uint32_t drop, i;
+
+  if (!bnds || x->tag != IXS_ADD || x->u.add.nterms < 2 ||
+      !ixs_node_is_integer_valued(x->u.add.coeff))
+    return x;
+
+  for (drop = 0; drop < x->u.add.nterms; drop++) {
+    int64_t lcm = 1;
+    ixs_node *candidate;
+    ixs_interval iv;
+
+    for (i = 0; i < x->u.add.nterms; i++) {
+      int64_t denom;
+      if (i == drop)
+        continue;
+      denom = floor_term_effective_denom(bnds, &x->u.add.terms[i]);
+      if (denom == 0 || !floor_update_lcm(&lcm, denom))
+        break;
+    }
+    if (i != x->u.add.nterms)
+      continue;
+
+    candidate =
+        simp_mul(ctx, x->u.add.terms[drop].coeff, x->u.add.terms[drop].term);
+    if (!candidate)
+      return NULL;
+    iv = ixs_bounds_get(bnds, candidate);
+    if (interval_nonnegative_below(iv, 1, lcm))
+      return floor_rebuild_without_term(ctx, x, drop);
+  }
+
+  return x;
+}
+
 /*
  * Drop a small positive constant from floor(ADD) when all terms share
  * a common symbolic denominator D^-1.
@@ -2301,6 +2357,18 @@ static ixs_node *rule_floor_drop_const(ixs_ctx *ctx, ixs_bounds *bnds,
   return simp_floor(ctx, r);
 }
 
+static ixs_node *rule_floor_drop_small_bounded_term(ixs_ctx *ctx,
+                                                    ixs_bounds *bnds,
+                                                    ixs_node *n) {
+  ixs_node *x = n->u.unary.arg;
+  ixs_node *r = floor_drop_small_bounded_term(ctx, bnds, x);
+  if (!r)
+    return NULL;
+  if (r == x)
+    return n;
+  return simp_floor_bnds(ctx, bnds, r);
+}
+
 /* needs_bounds = false: this rule fires on structure alone (symbolic
  * denominator shared across addends) but uses bnds opportunistically
  * to tighten the remainder when available. */
@@ -2411,6 +2479,7 @@ static const ixs_rule floor_rules[] = {
     {rule_round_pull_in_denom, "round_pull_in_denom", false},
     {rule_floor_unwrap_inner, "floor_unwrap_inner", false},
     {rule_floor_drop_const, "floor_drop_const", false},
+    {rule_floor_drop_small_bounded_term, "floor_drop_small_bounded_term", true},
     {rule_floor_drop_const_sym, "floor_drop_const_sym", false},
     {rule_floor_mod_div_zero, "floor_mod_div_zero", false},
     {NULL, NULL, false},
@@ -2631,6 +2700,64 @@ static ixs_node *mod_strip_multiples(ixs_ctx *ctx, ixs_node *n) {
   if (b->tag == IXS_INT && b->u.ival > 0)
     return mod_strip_integer_multiples(ctx, n, a, b);
   return mod_strip_symbolic_multiples(ctx, n, a, b);
+}
+
+static bool scale_add_coeff_integer(ixs_ctx *ctx, ixs_node *coeff, int64_t sp,
+                                    int64_t sq, ixs_node **scaled) {
+  int64_t cp, cq, rp, rq;
+  ixs_node_get_rat(coeff, &cp, &cq);
+  if (!ixs_rat_mul(cp, cq, sp, sq, &rp, &rq))
+    return false;
+  if (rq != 1)
+    return false;
+  *scaled = make_const(ctx, rp, rq);
+  return *scaled != NULL;
+}
+
+static ixs_node *mod_clear_rational_add_scale_impl(ixs_ctx *ctx, ixs_node *n) {
+  ixs_node *a = n->u.binary.lhs;
+  ixs_node *add;
+  ixs_node *scaled_const;
+  ixs_node *scaled_add;
+  int64_t sp, sq;
+  uint32_t i;
+  ixs_addterm *terms;
+
+  if (a->tag != IXS_MUL || a->u.mul.nfactors != 1 ||
+      a->u.mul.factors[0].exp != 1 || a->u.mul.factors[0].base->tag != IXS_ADD)
+    return n;
+
+  ixs_node_get_rat(a->u.mul.coeff, &sp, &sq);
+  if (sq == 1)
+    return n;
+
+  add = a->u.mul.factors[0].base;
+  terms = ixs_arena_alloc(&ctx->scratch, add->u.add.nterms * sizeof(*terms),
+                          sizeof(void *));
+  if (!terms && add->u.add.nterms != 0)
+    return NULL;
+
+  if (!scale_add_coeff_integer(ctx, add->u.add.coeff, sp, sq, &scaled_const))
+    return n;
+
+  for (i = 0; i < add->u.add.nterms; i++) {
+    terms[i].term = add->u.add.terms[i].term;
+    if (!scale_add_coeff_integer(ctx, add->u.add.terms[i].coeff, sp, sq,
+                                 &terms[i].coeff))
+      return n;
+  }
+
+  scaled_add = ixs_node_add(ctx, scaled_const, add->u.add.nterms, terms);
+  return scaled_add ? simp_mod(ctx, scaled_add, n->u.binary.rhs) : NULL;
+}
+
+/* Mod((p/q)*(c + sum(ci*ti)), m) -> Mod(c' + sum(ci'*ti), m)
+ * when every scaled coefficient is integral. */
+static ixs_node *mod_clear_rational_add_scale(ixs_ctx *ctx, ixs_node *n) {
+  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_node *result = mod_clear_rational_add_scale_impl(ctx, n);
+  ixs_arena_restore(&ctx->scratch, m);
+  return result;
 }
 
 /* Extract a small constant addend from Mod when every other term's
@@ -2899,6 +3026,12 @@ static ixs_node *rule_mod_strip_multiples(ixs_ctx *ctx, ixs_bounds *bnds,
   return mod_strip_multiples(ctx, n);
 }
 
+static ixs_node *
+rule_mod_clear_rational_add_scale(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
+  (void)bnds;
+  return mod_clear_rational_add_scale(ctx, n);
+}
+
 static ixs_node *rule_mod_extract_small_const(ixs_ctx *ctx, ixs_bounds *bnds,
                                               ixs_node *n) {
   (void)bnds;
@@ -2923,6 +3056,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_one, "mod_one", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},
     {rule_mod_idempotent, "mod_idempotent", false},
+    {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
     {rule_mod_extract_small_const, "mod_extract_small_const", false},
     {rule_mod_scale_extract, "mod_scale_extract", true},

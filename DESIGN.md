@@ -775,6 +775,8 @@ calls `simp_floor_bnds` / `simp_ceil_bnds` directly (selected by a
 floor(c + sum(ci*bi))  → floor(sum(ci*bi))
     when every bi is integer-valued and 0 < c < 1/lcm(qi)
     (the sum lies on a 1/L grid; c < 1/L can't cross a grid point)
+floor(grid_terms + t)   → floor(grid_terms)
+    when bounds prove 0 <= t < the grid spacing of grid_terms
 floor(Mod(X, M) / K)  → 0   when K >= M > 0
 round(round(A) / D)   → round(A / D)   when D is a positive integer
                                         (round = floor or ceiling)
@@ -863,6 +865,8 @@ Mod(x, 1)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
+Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
+                     when all scaled coefficients are integral
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
                      all terms integer   → g*Mod(x, m) + r
