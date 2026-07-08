@@ -380,6 +380,29 @@ static void test_mod_rules(void) {
         ixs_mul(ctx, ixs_int(ctx, 128), d));
     CHECK(ixs_simplify(ctx, big_r, NULL, 0) == big_r);
   }
+
+  /* Clear exact rational scales before Mod:
+   * Mod((16*q + 4*r) / 4, 2) -> Mod(r, 2). */
+  {
+    ixs_node *q = ixs_sym(ctx, "q");
+    ixs_node *r = ixs_sym(ctx, "r");
+    ixs_node *inner = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), q),
+                              ixs_mul(ctx, ixs_int(ctx, 4), r));
+    ixs_node *scaled = ixs_div(ctx, inner, ixs_int(ctx, 4));
+    ixs_node *result = ixs_mod(ctx, scaled, ixs_int(ctx, 2));
+    CHECK(result == ixs_mod(ctx, r, ixs_int(ctx, 2)));
+
+    inner = ixs_add(ctx, ixs_int(ctx, 64), inner);
+    scaled = ixs_div(ctx, inner, ixs_int(ctx, 4));
+    result = ixs_mod(ctx, scaled, ixs_int(ctx, 2));
+    CHECK(result == ixs_mod(ctx, r, ixs_int(ctx, 2)));
+
+    inner = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), q), r);
+    scaled = ixs_div(ctx, inner, ixs_int(ctx, 4));
+    result = ixs_mod(ctx, scaled, ixs_int(ctx, 2));
+    CHECK(ixs_node_tag(result) == IXS_MOD);
+    CHECK(ixs_node_binary_lhs(result) == scaled);
+  }
 }
 
 static void test_boolean(void) {
@@ -867,6 +890,50 @@ static void test_floor_drop_small_rational(void) {
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
                    assumptions, 1);
   CHECK(!ixs_same_node(r, without_r));
+}
+
+static void test_floor_drop_small_bounded_term(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *assumptions[] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 4)),
+      ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, y, IXS_CMP_LT, ixs_int(ctx, 4)),
+  };
+
+  ixs_node *base = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *expr =
+      ixs_floor(ctx, ixs_add(ctx, base, ixs_div(ctx, y, ixs_int(ctx, 16))));
+  ixs_node *expected = ixs_simplify(ctx, ixs_floor(ctx, base), assumptions, 4);
+  ixs_node *r = ixs_simplify(ctx, expr, assumptions, 4);
+  CHECK(r == expected);
+
+  expr = ixs_floor(ctx, ixs_add(ctx, base, ixs_div(ctx, y, ixs_int(ctx, 2))));
+  r = ixs_simplify(ctx, expr, assumptions, 4);
+  CHECK(r != expected);
+
+  {
+    ixs_node *wi = ixs_sym(ctx, "wi");
+    ixs_node *wi_assumptions[] = {
+        ixs_cmp(ctx, wi, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, wi, IXS_CMP_LE, ixs_int(ctx, 511)),
+    };
+    ixs_node *q =
+        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, wi, ixs_int(ctx, 64))),
+                ixs_int(ctx, 4));
+    ixs_node *low = ixs_mod(
+        ctx, ixs_mod(ctx, ixs_mod(ctx, wi, ixs_int(ctx, 64)), ixs_int(ctx, 16)),
+        ixs_int(ctx, 4));
+    expr = ixs_floor(ctx, ixs_add(ctx, ixs_div(ctx, q, ixs_int(ctx, 2)),
+                                  ixs_div(ctx, low, ixs_int(ctx, 8))));
+    expected =
+        ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, q, ixs_int(ctx, 2))),
+                     wi_assumptions, 2);
+    r = ixs_simplify(ctx, expr, wi_assumptions, 2);
+    CHECK(r == expected);
+  }
 }
 
 static void test_nested_floor_ceil(void) {
@@ -2806,6 +2873,7 @@ int main(void) {
   test_mod_bounds_tighten();
   test_mod_extract_constant();
   test_floor_drop_small_rational();
+  test_floor_drop_small_bounded_term();
   test_substitution();
   test_subs_multi();
   test_sentinel_propagation();
