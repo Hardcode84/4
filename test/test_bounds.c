@@ -2319,6 +2319,202 @@ static void test_public_equivalence_invalid_inputs(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_affine_and_constant_difference(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "algebra_x");
+  ixs_node *i = ixs_sym(ctx, "algebra_i");
+  ixs_node *base = ixs_sym(ctx, "algebra_base");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *coefficient = NULL;
+  ixs_node *residual = NULL;
+  int64_t delta = 0;
+
+  CHECK(ixs_constant_difference_facts(
+      facts, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 4)),
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 1)), &delta));
+  CHECK(delta == 3);
+  CHECK(ixs_constant_difference_facts(
+      facts, ixs_mul(ctx, ixs_int(ctx, 4), ixs_add(ctx, x, ixs_int(ctx, 1))),
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 1)), &delta));
+  CHECK(delta == 3);
+  delta = 9;
+  CHECK(!ixs_constant_difference_facts(facts, ixs_int(ctx, INT64_MAX),
+                                       ixs_int(ctx, -1), &delta));
+  CHECK(delta == 0);
+
+  CHECK(ixs_affine_decompose_facts(
+      facts, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), i), base), i,
+      &coefficient, &residual));
+  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
+  CHECK(ixs_same_node(residual, base));
+  CHECK(ixs_affine_decompose_facts(
+      facts, ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, i, base)), i,
+      &coefficient, &residual));
+  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
+  CHECK(ixs_same_node(residual, ixs_mul(ctx, ixs_int(ctx, 8), base)));
+  CHECK(ixs_affine_decompose_facts(facts, ixs_div(ctx, i, ixs_int(ctx, 2)), i,
+                                   &coefficient, &residual));
+  CHECK(ixs_same_node(coefficient, ixs_rat(ctx, 1, 2)));
+  CHECK(ixs_same_node(residual, ixs_int(ctx, 0)));
+
+  CHECK(!ixs_affine_decompose_facts(facts, ixs_mul(ctx, i, i), i, &coefficient,
+                                    &residual));
+  CHECK(coefficient == NULL && residual == NULL);
+  CHECK(!ixs_affine_decompose_facts(facts, ixs_mul(ctx, base, i), i,
+                                    &coefficient, &residual));
+  CHECK(coefficient == NULL && residual == NULL);
+  CHECK(!ixs_affine_decompose_facts(facts, ixs_mod(ctx, i, ixs_int(ctx, 8)), i,
+                                    &coefficient, &residual));
+  CHECK(coefficient == NULL && residual == NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_finite_difference_and_additive_split(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "difference_i");
+  ixs_node *base = ixs_sym(ctx, "difference_base");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *difference = NULL;
+  ixs_node *residual = NULL;
+  int64_t constant = 0;
+
+  CHECK(ixs_finite_difference_facts(
+      facts, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), i), base), i, one,
+      &difference));
+  CHECK(ixs_same_node(difference, ixs_int(ctx, 8)));
+  CHECK(ixs_finite_difference_facts(facts, ixs_mul(ctx, i, i), i, one,
+                                    &difference));
+  CHECK(ixs_same_node(difference, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), i),
+                                          ixs_int(ctx, 1))));
+  CHECK(ixs_finite_difference_facts(
+      facts, ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, i, base)), i, one,
+      &difference));
+  CHECK(ixs_same_node(difference, ixs_int(ctx, 8)));
+  CHECK(!ixs_finite_difference_facts(facts, i, i, i, &difference));
+  CHECK(difference == NULL);
+  CHECK(!ixs_finite_difference_facts(facts, ixs_add(ctx, i, ixs_int(ctx, 1)), i,
+                                     ixs_int(ctx, INT64_MAX), &difference));
+  CHECK(difference == NULL);
+
+  CHECK(ixs_split_additive_constant_facts(
+      facts, ixs_add(ctx, base, ixs_int(ctx, 96)), &residual, &constant));
+  CHECK(ixs_same_node(residual, base));
+  CHECK(constant == 96);
+  CHECK(ixs_split_additive_constant_facts(
+      facts,
+      ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, base, ixs_int(ctx, 12))),
+      &residual, &constant));
+  CHECK(ixs_same_node(residual, ixs_mul(ctx, ixs_int(ctx, 8), base)));
+  CHECK(constant == 96);
+  CHECK(ixs_split_additive_constant_facts(
+      facts, ixs_add(ctx, base, ixs_int(ctx, INT64_MAX)), &residual,
+      &constant));
+  CHECK(ixs_same_node(residual, base) && constant == INT64_MAX);
+  CHECK(ixs_split_additive_constant_facts(
+      facts, ixs_add(ctx, base, ixs_int(ctx, INT64_MIN)), &residual,
+      &constant));
+  CHECK(ixs_same_node(residual, base) && constant == INT64_MIN);
+  CHECK(ixs_split_additive_constant_facts(facts, base, &residual, &constant));
+  CHECK(ixs_same_node(residual, base) && constant == 0);
+  CHECK(!ixs_split_additive_constant_facts(
+      facts, ixs_add(ctx, base, ixs_rat(ctx, 1, 2)), &residual, &constant));
+  CHECK(residual == NULL && constant == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_algebra_helpers_use_facts(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "facts_algebra_i");
+  ixs_node *base = ixs_sym(ctx, "facts_algebra_base");
+  ixs_node *condition = ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *values[2];
+  ixs_node *conditions[2];
+  ixs_node *piecewise;
+  ixs_node *coefficient = NULL;
+  ixs_node *residual = NULL;
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), i);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+  ixs_facts *nonzero = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  int64_t delta = 7;
+
+  values[0] = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), i), base);
+  values[1] = base;
+  conditions[0] = condition;
+  conditions[1] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 2, values, conditions);
+  CHECK(!ixs_affine_decompose_facts(empty, piecewise, i, &coefficient,
+                                    &residual));
+  CHECK(ixs_facts_assume_pred(nonnegative, condition));
+  CHECK(ixs_affine_decompose_facts(nonnegative, piecewise, i, &coefficient,
+                                   &residual));
+  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
+  CHECK(ixs_same_node(residual, base));
+
+  CHECK(!ixs_constant_difference_facts(empty, reciprocal, reciprocal, &delta));
+  CHECK(delta == 0);
+  CHECK(ixs_facts_assume_pred(nonzero,
+                              ixs_cmp(ctx, i, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_constant_difference_facts(nonzero, reciprocal, reciprocal, &delta));
+  CHECK(delta == 0);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, i, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(!ixs_constant_difference_facts(contradictory, i, i, &delta));
+  CHECK(!ixs_affine_decompose_facts(contradictory, i, i, &coefficient,
+                                    &residual));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_algebra_helper_invalid_inputs(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "invalid_algebra_x");
+  ixs_node *other_x = ixs_sym(other, "invalid_algebra_x");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *first = NULL;
+  ixs_node *second = NULL;
+  int64_t value = 0;
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_constant_difference_facts(facts, x, other_x, &value));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_constant_difference_facts(facts, ctx->sentinel_error, x, &value));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_affine_decompose_facts(facts, x, other_x, &first, &second));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_affine_decompose_facts(facts, x, ixs_add(ctx, x, ixs_int(ctx, 1)),
+                                    &first, &second));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "must be a symbol") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_finite_difference_facts(facts, x, x, other_x, &first));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_finite_difference_facts(facts, ctx->sentinel_error, x,
+                                     ixs_int(ctx, 1), &first));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_split_additive_constant_facts(facts, other_x, &first, &value));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_split_additive_constant_facts(facts, ctx->sentinel_error, &first,
+                                           &value));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_basic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
@@ -2978,6 +3174,10 @@ int main(void) {
   test_public_predicate_tree_query();
   test_public_total_equivalence();
   test_public_equivalence_invalid_inputs();
+  test_public_affine_and_constant_difference();
+  test_public_finite_difference_and_additive_split();
+  test_public_algebra_helpers_use_facts();
+  test_public_algebra_helper_invalid_inputs();
   test_public_exact_divide_basic();
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();

@@ -4846,6 +4846,405 @@ cleanup:
   return result;
 }
 
+#define ALGEBRA_QUERY_STACK_LIMIT 1024u
+#define ALGEBRA_QUERY_VISIT_LIMIT 8192u
+
+typedef struct {
+  ixs_session_binding binding;
+  ixs_facts *facts;
+  ixs_ctx *ctx;
+  ixs_arena_mark scratch_mark;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
+  bool old_oom;
+  bool bound;
+  bool active;
+} algebra_query_scope;
+
+typedef struct {
+  size_t visited;
+  bool limited;
+} algebra_walk_state;
+
+static bool algebra_query_begin(ixs_facts *facts, ixs_node *const *nodes,
+                                size_t nnodes, const char *query,
+                                bool outputs_ok, const char *output_error,
+                                algebra_query_scope *scope) {
+  size_t i;
+  memset(scope, 0, sizeof(*scope));
+  if (!facts_bind(facts, &scope->binding, &scope->ctx))
+    return false;
+  scope->facts = facts;
+  scope->bound = true;
+  if (!facts_ready(facts)) {
+    ixs_ctx_push_error(scope->ctx, "%s: fact set is unusable", query);
+    goto fail;
+  }
+  if (!outputs_ok) {
+    ixs_ctx_push_error(scope->ctx, "%s: %s", query, output_error);
+    goto fail;
+  }
+  for (i = 0; i < nnodes; i++) {
+    if (!facts_query_node_ok(scope->ctx, nodes[i], query))
+      goto fail;
+  }
+  if (ixs_bounds_has_empty(&facts->bounds))
+    goto fail;
+  return true;
+
+fail:
+  ixs_session_unbind(&scope->binding);
+  scope->bound = false;
+  return false;
+}
+
+static void algebra_query_start(algebra_query_scope *scope) {
+  scope->scratch_mark = ixs_arena_save(&scope->ctx->scratch);
+  scope->diag_mark = ixs_arena_save(&scope->ctx->diag);
+  scope->saved_errors = scope->ctx->errors;
+  scope->saved_nerrors = scope->ctx->nerrors;
+  scope->saved_errors_cap = scope->ctx->errors_cap;
+  scope->old_oom = scope->facts->bounds.oom;
+  scope->active = true;
+}
+
+static bool algebra_query_finish(algebra_query_scope *scope, bool success) {
+  if (scope->active) {
+    if (!scope->old_oom && scope->facts->bounds.oom) {
+      bounds_cache_clear(&scope->facts->bounds);
+      success = false;
+    }
+    scope->facts->bounds.oom = scope->old_oom;
+    ixs_arena_restore(&scope->ctx->scratch, scope->scratch_mark);
+    ixs_arena_restore(&scope->ctx->diag, scope->diag_mark);
+    scope->ctx->errors = scope->saved_errors;
+    scope->ctx->nerrors = scope->saved_nerrors;
+    scope->ctx->errors_cap = scope->saved_errors_cap;
+  }
+  if (scope->bound)
+    ixs_session_unbind(&scope->binding);
+  return success;
+}
+
+static ixs_node *algebra_query_normalize(algebra_query_scope *scope,
+                                         ixs_node *expr) {
+  expr = simp_simplify_bounds(scope->ctx, expr, &scope->facts->bounds);
+  if (!expr || ixs_node_is_sentinel(expr))
+    return NULL;
+  expr = expand_impl(scope->ctx, expr);
+  if (!expr || ixs_node_is_sentinel(expr))
+    return NULL;
+  expr = simp_simplify_bounds(scope->ctx, expr, &scope->facts->bounds);
+  if (!expr || ixs_node_is_sentinel(expr))
+    return NULL;
+  return expr;
+}
+
+static bool algebra_contains_node(ixs_node *root, ixs_node *target,
+                                  algebra_walk_state *state, bool *contains) {
+  defined_depth_frame stack[ALGEBRA_QUERY_STACK_LIMIT];
+  size_t depth = 0;
+  uint32_t nchildren;
+  *contains = false;
+  if (!root || !target || state->limited ||
+      state->visited >= ALGEBRA_QUERY_VISIT_LIMIT) {
+    state->limited = true;
+    return false;
+  }
+  state->visited++;
+  if (root == target) {
+    *contains = true;
+    return true;
+  }
+  if (!defined_child_count(root, &nchildren))
+    return false;
+  if (nchildren == 0)
+    return true;
+  stack[depth].node = root;
+  stack[depth].next_child = 0;
+  stack[depth].nchildren = nchildren;
+  depth++;
+
+  while (depth > 0) {
+    defined_depth_frame *frame = &stack[depth - 1u];
+    ixs_node *child;
+    if (frame->next_child >= frame->nchildren) {
+      depth--;
+      continue;
+    }
+    child = defined_child_at(frame->node, frame->next_child++);
+    if (!child || state->visited >= ALGEBRA_QUERY_VISIT_LIMIT) {
+      state->limited = true;
+      return false;
+    }
+    state->visited++;
+    if (child == target) {
+      *contains = true;
+      return true;
+    }
+    if (!defined_child_count(child, &nchildren))
+      return false;
+    if (nchildren == 0)
+      continue;
+    if (depth >= ALGEBRA_QUERY_STACK_LIMIT) {
+      state->limited = true;
+      return false;
+    }
+    stack[depth].node = child;
+    stack[depth].next_child = 0;
+    stack[depth].nchildren = nchildren;
+    depth++;
+  }
+  return true;
+}
+
+static bool algebra_scalar_symbol(ixs_ctx *ctx, ixs_node *expr,
+                                  ixs_node *symbol, ixs_node **coefficient) {
+  if (expr == symbol) {
+    *coefficient = ctx->node_one;
+    return true;
+  }
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
+      expr->u.mul.factors[0].base == symbol &&
+      expr->u.mul.factors[0].exp == 1) {
+    *coefficient = expr->u.mul.coeff;
+    return true;
+  }
+  return false;
+}
+
+static bool algebra_affine_extract(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *symbol, ixs_node **coefficient,
+                                   ixs_node **residual) {
+  algebra_walk_state walk = {0, false};
+  ixs_node *symbol_coeff;
+  bool contains;
+  uint32_t i;
+
+  if (algebra_scalar_symbol(ctx, expr, symbol, &symbol_coeff)) {
+    *coefficient = symbol_coeff;
+    *residual = ctx->node_zero;
+    return true;
+  }
+  if (expr->tag != IXS_ADD) {
+    if (!algebra_contains_node(expr, symbol, &walk, &contains) || contains)
+      return false;
+    *coefficient = ctx->node_zero;
+    *residual = expr;
+    return true;
+  }
+
+  *coefficient = ctx->node_zero;
+  *residual = expr->u.add.coeff;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
+    ixs_node *term_coeff = expr->u.add.terms[i].coeff;
+    ixs_node *scaled;
+    if (algebra_scalar_symbol(ctx, term, symbol, &symbol_coeff)) {
+      scaled = simp_mul(ctx, term_coeff, symbol_coeff);
+      if (!scaled || ixs_node_is_sentinel(scaled))
+        return false;
+      *coefficient = simp_add(ctx, *coefficient, scaled);
+      if (!*coefficient || ixs_node_is_sentinel(*coefficient))
+        return false;
+      continue;
+    }
+    if (!algebra_contains_node(term, symbol, &walk, &contains) || contains)
+      return false;
+    scaled = simp_mul(ctx, term_coeff, term);
+    if (!scaled || ixs_node_is_sentinel(scaled))
+      return false;
+    *residual = simp_add(ctx, *residual, scaled);
+    if (!*residual || ixs_node_is_sentinel(*residual))
+      return false;
+  }
+  return ixs_node_is_const(*coefficient);
+}
+
+bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
+                                   ixs_node *rhs, int64_t *delta) {
+  algebra_query_scope scope;
+  ixs_node *nodes[2] = {lhs, rhs};
+  ixs_node *difference;
+  int64_t result = 0;
+  int64_t q;
+  bool ok = false;
+  if (delta)
+    *delta = 0;
+  if (!algebra_query_begin(facts, nodes, 2, "constant difference",
+                           delta != NULL, "NULL output", &scope))
+    return false;
+  algebra_query_start(&scope);
+  if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
+    goto cleanup;
+  difference = simp_sub(scope.ctx, lhs, rhs);
+  if (!difference || ixs_node_is_sentinel(difference))
+    goto cleanup;
+  difference = algebra_query_normalize(&scope, difference);
+  if (!difference || !ixs_node_is_const(difference))
+    goto cleanup;
+  ixs_node_get_rat(difference, &result, &q);
+  ok = q == 1;
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok)
+    *delta = result;
+  return ok;
+}
+
+bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
+                                ixs_node *symbol, ixs_node **coefficient,
+                                ixs_node **residual) {
+  algebra_query_scope scope;
+  ixs_node *nodes[2] = {expr, symbol};
+  ixs_node *result_coefficient = NULL;
+  ixs_node *result_residual = NULL;
+  bool outputs_ok = coefficient && residual && coefficient != residual;
+  bool ok = false;
+  if (coefficient)
+    *coefficient = NULL;
+  if (residual)
+    *residual = NULL;
+  if (!algebra_query_begin(facts, nodes, 2, "affine decomposition", outputs_ok,
+                           "outputs must be non-NULL and distinct", &scope))
+    return false;
+  if (symbol->tag != IXS_SYM) {
+    ixs_ctx_push_error(scope.ctx,
+                       "affine decomposition: expression must be a symbol");
+    return algebra_query_finish(&scope, false);
+  }
+  algebra_query_start(&scope);
+  if (ixs_bounds_check_defined(&facts->bounds, expr) != IXS_CHECK_TRUE)
+    goto cleanup;
+  expr = algebra_query_normalize(&scope, expr);
+  if (!expr)
+    goto cleanup;
+  ok = algebra_affine_extract(scope.ctx, expr, symbol, &result_coefficient,
+                              &result_residual);
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok) {
+    *coefficient = result_coefficient;
+    *residual = result_residual;
+  }
+  return ok;
+}
+
+bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
+                                 ixs_node *symbol, ixs_node *step,
+                                 ixs_node **difference) {
+  algebra_query_scope scope;
+  algebra_walk_state walk = {0, false};
+  ixs_node *nodes[3] = {expr, symbol, step};
+  ixs_node *shifted_symbol;
+  ixs_node *shifted_expr;
+  ixs_node *result = NULL;
+  bool contains;
+  bool ok = false;
+  if (difference)
+    *difference = NULL;
+  if (!algebra_query_begin(facts, nodes, 3, "finite difference",
+                           difference != NULL, "NULL output", &scope))
+    return false;
+  if (symbol->tag != IXS_SYM) {
+    ixs_ctx_push_error(scope.ctx,
+                       "finite difference: expression must be a symbol");
+    return algebra_query_finish(&scope, false);
+  }
+  algebra_query_start(&scope);
+  if (ixs_bounds_check_defined(&facts->bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(&facts->bounds, step) != IXS_CHECK_TRUE)
+    goto cleanup;
+  if (!algebra_contains_node(step, symbol, &walk, &contains) || contains)
+    goto cleanup;
+  shifted_symbol = simp_add(scope.ctx, symbol, step);
+  if (!shifted_symbol || ixs_node_is_sentinel(shifted_symbol))
+    goto cleanup;
+  shifted_expr = simp_subs(scope.ctx, expr, symbol, shifted_symbol);
+  if (!shifted_expr || ixs_node_is_sentinel(shifted_expr) ||
+      ixs_bounds_check_defined(&facts->bounds, shifted_expr) != IXS_CHECK_TRUE)
+    goto cleanup;
+  result = simp_sub(scope.ctx, shifted_expr, expr);
+  if (!result || ixs_node_is_sentinel(result))
+    goto cleanup;
+  result = algebra_query_normalize(&scope, result);
+  ok = result != NULL;
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok)
+    *difference = result;
+  return ok;
+}
+
+static ixs_node *algebra_add_without_constant(ixs_ctx *ctx, ixs_node *expr) {
+  ixs_node *residual = ctx->node_zero;
+  uint32_t i;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term =
+        simp_mul(ctx, expr->u.add.terms[i].coeff, expr->u.add.terms[i].term);
+    if (!term || ixs_node_is_sentinel(term))
+      return NULL;
+    residual = simp_add(ctx, residual, term);
+    if (!residual || ixs_node_is_sentinel(residual))
+      return NULL;
+  }
+  return residual;
+}
+
+bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
+                                       ixs_node **residual, int64_t *constant) {
+  algebra_query_scope scope;
+  ixs_node *nodes[1] = {expr};
+  ixs_node *result_residual = NULL;
+  int64_t result_constant = 0;
+  int64_t q;
+  bool outputs_ok = residual && constant;
+  bool ok = false;
+  if (residual)
+    *residual = NULL;
+  if (constant)
+    *constant = 0;
+  if (!algebra_query_begin(facts, nodes, 1, "additive constant", outputs_ok,
+                           "outputs must be non-NULL", &scope))
+    return false;
+  algebra_query_start(&scope);
+  if (ixs_bounds_check_defined(&facts->bounds, expr) != IXS_CHECK_TRUE)
+    goto cleanup;
+  expr = algebra_query_normalize(&scope, expr);
+  if (!expr)
+    goto cleanup;
+  if (ixs_node_is_const(expr)) {
+    ixs_node_get_rat(expr, &result_constant, &q);
+    if (q != 1)
+      goto cleanup;
+    result_residual = scope.ctx->node_zero;
+  } else if (expr->tag == IXS_ADD) {
+    ixs_node_get_rat(expr->u.add.coeff, &result_constant, &q);
+    if (q != 1)
+      goto cleanup;
+    result_residual = algebra_add_without_constant(scope.ctx, expr);
+    if (!result_residual)
+      goto cleanup;
+  } else {
+    result_residual = expr;
+  }
+  ok = true;
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok) {
+    *residual = result_residual;
+    *constant = result_constant;
+  }
+  return ok;
+}
+
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_session_binding binding;
   ixs_ctx *ctx;

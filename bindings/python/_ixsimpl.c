@@ -1722,6 +1722,187 @@ static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
   return true;
 }
 
+static bool context_query_exprs_facts(ContextObject *self,
+                                      PyObject *const *expr_objs,
+                                      const char *const *names, size_t nexprs,
+                                      PyObject *facts_obj, ixs_node **exprs,
+                                      ixs_facts **facts) {
+  size_t i;
+  for (i = 0; i < nexprs; i++) {
+    if (!PyObject_TypeCheck(expr_objs[i], &_ExprType)) {
+      PyErr_Format(PyExc_TypeError, "%s must be an Expr", names[i]);
+      return false;
+    }
+    if (((ExprObject *)expr_objs[i])->ctx_obj != self) {
+      PyErr_Format(PyExc_ValueError, "ixsimpl: %s from different context",
+                   names[i]);
+      return false;
+    }
+    exprs[i] = ((ExprObject *)expr_objs[i])->node;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return false;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return false;
+  }
+  *facts = ((FactsObject *)facts_obj)->facts;
+  return true;
+}
+
+static PyObject *context_expr_pair(ContextObject *self, ixs_node *first,
+                                   ixs_node *second) {
+  PyObject *pair = PyTuple_New(2);
+  PyObject *first_obj;
+  PyObject *second_obj;
+  if (!pair)
+    return NULL;
+  first_obj = (PyObject *)Expr_wrap(self, first);
+  second_obj = (PyObject *)Expr_wrap(self, second);
+  if (!first_obj || !second_obj) {
+    Py_XDECREF(first_obj);
+    Py_XDECREF(second_obj);
+    Py_DECREF(pair);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(pair, 0, first_obj);
+  PyTuple_SET_ITEM(pair, 1, second_obj);
+  return pair;
+}
+
+static PyObject *context_expr_int_pair(ContextObject *self, ixs_node *expr,
+                                       int64_t value) {
+  PyObject *pair = PyTuple_New(2);
+  PyObject *expr_obj;
+  PyObject *value_obj;
+  if (!pair)
+    return NULL;
+  expr_obj = (PyObject *)Expr_wrap(self, expr);
+  value_obj = PyLong_FromLongLong((long long)value);
+  if (!expr_obj || !value_obj) {
+    Py_XDECREF(expr_obj);
+    Py_XDECREF(value_obj);
+    Py_DECREF(pair);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(pair, 0, expr_obj);
+  PyTuple_SET_ITEM(pair, 1, value_obj);
+  return pair;
+}
+
+static PyObject *Context_constant_difference(ContextObject *self,
+                                             PyObject *args, PyObject *kwargs) {
+  static char *kwlist[] = {"lhs", "rhs", "facts", NULL};
+  static const char *names[] = {"lhs", "rhs"};
+  PyObject *expr_objs[2];
+  PyObject *facts_obj;
+  ixs_node *exprs[2];
+  ixs_facts *facts;
+  int64_t delta;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_objs[0],
+                                   &expr_objs[1], &facts_obj))
+    return NULL;
+  if (!context_query_exprs_facts(self, expr_objs, names, 2, facts_obj, exprs,
+                                 &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  ok = ixs_constant_difference_facts(facts, exprs[0], exprs[1], &delta);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "constant difference:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return PyLong_FromLongLong((long long)delta);
+}
+
+static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
+                                          PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "symbol", "facts", NULL};
+  static const char *names[] = {"expr", "symbol"};
+  PyObject *expr_objs[2];
+  PyObject *facts_obj;
+  ixs_node *exprs[2];
+  ixs_node *coefficient;
+  ixs_node *residual;
+  ixs_facts *facts;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_objs[0],
+                                   &expr_objs[1], &facts_obj))
+    return NULL;
+  if (!context_query_exprs_facts(self, expr_objs, names, 2, facts_obj, exprs,
+                                 &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  ok = ixs_affine_decompose_facts(facts, exprs[0], exprs[1], &coefficient,
+                                  &residual);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "affine decomposition:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return context_expr_pair(self, coefficient, residual);
+}
+
+static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
+                                           PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "symbol", "step", "facts", NULL};
+  static const char *names[] = {"expr", "symbol", "step"};
+  PyObject *expr_objs[3];
+  PyObject *facts_obj;
+  ixs_node *exprs[3];
+  ixs_node *difference;
+  ixs_facts *facts;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_objs[0],
+                                   &expr_objs[1], &expr_objs[2], &facts_obj))
+    return NULL;
+  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
+                                 &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  ok = ixs_finite_difference_facts(facts, exprs[0], exprs[1], exprs[2],
+                                   &difference);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "finite difference:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return (PyObject *)Expr_wrap(self, difference);
+}
+
+static PyObject *Context_split_additive_constant(ContextObject *self,
+                                                 PyObject *args,
+                                                 PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "facts", NULL};
+  PyObject *expr_obj;
+  PyObject *facts_obj;
+  ixs_node *expr;
+  ixs_node *residual;
+  ixs_facts *facts;
+  int64_t constant;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
+                                   &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  ok = ixs_split_additive_constant_facts(facts, expr, &residual, &constant);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "additive constant:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return context_expr_int_pair(self, residual, constant);
+}
+
 static PyObject *Context_known_bits(ContextObject *self, PyObject *args,
                                     PyObject *kwargs) {
   static char *kwlist[] = {"expr", "facts", NULL};
@@ -2292,6 +2473,18 @@ static PyMethodDef Context_methods[] = {
     {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
+    {"constant_difference", (PyCFunction)Context_constant_difference,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return the proven integer lhs-rhs difference, or None."},
+    {"affine_decompose", (PyCFunction)Context_affine_decompose,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return (coefficient, residual) around one symbol, or None."},
+    {"finite_difference", (PyCFunction)Context_finite_difference,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return expr(symbol+step)-expr(symbol), or None."},
+    {"split_additive_constant", (PyCFunction)Context_split_additive_constant,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return (residual, integer constant), or None."},
     {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
     {"known_bits", (PyCFunction)Context_known_bits,

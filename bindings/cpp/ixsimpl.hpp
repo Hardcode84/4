@@ -255,6 +255,39 @@ public:
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
     return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
   }
+  bool constant_difference(const Expr &lhs, const Expr &rhs,
+                           int64_t &delta) const {
+    return ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw(), &delta);
+  }
+  bool affine_decompose(const Expr &expr, const Expr &symbol, Expr &coefficient,
+                        Expr &residual) const {
+    ixs_node *raw_coefficient = nullptr;
+    ixs_node *raw_residual = nullptr;
+    if (!ixs_affine_decompose_facts(facts_, expr.raw(), symbol.raw(),
+                                    &raw_coefficient, &raw_residual))
+      return false;
+    coefficient = Expr(ctx_, session_, raw_coefficient);
+    residual = Expr(ctx_, session_, raw_residual);
+    return true;
+  }
+  bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
+                         Expr &difference) const {
+    ixs_node *raw_difference = nullptr;
+    if (!ixs_finite_difference_facts(facts_, expr.raw(), symbol.raw(),
+                                     step.raw(), &raw_difference))
+      return false;
+    difference = Expr(ctx_, session_, raw_difference);
+    return true;
+  }
+  bool split_additive_constant(const Expr &expr, Expr &residual,
+                               int64_t &constant) const {
+    ixs_node *raw_residual = nullptr;
+    if (!ixs_split_additive_constant_facts(facts_, expr.raw(), &raw_residual,
+                                           &constant))
+      return false;
+    residual = Expr(ctx_, session_, raw_residual);
+    return true;
+  }
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
     return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
   }

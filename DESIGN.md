@@ -1334,6 +1334,20 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   return `UNKNOWN`. Contradictory facts never prove equivalence. Recursive
   predicate-shape comparison has depth 32, 4096 proof visits, and at most 1024
   flattened terms, so this API is not an unbounded theorem prover.
+- **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
+  `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
+  `ixs_split_additive_constant_facts`): prove definedness over the complete
+  incoming fact domain, then simplify, expand, and simplify again in that same
+  environment. Constant differences and additive constants must fit
+  `int64_t`; affine coefficients may be exact rational nodes. Affine
+  decomposition accepts only one symbol and rejects any nonlinear occurrence
+  or residual reference to it. Finite difference substitutes
+  `symbol + step` once and may return a symbolic result such as `2*i + 1`;
+  callers decide whether that result is loop invariant. A step referencing the
+  target symbol is rejected. Unsupported shapes, undefined partitions,
+  contradictory facts, representation overflow, and bounded-walk or expansion
+  limits fail conservatively. These helpers do not add relational, polyhedral,
+  or SMT reasoning.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -1757,6 +1771,17 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
+                                   ixs_node *rhs, int64_t *delta);
+bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
+                                ixs_node *symbol, ixs_node **coefficient,
+                                ixs_node **residual);
+bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
+                                 ixs_node *symbol, ixs_node *step,
+                                 ixs_node **difference);
+bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
+                                       ixs_node **residual,
+                                       int64_t *constant);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
@@ -2322,6 +2347,9 @@ Key properties:
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
   through the owning `Context` diagnostics.
+  `Facts::constant_difference()`, `affine_decompose()`,
+  `finite_difference()`, and `split_additive_constant()` mirror the narrow
+  fact-backed C helpers and fill their output references only on success.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -2432,6 +2460,13 @@ Implementation:
   `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
   Core `ERROR` results raise `ValueError` for domain/representation failures
   and `MemoryError` for OOM while preserving the session diagnostic.
+- `Context.constant_difference(lhs, rhs, facts)` returns an `int` or `None`;
+  `Context.affine_decompose(expr, symbol, facts)` returns
+  `(coefficient, residual)` or `None`; `Context.finite_difference(...)`
+  returns an `Expr` or `None`; and `Context.split_additive_constant(...)`
+  returns `(residual, constant)` or `None`. Invalid contexts, sentinels, and
+  non-symbol affine targets raise `ValueError`; valid but unproved queries do
+  not add diagnostics.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
@@ -2724,6 +2759,17 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
+                                   ixs_node *rhs, int64_t *delta);
+bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
+                                ixs_node *symbol, ixs_node **coefficient,
+                                ixs_node **residual);
+bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
+                                 ixs_node *symbol, ixs_node *step,
+                                 ixs_node **difference);
+bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
+                                       ixs_node **residual,
+                                       int64_t *constant);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);

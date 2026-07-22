@@ -2117,6 +2117,150 @@ def test_equivalence_binding_invalid_inputs() -> None:
         ctx.check_predicate(sentinel, facts)
 
 
+def test_fact_backed_algebra_helpers() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("algebra_binding_x")
+    i = ctx.sym("algebra_binding_i")
+    base = ctx.sym("algebra_binding_base")
+    facts = ctx.facts()
+
+    assert ctx.constant_difference(4 * x + 4, 4 * x + 1, facts) == 3
+    assert ctx.constant_difference(4 * (x + 1), 4 * x + 1, facts) == 3
+    assert ctx.constant_difference(ctx.int_(2**63 - 1), ctx.int_(-1), facts) is None
+
+    affine = ctx.affine_decompose(8 * i + base, i, facts)
+    assert affine is not None
+    coefficient, residual = affine
+    assert ixsimpl.same_node(coefficient, ctx.int_(8))
+    assert ixsimpl.same_node(residual, base)
+
+    factored = ctx.affine_decompose(8 * (i + base), i, facts)
+    assert factored is not None
+    coefficient, residual = factored
+    assert ixsimpl.same_node(coefficient, ctx.int_(8))
+    assert ixsimpl.same_node(residual, 8 * base)
+
+    rational = ctx.affine_decompose(i / 2, i, facts)
+    assert rational is not None
+    coefficient, residual = rational
+    assert ixsimpl.same_node(coefficient, ctx.rat(1, 2))
+    assert ixsimpl.same_node(residual, ctx.int_(0))
+    assert ctx.affine_decompose(i * i, i, facts) is None
+    assert ctx.affine_decompose(base * i, i, facts) is None
+    assert ctx.affine_decompose(i % 8, i, facts) is None
+
+    linear_difference = ctx.finite_difference(8 * i + base, i, ctx.int_(1), facts)
+    assert linear_difference is not None
+    assert ixsimpl.same_node(linear_difference, ctx.int_(8))
+    quadratic_difference = ctx.finite_difference(i * i, i, ctx.int_(1), facts)
+    assert quadratic_difference is not None
+    assert ixsimpl.same_node(quadratic_difference, 2 * i + 1)
+    assert ctx.finite_difference(i, i, i, facts) is None
+    assert ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts) is None
+
+    split = ctx.split_additive_constant(base + 96, facts)
+    assert split is not None
+    residual, constant = split
+    assert ixsimpl.same_node(residual, base)
+    assert constant == 96
+    for limit in (-(2**63), 2**63 - 1):
+        split = ctx.split_additive_constant(base + limit, facts)
+        assert split is not None
+        residual, constant = split
+        assert ixsimpl.same_node(residual, base)
+        assert constant == limit
+    assert ctx.split_additive_constant(base + ctx.rat(1, 2), facts) is None
+
+
+def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
+    ctx = ixsimpl.Context()
+    i = ctx.sym("algebra_domain_i")
+    base = ctx.sym("algebra_domain_base")
+    empty = ctx.facts()
+    condition = i >= 0
+    piecewise = ixsimpl.pw((8 * i + base, condition), (base, ctx.true_()))
+
+    assert ctx.affine_decompose(piecewise, i, empty) is None
+    nonnegative = ctx.facts()
+    nonnegative.assume(condition)
+    affine = ctx.affine_decompose(piecewise, i, nonnegative)
+    assert affine is not None
+    coefficient, residual = affine
+    assert ixsimpl.same_node(coefficient, ctx.int_(8))
+    assert ixsimpl.same_node(residual, base)
+
+    reciprocal = 1 / i
+    assert ctx.constant_difference(reciprocal, reciprocal, empty) is None
+    nonzero = ctx.facts()
+    nonzero.assume(ctx.ne(i, 0))
+    assert ctx.constant_difference(reciprocal, reciprocal, nonzero) == 0
+
+    contradictory = ctx.facts()
+    contradictory.assume(i >= 10)
+    contradictory.assume(i <= 5)
+    assert ctx.constant_difference(i, i, contradictory) is None
+    assert ctx.affine_decompose(i, i, contradictory) is None
+
+
+def test_fact_backed_algebra_helper_binding_failures() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("algebra_invalid_x")
+    facts = ctx.facts()
+    sentinel = ctx.parse_expr("(")
+
+    with pytest.raises(ValueError, match="different context"):
+        ctx.constant_difference(x, other.sym("x"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.affine_decompose(x, other.sym("x"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.finite_difference(x, x, other.sym("step"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.split_additive_constant(other.sym("x"), facts)
+    with pytest.raises(ValueError, match="must be a symbol"):
+        ctx.affine_decompose(x, x + 1, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.constant_difference(sentinel, x, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.affine_decompose(sentinel, x, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.split_additive_constant(sentinel, facts)
+
+
+@given(
+    a=st.integers(min_value=-64, max_value=64),
+    b=st.integers(min_value=-64, max_value=64),
+    c=st.integers(min_value=-64, max_value=64),
+    d=st.integers(min_value=-64, max_value=64),
+    step=st.integers(min_value=-8, max_value=8),
+)
+def test_fact_backed_algebra_helper_affine_property(
+    a: int, b: int, c: int, d: int, step: int
+) -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("algebra_property_x")
+    y = ctx.sym("algebra_property_y")
+    facts = ctx.facts()
+    expr = a * x + b * y + c
+
+    assert ctx.constant_difference(expr, a * x + b * y + d, facts) == c - d
+    affine = ctx.affine_decompose(expr, x, facts)
+    assert affine is not None
+    coefficient, residual = affine
+    assert ixsimpl.same_node(coefficient, ctx.int_(a))
+    assert ixsimpl.same_node(residual, b * y + c)
+    difference = ctx.finite_difference(expr, x, ctx.int_(step), facts)
+    assert difference is not None
+    assert ixsimpl.same_node(difference, ctx.int_(a * step))
+    split = ctx.split_additive_constant(expr, facts)
+    assert split is not None
+    residual, constant = split
+    assert ixsimpl.same_node(residual, a * x + b * y)
+    assert constant == c
+
+
 def test_definedness_queries_assumptions_facts_and_piecewise() -> None:
     ctx = ixsimpl.Context()
     x, m = ctx.sym("defined_x"), ctx.sym("defined_m")
