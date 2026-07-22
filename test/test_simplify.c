@@ -381,6 +381,25 @@ static void test_mod_rules(void) {
     CHECK(ixs_simplify(ctx, big_r, NULL, 0) == big_r);
   }
 
+  /* Congruence-gated scale extraction for a symbolic modulus. */
+  {
+    ixs_node *a = ixs_sym(ctx, "scale_a");
+    ixs_node *m = ixs_sym(ctx, "scale_m");
+    ixs_node *lhs = ixs_mod(
+        ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), a), ixs_int(ctx, 1)),
+        m);
+    ixs_node *divisible = ixs_cmp(ctx, ixs_mod(ctx, m, ixs_int(ctx, 16)),
+                                  IXS_CMP_EQ, ixs_int(ctx, 0));
+    ixs_node *positive = ixs_cmp(ctx, m, IXS_CMP_GE, ixs_int(ctx, 1));
+    ixs_node *new_mod = ixs_div(ctx, m, ixs_int(ctx, 16));
+    ixs_node *expected =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), ixs_mod(ctx, a, new_mod)),
+                ixs_int(ctx, 1));
+
+    CHECK(ixs_simplify(ctx, lhs, &divisible, 1) == expected);
+    CHECK(ixs_simplify(ctx, lhs, &positive, 1) == lhs);
+  }
+
   /* Clear exact rational scales before Mod:
    * Mod((16*q + 4*r) / 4, 2) -> Mod(r, 2). */
   {
@@ -772,6 +791,35 @@ static void test_mod_bounds_tighten(void) {
   ixs_node *ce = ixs_ceil(ctx, mod1);
   r = ixs_simplify(ctx, ce, NULL, 0);
   CHECK(r != ixs_int(ctx, 0));
+
+  /* A symbolic positive modulus has the same remainder bounds as a literal
+   * modulus.  Canonicalization commonly turns constants into SSA symbols
+   * constrained by equality. */
+  {
+    ixs_node *m = ixs_sym(ctx, "m");
+    ixs_node *mod_x_m = ixs_mod(ctx, x, m);
+    ixs_node *bounded_m[] = {
+        ixs_cmp(ctx, m, IXS_CMP_GE, ixs_int(ctx, 1)),
+        ixs_cmp(ctx, m, IXS_CMP_LE, ixs_int(ctx, 16)),
+    };
+    ixs_node *nonnegative = ixs_cmp(ctx, mod_x_m, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *below_bound = ixs_cmp(ctx, mod_x_m, IXS_CMP_LT, ixs_int(ctx, 16));
+    CHECK(ixs_simplify(ctx, nonnegative, bounded_m, 2) == ixs_true(ctx));
+    CHECK(ixs_simplify(ctx, below_bound, bounded_m, 2) == ixs_true(ctx));
+
+    /* Without a proof that the divisor is positive, neither bound applies. */
+    CHECK(ixs_simplify(ctx, nonnegative, bounded_m + 1, 1) != ixs_true(ctx));
+    CHECK(ixs_simplify(ctx, below_bound, NULL, 0) != ixs_true(ctx));
+
+    /* Equality-constrained symbols preserve exact-modulus tightening. */
+    {
+      ixs_node *exact_m = ixs_cmp(ctx, m, IXS_CMP_EQ, ixs_int(ctx, 16));
+      ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 4), x);
+      ixs_node *quotient = ixs_floor(
+          ctx, ixs_div(ctx, ixs_mod(ctx, scaled, m), ixs_int(ctx, 13)));
+      CHECK(ixs_simplify(ctx, quotient, &exact_m, 1) == ixs_int(ctx, 0));
+    }
+  }
 }
 
 static void test_mod_extract_constant(void) {

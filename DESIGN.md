@@ -817,6 +817,9 @@ integer-valued (or divisible by a given modulus).  This is a sufficient
 OR-of-factors test, not full product factorization: `6 | (2*3)` cannot
 be proved when neither factor alone is divisible by 6.
 
+`is_known_divisible` also handles `Max` and `Min` when both operands are
+provably divisible; either selected value then preserves the divisor.
+
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
     when every ti is integer-valued, D is symbolic, all terms share D^{-1},
@@ -881,6 +884,17 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
 ```
+
+Interval propagation also handles symbolic integer moduli.  If assumptions
+prove `1 <= m <= U`, then an integer-valued `Mod(x, m)` is in `[0, U - 1]`.
+An equality-constrained symbolic modulus receives the same dividend-step
+tightening as a literal modulus.  No remainder bound is inferred unless the
+modulus is proven positive.
+
+Scale extraction may establish the `g*m` condition through congruence facts
+instead of a structural leading coefficient.  If every non-constant dividend
+coefficient is divisible by `g` and bounds prove `g` divides the symbolic
+modulus, `Mod(g*x + r, modulus)` uses the same extraction for `0 <= r < g`.
 
 The forward cancellation uses two verification strategies:
 
@@ -1127,7 +1141,9 @@ This enables rules like:
 - `Mod(x, m)` bounds tightened to dividend's bounds when `0 <= x < m`
 - `Mod(x, m)` upper bound tightened to `m - gcd(d, m)` when `x` is
   integer-valued and `d` is the gcd of its top-level integer coefficients
-  (e.g. `Mod(4*a, 16)` in `[0, 12]` instead of `[0, 15]`)
+  (e.g. `Mod(4*a, 16)` in `[0, 12]` instead of `[0, 15]`).  The implementation
+  computes `gcd(d, m)` directly, so an `INT64_MIN` coefficient never requires
+  representing its `2^63` magnitude in `int64_t`.
 - `Max(1, expr)` where `expr >= 1` → `expr`
 
 **Congruence-gated rewrites** (requires `Mod(sym, M) == R` assumption):

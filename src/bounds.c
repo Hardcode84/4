@@ -1015,29 +1015,28 @@ IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
     add_expr_integer_zero_cmp(b, lhs, op);
 }
 
-/* Conservative positive divisor of expr's value when integer-valued:
- * MUL — absolute coefficient; ADD — gcd of constant and all term
- * coefficients; everything else — 1.  Deliberately ignores nested
- * structure; the result is a lower bound on the true step. */
-static int64_t mod_dividend_step(ixs_node *expr) {
+/* GCD of a positive modulus and a conservative dividend step.  Computing the
+ * GCD directly keeps the result representable when a coefficient is
+ * INT64_MIN, whose magnitude is one past INT64_MAX. */
+static int64_t mod_dividend_gcd(ixs_node *expr, int64_t modulus) {
   int64_t p, q, g;
   uint32_t i;
   switch (expr->tag) {
   case IXS_MUL:
     ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
-    return (q == 1) ? ixs_gcd(p, 0) : 1;
+    return (q == 1) ? ixs_gcd(p, modulus) : 1;
   case IXS_ADD:
     ixs_node_get_rat(expr->u.add.coeff, &p, &q);
     if (q != 1)
       return 1;
-    g = ixs_gcd(p, 0);
+    g = ixs_gcd(p, modulus);
     for (i = 0; i < expr->u.add.nterms; i++) {
       ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
       if (q != 1)
         return 1;
       g = ixs_gcd(g, p);
     }
-    return (g > 0) ? g : 1;
+    return g;
   default:
     return 1;
   }
@@ -1452,6 +1451,11 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
     return bounds_add_divisible(b, expr, m);
   }
 
+  if (expr->tag == IXS_MAX || expr->tag == IXS_MIN) {
+    return ixs_bounds_is_known_divisible(b, expr->u.binary.lhs, m) &&
+           ixs_bounds_is_known_divisible(b, expr->u.binary.rhs, m);
+  }
+
   return false;
 }
 
@@ -1572,16 +1576,39 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
 
 static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
   ixs_node *m = expr->u.binary.rhs;
-  if (m->tag == IXS_INT && m->u.ival > 0) {
+  ixs_interval mi = ixs_bounds_get(b, m);
+  int64_t exact_m;
+
+  if (interval_exact_int(&mi, &exact_m) && exact_m > 0) {
     ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
     if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
-        pi.hi_p < m->u.ival)
+        pi.hi_p < exact_m)
       return pi;
     if (ixs_node_is_integer_valued(expr->u.binary.lhs)) {
-      int64_t step = mod_dividend_step(expr->u.binary.lhs);
-      int64_t g = ixs_gcd(step, m->u.ival);
-      return ixs_interval_range(0, 1, m->u.ival - g, 1);
+      int64_t g = mod_dividend_gcd(expr->u.binary.lhs, exact_m);
+      return ixs_interval_range(0, 1, exact_m - g, 1);
     }
+  }
+
+  if (ixs_node_is_integer_valued(expr->u.binary.lhs) &&
+      ixs_node_is_integer_valued(m) && interval_lower_at_least(&mi, 1, 1)) {
+    ixs_interval result = ixs_interval_unknown();
+    result.valid = true;
+    result.lo_inf = false;
+    result.lo_p = 0;
+    result.lo_q = 1;
+    if (mi.hi_inf) {
+      ixs_interval_set_hi_pos_inf(&result);
+    } else {
+      int64_t upper = ixs_rat_floor(mi.hi_p, mi.hi_q);
+      if (!ixs_safe_sub(upper, 1, &result.hi_p))
+        ixs_interval_set_hi_pos_inf(&result);
+      else {
+        result.hi_q = 1;
+        result.hi_inf = false;
+      }
+    }
+    return result;
   }
   return ixs_interval_unknown();
 }

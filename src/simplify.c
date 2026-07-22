@@ -2945,7 +2945,10 @@ static ixs_node *mod_scale_extract_add(ixs_ctx *ctx, ixs_bounds *bnds,
   if (a->tag != IXS_ADD || a->u.add.nterms == 0)
     return n;
   bfactor = mul_int_factor(b);
-  if (bfactor == 0 || !mod_scale_add_gcd(a, bfactor, &g))
+  if (!mod_scale_add_gcd(a, bfactor, &g))
+    return n;
+  /* Congruence facts can establish the missing structural factor. */
+  if (bfactor == 0 && (!bnds || !ixs_bounds_is_known_divisible(bnds, b, g)))
     return n;
 
   ixs_node_get_rat(a->u.add.coeff, &kp, &kq);

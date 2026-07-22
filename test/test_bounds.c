@@ -650,6 +650,25 @@ static void test_bounds_bitfacts_mul_requires_integer_product(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_extrema_divisibility(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *six_x = ixs_mul(ctx, ixs_int(ctx, 6), x);
+  ixs_node *nine_y = ixs_mul(ctx, ixs_int(ctx, 9), y);
+  ixs_node *ten_y = ixs_mul(ctx, ixs_int(ctx, 10), y);
+
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  CHECK(ixs_bounds_is_known_divisible(&b, ixs_max(ctx, six_x, nine_y), 3));
+  CHECK(ixs_bounds_is_known_divisible(&b, ixs_min(ctx, six_x, nine_y), 3));
+  CHECK(!ixs_bounds_is_known_divisible(&b, ixs_max(ctx, six_x, ten_y), 3));
+  CHECK(!ixs_bounds_is_known_divisible(&b, ixs_min(ctx, six_x, ten_y), 3));
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_bitfacts_contradiction(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -1099,6 +1118,36 @@ static void test_public_range_int64_extrema(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_mod_int64_min_step(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *m = ixs_sym(ctx, "m");
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, INT64_MIN), x);
+  ixs_node *add = ixs_add(ctx, scaled, ixs_mul(ctx, ixs_int(ctx, 7), y));
+  ixs_node *literal_mod = ixs_mod(ctx, scaled, ixs_int(ctx, 7));
+  ixs_node *literal_add_mod = ixs_mod(ctx, add, ixs_int(ctx, 7));
+  ixs_node *symbolic_mod = ixs_mod(ctx, scaled, m);
+  ixs_node *exact_m = ixs_cmp(ctx, m, IXS_CMP_EQ, ixs_int(ctx, 7));
+  ixs_node *is_zero = ixs_cmp(ctx, symbolic_mod, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_range_result r;
+
+  CHECK(ixs_range(ctx, literal_mod, NULL, 0, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 6 && r.upper_q == 1);
+
+  CHECK(ixs_range(ctx, literal_add_mod, NULL, 0, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 6 && r.upper_q == 1);
+
+  CHECK(ixs_range(ctx, symbolic_mod, &exact_m, 1, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 6 && r.upper_q == 1);
+  CHECK(ixs_check(ctx, is_zero, &exact_m, 1) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -1347,6 +1396,7 @@ int main(void) {
   test_bounds_modrem();
   test_bounds_modrem_zero();
   test_bounds_no_modrem();
+  test_bounds_extrema_divisibility();
 
   /* Bounds: bitwise facts */
   test_bounds_bitfacts_pow2();
@@ -1382,6 +1432,7 @@ int main(void) {
   test_public_range_rational();
   test_public_range_unknown();
   test_public_range_int64_extrema();
+  test_public_range_mod_int64_min_step();
   test_public_range_composite_predicate_fact();
   test_public_facts_range_and_transfer();
   test_failed_expand_is_not_expression_fact_alias();
