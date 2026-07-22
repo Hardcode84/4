@@ -104,6 +104,15 @@ public:
                 ixs_simplify(session_, node_, nullptr, 0));
   }
   Expr simplify(const Facts &facts) const;
+  ixs_check_result check(const Expr *assumptions, size_t n) const {
+    std::vector<ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_check(session_, node_, raw.data(), n);
+  }
+  ixs_check_result check() const {
+    return ixs_check(session_, node_, nullptr, 0);
+  }
   ixs_check_result check_integer_valued(const Expr *assumptions,
                                         size_t n) const {
     std::vector<ixs_node *> raw(n);
@@ -122,6 +131,27 @@ public:
   }
   ixs_check_result check_defined() const {
     return ixs_check_defined(session_, node_, nullptr, 0);
+  }
+  ixs_pow2_fact get_pow2_fact(const Expr *assumptions, size_t n) const {
+    std::vector<ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_get_pow2_fact(session_, node_, raw.data(), n);
+  }
+  ixs_pow2_fact get_pow2_fact() const {
+    return ixs_get_pow2_fact(session_, node_, nullptr, 0);
+  }
+  bool range(ixs_range_result &out, const Expr *assumptions, size_t n) const {
+    std::vector<ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_range(session_, node_, raw.data(), n, &out);
+  }
+  bool range(ixs_range_result &out) const {
+    return ixs_range(session_, node_, nullptr, 0, &out);
+  }
+  Expr expand() const {
+    return Expr(session_ctx(), session_, ixs_expand(session_, node_));
   }
   Expr subs(Expr target, Expr repl) const {
     return Expr(session_ctx(), session_,
@@ -203,6 +233,7 @@ public:
   }
 
   ixs_node *raw() const { return node_; }
+  const ixs_node *raw_const() const { return node_; }
   ixs_ctx *raw_ctx() const { return ctx_; }
   ixs_session *raw_session() const { return session_; }
 
@@ -231,6 +262,14 @@ public:
   bool assume(const Expr &pred) {
     return ixs_facts_assume_pred(facts_, pred.raw());
   }
+  bool assume_range(const Expr &expr, const ixs_range_result &range) {
+    return ixs_facts_assume_range(facts_, expr.raw(), &range);
+  }
+  bool derive_affine(const Expr &base, int64_t scale, int64_t offset,
+                     const Expr &derived) {
+    return ixs_facts_derive_affine(facts_, base.raw(), scale, offset,
+                                   derived.raw());
+  }
   Expr simplify(const Expr &expr) const {
     return Expr(ctx_, session_, ixs_simplify_facts(facts_, expr.raw()));
   }
@@ -242,6 +281,9 @@ public:
     ixs_simplify_batch_facts(facts_, raw.data(), raw.size());
     for (size_t i = 0; i < exprs.size(); ++i)
       exprs[i] = Expr(ctx_, session_, raw[i]);
+  }
+  ixs_check_result check(const Expr &expr) const {
+    return ixs_check_facts(facts_, expr.raw());
   }
   ixs_check_result check_integer_valued(const Expr &expr) const {
     return ixs_check_integer_valued_facts(facts_, expr.raw());
@@ -303,6 +345,12 @@ public:
                                    int64_t residue) const {
     return ixs_check_congruent_facts(facts_, expr.raw(), modulus, residue);
   }
+  ixs_pow2_fact get_pow2_fact(const Expr &expr) const {
+    return ixs_get_pow2_fact_facts(facts_, expr.raw());
+  }
+  bool range(const Expr &expr, ixs_range_result &out) const {
+    return ixs_range_facts(facts_, expr.raw(), &out);
+  }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {
     return ixs_facts_substitute(facts_, source.raw(), target.raw(),
@@ -345,7 +393,7 @@ inline Facts Context::facts() { return Facts(*this); }
 inline Expr Context::import_expr(const Expr &expr) {
   if (!expr.raw())
     throw std::invalid_argument("ixsimpl: null expression");
-  ixs_node *node = ixs_import_node(session(), expr.raw());
+  ixs_node *node = ixs_import_node(session(), expr.raw_const());
   if (!node)
     throw std::bad_alloc();
   return Expr(raw(), session(), node);
@@ -376,7 +424,7 @@ inline std::string Context::serialize_expr(const Expr &expr) {
   before_nerrors = nerrors();
   StringWriter sink;
   ixs_writer writer = {&StringWriter::write, &sink};
-  if (!ixs_serialize_node(session(), expr.raw(), &writer)) {
+  if (!ixs_serialize_node(session(), expr.raw_const(), &writer)) {
     if (sink.failure)
       std::rethrow_exception(sink.failure);
     after_nerrors = nerrors();

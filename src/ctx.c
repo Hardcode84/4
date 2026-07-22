@@ -262,15 +262,15 @@ void ixs_ctx_stats_reset(ixs_ctx *ctx) {
 /*  Sentinel checks                                                   */
 /* ------------------------------------------------------------------ */
 
-bool ixs_is_error(ixs_node *node) {
+bool ixs_is_error(const ixs_node *node) {
   return node && (node->tag == IXS_ERROR || node->tag == IXS_PARSE_ERROR);
 }
 
-bool ixs_is_parse_error(ixs_node *node) {
+bool ixs_is_parse_error(const ixs_node *node) {
   return node && node->tag == IXS_PARSE_ERROR;
 }
 
-bool ixs_is_domain_error(ixs_node *node) {
+bool ixs_is_domain_error(const ixs_node *node) {
   return node && node->tag == IXS_ERROR;
 }
 
@@ -573,7 +573,7 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
 /*  Comparison and substitution                                       */
 /* ------------------------------------------------------------------ */
 
-bool ixs_same_node(ixs_node *a, ixs_node *b) { return a == b; }
+bool ixs_same_node(const ixs_node *a, const ixs_node *b) { return a == b; }
 
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement) {
@@ -598,11 +598,11 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
 /*  Output                                                            */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize) {
+size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize) {
   return ixs_print_impl(expr, buf, bufsize);
 }
 
-size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize) {
+size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize) {
   return ixs_print_c_impl(expr, buf, bufsize);
 }
 
@@ -610,8 +610,8 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize) {
 /*  Introspection                                                     */
 /* ------------------------------------------------------------------ */
 
-ixs_tag ixs_node_tag(ixs_node *node) { return node->tag; }
+ixs_tag ixs_node_tag(const ixs_node *node) { return node->tag; }
 
-int64_t ixs_node_int_val(ixs_node *node) { return node->u.ival; }
+int64_t ixs_node_int_val(const ixs_node *node) { return node->u.ival; }
 
-uint32_t ixs_node_hash(ixs_node *node) { return node->hash; }
+uint32_t ixs_node_hash(const ixs_node *node) { return node->hash; }

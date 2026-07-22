@@ -1541,9 +1541,9 @@ const char *ixs_session_error(ixs_session *s, size_t index);
 void        ixs_session_clear_errors(ixs_session *s);
 
 // Check sentinel kind
-bool        ixs_is_error(ixs_node *node);        // true for either sentinel
-bool        ixs_is_parse_error(ixs_node *node);   // true only for IXS_PARSE_ERROR
-bool        ixs_is_domain_error(ixs_node *node);  // true only for IXS_ERROR
+bool        ixs_is_error(const ixs_node *node);        // true for either sentinel
+bool        ixs_is_parse_error(const ixs_node *node);   // true only for IXS_PARSE_ERROR
+bool        ixs_is_domain_error(const ixs_node *node);  // true only for IXS_ERROR
 ```
 
 In the current implementation, error strings are arena-allocated in the
@@ -1613,9 +1613,9 @@ void ixs_session_destroy(ixs_session *s);
 size_t ixs_session_nerrors(ixs_session *s);
 const char *ixs_session_error(ixs_session *s, size_t index);
 void ixs_session_clear_errors(ixs_session *s);
-bool ixs_is_error(ixs_node *node);        // true for either sentinel
-bool ixs_is_parse_error(ixs_node *node);  // true only for IXS_PARSE_ERROR
-bool ixs_is_domain_error(ixs_node *node); // true only for IXS_ERROR
+bool ixs_is_error(const ixs_node *node);        // true for either sentinel
+bool ixs_is_parse_error(const ixs_node *node);  // true only for IXS_PARSE_ERROR
+bool ixs_is_domain_error(const ixs_node *node); // true only for IXS_ERROR
 
 // Parse a SymPy-format expression. Errors append to the session list.
 // The current parser surface also includes ixs_parse_expr(),
@@ -1659,15 +1659,15 @@ ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
 // Introspection — node must not be NULL:
-ixs_tag ixs_node_tag(ixs_node *node);       // returns the node's type tag
-int64_t ixs_node_int_val(ixs_node *node);   // IXS_INT value; UB if tag != IXS_INT
-uint32_t ixs_node_hash(ixs_node *node);     // precomputed content hash
+ixs_tag ixs_node_tag(const ixs_node *node);       // returns the node's type tag
+int64_t ixs_node_int_val(const ixs_node *node);   // IXS_INT value; UB if wrong tag
+uint32_t ixs_node_hash(const ixs_node *node);     // precomputed content hash
 
 // Pointer equality (O(1) — hash-consing guarantees that structurally
 // identical expressions within the same context share the same pointer).
 // Only valid for nodes from the same ixs_ctx. NULL arguments are allowed:
 // ixs_same_node(NULL, NULL) returns true, ixs_same_node(NULL, x) returns false.
-bool ixs_same_node(ixs_node *a, ixs_node *b);
+bool ixs_same_node(const ixs_node *a, const ixs_node *b);
 
 // Substitution — single-pass: replaces all occurrences of `target` in
 // `expr` with `replacement`. target can be any node (symbol, constant,
@@ -1702,8 +1702,8 @@ bool ixs_import_many(ixs_session *s, const ixs_node *const *src,
 // (excluding '\0'). If buf is NULL or bufsize is 0, returns the required
 // length without writing. Output is always null-terminated when bufsize > 0.
 // Sentinel prints as "<error>". NULL expr returns 0 and does not modify buf.
-size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);  // SymPy format
-size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
+size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize);  // SymPy
+size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize); // C code
 
 // Batch: simplify multiple expressions **in place**, sharing the same
 // assumption-derived bounds (parsed once, reused for every element).
@@ -1907,6 +1907,14 @@ Nodes are opaque — `struct ixs_node` is internal. The public C API exposes
 structural introspection through `ixs_node_tag`, type-specific field
 accessors, generic child access, and scratch-backed tree walks.
 
+Interned node payloads are immutable. Sentinel checks, pointer equality,
+printers, and every structural accessor therefore accept `const ixs_node *`.
+Child accessors still return `ixs_node *`: changing that return type would
+break source compatibility and would prevent direct composition with the
+constructor, transform, proof-query, walk, and pointer-array APIs, whose
+historic handle types remain mutable. The mutable spelling is only a handle
+compatibility contract; opaque node payloads are never caller-mutable.
+
 **Representation mismatch with sympy**: sympy's `Add(a, 2*b, 3)` has
 `args = [a, 2*b, 3]` — flat list of sub-expressions. ixsimpl's ADD is
 `coeff=3, terms=[{a,1},{b,2}]` — structured. Similarly, sympy MUL has
@@ -1924,45 +1932,45 @@ allocation, no ctx needed.
 
 ```c
 /* Only valid when tag is IXS_RAT. */
-int64_t ixs_node_rat_num(ixs_node *node);
-int64_t ixs_node_rat_den(ixs_node *node);
+int64_t ixs_node_rat_num(const ixs_node *node);
+int64_t ixs_node_rat_den(const ixs_node *node);
 
 /* Only valid when tag is IXS_SYM.  Pointer valid for ctx lifetime. */
-const char *ixs_node_sym_name(ixs_node *node);
+const char *ixs_node_sym_name(const ixs_node *node);
 
 /* Only valid when tag is IXS_ADD.  i must be < nterms.
  * ADD = coeff + sum(term_coeff[i] * term[i]). */
-ixs_node *ixs_node_add_coeff(ixs_node *node);
-uint32_t ixs_node_add_nterms(ixs_node *node);
-ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i);
-ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_coeff(const ixs_node *node);
+uint32_t ixs_node_add_nterms(const ixs_node *node);
+ixs_node *ixs_node_add_term(const ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_term_coeff(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_MUL.  i must be < nfactors.
  * MUL = coeff * product(base[i] ^ exp[i]). */
-ixs_node *ixs_node_mul_coeff(ixs_node *node);
-uint32_t ixs_node_mul_nfactors(ixs_node *node);
-ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i);
-int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_mul_coeff(const ixs_node *node);
+uint32_t ixs_node_mul_nfactors(const ixs_node *node);
+ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
+int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
-ixs_node *ixs_node_unary_arg(ixs_node *node);
+ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
 /* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
  * IXS_XOR, or IXS_CMP. */
-ixs_node *ixs_node_binary_lhs(ixs_node *node);
-ixs_node *ixs_node_binary_rhs(ixs_node *node);
+ixs_node *ixs_node_binary_lhs(const ixs_node *node);
+ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
 /* Only valid when tag is IXS_CMP. */
-ixs_cmp_op ixs_node_cmp_op(ixs_node *node);
+ixs_cmp_op ixs_node_cmp_op(const ixs_node *node);
 
 /* Only valid when tag is IXS_PIECEWISE.  i must be < ncases. */
-uint32_t ixs_node_pw_ncases(ixs_node *node);
-ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i);
-ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
+uint32_t ixs_node_pw_ncases(const ixs_node *node);
+ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
+ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
-uint32_t ixs_node_logic_nargs(ixs_node *node);
-ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
+uint32_t ixs_node_logic_nargs(const ixs_node *node);
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
 ```
 
 ~20 functions, all trivial one-liners into the internal union fields
@@ -1972,10 +1980,10 @@ ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
 
 ```c
 /* Number of child node pointers.  Leaves return 0. */
-uint32_t ixs_node_nchildren(ixs_node *node);
+uint32_t ixs_node_nchildren(const ixs_node *node);
 
 /* i-th child node.  i must be < ixs_node_nchildren(node). */
-ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_child(const ixs_node *node, uint32_t i);
 ```
 
 Single point of truth for "which child-node pointers does this node
@@ -2358,10 +2366,14 @@ Key properties:
 - `parse_expr()` and `parse_pred()` expose the kind-aware parse surface;
   `parse()` remains the backward-compatible expression parser.
 - `Expr::is_integer_valued()` exposes structural classification, while
-  `Expr::check_integer_valued()` consumes an assumption array. `Context::facts()`
-  returns a lightweight session-owned `Facts` wrapper whose
-  `simplify()`, `simplify_batch()`, `check_integer_valued()`, and
-  `check_divisible()` methods expose fact-backed transforms and proofs.
+  `Expr::check()`, `check_integer_valued()`, `check_defined()`,
+  `get_pow2_fact()`, and `range()` consume an optional assumption array.
+  `Expr::expand()` exposes distribution. `Context::facts()` returns a
+  lightweight session-owned `Facts` wrapper whose `assume_range()` and
+  `derive_affine()` expose explicit range ingestion and whose `simplify()`,
+  `simplify_batch()`, `check()`, `check_integer_valued()`, `check_defined()`,
+  `check_divisible()`, `get_pow2_fact()`, and `range()` expose every
+  fact-backed transform and core proof query.
   `get_known_bits()`, `get_symbol_congruence()`, and `check_congruent()` expose
   the low-64 and query-specific modular interfaces without adding wrapper-side
   reasoning. `Facts::substitute()` and `Facts::substitute_multi()` mutate a
@@ -2374,6 +2386,9 @@ Key properties:
   `Facts::constant_difference()`, `affine_decompose()`,
   `finite_difference()`, and `split_additive_constant()` mirror the narrow
   fact-backed C helpers and fill their output references only on success.
+- `Expr::raw_const()` supplies a const-qualified node view for inspection and
+  serialization. `raw()` remains mutable-typed for source compatibility with
+  older consumers and node-producing C APIs; neither permits payload mutation.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -2494,6 +2509,9 @@ Implementation:
   returns `(residual, constant)` or `None`. Invalid contexts, sentinels, and
   non-symbol affine targets raise `ValueError`; valid but unproved queries do
   not add diagnostics.
+- `Context.check_predicate(predicate, facts)` and
+  `Context.equivalent(lhs, rhs, facts)` expose conservative tri-state results
+  as `True`, `False`, or `None`.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
@@ -2836,12 +2854,17 @@ ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root,
                         ixs_visit_fn fn, void *userdata);
 ```
 
-Node-only APIs stay unchanged:
+Node-only APIs do not take a session. Pure inspection is const-qualified:
 
 - sentinel checks
 - pointer equality
 - printers
 - node introspection accessors
+
+Their child accessors retain mutable-typed return handles for compatibility.
+Transforms, proof queries, walks, and node pointer arrays retain their historic
+mutable-typed inputs for the same source-compatibility reason; node payloads
+remain immutable.
 
 Store inspection APIs that do not create nodes stay on `ixs_ctx`. That
 includes rule-hit statistics and any future store-level counters.

@@ -6151,15 +6151,15 @@ void ixs_ctx_stats_reset(ixs_ctx *ctx) {
 /*  Sentinel checks                                                   */
 /* ------------------------------------------------------------------ */
 
-bool ixs_is_error(ixs_node *node) {
+bool ixs_is_error(const ixs_node *node) {
   return node && (node->tag == IXS_ERROR || node->tag == IXS_PARSE_ERROR);
 }
 
-bool ixs_is_parse_error(ixs_node *node) {
+bool ixs_is_parse_error(const ixs_node *node) {
   return node && node->tag == IXS_PARSE_ERROR;
 }
 
-bool ixs_is_domain_error(ixs_node *node) {
+bool ixs_is_domain_error(const ixs_node *node) {
   return node && node->tag == IXS_ERROR;
 }
 
@@ -6462,7 +6462,7 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
 /*  Comparison and substitution                                       */
 /* ------------------------------------------------------------------ */
 
-bool ixs_same_node(ixs_node *a, ixs_node *b) { return a == b; }
+bool ixs_same_node(const ixs_node *a, const ixs_node *b) { return a == b; }
 
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement) {
@@ -6487,11 +6487,11 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
 /*  Output                                                            */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize) {
+size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize) {
   return ixs_print_impl(expr, buf, bufsize);
 }
 
-size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize) {
+size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize) {
   return ixs_print_c_impl(expr, buf, bufsize);
 }
 
@@ -6499,11 +6499,11 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize) {
 /*  Introspection                                                     */
 /* ------------------------------------------------------------------ */
 
-ixs_tag ixs_node_tag(ixs_node *node) { return node->tag; }
+ixs_tag ixs_node_tag(const ixs_node *node) { return node->tag; }
 
-int64_t ixs_node_int_val(ixs_node *node) { return node->u.ival; }
+int64_t ixs_node_int_val(const ixs_node *node) { return node->u.ival; }
 
-uint32_t ixs_node_hash(ixs_node *node) { return node->hash; }
+uint32_t ixs_node_hash(const ixs_node *node) { return node->hash; }
 
 /* ==================================================================== */
 /* expand.c                                                           */
@@ -8832,62 +8832,62 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
 /*  Type-specific accessors                                           */
 /* ------------------------------------------------------------------ */
 
-int64_t ixs_node_rat_num(ixs_node *node) {
+int64_t ixs_node_rat_num(const ixs_node *node) {
   assert(node && node->tag == IXS_RAT);
   return node->u.rat.p;
 }
 
-int64_t ixs_node_rat_den(ixs_node *node) {
+int64_t ixs_node_rat_den(const ixs_node *node) {
   assert(node && node->tag == IXS_RAT);
   return node->u.rat.q;
 }
 
-const char *ixs_node_sym_name(ixs_node *node) {
+const char *ixs_node_sym_name(const ixs_node *node) {
   assert(node && node->tag == IXS_SYM);
   return node->u.name;
 }
 
-ixs_node *ixs_node_add_coeff(ixs_node *node) {
+ixs_node *ixs_node_add_coeff(const ixs_node *node) {
   assert(node && node->tag == IXS_ADD);
   return node->u.add.coeff;
 }
 
-uint32_t ixs_node_add_nterms(ixs_node *node) {
+uint32_t ixs_node_add_nterms(const ixs_node *node) {
   assert(node && node->tag == IXS_ADD);
   return node->u.add.nterms;
 }
 
-ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_add_term(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_ADD && i < node->u.add.nterms);
   return node->u.add.terms[i].term;
 }
 
-ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_add_term_coeff(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_ADD && i < node->u.add.nterms);
   return node->u.add.terms[i].coeff;
 }
 
-ixs_node *ixs_node_mul_coeff(ixs_node *node) {
+ixs_node *ixs_node_mul_coeff(const ixs_node *node) {
   assert(node && node->tag == IXS_MUL);
   return node->u.mul.coeff;
 }
 
-uint32_t ixs_node_mul_nfactors(ixs_node *node) {
+uint32_t ixs_node_mul_nfactors(const ixs_node *node) {
   assert(node && node->tag == IXS_MUL);
   return node->u.mul.nfactors;
 }
 
-ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_MUL && i < node->u.mul.nfactors);
   return node->u.mul.factors[i].base;
 }
 
-int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i) {
+int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_MUL && i < node->u.mul.nfactors);
   return node->u.mul.factors[i].exp;
 }
 
-ixs_node *ixs_node_unary_arg(ixs_node *node) {
+ixs_node *ixs_node_unary_arg(const ixs_node *node) {
   assert(node && (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
                   node->tag == IXS_NOT));
   if (node->tag == IXS_NOT)
@@ -8895,46 +8895,46 @@ ixs_node *ixs_node_unary_arg(ixs_node *node) {
   return node->u.unary.arg;
 }
 
-ixs_node *ixs_node_binary_lhs(ixs_node *node) {
+ixs_node *ixs_node_binary_lhs(const ixs_node *node) {
   assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
                   node->tag == IXS_MIN || node->tag == IXS_XOR ||
                   node->tag == IXS_CMP));
   return node->u.binary.lhs;
 }
 
-ixs_node *ixs_node_binary_rhs(ixs_node *node) {
+ixs_node *ixs_node_binary_rhs(const ixs_node *node) {
   assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
                   node->tag == IXS_MIN || node->tag == IXS_XOR ||
                   node->tag == IXS_CMP));
   return node->u.binary.rhs;
 }
 
-ixs_cmp_op ixs_node_cmp_op(ixs_node *node) {
+ixs_cmp_op ixs_node_cmp_op(const ixs_node *node) {
   assert(node && node->tag == IXS_CMP);
   return node->u.binary.cmp_op;
 }
 
-uint32_t ixs_node_pw_ncases(ixs_node *node) {
+uint32_t ixs_node_pw_ncases(const ixs_node *node) {
   assert(node && node->tag == IXS_PIECEWISE);
   return node->u.pw.ncases;
 }
 
-ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
   return node->u.pw.cases[i].value;
 }
 
-ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
   return node->u.pw.cases[i].cond;
 }
 
-uint32_t ixs_node_logic_nargs(ixs_node *node) {
+uint32_t ixs_node_logic_nargs(const ixs_node *node) {
   assert(node && (node->tag == IXS_AND || node->tag == IXS_OR));
   return node->u.logic.nargs;
 }
 
-ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i) {
   assert(node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
          i < node->u.logic.nargs);
   return node->u.logic.args[i];
@@ -8944,7 +8944,7 @@ ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i) {
 /*  Generic child access                                              */
 /* ------------------------------------------------------------------ */
 
-uint32_t ixs_node_nchildren(ixs_node *node) {
+uint32_t ixs_node_nchildren(const ixs_node *node) {
   assert(node);
   switch (node->tag) {
   case IXS_ADD:
@@ -8971,7 +8971,7 @@ uint32_t ixs_node_nchildren(ixs_node *node) {
   }
 }
 
-ixs_node *ixs_node_child(ixs_node *node, uint32_t i) {
+ixs_node *ixs_node_child(const ixs_node *node, uint32_t i) {
   assert(node && i < ixs_node_nchildren(node));
   switch (node->tag) {
   case IXS_ADD:
@@ -9873,7 +9873,7 @@ typedef enum {
   PREC_TOP = 7
 } prec_t;
 
-static prec_t node_prec(ixs_node *n) {
+static prec_t node_prec(const ixs_node *n) {
   switch (n->tag) {
   case IXS_ADD:
     return PREC_ADD;
@@ -9892,9 +9892,9 @@ static prec_t node_prec(ixs_node *n) {
   }
 }
 
-static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec);
+static void print_node(printbuf *pb, const ixs_node *n, prec_t parent_prec);
 
-static void print_wrapped(printbuf *pb, ixs_node *n, prec_t parent_prec) {
+static void print_wrapped(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
   prec_t my = node_prec(n);
   if (my > parent_prec) {
     pb_char(pb, '(');
@@ -9905,7 +9905,7 @@ static void print_wrapped(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-static void print_add(printbuf *pb, ixs_node *n) {
+static void print_add(printbuf *pb, const ixs_node *n) {
   uint32_t i;
   int64_t cp, cq;
   bool first = true;
@@ -9991,7 +9991,7 @@ static void print_add(printbuf *pb, ixs_node *n) {
     pb_str(pb, "0");
 }
 
-static void print_mul_node(printbuf *pb, ixs_node *n) {
+static void print_mul_node(printbuf *pb, const ixs_node *n) {
   uint32_t i;
   int64_t cp, cq;
   bool need_sep = false;
@@ -10021,14 +10021,16 @@ static void print_mul_node(printbuf *pb, ixs_node *n) {
   }
 }
 
-static void print_unary_func(printbuf *pb, const char *name, ixs_node *arg) {
+static void print_unary_func(printbuf *pb, const char *name,
+                             const ixs_node *arg) {
   pb_str(pb, name);
   pb_char(pb, '(');
   print_node(pb, arg, PREC_TOP);
   pb_char(pb, ')');
 }
 
-static void print_binary_func(printbuf *pb, const char *name, ixs_node *n) {
+static void print_binary_func(printbuf *pb, const char *name,
+                              const ixs_node *n) {
   pb_str(pb, name);
   pb_char(pb, '(');
   print_node(pb, n->u.binary.lhs, PREC_TOP);
@@ -10055,13 +10057,13 @@ static const char *cmp_op_str(ixs_cmp_op op) {
   return "??";
 }
 
-static void print_cmp_node(printbuf *pb, ixs_node *n) {
+static void print_cmp_node(printbuf *pb, const ixs_node *n) {
   print_wrapped(pb, n->u.binary.lhs, PREC_CMP);
   pb_str(pb, cmp_op_str(n->u.binary.cmp_op));
   print_wrapped(pb, n->u.binary.rhs, PREC_CMP);
 }
 
-static void print_pw_cond(printbuf *pb, ixs_node *cond) {
+static void print_pw_cond(printbuf *pb, const ixs_node *cond) {
   if (ixs_node_is_known_true(cond))
     pb_str(pb, "True");
   else if (ixs_node_is_known_false(cond))
@@ -10070,7 +10072,7 @@ static void print_pw_cond(printbuf *pb, ixs_node *cond) {
     print_node(pb, cond, PREC_TOP);
 }
 
-static void print_pw_node(printbuf *pb, ixs_node *n) {
+static void print_pw_node(printbuf *pb, const ixs_node *n) {
   uint32_t i;
   pb_str(pb, "Piecewise(");
   for (i = 0; i < n->u.pw.ncases; i++) {
@@ -10085,7 +10087,7 @@ static void print_pw_node(printbuf *pb, ixs_node *n) {
   pb_char(pb, ')');
 }
 
-static void print_logic_node(printbuf *pb, ixs_node *n, const char *sep,
+static void print_logic_node(printbuf *pb, const ixs_node *n, const char *sep,
                              prec_t prec) {
   uint32_t i;
   for (i = 0; i < n->u.logic.nargs; i++) {
@@ -10095,7 +10097,7 @@ static void print_logic_node(printbuf *pb, ixs_node *n, const char *sep,
   }
 }
 
-static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
+static void print_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
   (void)parent_prec;
 
   if (!n) {
@@ -10178,7 +10180,8 @@ static void print_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-IXS_STATIC size_t ixs_print_impl(ixs_node *expr, char *buf, size_t bufsize) {
+IXS_STATIC size_t ixs_print_impl(const ixs_node *expr, char *buf,
+                                 size_t bufsize) {
   printbuf pb;
   if (!expr) {
     if (buf && bufsize > 0)
@@ -10195,9 +10198,10 @@ IXS_STATIC size_t ixs_print_impl(ixs_node *expr, char *buf, size_t bufsize) {
 /*  C output mode                                                     */
 /* ------------------------------------------------------------------ */
 
-static void print_c_node(printbuf *pb, ixs_node *n, prec_t parent_prec);
+static void print_c_node(printbuf *pb, const ixs_node *n, prec_t parent_prec);
 
-static void print_c_wrapped(printbuf *pb, ixs_node *n, prec_t parent_prec) {
+static void print_c_wrapped(printbuf *pb, const ixs_node *n,
+                            prec_t parent_prec) {
   prec_t my = node_prec(n);
   if (my > parent_prec) {
     pb_char(pb, '(');
@@ -10208,7 +10212,7 @@ static void print_c_wrapped(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-static void print_c_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
+static void print_c_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
   (void)parent_prec;
 
   if (!n) {
@@ -10275,7 +10279,8 @@ static void print_c_node(printbuf *pb, ixs_node *n, prec_t parent_prec) {
   }
 }
 
-IXS_STATIC size_t ixs_print_c_impl(ixs_node *expr, char *buf, size_t bufsize) {
+IXS_STATIC size_t ixs_print_c_impl(const ixs_node *expr, char *buf,
+                                   size_t bufsize) {
   printbuf pb;
   if (!expr) {
     if (buf && bufsize > 0)

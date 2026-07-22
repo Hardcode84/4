@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Sequence
 from fractions import Fraction
-from typing import Literal, Self, overload
+from typing import Literal, Self, TypeVar, overload
 
 # Assumption inputs accept CMP/boolean roots and AND trees with those leaves.
 # Unsupported predicate shapes raise ValueError.
@@ -120,6 +120,8 @@ class _Expr:
     @property
     def _ctx(self) -> Context: ...
 
+_BatchExpr = TypeVar("_BatchExpr", bound=_Expr)
+
 class Facts:
     def assume(self, pred: _Expr) -> None: ...
     def assume_range(
@@ -177,6 +179,8 @@ class Context:
         assumptions: Sequence[_Expr] | None = None,
         facts: Facts | None = None,
     ) -> bool | None: ...
+    def check_predicate(self, predicate: _Expr, facts: Facts) -> bool | None: ...
+    def equivalent(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> bool | None: ...
     def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
     def affine_decompose(
         self, expr: _Expr, symbol: _Expr, facts: Facts
@@ -212,7 +216,7 @@ class Context:
 
     def simplify_batch(
         self,
-        exprs: Sequence[_Expr],
+        exprs: list[_BatchExpr],
         *,
         assumptions: Sequence[_Expr] | None = None,
         facts: Facts | None = None,

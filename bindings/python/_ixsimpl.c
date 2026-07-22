@@ -283,8 +283,9 @@ static ContextObject *binop_ctx(PyObject *a, PyObject *b) {
 
 /* --- repr / str --- */
 
-static PyObject *print_to_pystr(ixs_node *node,
-                                size_t (*fn)(ixs_node *, char *, size_t)) {
+static PyObject *print_to_pystr(const ixs_node *node,
+                                size_t (*fn)(const ixs_node *, char *,
+                                             size_t)) {
   char stack_buf[8192];
   size_t n = fn(node, stack_buf, sizeof(stack_buf));
   if (n < sizeof(stack_buf))

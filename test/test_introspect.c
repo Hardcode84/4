@@ -544,6 +544,68 @@ static void test_walk_deep_chain(void) {
   printf("  walk_deep_chain: OK\n");
 }
 
+static void test_const_read_api(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *rat = ixs_rat(ctx, 3, 5);
+  ixs_node *sum = ixs_add(ctx, x, ixs_int(ctx, 2));
+  ixs_node *product = ixs_mul(ctx, x, y);
+  ixs_node *rounded = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *cmp = ixs_cmp(ctx, x, IXS_CMP_LT, y);
+  ixs_node *cmp2 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *logic = ixs_and(ctx, cmp, cmp2);
+  ixs_node *values[2] = {x, y};
+  ixs_node *conds[2] = {cmp, ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conds);
+  const ixs_node *const_x = x;
+  const ixs_node *const_rat = rat;
+  const ixs_node *const_sum = sum;
+  const ixs_node *const_product = product;
+  const ixs_node *const_rounded = rounded;
+  const ixs_node *const_cmp = cmp;
+  const ixs_node *const_logic = logic;
+  const ixs_node *const_piecewise = piecewise;
+  const ixs_node *parse_error = ixs_parse(ctx, "?", 1);
+  ixs_node *mutable_child;
+  char buf[64];
+
+  CHECK(ixs_node_tag(const_x) == IXS_SYM);
+  CHECK(strcmp(ixs_node_sym_name(const_x), "x") == 0);
+  CHECK(ixs_node_hash(const_x) == ixs_node_hash(x));
+  CHECK(ixs_node_rat_num(const_rat) == 3);
+  CHECK(ixs_node_rat_den(const_rat) == 5);
+  CHECK(ixs_node_add_nterms(const_sum) == 1);
+  CHECK(ixs_node_int_val(ixs_node_add_coeff(const_sum)) == 2);
+  CHECK(ixs_same_node(ixs_node_add_term(const_sum, 0), x));
+  CHECK(ixs_node_int_val(ixs_node_add_term_coeff(const_sum, 0)) == 1);
+  CHECK(ixs_node_mul_nfactors(const_product) == 2);
+  CHECK(ixs_node_int_val(ixs_node_mul_coeff(const_product)) == 1);
+  CHECK(ixs_node_mul_factor_base(const_product, 0) != NULL);
+  CHECK(ixs_node_mul_factor_exp(const_product, 0) == 1);
+  CHECK(ixs_node_unary_arg(const_rounded) != NULL);
+  CHECK(ixs_node_binary_lhs(const_cmp) != NULL);
+  CHECK(ixs_node_int_val(ixs_node_binary_rhs(const_cmp)) == 0);
+  CHECK(ixs_node_cmp_op(const_cmp) == IXS_CMP_LT);
+  CHECK(ixs_node_logic_nargs(const_logic) == 2);
+  CHECK(ixs_node_logic_arg(const_logic, 0) != NULL);
+  CHECK(ixs_node_pw_ncases(const_piecewise) == 2);
+  CHECK(ixs_same_node(ixs_node_pw_value(const_piecewise, 0), x));
+  CHECK(ixs_same_node(ixs_node_pw_cond(const_piecewise, 1), ixs_true(ctx)));
+  CHECK(ixs_node_nchildren(const_sum) == 3);
+  mutable_child = ixs_node_child(const_sum, 0);
+  CHECK(mutable_child != NULL);
+  CHECK(ixs_print(const_sum, buf, sizeof(buf)) > 0);
+  CHECK(ixs_print_c(const_sum, buf, sizeof(buf)) > 0);
+  CHECK(!ixs_is_error(const_x));
+  CHECK(ixs_is_error(parse_error));
+  CHECK(ixs_is_parse_error(parse_error));
+  CHECK(!ixs_is_domain_error(parse_error));
+
+  ixs_ctx_destroy(ctx);
+  printf("  const_read_api: OK\n");
+}
+
 int main(void) {
   printf("test_introspect:\n");
   test_rat_accessors();
@@ -570,6 +632,7 @@ int main(void) {
   test_walk_sentinel();
   test_walk_same_session_reentry();
   test_walk_deep_chain();
+  test_const_read_api();
   printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
 }

@@ -17,6 +17,13 @@
  *   ERROR        -- domain error (e.g. division by zero).  Same.
  * Check with ixs_is_error / ixs_is_parse_error / ixs_is_domain_error.
  * Human-readable messages accumulate in the session error list.
+ *
+ * Node payloads are immutable after interning.  Pure inspection APIs accept
+ * const ixs_node pointers.  Constructors, transforms, proof queries, walks,
+ * and pointer-array APIs retain mutable-typed handles for source compatibility
+ * with the original API and with their mutable-typed node results; callers
+ * still must not modify the opaque payload.  Structural child accessors also
+ * return mutable-typed handles for that compatibility reason.
  */
 
 #ifndef IXSIMPL_H
@@ -92,13 +99,13 @@ void ixs_session_clear_errors(ixs_session *s);
 /* --- Sentinel checks --------------------------------------------------- */
 
 /* True if node is any sentinel (PARSE_ERROR or ERROR). */
-bool ixs_is_error(ixs_node *node);
+bool ixs_is_error(const ixs_node *node);
 
 /* True if node is specifically a parse error sentinel. */
-bool ixs_is_parse_error(ixs_node *node);
+bool ixs_is_parse_error(const ixs_node *node);
 
 /* True if node is specifically a domain error sentinel. */
-bool ixs_is_domain_error(ixs_node *node);
+bool ixs_is_domain_error(const ixs_node *node);
 
 /* --- Parse ------------------------------------------------------------- */
 
@@ -409,7 +416,7 @@ ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 /* --- Comparison and substitution --------------------------------------- */
 
 /* Pointer equality on hash-consed nodes.  Safe to call with NULL. */
-bool ixs_same_node(ixs_node *a, ixs_node *b);
+bool ixs_same_node(const ixs_node *a, const ixs_node *b);
 
 /* Return expr with all occurrences of target replaced by replacement.
  * target can be any node (symbol, subexpression, constant, etc.).
@@ -481,10 +488,10 @@ ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
 
 /* Print in SymPy-compatible syntax.  Returns bytes written (excl. NUL).
  * Output is truncated if bufsize is insufficient. */
-size_t ixs_print(ixs_node *expr, char *buf, size_t bufsize);
+size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize);
 
 /* Print in C syntax where possible; falls back to SymPy style. */
-size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize);
+size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize);
 
 /* --- Introspection ----------------------------------------------------- */
 
@@ -509,63 +516,65 @@ typedef enum {
   IXS_PARSE_ERROR
 } ixs_tag;
 
-/* All introspection functions require non-NULL node. */
+/* All introspection functions require a non-NULL node.  Returned child handles
+ * remain mutable-typed for source compatibility, but node payloads are
+ * immutable and may only be consumed by public APIs. */
 
-ixs_tag ixs_node_tag(ixs_node *node);
+ixs_tag ixs_node_tag(const ixs_node *node);
 
 /* Only valid when tag is IXS_INT. */
-int64_t ixs_node_int_val(ixs_node *node);
+int64_t ixs_node_int_val(const ixs_node *node);
 
 /* Structural hash (deterministic, not an address).  Useful for
  * external hash tables; not guaranteed stable across library versions. */
-uint32_t ixs_node_hash(ixs_node *node);
+uint32_t ixs_node_hash(const ixs_node *node);
 
 /* Only valid when tag is IXS_RAT. */
-int64_t ixs_node_rat_num(ixs_node *node);
-int64_t ixs_node_rat_den(ixs_node *node);
+int64_t ixs_node_rat_num(const ixs_node *node);
+int64_t ixs_node_rat_den(const ixs_node *node);
 
 /* Only valid when tag is IXS_SYM.  Pointer valid for ctx lifetime. */
-const char *ixs_node_sym_name(ixs_node *node);
+const char *ixs_node_sym_name(const ixs_node *node);
 
 /* Only valid when tag is IXS_ADD.  i must be < nterms.
  * ADD = coeff + sum(term_coeff[i] * term[i]). */
-ixs_node *ixs_node_add_coeff(ixs_node *node);
-uint32_t ixs_node_add_nterms(ixs_node *node);
-ixs_node *ixs_node_add_term(ixs_node *node, uint32_t i);
-ixs_node *ixs_node_add_term_coeff(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_coeff(const ixs_node *node);
+uint32_t ixs_node_add_nterms(const ixs_node *node);
+ixs_node *ixs_node_add_term(const ixs_node *node, uint32_t i);
+ixs_node *ixs_node_add_term_coeff(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_MUL.  i must be < nfactors.
  * MUL = coeff * product(base[i] ^ exp[i]). */
-ixs_node *ixs_node_mul_coeff(ixs_node *node);
-uint32_t ixs_node_mul_nfactors(ixs_node *node);
-ixs_node *ixs_node_mul_factor_base(ixs_node *node, uint32_t i);
-int32_t ixs_node_mul_factor_exp(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_mul_coeff(const ixs_node *node);
+uint32_t ixs_node_mul_nfactors(const ixs_node *node);
+ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
+int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
-ixs_node *ixs_node_unary_arg(ixs_node *node);
+ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
 /* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
  * IXS_XOR, or IXS_CMP. */
-ixs_node *ixs_node_binary_lhs(ixs_node *node);
-ixs_node *ixs_node_binary_rhs(ixs_node *node);
+ixs_node *ixs_node_binary_lhs(const ixs_node *node);
+ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
 /* Only valid when tag is IXS_CMP. */
-ixs_cmp_op ixs_node_cmp_op(ixs_node *node);
+ixs_cmp_op ixs_node_cmp_op(const ixs_node *node);
 
 /* Only valid when tag is IXS_PIECEWISE.  i must be < ncases. */
-uint32_t ixs_node_pw_ncases(ixs_node *node);
-ixs_node *ixs_node_pw_value(ixs_node *node, uint32_t i);
-ixs_node *ixs_node_pw_cond(ixs_node *node, uint32_t i);
+uint32_t ixs_node_pw_ncases(const ixs_node *node);
+ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
+ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_AND or IXS_OR.  New nodes are binary, but
  * deserialized legacy nodes may have more children. i must be < nargs. */
-uint32_t ixs_node_logic_nargs(ixs_node *node);
-ixs_node *ixs_node_logic_arg(ixs_node *node, uint32_t i);
+uint32_t ixs_node_logic_nargs(const ixs_node *node);
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
 
 /* --- Generic child access ----------------------------------------------- */
 
 /* Number of child node pointers.  Leaves return 0. */
-uint32_t ixs_node_nchildren(ixs_node *node);
+uint32_t ixs_node_nchildren(const ixs_node *node);
 
 /* i-th child node.  i must be < ixs_node_nchildren(node).
  * Child order matches the type-specific accessors:
@@ -575,7 +584,7 @@ uint32_t ixs_node_nchildren(ixs_node *node);
  *   unary: arg
  *   PW:  (value[0], cond[0]), (value[1], cond[1]), ...
  *   AND/OR: arg[0], arg[1], ... */
-ixs_node *ixs_node_child(ixs_node *node, uint32_t i);
+ixs_node *ixs_node_child(const ixs_node *node, uint32_t i);
 
 /* --- Rule-hit statistics (requires -DIXS_STATS at compile time) -------- */
 

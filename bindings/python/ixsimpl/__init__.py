@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from ixsimpl._ixsimpl import (
     ADD,
@@ -132,6 +132,8 @@ if TYPE_CHECKING:
     from ixsimpl._ixsimpl import Context as _Context
     from ixsimpl._ixsimpl import Facts
 
+    _BatchExpr = TypeVar("_BatchExpr", bound=_Expr)
+
     # Assumption inputs accept CMP/boolean roots and AND trees with those leaves.
     # Unsupported predicate shapes raise ValueError.
 
@@ -208,7 +210,7 @@ if TYPE_CHECKING:
         ) -> tuple[int | Fraction | None, int | Fraction | None] | None: ...
         def simplify_batch(
             self,
-            exprs: Sequence[_Expr],
+            exprs: list[_BatchExpr],
             *,
             assumptions: Sequence[_Expr] | None = None,
             facts: Facts | None = None,

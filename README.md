@@ -148,6 +148,11 @@ API. Key functions:
 | `ixs_node_tag`, `ixs_node_child`, ... | Node introspection and generic child access |
 | `ixs_ctx_nstats`, `ixs_ctx_stat` | Rule-hit statistics (requires `-DIXS_STATS`) |
 
+Interned nodes are immutable. Sentinel checks, identity checks, printers, and
+structural introspection accept `const ixs_node *`. Child accessors retain
+mutable-typed return handles so existing code can pass them directly to the
+node-producing APIs; callers still cannot and must not mutate node payloads.
+
 ## Rule-Hit Statistics
 
 Build with `-DENABLE_STATS=ON` to count how many times each
