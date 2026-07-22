@@ -1008,6 +1008,7 @@ Min(a, b)       where a,b constant   → min(a, b)
 xor(a, a)       → 0
 xor(a, 0)       → a
 xor(0, b)       → b
+xor(a, xor(a,b)) → b  (either outer or inner operand order)
 xor(c1, c2)     → c1 ^ c2  (constant fold)
 xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
 
@@ -1093,6 +1094,11 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   symbol remainders when the stored modulus is a multiple of the query
   modulus, and proves zero remainders for composite expressions through
   the same sufficient divisibility predicate used by simplification rules.
+- **Atomic predicate checks**: `ixs_check` and `ixs_check_facts` accept a
+  normalized comparison or the canonical integer `1`/`0` produced when a
+  smart constructor resolves a comparison. Other non-comparison expressions
+  remain unknown. Contradictory fact domains never prove even a constant
+  predicate.
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 

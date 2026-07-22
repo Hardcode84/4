@@ -228,11 +228,12 @@ typedef struct {
 
 /* Check whether a comparison is provably true or false given the
  * assumptions, using interval propagation, modular congruence facts, and
- * bitwise facts.
- * expr must be a CMP node in normalized form (lhs op 0) -- this is
- * automatic when constructed via ixs_cmp().  Returns UNKNOWN when bounds
- * are insufficient, when expr is not a CMP, or on OOM.  Lighter than
- * ixs_simplify: no rewriting, just bounds setup + entailment checks. */
+ * bitwise facts.  expr must be a CMP node in normalized form (lhs op 0), or
+ * the canonical true/false node produced when a smart constructor resolves a
+ * comparison.  CMP normalization is automatic through ixs_cmp().  Returns
+ * UNKNOWN when bounds are insufficient, when expr has another form, or on
+ * OOM.  Lighter than ixs_simplify: no rewriting, just bounds setup and
+ * entailment checks. */
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
 
@@ -327,6 +328,8 @@ ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
  * detected contradictory facts leave every entry unchanged. */
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 
+/* Reusable-fact form of ixs_check with the same CMP or canonical
+ * true/false input contract. */
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 /* Check a predicate tree against an existing fact set.  AND, OR, and NOT use
  * conservative three-valued logic.  Numeric bitwise AND/OR expressions are

@@ -3251,7 +3251,18 @@ IXS_STATIC ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /*  simp_xor                                                          */
 /* ------------------------------------------------------------------ */
 
+static ixs_node *xor_cancel_nested(ixs_node *outer, ixs_node *nested) {
+  if (!outer || !nested || nested->tag != IXS_XOR)
+    return NULL;
+  if (outer == nested->u.binary.lhs)
+    return nested->u.binary.rhs;
+  if (outer == nested->u.binary.rhs)
+    return nested->u.binary.lhs;
+  return NULL;
+}
+
 IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
+  ixs_node *cancelled;
   if (!a || !b)
     return NULL;
   ixs_node *prop = ixs_propagate2(a, b);
@@ -3264,6 +3275,14 @@ IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
     return b;
   if (ixs_node_is_zero(b))
     return a;
+
+  /* XOR is associative: a ^ (a ^ b) == b.  Check both outer positions
+   * because callers can present either order before canonical sorting. */
+  cancelled = xor_cancel_nested(a, b);
+  if (!cancelled)
+    cancelled = xor_cancel_nested(b, a);
+  if (cancelled)
+    return cancelled;
 
   if (a->tag == IXS_INT && b->tag == IXS_INT)
     return ixs_node_int(ctx, a->u.ival ^ b->u.ival);

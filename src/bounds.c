@@ -2778,10 +2778,20 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
   ixs_check_result mod_result, bit_result;
 
-  if (!cmp || cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
+  if (!cmp)
     return IXS_CHECK_UNKNOWN;
 
   if (ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+
+  /* Smart constructors can reduce a comparison to its canonical predicate
+   * constant before it reaches the query API. */
+  if (cmp->tag == IXS_INT && cmp->u.ival == 1)
+    return IXS_CHECK_TRUE;
+  if (cmp->tag == IXS_INT && cmp->u.ival == 0)
+    return IXS_CHECK_FALSE;
+
+  if (cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
     return IXS_CHECK_UNKNOWN;
 
   mod_result = bounds_check_mod_query(b, cmp);

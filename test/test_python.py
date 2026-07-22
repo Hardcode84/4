@@ -2759,6 +2759,30 @@ def test_compound_assumption_ingestion_parity() -> None:
     assert ctx.range(x, facts=facts) == (0, 31)
 
 
+def test_fact_check_nested_xor_cancellation_parity() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("xor_check_x")
+    one, two = ctx.int_(1), ctx.int_(2)
+    pred = ixsimpl.and_(x >= 0, x <= 31)
+    nested = ixsimpl.xor_(one, ixsimpl.xor_(one, x))
+    query = ctx.eq(nested, x)
+    different = ixsimpl.xor_(one, ixsimpl.xor_(two, x))
+    nonmatching = ctx.eq(different, x)
+
+    assert nested == x
+    assert ctx.check(query, assumptions=[pred]) is True
+
+    facts = ctx.facts()
+    facts.assume(pred)
+    assert ctx.check(query, facts=facts) is True
+    assert ctx.check_predicate(query, facts) is True
+    assert ctx.equivalent(nested, x, facts) is True
+
+    assert different != x
+    assert ctx.check(nonmatching, assumptions=[pred]) is None
+    assert ctx.check(nonmatching, facts=facts) is None
+
+
 def test_fact_backed_simplification() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("fact_simplify_x"), ctx.sym("fact_simplify_y")

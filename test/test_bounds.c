@@ -1091,11 +1091,26 @@ static void test_public_pow2_fact(void) {
   ixs_ctx_destroy(ctx);
 }
 
-/* Non-CMP input returns UNKNOWN. */
+/* Canonical predicates survive smart-constructor folding; other non-CMP
+ * inputs return UNKNOWN. */
 static void test_bounds_check_non_cmp(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *falsehood = ixs_false(ctx);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  CHECK(ixs_check(ctx, ixs_true(ctx), NULL, 0) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, ixs_false(ctx), NULL, 0) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx, ixs_int(ctx, 2), NULL, 0) == IXS_CHECK_UNKNOWN);
   CHECK(ixs_check(ctx, x, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(facts, ixs_true(ctx)) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, ixs_false(ctx)) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_facts(facts, ixs_int(ctx, 2)) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(facts, x) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check(ctx, ixs_true(ctx), &falsehood, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(contradictory, falsehood));
+  CHECK(ixs_check_facts(contradictory, ixs_true(ctx)) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(contradictory, ixs_false(ctx)) == IXS_CHECK_UNKNOWN);
   ixs_ctx_destroy(ctx);
 }
 
@@ -1602,6 +1617,34 @@ static void test_compound_assumption_legacy_fact_parity(void) {
   CHECK(fact_range.upper_q == legacy_range.upper_q);
   CHECK(ixs_check_facts(facts, query) == IXS_CHECK_TRUE);
   CHECK(ixs_get_pow2_fact_facts(facts, d) == IXS_POW2_POSITIVE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_fact_check_xor_cancellation_parity(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "xor_check_x");
+  ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31));
+  ixs_node *range = ixs_and(ctx, lo, hi);
+  ixs_node *nested =
+      ixs_xor(ctx, ixs_int(ctx, 1), ixs_xor(ctx, ixs_int(ctx, 1), x));
+  ixs_node *equal = ixs_cmp(ctx, nested, IXS_CMP_EQ, x);
+  ixs_node *different =
+      ixs_xor(ctx, ixs_int(ctx, 1), ixs_xor(ctx, ixs_int(ctx, 2), x));
+  ixs_node *not_equal = ixs_cmp(ctx, different, IXS_CMP_EQ, x);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(nested == x);
+  CHECK(ixs_check(ctx, equal, &range, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(facts, range));
+  CHECK(ixs_check_facts(facts, equal) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_predicate_facts(facts, equal) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(facts, nested, x) == IXS_CHECK_TRUE);
+
+  CHECK(different != x);
+  CHECK(ixs_check(ctx, not_equal, &range, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(facts, not_equal) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
 }
@@ -3411,6 +3454,7 @@ int main(void) {
   test_failed_expand_is_not_expression_fact_alias();
   test_public_facts_assume_conjunction();
   test_compound_assumption_legacy_fact_parity();
+  test_fact_check_xor_cancellation_parity();
   test_compound_assumption_rejection_is_atomic();
   test_compound_assumption_boolean_constants();
   test_public_facts_assume_deep_conjunction();

@@ -623,6 +623,23 @@ static void test_xor_known_bit_simplification(void) {
   }
 }
 
+static void test_xor_nested_cancellation(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "xor_cancel_x");
+  ixs_node *y = ixs_sym(ctx, "xor_cancel_y");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *uncancelled;
+
+  CHECK(ixs_xor(ctx, one, ixs_xor(ctx, one, x)) == x);
+  CHECK(ixs_xor(ctx, ixs_xor(ctx, x, one), one) == x);
+  CHECK(ixs_xor(ctx, x, ixs_xor(ctx, y, x)) == y);
+
+  uncancelled = ixs_xor(ctx, one, ixs_xor(ctx, two, x));
+  CHECK(ixs_node_tag(uncancelled) == IXS_XOR);
+  CHECK(uncancelled != x);
+}
+
 static void test_simplify_with_bounds(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *T0 = ixs_sym(ctx, "$T0");
@@ -3175,6 +3192,7 @@ int main(void) {
   test_mod_rules();
   test_mod_divisor_contract();
   test_boolean();
+  test_xor_nested_cancellation();
   test_xor_known_bit_simplification();
   test_simplify_with_bounds();
   test_eq_substitution();
