@@ -964,10 +964,9 @@ def test_to_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
             sp_val = sp_converted.xreplace(sp_env)
             if not sp_val.is_number:
                 continue
-            assert int(sp_val) == ixs_val, (
-                f"to_sympy mismatch at {env}: "
-                f"ixsimpl={ixs_val}, sympy={int(sp_val)}, expr={expr}"
-            )
+            assert (
+                int(sp_val) == ixs_val
+            ), f"to_sympy mismatch at {env}: ixsimpl={ixs_val}, sympy={int(sp_val)}, expr={expr}"
             checked += 1
         except (ZeroDivisionError, ValueError, TypeError, OverflowError):
             continue
@@ -1007,10 +1006,9 @@ def test_from_sympy_semantics(expr: ExprTree, envs: list[Env]) -> None:
             ixs_val = eval_ixs(ixs_converted, ctx, env)
         except (ValueError, TypeError):
             continue
-        assert ixs_val == ground_truth, (
-            f"from_sympy mismatch at {env}: "
-            f"expected={ground_truth}, ixsimpl={ixs_val}, expr={expr}"
-        )
+        assert (
+            ixs_val == ground_truth
+        ), f"from_sympy mismatch at {env}: expected={ground_truth}, ixsimpl={ixs_val}, expr={expr}"
         checked += 1
     assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
@@ -1056,10 +1054,9 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
             rt_val = eval_ixs(roundtripped, ctx, env)
         except (ValueError, TypeError, OverflowError):
             continue
-        assert orig_val == rt_val, (
-            f"roundtrip mismatch at {env}: "
-            f"original={orig_val}, roundtripped={rt_val}, expr={expr}"
-        )
+        assert (
+            orig_val == rt_val
+        ), f"roundtrip mismatch at {env}: original={orig_val}, roundtripped={rt_val}, expr={expr}"
         checked += 1
     assume(checked > 0)  # reject vacuous passes (all envs skipped)
 
@@ -1840,6 +1837,79 @@ def test_check_contradictory_assumptions_unknown() -> None:
 
     assert ctx.check(x >= 0, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.pow2_fact(x, assumptions=[x >= 10, x <= 5]) is None
+
+
+def test_integrality_queries_structural_assumption_and_facts() -> None:
+    ctx = ixsimpl.Context()
+    x, k = ctx.sym("x"), ctx.sym("K")
+    reciprocal = 1 / x
+    scaled = k / 32
+    total = x + scaled
+    half = ctx.rat(1, 2)
+    congruence = ctx.eq(k % 32, 0)
+
+    assert x.is_integer_valued
+    assert not reciprocal.is_integer_valued
+    assert not scaled.is_integer_valued
+    assert not total.is_integer_valued
+    assert not half.is_integer_valued
+
+    assert ctx.integer_valued(reciprocal) is None
+    assert ctx.integer_valued(scaled) is None
+    assert ctx.integer_valued(total) is None
+    assert ctx.integer_valued(half) is False
+    assert ctx.integer_valued(scaled, assumptions=[congruence]) is True
+    assert ctx.integer_valued(total, assumptions=[congruence]) is True
+
+    facts = ctx.facts()
+    facts.assume(congruence)
+    piecewise = ixsimpl.pw((scaled, x > 0), (x, ctx.true_()))
+    assert not piecewise.is_integer_valued
+    assert ctx.integer_valued(piecewise, facts=facts) is True
+    assert ctx.divisible(k, 32, facts) is True
+    assert ctx.divisible(k, -32, facts) is True
+    assert ctx.divisible(k, 64, facts) is None
+
+
+def test_integrality_and_divisibility_invalid_inputs() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("x")
+    facts = ctx.facts()
+    contradictory = ctx.facts()
+    contradictory.assume(x >= 10)
+    contradictory.assume(x <= 5)
+    sentinel = ctx.parse_expr("(")
+
+    assert ctx.integer_valued(x, facts=contradictory) is None
+    assert ctx.divisible(ctx.int_(64), 32, contradictory) is None
+    assert not sentinel.is_integer_valued
+    assert ctx.integer_valued(sentinel) is None
+    assert ctx.divisible(sentinel, 8, facts) is None
+
+    with pytest.raises(ValueError, match="different context"):
+        ctx.integer_valued(other.sym("x"))
+    with pytest.raises(ValueError, match="different context"):
+        ctx.divisible(other.sym("x"), 8, facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.divisible(x, 8, other.facts())
+    with pytest.raises(ValueError, match="modulus must be nonzero"):
+        ctx.divisible(x, 0, facts)
+
+
+@example(value=-(1 << 63), modulus=-(1 << 63))
+@example(value=(1 << 63) - 1, modulus=-(1 << 63))
+@given(
+    value=st.integers(min_value=-(1 << 63), max_value=(1 << 63) - 1),
+    modulus=st.integers(min_value=-(1 << 63), max_value=(1 << 63) - 1).filter(
+        lambda value: value != 0
+    ),
+)
+def test_exact_integer_divisibility_query(value: int, modulus: int) -> None:
+    ctx = ixsimpl.Context()
+    facts = ctx.facts()
+
+    assert ctx.divisible(ctx.int_(value), modulus, facts) is (value % modulus == 0)
 
 
 @given(

@@ -47,6 +47,10 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
                                        ixs_node *const *assumptions,
                                        size_t n_assumptions);
 
+IXS_STATIC ixs_check_result
+simp_check_integer_valued(ixs_ctx *ctx, ixs_node *expr,
+                          ixs_node *const *assumptions, size_t n_assumptions);
+
 /* Power-of-two fact query: bounds-only, no rewriting. */
 IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
                                             ixs_node *const *assumptions,

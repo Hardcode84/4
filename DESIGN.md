@@ -1117,13 +1117,13 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 **Compound assumption ingestion**: All predicate-bearing entry points use one
 bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
-`ixs_get_pow2_fact`, `ixs_range`, and `ixs_facts_assume_pred`. Each predicate
-root may be a CMP, a canonical true/false node, or an AND tree whose leaves
-have those forms. True contributes no fact; false marks the bounds as
-contradictory. Supporting these constants preserves predicates that simplify
-before ingestion, such as `(x & 0) == 0`. The walker visits at most 1024 nodes
-per root and therefore does not consume one C call frame per nested
-conjunction.
+`ixs_check_integer_valued`, `ixs_get_pow2_fact`, `ixs_range`, and
+`ixs_facts_assume_pred`. Each predicate root may be a CMP, a canonical
+true/false node, or an AND tree whose leaves have those forms. True contributes
+no fact; false marks the bounds as contradictory. Supporting these constants
+preserves predicates that simplify before ingestion, such as `(x & 0) == 0`.
+The walker visits at most 1024 nodes per root and therefore does not consume one
+C call frame per nested conjunction.
 
 OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
@@ -1132,8 +1132,8 @@ entry is rejected or fails; it never queries a partially ingested prefix.
 `ixs_facts_assume_pred` applies the predicate to a fork and commits only after
 the entire tree succeeds, so an existing fact set is unchanged on rejection or
 OOM. Rejection returns the domain-error sentinel from `ixs_simplify`, fills an
-entire batch with that sentinel, returns unknown/no-result from the three query
-APIs, and returns false from `ixs_facts_assume_pred`. Structurally valid but
+entire batch with that sentinel, returns unknown/no-result from the query APIs,
+and returns false from `ixs_facts_assume_pred`. Structurally valid but
 contradictory conjunctions retain the existing unknown/no-result behavior.
 
 **Conflicting assumptions**: User-assumption validation and error reporting are
@@ -1251,12 +1251,28 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   (`unknown`, `or_zero`, `positive`), not the internal known-bit masks.
   It uses both direct bitfacts and exact integer intervals inferred for
   arithmetic expressions.  Detected contradictory assumptions return unknown.
+- **Public integrality queries**: `ixs_node_is_integer_valued` is a
+  conservative structural test. It rejects negative powers and rational
+  coefficients without consulting facts. `ixs_check_integer_valued` and
+  `ixs_check_integer_valued_facts` add interval and congruence reasoning, so
+  `K/32` is proven integral under `Mod(K, 32) == 0`. A `Piecewise` is proven
+  integral only when every branch not proven unreachable has an integral
+  value. `TRUE` and `FALSE` are universal proofs; a failed sufficient proof is
+  `UNKNOWN`, while an exact noninteger rational point may return `FALSE`.
+- **Public divisibility query** (`ixs_check_divisible_facts`, Python
+  `Context.divisible`, C++ `Facts::check_divisible`): first proves that the
+  expression is integer-valued, then uses exact values, congruences, and known
+  low-zero bits. Exact nonmultiples return `FALSE`; incomplete evidence returns
+  `UNKNOWN`. The modulus must be nonzero. Negative moduli use their unsigned
+  magnitude, including the `2^63` magnitude of `INT64_MIN`, so normalization
+  cannot overflow.
 - **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
   proof contexts for callers that carry facts through IR rewrites instead of
   re-encoding everything as predicates.  A fact set accepts predicate facts,
   explicit expression ranges, affine range transfer (`scale*base + offset`),
-  and substitution transfer.  `Context.range(..., facts=f)`,
-  `Context.check(..., facts=f)`, and `Context.pow2_fact(..., facts=f)` query
+  and substitution transfer. `Context.range(..., facts=f)`,
+  `Context.check(..., facts=f)`, `Context.integer_valued(..., facts=f)`,
+  `Context.divisible(..., facts=f)`, and `Context.pow2_fact(..., facts=f)` query
   these facts directly before relying on structural interval propagation.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
@@ -1552,6 +1568,10 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+bool ixs_node_is_integer_valued(const ixs_node *expr);
+ixs_check_result ixs_check_integer_valued(
+    ixs_session *s, ixs_node *expr,
+    ixs_node *const *assumptions, size_t n_assumptions);
 
 // Power-of-two fact query under assumptions.  Returns the strongest provable
 // fact, or UNKNOWN when no fact is proven.
@@ -1590,6 +1610,11 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                ixs_node *expr);
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                           ixs_node *expr,
+                                           int64_t modulus);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
@@ -2101,6 +2126,9 @@ public:
     bool is_domain_error() const { return node_ && ixs_is_domain_error(node_); }
     bool is_expr() const { return node_ && ixs_node_is_expr(node_); }
     bool is_pred() const { return node_ && ixs_node_is_pred(node_); }
+    bool is_integer_valued() const {
+        return node_ && ixs_node_is_integer_valued(node_);
+    }
     explicit operator bool() const { return node_ && !ixs_is_error(node_); }
 
     ixs_node *raw() const { return node_; }
@@ -2123,6 +2151,11 @@ Key properties:
   specific sentinels, `is_error()` checks either.
 - `parse_expr()` and `parse_pred()` expose the kind-aware parse surface;
   `parse()` remains the backward-compatible expression parser.
+- `Expr::is_integer_valued()` exposes structural classification, while
+  `Expr::check_integer_valued()` consumes an assumption array. `Context::facts()`
+  returns a lightweight session-owned `Facts` wrapper whose
+  `check_integer_valued()` and `check_divisible()` methods expose fact-backed
+  proofs.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -2198,6 +2231,8 @@ Implementation:
 - `Expr.is_parse_error` / `Expr.is_domain_error` — specific checks.
 - `Expr.is_expr` / `Expr.is_pred` — root-kind checks. Predicate values are also
   expressions; `is_pred` means the node is known to produce only `0` or `1`.
+- `Expr.is_integer_valued` — conservative structural integrality, without
+  assumptions or facts.
 - `Expr.node_ptr` — raw `ixs_node*` address exposed as a Python `int`.
   This is for identity/debug/FFI plumbing only.  It is not a stable semantic
   ID, and it is only meaningful while the owning `Context` is alive.
@@ -2210,13 +2245,17 @@ Implementation:
   assumptions=[...])` returns `(lower, upper)` from the same interval engine,
   or `None` when unknown.  Endpoints are Python `int`,
   `fractions.Fraction`, or `None` for an unbounded side.
+- `Context.integer_valued(expr, assumptions=[...])` and the alternative
+  `facts=...` form expose tri-state integrality. `Context.divisible(expr,
+  modulus, facts)` exposes fact-backed tri-state divisibility and raises
+  `ValueError` for modulus zero.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
   `scale*base + offset`, and `Facts.subs()` transfers expression ranges
-  through substitution.  `Context.check`, `Context.range`, and
-  `Context.pow2_fact` accept `facts=...` as an alternative to
-  `assumptions=[...]`.
+  through substitution. `Context.check`, `Context.range`,
+  `Context.integer_valued`, and `Context.pow2_fact` accept `facts=...` as an
+  alternative to `assumptions=[...]`; `Context.divisible` requires a fact set.
 - Every Python `assumptions=[...]` entry and `Facts.assume()` predicate must be
   a CMP, a canonical boolean constant, or an AND tree with those leaves.
   Unsupported or malformed predicate shapes raise `ValueError`; a failed
@@ -2441,6 +2480,9 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+ixs_check_result ixs_check_integer_valued(
+    ixs_session *s, ixs_node *expr,
+    ixs_node *const *assumptions, size_t n_assumptions);
 
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
@@ -2466,6 +2508,11 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                ixs_node *expr);
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                           ixs_node *expr,
+                                           int64_t modulus);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
@@ -2498,6 +2545,7 @@ expressions from 0/1 predicate values:
 ```c
 bool ixs_node_is_expr(const ixs_node *node);
 bool ixs_node_is_pred(const ixs_node *node);
+bool ixs_node_is_integer_valued(const ixs_node *expr);
 ```
 
 Exact classification:
@@ -2509,6 +2557,13 @@ Exact classification:
   whose operands are predicate nodes, and `IXS_PIECEWISE` whose values are
   predicate nodes
 - sentinels are neither
+
+Structural integrality is likewise a node-only conservative classification.
+Integer constants, symbols, floor/ceiling, predicates, integer-coefficient
+sums/products with nonnegative powers, and compositions whose operands are all
+structurally integral return true. Rational coefficients, negative powers, and
+any `Piecewise` with a nonintegral value return false. Use the tri-state query
+when assumptions or fact sets should participate.
 
 `ixs_pw` remains expression-valued: every non-sentinel branch value must be an
 expression, every branch condition is evaluated with logical truthiness, and a

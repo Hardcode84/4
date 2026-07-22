@@ -157,6 +157,14 @@ if TYPE_CHECKING:
             assumptions: Sequence[_Expr] | None = None,
             facts: Facts | None = None,
         ) -> bool | None: ...
+        def integer_valued(
+            self,
+            expr: _Expr,
+            *,
+            assumptions: Sequence[_Expr] | None = None,
+            facts: Facts | None = None,
+        ) -> bool | None: ...
+        def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
         def pow2_fact(
             self,
             expr: _Expr,

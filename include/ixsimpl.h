@@ -117,6 +117,9 @@ ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
  * Sentinels are neither. */
 bool ixs_node_is_expr(const ixs_node *node);
 bool ixs_node_is_pred(const ixs_node *node);
+/* True when expr is structurally guaranteed to be integer-valued.  This
+ * conservative query does not use assumptions or fact sets. */
+bool ixs_node_is_integer_valued(const ixs_node *expr);
 
 /* --- Constructors ------------------------------------------------------ */
 
@@ -185,15 +188,16 @@ typedef struct {
 } ixs_range_result;
 
 /* Assumption contract shared by simplify, simplify_batch, check,
- * get_pow2_fact, range, and facts_assume_pred: each predicate root must be a
- * CMP, a canonical true/false node, or an AND tree whose leaves have those
- * forms.  True contributes no fact; false marks the set contradictory.  Trees
- * are walked iteratively and may contain at most 1024 visited nodes per root.
- * NULL, sentinel, malformed, cross-context, OR, NOT, and other roots are
- * rejected with an "assumptions:" session diagnostic; no prefix of a rejected
- * set is used.  A rejected set makes simplify return the domain-error sentinel,
- * makes simplify_batch set every element to that sentinel, makes query APIs
- * return unknown/no-result, and leaves an existing fact set unchanged. */
+ * check_integer_valued, get_pow2_fact, range, and facts_assume_pred: each
+ * predicate root must be a CMP, a canonical true/false node, or an AND tree
+ * whose leaves have those forms.  True contributes no fact; false marks the set
+ * contradictory.  Trees are walked iteratively and may contain at most 1024
+ * visited nodes per root.  NULL, sentinel, malformed, cross-context, OR, NOT,
+ * and other roots are rejected with an "assumptions:" session diagnostic; no
+ * prefix of a rejected set is used.  A rejected set makes simplify return the
+ * domain-error sentinel, makes simplify_batch set every element to that
+ * sentinel, makes query APIs return unknown/no-result, and leaves an existing
+ * fact set unchanged. */
 
 /* Check whether a comparison is provably true or false given the
  * assumptions, using interval propagation, modular congruence facts, and
@@ -204,6 +208,13 @@ typedef struct {
  * ixs_simplify: no rewriting, just bounds setup + entailment checks. */
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
+
+/* Prove whether expr is integer-valued under assumptions.  TRUE and FALSE are
+ * returned only for universal proofs; insufficient information, invalid input,
+ * contradictory assumptions, and OOM return UNKNOWN. */
+ixs_check_result ixs_check_integer_valued(ixs_session *s, ixs_node *expr,
+                                          ixs_node *const *assumptions,
+                                          size_t n_assumptions);
 
 /* Return the strongest known power-of-two fact for expr under assumptions.
  * POSITIVE means expr > 0 and exactly one bit is set.  OR_ZERO additionally
@@ -247,6 +258,13 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
 
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                ixs_node *expr);
+/* Check divisibility by a nonzero signed modulus.  Negative moduli are
+ * normalized by magnitude without overflowing INT64_MIN.  Modulus zero emits
+ * a session diagnostic and returns UNKNOWN. */
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
+                                           int64_t modulus);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
 

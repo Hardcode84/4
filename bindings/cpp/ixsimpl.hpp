@@ -18,6 +18,7 @@
 namespace ixs {
 
 class Expr;
+class Facts;
 
 class Context {
   ixs_ctx *ctx_;
@@ -54,6 +55,7 @@ public:
   /* Parse errors return the Context's parse-error sentinel Expr; OOM throws
    * bad_alloc. */
   Expr deserialize_expr(std::string_view data);
+  Facts facts();
 };
 
 class Expr {
@@ -99,6 +101,16 @@ public:
   Expr simplify() const {
     return Expr(session_ctx(), session_,
                 ixs_simplify(session_, node_, nullptr, 0));
+  }
+  ixs_check_result check_integer_valued(const Expr *assumptions,
+                                        size_t n) const {
+    std::vector<ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_check_integer_valued(session_, node_, raw.data(), n);
+  }
+  ixs_check_result check_integer_valued() const {
+    return ixs_check_integer_valued(session_, node_, nullptr, 0);
   }
   Expr subs(Expr target, Expr repl) const {
     return Expr(session_ctx(), session_,
@@ -172,6 +184,9 @@ public:
   bool is_domain_error() const { return node_ && ixs_is_domain_error(node_); }
   bool is_expr() const { return node_ && ixs_node_is_expr(node_); }
   bool is_pred() const { return node_ && ixs_node_is_pred(node_); }
+  bool is_integer_valued() const {
+    return node_ && ixs_node_is_integer_valued(node_);
+  }
   explicit operator bool() const {
     return node_ != nullptr && !ixs_is_error(node_);
   }
@@ -183,6 +198,32 @@ public:
 private:
   ixs_ctx *session_ctx() const { return ctx_; }
 };
+
+class Facts {
+  ixs_ctx *ctx_;
+  ixs_facts *facts_;
+
+public:
+  explicit Facts(Context &ctx)
+      : ctx_(ctx.raw()), facts_(ixs_facts_create(ctx.session())) {
+    if (!facts_)
+      throw std::bad_alloc();
+  }
+
+  bool assume(const Expr &pred) {
+    return ixs_facts_assume_pred(facts_, pred.raw());
+  }
+  ixs_check_result check_integer_valued(const Expr &expr) const {
+    return ixs_check_integer_valued_facts(facts_, expr.raw());
+  }
+  ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
+    return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
+  }
+  ixs_facts *raw() const { return facts_; }
+  ixs_ctx *raw_ctx() const { return ctx_; }
+};
+
+inline Facts Context::facts() { return Facts(*this); }
 
 inline Expr Context::import_expr(const Expr &expr) {
   if (!expr.raw())

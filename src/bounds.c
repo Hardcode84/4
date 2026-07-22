@@ -1486,6 +1486,32 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
   return false;
 }
 
+static bool bounds_piecewise_is_integer_with_divinfo(ixs_bounds *b,
+                                                     ixs_node *expr) {
+  uint32_t i;
+  bool reachable = false;
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    ixs_node *cond = expr->u.pw.cases[i].cond;
+    ixs_check_result truth = IXS_CHECK_UNKNOWN;
+    if (ixs_node_is_known_false(cond))
+      truth = IXS_CHECK_FALSE;
+    else if (ixs_node_is_known_true(cond))
+      truth = IXS_CHECK_TRUE;
+    else if (cond && cond->tag == IXS_CMP)
+      truth = ixs_bounds_check(b, cond);
+    /* An unknown condition leaves both this value and later values reachable.
+     */
+    if (truth == IXS_CHECK_FALSE)
+      continue;
+    reachable = true;
+    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.pw.cases[i].value))
+      return false;
+    if (truth == IXS_CHECK_TRUE)
+      return true;
+  }
+  return reachable;
+}
+
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr) {
   if (!expr)
@@ -1537,7 +1563,97 @@ IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
     return true;
   }
 
+  if (expr->tag == IXS_PIECEWISE)
+    return bounds_piecewise_is_integer_with_divinfo(b, expr);
+
   return false;
+}
+
+static bool bounds_interval_point_rational(ixs_interval iv, int64_t *p,
+                                           int64_t *q) {
+  if (!iv.valid || iv.lo_inf || iv.hi_inf ||
+      ixs_rat_cmp(iv.lo_p, iv.lo_q, iv.hi_p, iv.hi_q) != 0)
+    return false;
+  if (p)
+    *p = iv.lo_p;
+  if (q)
+    *q = iv.lo_q;
+  return true;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
+                                                            ixs_node *expr) {
+  ixs_interval iv;
+  int64_t p, q;
+  bool proven;
+  if (!b || !expr || b->oom || ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+  proven = ixs_bounds_is_integer_with_divinfo(b, expr);
+  if (b->oom)
+    return IXS_CHECK_UNKNOWN;
+  if (proven)
+    return IXS_CHECK_TRUE;
+  iv = ixs_bounds_get(b, expr);
+  if (b->oom || !bounds_interval_point_rational(iv, &p, &q))
+    return IXS_CHECK_UNKNOWN;
+  (void)p;
+  return q == 1 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+}
+
+static uint64_t bounds_int64_magnitude(int64_t value) {
+  if (value >= 0)
+    return (uint64_t)value;
+  return (uint64_t)(-(value + 1)) + 1u;
+}
+
+static bool bounds_int64_divisible_by_u64(int64_t value, uint64_t modulus) {
+  return bounds_int64_magnitude(value) % modulus == 0;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
+                                                       ixs_node *expr,
+                                                       int64_t modulus) {
+  ixs_check_result integer_result;
+  ixs_interval iv;
+  ixs_bitfacts bits;
+  uint64_t magnitude;
+  int64_t exact;
+
+  if (!b || !expr || modulus == 0 || b->oom || ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+
+  integer_result = ixs_bounds_check_integer_valued(b, expr);
+  if (integer_result != IXS_CHECK_TRUE)
+    return integer_result;
+
+  magnitude = bounds_int64_magnitude(modulus);
+  if (magnitude == 1u)
+    return IXS_CHECK_TRUE;
+
+  iv = ixs_bounds_get(b, expr);
+  if (b->oom)
+    return IXS_CHECK_UNKNOWN;
+  if (ixs_interval_is_point_int(iv, &exact))
+    return bounds_int64_divisible_by_u64(exact, magnitude) ? IXS_CHECK_TRUE
+                                                           : IXS_CHECK_FALSE;
+
+  if (magnitude <= (uint64_t)INT64_MAX) {
+    bool proven = ixs_bounds_is_known_divisible(b, expr, (int64_t)magnitude);
+    if (b->oom)
+      return IXS_CHECK_UNKNOWN;
+    if (proven)
+      return IXS_CHECK_TRUE;
+  }
+
+  if (magnitude == (uint64_t)INT64_MAX + 1u) {
+    bool has_bits = ixs_bounds_get_bitfacts(b, expr, &bits);
+    if (b->oom)
+      return IXS_CHECK_UNKNOWN;
+    if (has_bits && (bits.known_zero & (magnitude - 1u)) == magnitude - 1u)
+      return IXS_CHECK_TRUE;
+  }
+
+  return IXS_CHECK_UNKNOWN;
 }
 
 static ixs_interval bounds_get_and_mask(ixs_node *expr) {
@@ -2414,6 +2530,38 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr) {
     return IXS_CHECK_UNKNOWN;
   if (facts_node_ok(ctx, expr))
     result = ixs_bounds_check(&facts->bounds, expr);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                ixs_node *expr) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (facts_node_ok(ctx, expr))
+    result = ixs_bounds_check_integer_valued(&facts->bounds, expr);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
+                                           int64_t modulus) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (modulus == 0) {
+    ixs_ctx_push_error(ctx, "divisibility: modulus must be nonzero");
+    goto cleanup;
+  }
+  if (facts_node_ok(ctx, expr))
+    result = ixs_bounds_check_divisible(&facts->bounds, expr, modulus);
+
+cleanup:
   ixs_session_unbind(&binding);
   return result;
 }

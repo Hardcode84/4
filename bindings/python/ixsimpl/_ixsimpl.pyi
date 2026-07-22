@@ -45,6 +45,8 @@ class _Expr:
     @property
     def is_pred(self) -> bool: ...
     @property
+    def is_integer_valued(self) -> bool: ...
+    @property
     def tag(self) -> int: ...
     @property
     def node_ptr(self) -> int: ...
@@ -153,6 +155,14 @@ class Context:
         assumptions: Sequence[_Expr] | None = None,
         facts: Facts | None = None,
     ) -> bool | None: ...
+    def integer_valued(
+        self,
+        expr: _Expr,
+        *,
+        assumptions: Sequence[_Expr] | None = None,
+        facts: Facts | None = None,
+    ) -> bool | None: ...
+    def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
     def pow2_fact(
         self,
         expr: _Expr,

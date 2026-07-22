@@ -1043,7 +1043,7 @@ static bool pw_is_integer_valued(const ixs_node *n) {
   return n->u.pw.ncases > 0;
 }
 
-IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n) {
+bool ixs_node_is_integer_valued(const ixs_node *n) {
   if (!n)
     return false;
   switch (n->tag) {

@@ -109,6 +109,13 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr);
 
+/* Public-query semantics over an already populated bounds environment. */
+IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
+                                                            ixs_node *expr);
+IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
+                                                       ixs_node *expr,
+                                                       int64_t modulus);
+
 typedef enum {
   IXS_BOUNDS_BUILD_OK,
   IXS_BOUNDS_BUILD_INVALID,

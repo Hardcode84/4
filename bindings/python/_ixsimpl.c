@@ -4,7 +4,8 @@
 /*
  * CPython extension module for ixsimpl.
  *
- * Exposes two types: Context (wraps ixs_ctx) and Expr (wraps ixs_node).
+ * Exposes Context (wraps ixs_ctx), Facts (wraps ixs_facts), and Expr
+ * (wraps ixs_node).
  * Operator overloading lets you build expression trees naturally:
  *   x = ctx.sym("x"); e = ixsimpl.floor(x + 3)
  */
@@ -87,6 +88,19 @@ static int raise_new_assumption_error(ixs_session *session, size_t before) {
   for (i = before; i < after; i++) {
     const char *message = ixs_session_error(session, i);
     if (message && strncmp(message, "assumptions:", 12) == 0) {
+      PyErr_SetString(PyExc_ValueError, message);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int raise_new_divisibility_error(ixs_session *session, size_t before) {
+  size_t i;
+  size_t after = ixs_session_nerrors(session);
+  for (i = before; i < after; i++) {
+    const char *message = ixs_session_error(session, i);
+    if (message && strncmp(message, "divisibility:", 13) == 0) {
       PyErr_SetString(PyExc_ValueError, message);
       return -1;
     }
@@ -798,6 +812,11 @@ static PyObject *Expr_get_is_pred(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyBool_FromLong(ixs_node_is_pred(self->node));
 }
 
+static PyObject *Expr_get_is_integer_valued(ExprObject *self,
+                                            void *Py_UNUSED(closure)) {
+  return PyBool_FromLong(ixs_node_is_integer_valued(self->node));
+}
+
 static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
 }
@@ -885,6 +904,8 @@ static PyGetSetDef Expr_getset[] = {
      "True if node is an expression root.", NULL},
     {"is_pred", (getter)Expr_get_is_pred, NULL,
      "True if node is a predicate root.", NULL},
+    {"is_integer_valued", (getter)Expr_get_is_integer_valued, NULL,
+     "True if the expression is structurally integer-valued.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
     {"node_ptr", (getter)Expr_get_node_ptr, NULL,
      "Raw ixs_node* address as an int. For identity/debug/FFI use only.", NULL},
@@ -1320,8 +1341,16 @@ static PyObject *Context_facts(ContextObject *self, PyObject *Py_UNUSED(args)) {
   return (PyObject *)Facts_wrap(self, ixs_facts_create(Context_session(self)));
 }
 
-static PyObject *Context_check(ContextObject *self, PyObject *args,
-                               PyObject *kwargs) {
+typedef ixs_check_result (*Context_assumption_check_fn)(ixs_session *,
+                                                        ixs_node *,
+                                                        ixs_node *const *,
+                                                        size_t);
+typedef ixs_check_result (*Context_facts_check_fn)(ixs_facts *, ixs_node *);
+
+static PyObject *Context_check_with(ContextObject *self, PyObject *args,
+                                    PyObject *kwargs,
+                                    Context_assumption_check_fn assumption_fn,
+                                    Context_facts_check_fn facts_fn) {
   static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
@@ -1360,7 +1389,7 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
                       "ixsimpl: facts from different context");
       return NULL;
     }
-    r = ixs_check_facts(((FactsObject *)facts_obj)->facts, expr);
+    r = facts_fn(((FactsObject *)facts_obj)->facts, expr);
     if (r == IXS_CHECK_TRUE)
       Py_RETURN_TRUE;
     if (r == IXS_CHECK_FALSE)
@@ -1398,7 +1427,7 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
   }
 
   errors_before = ixs_session_nerrors(session);
-  r = ixs_check(session, expr, assumptions, (size_t)n_assumptions);
+  r = assumption_fn(session, expr, assumptions, (size_t)n_assumptions);
   PyMem_Free(assumptions);
   if (raise_new_assumption_error(session, errors_before) < 0)
     return NULL;
@@ -1406,6 +1435,61 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
   if (r == IXS_CHECK_TRUE)
     Py_RETURN_TRUE;
   if (r == IXS_CHECK_FALSE)
+    Py_RETURN_FALSE;
+  Py_RETURN_NONE;
+}
+
+static PyObject *Context_check(ContextObject *self, PyObject *args,
+                               PyObject *kwargs) {
+  return Context_check_with(self, args, kwargs, ixs_check, ixs_check_facts);
+}
+
+static PyObject *Context_integer_valued(ContextObject *self, PyObject *args,
+                                        PyObject *kwargs) {
+  return Context_check_with(self, args, kwargs, ixs_check_integer_valued,
+                            ixs_check_integer_valued_facts);
+}
+
+static PyObject *Context_divisible(ContextObject *self, PyObject *args,
+                                   PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "modulus", "facts", NULL};
+  PyObject *expr_obj, *modulus_obj, *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_check_result result;
+  int64_t modulus;
+  size_t errors_before;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_obj,
+                                   &modulus_obj, &facts_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  if (!py_int64(modulus_obj, &modulus, "modulus"))
+    return NULL;
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_check_divisible_facts(((FactsObject *)facts_obj)->facts,
+                                     ((ExprObject *)expr_obj)->node, modulus);
+  if (raise_new_divisibility_error(session, errors_before) < 0)
+    return NULL;
+  if (result == IXS_CHECK_TRUE)
+    Py_RETURN_TRUE;
+  if (result == IXS_CHECK_FALSE)
     Py_RETURN_FALSE;
   Py_RETURN_NONE;
 }
@@ -1812,6 +1896,11 @@ static PyMethodDef Context_methods[] = {
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds. Assumptions accept CMP/boolean or AND predicates."},
+    {"integer_valued", (PyCFunction)Context_integer_valued,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove integrality from assumptions or facts; return bool or None."},
+    {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
+     "Prove divisibility under a fact set; return bool or None."},
     {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
      "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
      "or AND predicates."},

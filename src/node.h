@@ -209,11 +209,6 @@ typedef enum {
 IXS_STATIC ixs_mod_divisor_class
 ixs_node_classify_mod_divisor(const ixs_node *n);
 
-/* True if the node is guaranteed to produce an integer for all
- * variable assignments.  Conservative: may return false for some
- * integer-valued expressions. */
-IXS_STATIC bool ixs_node_is_integer_valued(const ixs_node *n);
-
 /* Error list helpers. fmt is printf-style. */
 IXS_STATIC void ixs_ctx_push_error(ixs_ctx *ctx, const char *fmt, ...);
 

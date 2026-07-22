@@ -1533,6 +1533,147 @@ static void test_public_facts_substitute_preserves_symbol_facts(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Public integrality and divisibility                               */
+/* ------------------------------------------------------------------ */
+
+static void test_public_structural_and_assumption_integrality(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *k = ixs_sym(ctx, "K");
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_node *scaled = ixs_div(ctx, k, ixs_int(ctx, 32));
+  ixs_node *sum = ixs_add(ctx, x, scaled);
+  ixs_node *half = ixs_rat(ctx, 1, 2);
+  ixs_node *congruence = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+
+  CHECK(ixs_node_is_integer_valued(x));
+  CHECK(!ixs_node_is_integer_valued(reciprocal));
+  CHECK(!ixs_node_is_integer_valued(scaled));
+  CHECK(!ixs_node_is_integer_valued(sum));
+  CHECK(!ixs_node_is_integer_valued(half));
+
+  CHECK(ixs_check_integer_valued(ctx, reciprocal, NULL, 0) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued(ctx, scaled, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued(ctx, sum, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued(ctx, half, NULL, 0) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_integer_valued(ctx, scaled, &congruence, 1) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued(ctx, sum, &congruence, 1) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_fact_integrality_piecewise(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *k = ixs_sym(ctx, "K");
+  ixs_node *scaled = ixs_div(ctx, k, ixs_int(ctx, 32));
+  ixs_node *values[2];
+  ixs_node *conds[2];
+  ixs_node *piecewise;
+  ixs_node *unreachable_values[2];
+  ixs_node *unreachable_conds[2];
+  ixs_node *unreachable;
+  ixs_node *congruence = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *range_facts = ixs_facts_create(ctx);
+
+  values[0] = scaled;
+  values[1] = x;
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  conds[1] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 2, values, conds);
+  CHECK(!ixs_node_is_integer_valued(piecewise));
+  CHECK(ixs_check_integer_valued_facts(facts, piecewise) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(facts, congruence));
+  CHECK(ixs_check_integer_valued_facts(facts, scaled) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(facts, piecewise) == IXS_CHECK_TRUE);
+
+  unreachable_values[0] = ixs_div(ctx, ixs_int(ctx, 1), x);
+  unreachable_values[1] = x;
+  unreachable_conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0));
+  unreachable_conds[1] = ixs_true(ctx);
+  unreachable = ixs_pw(ctx, 2, unreachable_values, unreachable_conds);
+  CHECK(ixs_facts_assume_pred(range_facts,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_check_integer_valued_facts(range_facts, unreachable) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_fact_divisibility(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *k = ixs_sym(ctx, "K");
+  ixs_node *congruence = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(facts, congruence));
+  CHECK(ixs_check_divisible_facts(facts, k, 32) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_divisible_facts(facts, k, -32) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_divisible_facts(facts, k, 64) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, 64), 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, 65), 32) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_rat(ctx, 1, 2), 1) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_div(ctx, ixs_int(ctx, 1), k), 1) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, INT64_MIN), INT64_MIN) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, INT64_MAX), INT64_MIN) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, 0), INT64_MIN) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_divisible_facts(facts, ixs_int(ctx, INT64_MIN), -1) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_divisible_facts(facts, k, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "modulus must be nonzero") != NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_integrality_invalid_and_contradictory(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *other_x = ixs_sym(other, "x");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(ixs_check_integer_valued_facts(contradictory, x) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_divisible_facts(contradictory, ixs_int(ctx, 64), 32) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_check_integer_valued(ctx, other_x, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued(ctx, ctx->sentinel_error, NULL, 0) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued_facts(facts, other_x) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued_facts(facts, ctx->sentinel_error) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_divisible_facts(facts, other_x, 8) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_divisible_facts(facts, ctx->sentinel_error, 8) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_node_is_integer_valued(ctx->sentinel_error));
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+/* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -1634,6 +1775,10 @@ int main(void) {
   test_compound_assumption_boolean_constants();
   test_public_facts_assume_deep_conjunction();
   test_public_facts_substitute_preserves_symbol_facts();
+  test_public_structural_and_assumption_integrality();
+  test_public_fact_integrality_piecewise();
+  test_public_fact_divisibility();
+  test_public_integrality_invalid_and_contradictory();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
