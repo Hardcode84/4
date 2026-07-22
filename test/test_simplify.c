@@ -1770,6 +1770,135 @@ static void test_simplify_batch(void) {
   CHECK(exprs[2] == ixs_int(ctx, 7));
 }
 
+static void test_fact_backed_simplification(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "facts_simplify_x");
+  ixs_node *y = ixs_sym(ctx, "facts_simplify_y");
+  ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *assumptions[2] = {lo, hi};
+  ixs_node *mod = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *floor = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 8)));
+  ixs_node *domain_error = ixs_mod(ctx, x, ixs_int(ctx, 0));
+  ixs_node *parse_error = ixs_parse(ctx, "(", 1);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *legacy_batch[2] = {mod, floor};
+  ixs_node *fact_batch[2] = {mod, floor};
+  ixs_range_result range;
+
+  CHECK(ixs_facts_assume_pred(facts, lo));
+  CHECK(ixs_facts_assume_pred(facts, hi));
+  CHECK(ixs_simplify_facts(facts, mod) ==
+        ixs_simplify(ctx, mod, assumptions, 2));
+  CHECK(ixs_simplify_facts(facts, mod) == x);
+  CHECK(ixs_simplify_facts(facts, floor) == ixs_int(ctx, 0));
+  CHECK(ixs_range_facts(facts, x, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 7 && range.upper_q == 1);
+
+  ixs_simplify_batch(ctx, legacy_batch, 2, assumptions, 2);
+  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  CHECK(fact_batch[0] == legacy_batch[0]);
+  CHECK(fact_batch[1] == legacy_batch[1]);
+
+  {
+    ixs_facts *explicit_facts = ixs_facts_create(ctx);
+    ixs_node *base = ixs_add(ctx, x, y);
+    ixs_node *expr = ixs_floor(ctx, ixs_div(ctx, base, ixs_int(ctx, 16)));
+    range.has_lower = true;
+    range.has_upper = true;
+    range.lower_p = 3;
+    range.lower_q = 16;
+    range.upper_p = 15;
+    range.upper_q = 16;
+    CHECK(ixs_facts_assume_range(explicit_facts, ixs_node_child(expr, 0),
+                                 &range));
+    CHECK(ixs_simplify_facts(explicit_facts, expr) == ixs_int(ctx, 0));
+  }
+
+  {
+    ixs_facts *affine_facts = ixs_facts_create(ctx);
+    ixs_node *base = ixs_sym(ctx, "facts_affine_base");
+    ixs_node *derived =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), base), ixs_int(ctx, 2));
+    ixs_node *expr = ixs_floor(ctx, ixs_div(ctx, derived, ixs_int(ctx, 24)));
+    range.has_lower = true;
+    range.has_upper = true;
+    range.lower_p = 4;
+    range.lower_q = 1;
+    range.upper_p = 7;
+    range.upper_q = 1;
+    CHECK(ixs_facts_assume_range(affine_facts, base, &range));
+    CHECK(ixs_facts_derive_affine(affine_facts, base, 3, 2, derived));
+    CHECK(ixs_simplify_facts(affine_facts, expr) == ixs_int(ctx, 0));
+  }
+
+  {
+    ixs_facts *source = ixs_facts_create(ctx);
+    ixs_facts *substituted = ixs_facts_create(ctx);
+    ixs_node *base = ixs_sym(ctx, "facts_substitute_base");
+    ixs_node *replacement = ixs_add(ctx, y, ixs_int(ctx, 1));
+    ixs_node *source_expr = ixs_floor(ctx, ixs_div(ctx, base, ixs_int(ctx, 8)));
+    ixs_node *expr = ixs_floor(ctx, ixs_div(ctx, replacement, ixs_int(ctx, 8)));
+    range.has_lower = true;
+    range.has_upper = true;
+    range.lower_p = 0;
+    range.lower_q = 1;
+    range.upper_p = 7;
+    range.upper_q = 8;
+    CHECK(
+        ixs_facts_assume_range(source, ixs_node_child(source_expr, 0), &range));
+    CHECK(ixs_facts_substitute(substituted, source, base, replacement));
+    CHECK(ixs_simplify_facts(substituted, expr) == ixs_int(ctx, 0));
+  }
+
+  {
+    ixs_facts *contradictory = ixs_facts_create(ctx);
+    ixs_node *contradictory_floor =
+        ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 100)));
+    ixs_node *contradictory_batch[2] = {contradictory_floor, x};
+    CHECK(ixs_facts_assume_pred(contradictory,
+                                ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+    CHECK(ixs_facts_assume_pred(contradictory,
+                                ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+    CHECK(ixs_simplify_facts(contradictory, x) == x);
+    CHECK(ixs_simplify_facts(contradictory, contradictory_floor) ==
+          contradictory_floor);
+    ixs_simplify_batch_facts(contradictory, contradictory_batch, 2);
+    CHECK(contradictory_batch[0] == contradictory_floor);
+    CHECK(contradictory_batch[1] == x);
+  }
+
+  CHECK(ixs_simplify_facts(facts, domain_error) == domain_error);
+  CHECK(ixs_simplify_facts(facts, parse_error) == parse_error);
+  CHECK(ixs_is_domain_error(
+      ixs_simplify_facts(facts, ixs_sym(other, "facts_simplify_x"))));
+
+  fact_batch[0] = mod;
+  fact_batch[1] = ixs_sym(other, "facts_simplify_y");
+  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  CHECK(ixs_is_domain_error(fact_batch[0]));
+  CHECK(ixs_is_domain_error(fact_batch[1]));
+
+  fact_batch[0] = domain_error;
+  fact_batch[1] = floor;
+  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  CHECK(fact_batch[0] == domain_error);
+  CHECK(fact_batch[1] == ixs_int(ctx, 0));
+
+  {
+    ixs_facts *rejected = ixs_facts_create(ctx);
+    ixs_node *unsupported = ixs_or(ctx, lo, hi);
+    CHECK(ixs_facts_assume_pred(rejected, lo));
+    CHECK(!ixs_facts_assume_pred(rejected, unsupported));
+    CHECK(ixs_is_domain_error(ixs_simplify_facts(rejected, mod)));
+    CHECK(ixs_check_facts(rejected, lo) == IXS_CHECK_UNKNOWN);
+  }
+
+  ixs_ctx_destroy(other);
+}
+
 static void test_compound_assumption_simplification(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "compound_x");
@@ -3050,6 +3179,7 @@ int main(void) {
   test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
   test_simplify_batch();
+  test_fact_backed_simplification();
   test_compound_assumption_simplification();
   test_print_c();
   test_floor_drop_fractional_const();

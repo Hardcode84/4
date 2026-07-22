@@ -30,6 +30,7 @@ typedef struct ixs_pwcase {
 
 typedef struct ixs_session_impl {
   ixs_ctx *ctx;
+  uint64_t epoch;
   ixs_arena scratch;
   ixs_arena diag;
   const char **errors;
@@ -129,6 +130,7 @@ struct ixs_ctx {
   size_t errors_cap;
   ixs_session_impl *active_session;
   size_t active_session_depth;
+  uint64_t next_session_epoch;
 
   /* Singletons */
   ixs_node *sentinel_error;

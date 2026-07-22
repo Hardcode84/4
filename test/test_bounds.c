@@ -1439,9 +1439,9 @@ static void test_compound_assumption_rejection_is_atomic(void) {
   CHECK(!ixs_facts_assume_pred(facts, atomic_tree));
   CHECK(ixs_ctx_nerrors(ctx) == 1);
   CHECK(strstr(ixs_ctx_error(ctx, 0), "OR") != NULL);
-  CHECK(ixs_range_facts(facts, x, &r));
-  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(!ixs_range_facts(facts, x, &r));
   CHECK(!ixs_range_facts(facts, y, &r));
+  CHECK(ixs_check_facts(facts, query) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(other);
   ixs_ctx_destroy(ctx);
@@ -2110,6 +2110,78 @@ static void test_public_defined_traversal_bounds_and_sharing(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_fact_simplify_session_lifetime_and_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "fact_lifetime_x");
+  ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *mod = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *values[2] = {ixs_add(ctx, x, ixs_int(ctx, 1)),
+                         ixs_add(ctx, x, ixs_int(ctx, 2))};
+  ixs_node *conds[2] = {ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 3)),
+                        ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conds);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *poisoned;
+  ixs_node *batch[2];
+
+  CHECK(ixs_facts_assume_pred(facts, lo));
+  CHECK(ixs_facts_assume_pred(facts, hi));
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_simplify_facts(facts, piecewise) == NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify_facts(facts, mod) == x);
+
+  batch[0] = mod;
+  batch[1] = piecewise;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  ixs_simplify_batch_facts(facts, batch, 2);
+  CHECK(batch[0] == NULL);
+  CHECK(batch[1] == NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify_facts(facts, mod) == x);
+
+  poisoned = ixs_facts_create(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(!ixs_facts_assume_pred(poisoned, lo));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_is_domain_error(ixs_simplify_facts(poisoned, mod)));
+  CHECK(ixs_check_facts(poisoned, lo) == IXS_CHECK_UNKNOWN);
+
+  (ixs_session_reset)(IXS_TEST_SESSION(ctx));
+  CHECK(ixs_simplify_facts(facts, mod) == NULL);
+  facts = ixs_facts_create(ctx);
+  CHECK(facts != NULL);
+  CHECK(ixs_simplify_facts(facts, mod) == mod);
+  ixs_ctx_destroy(ctx);
+
+  {
+    ixs_ctx *raw_ctx = (ixs_ctx_create)();
+    ixs_session session;
+    ixs_node *raw_x;
+    ixs_node *raw_pred;
+    ixs_facts *stale;
+    ixs_facts *fresh;
+
+    ixs_session_init(&session, raw_ctx);
+    raw_x = (ixs_sym)(&session, "destroyed_fact_x");
+    raw_pred = (ixs_cmp)(&session, raw_x, IXS_CMP_GE, (ixs_int)(&session, 0));
+    stale = (ixs_facts_create)(&session);
+    CHECK((ixs_facts_assume_pred)(stale, raw_pred));
+    ixs_session_destroy(&session);
+    CHECK(ixs_simplify_facts(stale, raw_x) == NULL);
+
+    ixs_session_init(&session, raw_ctx);
+    CHECK(ixs_simplify_facts(stale, raw_x) == NULL);
+    fresh = (ixs_facts_create)(&session);
+    CHECK(fresh != NULL);
+    CHECK(ixs_simplify_facts(fresh, raw_x) == raw_x);
+    ixs_session_destroy(&session);
+    (ixs_ctx_destroy)(raw_ctx);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
@@ -2225,6 +2297,7 @@ int main(void) {
   test_public_defined_piecewise_condition();
   test_public_defined_facts_and_invalid();
   test_public_defined_traversal_bounds_and_sharing();
+  test_fact_simplify_session_lifetime_and_oom();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

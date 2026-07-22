@@ -2358,6 +2358,65 @@ def test_compound_assumption_ingestion_parity() -> None:
     assert ctx.range(x, facts=facts) == (0, 31)
 
 
+def test_fact_backed_simplification() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("fact_simplify_x"), ctx.sym("fact_simplify_y")
+    assumptions = [x >= 0, x < 8]
+    facts = ctx.facts()
+    facts.assume(ixsimpl.and_(*assumptions))
+
+    expr = x % 16
+    assert expr.simplify(facts=facts) == expr.simplify(assumptions=assumptions)
+    assert expr.simplify(facts=facts) == x
+    assert expr.simplify(facts=facts) == x
+    assert ctx.range(x, facts=facts) == (0, 7)
+
+    batch = [expr, ixsimpl.floor(x / 8)]
+    ctx.simplify_batch(batch, facts=facts)
+    assert batch == [x, ctx.int_(0)]
+
+    explicit = ctx.facts()
+    base = x + y
+    bounded = ixsimpl.floor(base / 16)
+    explicit.assume_range(bounded.child(0), Fraction(3, 16), Fraction(15, 16))
+    assert bounded.simplify(facts=explicit) == ctx.int_(0)
+
+    affine = ctx.facts()
+    affine_base = ctx.sym("fact_affine_base")
+    derived = 3 * affine_base + 2
+    affine.assume_range(affine_base, 4, 7)
+    affine.derive_affine(affine_base, 3, 2, derived)
+    assert ixsimpl.floor(derived / 24).simplify(facts=affine) == ctx.int_(0)
+
+    source = ctx.facts()
+    source_base = ctx.sym("fact_substitute_base")
+    replacement = y + 1
+    source_expr = ixsimpl.floor(source_base / 8)
+    source.assume_range(source_expr.child(0), 0, Fraction(7, 8))
+    substituted = source.subs(source_base, replacement)
+    assert ixsimpl.floor(replacement / 8).simplify(facts=substituted) == ctx.int_(0)
+
+    contradictory = ctx.facts()
+    contradictory.assume(x >= 10)
+    contradictory.assume(x <= 5)
+    assert x.simplify(facts=contradictory) == x
+    contradictory_floor = ixsimpl.floor(x / 100)
+    assert contradictory_floor.simplify(facts=contradictory) == contradictory_floor
+
+    sentinel = ctx.parse_expr("(")
+    assert sentinel.simplify(facts=facts).is_parse_error
+
+    other = ixsimpl.Context()
+    with pytest.raises(ValueError, match="expression from different context"):
+        ctx.simplify_batch([other.sym("x")], facts=facts)
+    with pytest.raises(ValueError, match="facts from different context"):
+        x.simplify(facts=other.facts())
+    with pytest.raises(ValueError, match="either assumptions or facts"):
+        x.simplify(assumptions=assumptions, facts=facts)
+    with pytest.raises(ValueError, match="either assumptions or facts"):
+        ctx.simplify_batch([x], assumptions=assumptions, facts=facts)
+
+
 def test_compound_assumption_rejection_is_atomic() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")
@@ -2383,8 +2442,10 @@ def test_compound_assumption_rejection_is_atomic() -> None:
     facts.assume(ge0)
     with pytest.raises(ValueError, match="OR predicates"):
         facts.assume(ixsimpl.and_(y >= 5, either))
-    assert ctx.range(x, facts=facts) == (0, None)
+    assert ctx.range(x, facts=facts) is None
     assert ctx.range(y, facts=facts) is None
+    with pytest.raises(ValueError, match="fact set is unusable"):
+        mod.simplify(facts=facts)
 
 
 def test_facts_assume_deep_conjunction() -> None:

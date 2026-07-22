@@ -147,6 +147,13 @@ void ixs_ctx_destroy(ixs_ctx *ctx) {
 /*  Session lifecycle                                                 */
 /* ------------------------------------------------------------------ */
 
+static uint64_t session_next_epoch(ixs_ctx *ctx) {
+  ctx->next_session_epoch++;
+  if (ctx->next_session_epoch == 0)
+    ctx->next_session_epoch++;
+  return ctx->next_session_epoch;
+}
+
 void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
   ixs_arena scratch;
   ixs_session_impl *impl;
@@ -159,6 +166,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
     return;
   memset(impl, 0, sizeof(*impl));
   impl->ctx = ctx;
+  impl->epoch = session_next_epoch(ctx);
   impl->scratch = scratch;
   ixs_arena_init(&impl->diag, IXS_ARENA_DEFAULT_SIZE);
   impl->base_mark = ixs_arena_save(&impl->scratch);
@@ -168,6 +176,7 @@ void ixs_session_reset(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
   ixs_arena_restore(session_scratch(impl), impl->base_mark);
   session_clear_errors_impl(impl);
+  impl->epoch = session_next_epoch(impl->ctx);
 }
 
 void ixs_session_destroy(ixs_session *s) {

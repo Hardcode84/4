@@ -194,6 +194,7 @@ if TYPE_CHECKING:
             exprs: Sequence[_Expr],
             *,
             assumptions: Sequence[_Expr] | None = None,
+            facts: Facts | None = None,
         ) -> None: ...
 
     def abs_(x: Expr) -> Expr: ...

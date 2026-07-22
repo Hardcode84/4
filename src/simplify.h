@@ -6,6 +6,7 @@
 
 #include "internal.h"
 
+#include "bounds.h"
 #include "node.h"
 
 /*
@@ -33,6 +34,9 @@ IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 
 /* Top-down simplification pass with assumptions + bound analysis. */
+IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                          ixs_bounds *bounds);
+
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    ixs_node *const *assumptions,
                                    size_t n_assumptions);

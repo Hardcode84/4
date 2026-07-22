@@ -4488,8 +4488,8 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   return n;
 }
 
-static ixs_node *simp_simplify_with_bounds(ixs_ctx *ctx, ixs_node *expr,
-                                           ixs_bounds *bnds) {
+IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                          ixs_bounds *bnds) {
   int iter;
   rewrite_memo_slot memo[REWRITE_MEMO_SIZE];
 
@@ -4525,7 +4525,7 @@ IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
     ixs_arena_restore(&ctx->scratch, m);
     return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
   }
-  expr = simp_simplify_with_bounds(ctx, expr, &bnds);
+  expr = simp_simplify_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
   ixs_arena_restore(&ctx->scratch, m);
   return expr;
@@ -4550,7 +4550,7 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
   for (i = 0; i < n; i++) {
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
-    exprs[i] = simp_simplify_with_bounds(ctx, exprs[i], &bnds);
+    exprs[i] = simp_simplify_bounds(ctx, exprs[i], &bnds);
     if (!exprs[i]) {
       size_t j;
       for (j = 0; j < n; j++)

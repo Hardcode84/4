@@ -1143,11 +1143,13 @@ nodes from another context are rejected with an `assumptions:` diagnostic.
 Legacy array ingestion discards the whole temporary bound context when any
 entry is rejected or fails; it never queries a partially ingested prefix.
 `ixs_facts_assume_pred` applies the predicate to a fork and commits only after
-the entire tree succeeds, so an existing fact set is unchanged on rejection or
-OOM. Rejection returns the domain-error sentinel from `ixs_simplify`, fills an
-entire batch with that sentinel, returns unknown/no-result from the query APIs,
-and returns false from `ixs_facts_assume_pred`. Structurally valid but
-contradictory conjunctions retain the existing unknown/no-result behavior.
+the entire tree succeeds. Rejection or OOM leaves the stored payload unchanged
+but poisons the fact set, so no caller can continue proving from a partial or
+silently weaker context. Every fact mutator follows this rule. Rejection
+returns the domain-error sentinel from `ixs_simplify`, fills an entire batch
+with that sentinel, returns unknown/no-result from the query APIs, and returns
+false from `ixs_facts_assume_pred`. Structurally valid but contradictory
+conjunctions retain the existing unknown/no-result behavior.
 
 **Conflicting assumptions**: User-assumption validation and error reporting are
 **best-effort**. Direct contradictions are detected where the local domains can
@@ -1322,7 +1324,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `Context.check(..., facts=f)`, `Context.integer_valued(..., facts=f)`,
   `Context.defined(..., facts=f)`, `Context.divisible(..., facts=f)`, and
   `Context.pow2_fact(..., facts=f)` query these facts directly before relying
-  on structural interval propagation.
+  on structural interval propagation. `Expr.simplify(facts=f)` and
+  `Context.simplify_batch(..., facts=f)` run the rewrite engine directly
+  against the same stored bounds. Successful queries may populate sound
+  caches but do not weaken or consume the fact set. Detected contradictory
+  facts leave simplification results unchanged; they never enable rewriting
+  from an empty domain.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1657,13 +1664,11 @@ bool ixs_range(ixs_session *s, ixs_node *expr,
                ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
 
-// Session-owned fact sets.  The pointer remains valid until session reset or
-// destroy.  Use these when facts must survive expression transforms directly
-// instead of being rediscovered from predicates.
+// Session-owned fact sets. The handle is a store-owned tombstone until ctx
+// destruction; its proof payload is usable only until session reset/destroy.
+// Failed mutation poisons the set, and later queries fail conservatively.
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
-// Uses the same compound-assumption walker. Rejection and OOM leave the
-// existing fact set unchanged and return false.
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
                             const ixs_range_result *range);
@@ -1671,6 +1676,8 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
+void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
@@ -2220,9 +2227,11 @@ Key properties:
 - `Expr::is_integer_valued()` exposes structural classification, while
   `Expr::check_integer_valued()` consumes an assumption array. `Context::facts()`
   returns a lightweight session-owned `Facts` wrapper whose
-  `check_integer_valued()` and `check_divisible()` methods expose fact-backed
-  proofs. `Facts::try_exact_divide()` returns an `ExactDivideResult` containing
-  the four-way status and a nullable `Expr` quotient; errors remain available
+  `simplify()`, `simplify_batch()`, `check_integer_valued()`, and
+  `check_divisible()` methods expose fact-backed transforms and proofs.
+  `Expr::simplify(const Facts&)` is the expression-oriented spelling.
+  `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
+  four-way status and a nullable `Expr` quotient; errors remain available
   through the owning `Context` diagnostics.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
@@ -2250,6 +2259,13 @@ expr = ctx.parse("128*floor($T0/64) + 4*floor(Mod($T0, 64)/16)")
 result = expr.simplify(assumptions=assumptions)
 print(result)              # SymPy-compatible string
 print(result.to_c())       # C code string
+
+facts = ctx.facts()
+for assumption in assumptions:
+    facts.assume(assumption)
+result = expr.simplify(facts=facts)
+batch = [expr, x % 16]
+ctx.simplify_batch(batch, facts=facts)
 
 # Programmatic construction
 x = ctx.sym("x")
@@ -2468,6 +2484,13 @@ raw bytes duplicates interior pointers and is invalid.
 - restores scratch to the session's post-init `base_mark`
 - retains one cached spare heap chunk for reuse
 
+Each initialization and reset assigns a new store-local session epoch. A fact
+handle keeps its creating epoch in a store-arena header while all bounds
+payload remains in session scratch. This header survives scratch rewind long
+enough to reject a stale handle before following any rewound pointers. Destroy
+zeros the inline session header; reinitializing the same public storage receives
+a different epoch. The fact handle itself is released with the store.
+
 This is the critical performance property: hot paths stop paying allocator
 setup cost on every parse/simplify/import call.
 
@@ -2593,6 +2616,8 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
+void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);

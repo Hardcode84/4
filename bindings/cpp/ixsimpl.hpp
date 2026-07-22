@@ -103,6 +103,7 @@ public:
     return Expr(session_ctx(), session_,
                 ixs_simplify(session_, node_, nullptr, 0));
   }
+  Expr simplify(const Facts &facts) const;
   ixs_check_result check_integer_valued(const Expr *assumptions,
                                         size_t n) const {
     std::vector<ixs_node *> raw(n);
@@ -230,6 +231,18 @@ public:
   bool assume(const Expr &pred) {
     return ixs_facts_assume_pred(facts_, pred.raw());
   }
+  Expr simplify(const Expr &expr) const {
+    return Expr(ctx_, session_, ixs_simplify_facts(facts_, expr.raw()));
+  }
+  void simplify_batch(std::vector<Expr> &exprs) const {
+    std::vector<ixs_node *> raw;
+    raw.reserve(exprs.size());
+    for (const Expr &expr : exprs)
+      raw.push_back(expr.raw());
+    ixs_simplify_batch_facts(facts_, raw.data(), raw.size());
+    for (size_t i = 0; i < exprs.size(); ++i)
+      exprs[i] = Expr(ctx_, session_, raw[i]);
+  }
   ixs_check_result check_integer_valued(const Expr &expr) const {
     return ixs_check_integer_valued_facts(facts_, expr.raw());
   }
@@ -247,6 +260,10 @@ public:
   ixs_facts *raw() const { return facts_; }
   ixs_ctx *raw_ctx() const { return ctx_; }
 };
+
+inline Expr Expr::simplify(const Facts &facts) const {
+  return facts.simplify(*this);
+}
 
 inline Facts Context::facts() { return Facts(*this); }
 

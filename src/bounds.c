@@ -3212,12 +3212,30 @@ static void interval_to_range_result(ixs_interval iv, ixs_range_result *out) {
 
 static bool facts_bind(ixs_facts *facts, ixs_session_binding *binding,
                        ixs_ctx **ctx) {
-  if (!facts || !facts->impl || !binding || !ctx)
+  if (!facts || !facts->impl || !facts->ctx || !binding || !ctx ||
+      facts->epoch == 0 || facts->impl->ctx != facts->ctx ||
+      facts->impl->epoch != facts->epoch)
     return false;
   *ctx = ixs_session_bind_impl(binding, facts->impl);
   facts->bounds.ctx = *ctx;
   facts->bounds.scratch = &(*ctx)->scratch;
   return true;
+}
+
+static bool facts_ready(const ixs_facts *facts) {
+  return facts && facts->usable && !facts->bounds.oom;
+}
+
+static void facts_poison(ixs_facts *facts) {
+  if (facts)
+    facts->usable = false;
+}
+
+static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
+  candidate->cache = facts->bounds.cache;
+  candidate->cache_cap = facts->bounds.cache_cap;
+  bounds_cache_clear(candidate);
+  facts->bounds = *candidate;
 }
 
 static bool facts_node_ok(ixs_ctx *ctx, ixs_node *node) {
@@ -3261,17 +3279,20 @@ ixs_facts *ixs_facts_create(ixs_session *s) {
   if (!s)
     return NULL;
   ctx = ixs_session_bind(&binding, s);
-  facts = ixs_arena_alloc(&ctx->scratch, sizeof(*facts), sizeof(void *));
+  facts = ixs_arena_alloc(&ctx->arena, sizeof(*facts), sizeof(void *));
   if (!facts) {
     ixs_session_unbind(&binding);
     return NULL;
   }
   memset(facts, 0, sizeof(*facts));
   facts->impl = binding.impl;
+  facts->ctx = ctx;
+  facts->epoch = binding.impl->epoch;
   if (!ixs_bounds_init_ctx(&facts->bounds, ctx, &ctx->scratch)) {
     ixs_session_unbind(&binding);
     return NULL;
   }
+  facts->usable = true;
   ixs_session_unbind(&binding);
   return facts;
 }
@@ -3284,17 +3305,23 @@ bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
   ixs_bounds_build_status status;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
+  if (!facts_ready(facts)) {
+    ixs_session_unbind(&binding);
+    return false;
+  }
   mark = ixs_arena_save(&ctx->scratch);
   if (!ixs_bounds_fork(&candidate, &facts->bounds)) {
     ixs_arena_restore(&ctx->scratch, mark);
+    facts_poison(facts);
     ixs_session_unbind(&binding);
     return false;
   }
   status = bounds_ingest_predicate(&candidate, pred);
   if (status == IXS_BOUNDS_BUILD_OK) {
-    facts->bounds = candidate;
+    facts_commit(facts, &candidate);
   } else {
     ixs_arena_restore(&ctx->scratch, mark);
+    facts_poison(facts);
   }
   ixs_session_unbind(&binding);
   return status == IXS_BOUNDS_BUILD_OK;
@@ -3304,13 +3331,30 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
                             const ixs_range_result *range) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  ixs_bounds candidate;
   ixs_interval iv;
-  bool ok;
+  bool ok = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
-  ok = facts_node_ok(ctx, expr) && range_result_to_interval(range, &iv);
-  if (ok)
-    ixs_bounds_add_expr(&facts->bounds, expr, iv);
+  if (!facts_ready(facts))
+    goto cleanup;
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!facts_node_ok(ctx, expr) || !range_result_to_interval(range, &iv) ||
+      !ixs_bounds_fork(&candidate, &facts->bounds))
+    goto failed;
+  ixs_bounds_add_expr(&candidate, expr, iv);
+  if (candidate.oom)
+    goto failed;
+  facts_commit(facts, &candidate);
+  ok = true;
+  goto cleanup;
+
+failed:
+  ixs_arena_restore(&ctx->scratch, mark);
+  facts_poison(facts);
+
+cleanup:
   ixs_session_unbind(&binding);
   return ok;
 }
@@ -3319,20 +3363,35 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  ixs_bounds candidate;
   ixs_interval iv, shifted;
   bool ok = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
+  if (!facts_ready(facts))
+    goto cleanup;
+  mark = ixs_arena_save(&ctx->scratch);
   if (!facts_node_ok(ctx, base) || !facts_node_ok(ctx, derived))
-    goto cleanup;
-  iv = ixs_bounds_get(&facts->bounds, base);
-  if (!iv.valid || ixs_interval_is_empty(iv))
-    goto cleanup;
+    goto failed;
+  if (!ixs_bounds_fork(&candidate, &facts->bounds))
+    goto failed;
+  iv = ixs_bounds_get(&candidate, base);
+  if (candidate.oom || !iv.valid || ixs_interval_is_empty(iv))
+    goto failed;
   shifted = iv_add(iv_mul_const(iv, scale, 1), ixs_interval_exact(offset, 1));
   if (!shifted.valid || ixs_interval_is_empty(shifted))
-    goto cleanup;
-  ixs_bounds_add_expr(&facts->bounds, derived, shifted);
+    goto failed;
+  ixs_bounds_add_expr(&candidate, derived, shifted);
+  if (candidate.oom)
+    goto failed;
+  facts_commit(facts, &candidate);
   ok = true;
+  goto cleanup;
+
+failed:
+  ixs_arena_restore(&ctx->scratch, mark);
+  facts_poison(facts);
 
 cleanup:
   ixs_session_unbind(&binding);
@@ -3343,65 +3402,184 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  ixs_bounds candidate;
   size_t nexprs, nvars, nnonzero, i;
   bool ok = false;
 
-  if (!dst || !dst->impl || !src || !src->impl ||
-      dst->impl->ctx != src->impl->ctx)
-    return false;
   if (!facts_bind(dst, &binding, &ctx))
     return false;
-  if (!facts_node_ok(ctx, target) || !facts_node_ok(ctx, replacement))
+  if (!facts_ready(dst))
     goto cleanup;
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!src || src->impl != dst->impl || src->ctx != ctx ||
+      src->epoch != dst->epoch || !facts_ready(src) ||
+      !facts_node_ok(ctx, target) || !facts_node_ok(ctx, replacement))
+    goto failed;
+  if (!ixs_bounds_fork(&candidate, &dst->bounds))
+    goto failed;
 
   nexprs = src->bounds.nexprs;
   nvars = src->bounds.nvars;
   nnonzero = src->bounds.nnonzero;
-
-  if (dst->bounds.nexprs == 0 && dst->bounds.nvars == 0 &&
-      dst->bounds.nnonzero == 0) {
-    ixs_bounds forked;
-    if (!ixs_bounds_fork(&forked, &src->bounds))
-      goto cleanup;
-    forked.ctx = ctx;
-    forked.scratch = &ctx->scratch;
-    dst->bounds = forked;
-  } else {
-    /* Source symbol facts carry pow2, bit, and modular information; copying
-     * expression ranges alone loses public facts for non-empty destinations. */
-    bounds_add_all_facts(&dst->bounds, &src->bounds);
-  }
+  /* Symbol facts carry pow2, bit, and modular information; copying expression
+   * ranges alone loses public facts for non-empty destinations. */
+  bounds_add_all_facts(&candidate, &src->bounds);
+  if (candidate.oom)
+    goto failed;
 
   for (i = 0; i < nexprs; i++) {
     ixs_node *subst =
         simp_subs(ctx, src->bounds.exprs[i].expr, target, replacement);
     if (!subst)
-      goto cleanup;
-    ixs_bounds_add_expr(&dst->bounds, subst, src->bounds.exprs[i].iv);
+      goto failed;
+    ixs_bounds_add_expr(&candidate, subst, src->bounds.exprs[i].iv);
+    if (candidate.oom)
+      goto failed;
   }
   for (i = 0; i < nvars; i++) {
     ixs_node *sym = ixs_node_sym(ctx, src->bounds.vars[i].name,
                                  strlen(src->bounds.vars[i].name));
     ixs_node *subst;
     if (!sym)
-      goto cleanup;
+      goto failed;
     subst = simp_subs(ctx, sym, target, replacement);
     if (!subst)
-      goto cleanup;
-    ixs_bounds_add_expr(&dst->bounds, subst, src->bounds.vars[i].iv);
+      goto failed;
+    ixs_bounds_add_expr(&candidate, subst, src->bounds.vars[i].iv);
+    if (candidate.oom)
+      goto failed;
   }
   for (i = 0; i < nnonzero; i++) {
     ixs_node *subst =
         simp_subs(ctx, src->bounds.nonzero[i], target, replacement);
     if (!subst)
-      goto cleanup;
-    bounds_add_nonzero(&dst->bounds, subst);
+      goto failed;
+    bounds_add_nonzero(&candidate, subst);
+    if (candidate.oom)
+      goto failed;
   }
+  facts_commit(dst, &candidate);
   ok = true;
+  goto cleanup;
+
+failed:
+  ixs_arena_restore(&ctx->scratch, mark);
+  facts_poison(dst);
 
 cleanup:
   ixs_session_unbind(&binding);
   return ok;
+}
+
+static ixs_node *facts_simplify_error(ixs_ctx *ctx, const char *message) {
+  ixs_ctx_push_error(ctx, "facts: %s", message);
+  return ctx->sentinel_error;
+}
+
+ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr) {
+  ixs_session_binding binding;
+  ixs_arena_mark mark;
+  ixs_ctx *ctx;
+  ixs_node *result;
+  bool old_oom;
+
+  if (!facts_bind(facts, &binding, &ctx))
+    return NULL;
+  if (!facts_ready(facts)) {
+    result = facts_simplify_error(ctx, "fact set is unusable");
+    goto cleanup;
+  }
+  if (!expr) {
+    result = NULL;
+    goto cleanup;
+  }
+  if (!ixs_ctx_owns_node(ctx, expr)) {
+    result =
+        facts_simplify_error(ctx, "expression belongs to a different context");
+    goto cleanup;
+  }
+  if (ixs_node_is_sentinel(expr)) {
+    result = expr;
+    goto cleanup;
+  }
+  if (ixs_bounds_has_empty(&facts->bounds)) {
+    result = expr;
+    goto cleanup;
+  }
+
+  mark = ixs_arena_save(&ctx->scratch);
+  old_oom = facts->bounds.oom;
+  result = simp_simplify_bounds(ctx, expr, &facts->bounds);
+  if (!result || (!old_oom && facts->bounds.oom)) {
+    result = NULL;
+    bounds_cache_clear(&facts->bounds);
+  }
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+static void facts_fill_batch(ixs_node **exprs, size_t n, ixs_node *value) {
+  size_t i;
+  if (!exprs)
+    return;
+  for (i = 0; i < n; i++)
+    exprs[i] = value;
+}
+
+void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n) {
+  ixs_session_binding binding;
+  ixs_arena_mark mark;
+  ixs_ctx *ctx;
+  bool old_oom;
+  size_t i;
+
+  if (!facts_bind(facts, &binding, &ctx)) {
+    facts_fill_batch(exprs, n, NULL);
+    return;
+  }
+  if (n > 0 && !exprs) {
+    (void)facts_simplify_error(ctx, "NULL batch with nonzero count");
+    goto cleanup;
+  }
+  if (!facts_ready(facts)) {
+    facts_fill_batch(exprs, n,
+                     facts_simplify_error(ctx, "fact set is unusable"));
+    goto cleanup;
+  }
+  for (i = 0; i < n; i++) {
+    if (exprs[i] && !ixs_ctx_owns_node(ctx, exprs[i])) {
+      facts_fill_batch(
+          exprs, n,
+          facts_simplify_error(
+              ctx, "batch expression belongs to a different context"));
+      goto cleanup;
+    }
+  }
+  if (ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  old_oom = facts->bounds.oom;
+  for (i = 0; i < n; i++) {
+    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
+      continue;
+    exprs[i] = simp_simplify_bounds(ctx, exprs[i], &facts->bounds);
+    if (!exprs[i] || (!old_oom && facts->bounds.oom)) {
+      facts_fill_batch(exprs, n, NULL);
+      bounds_cache_clear(&facts->bounds);
+      break;
+    }
+  }
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
+
+cleanup:
+  ixs_session_unbind(&binding);
 }
 
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr) {
@@ -3410,7 +3588,7 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
-  if (facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr))
     result = ixs_bounds_check(&facts->bounds, expr);
   ixs_session_unbind(&binding);
   return result;
@@ -3423,7 +3601,7 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
-  if (facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr))
     result = ixs_bounds_check_integer_valued(&facts->bounds, expr);
   ixs_session_unbind(&binding);
   return result;
@@ -3435,7 +3613,7 @@ ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
-  if (facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr))
     result = ixs_bounds_check_defined(&facts->bounds, expr);
   ixs_session_unbind(&binding);
   return result;
@@ -3448,6 +3626,8 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
+  if (!facts_ready(facts))
+    goto cleanup;
   if (modulus == 0) {
     ixs_ctx_push_error(ctx, "divisibility: modulus must be nonzero");
     goto cleanup;
@@ -3485,6 +3665,12 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
 
   if (!facts_bind(facts, &binding, &ctx))
     return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
+  if (!facts_ready(facts)) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "fact set is unusable");
+    ixs_session_unbind(&binding);
+    return result;
+  }
   if (!expr) {
     ixs_exact_divide_result result = exact_divide_error(ctx, "NULL expression");
     ixs_session_unbind(&binding);
@@ -3578,7 +3764,8 @@ ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_pow2_fact result = IXS_POW2_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_POW2_UNKNOWN;
-  if (!facts_node_ok(ctx, expr) || ixs_bounds_has_empty(&facts->bounds))
+  if (!facts_ready(facts) || !facts_node_ok(ctx, expr) ||
+      ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
   if (ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits))
     result = bits.pow2;
@@ -3608,7 +3795,8 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out) {
   out->upper_q = 1;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
-  if (!facts_node_ok(ctx, expr) || ixs_bounds_has_empty(&facts->bounds))
+  if (!facts_ready(facts) || !facts_node_ok(ctx, expr) ||
+      ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
   iv = ixs_bounds_get(&facts->bounds, expr);
   if (!iv.valid || ixs_interval_is_empty(iv))

@@ -256,13 +256,18 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
 
 /* --- Fact sets --------------------------------------------------------- */
 
-/* Create a session-owned fact set.  The pointer remains valid until the
- * session is reset or destroyed.  Fact sets are mutable and bound to the
- * session/context that created them. */
+/* Create a session-owned fact set.  The handle storage remains valid until
+ * ctx destruction, but reset or destruction of its session invalidates the
+ * proof payload.  Calls through an invalidated handle fail conservatively.
+ * Fact sets are mutable and bound to the session/context that created them. */
 ixs_facts *ixs_facts_create(ixs_session *s);
 
-/* Import a predicate under the shared assumption contract above.  Returns
- * false and leaves facts unchanged when ingestion is rejected or fails. */
+/* Every mutator returns false on rejection or failure and makes facts
+ * unusable for subsequent proof queries.  The stored payload is committed
+ * only after a complete successful mutation, so no partial weaker context is
+ * observable. */
+
+/* Import a predicate under the shared assumption contract above. */
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;
@@ -276,9 +281,22 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 
 /* Copy facts from src to dst and add range facts for every known expression
- * after substituting target with replacement. */
+ * after substituting target with replacement.  Both sets must belong to the
+ * same live session. */
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+
+/* Simplify directly against an existing fact set without rebuilding bounds.
+ * NULL reports OOM or an expired/reset session.  Sentinel input propagates;
+ * invalid live input returns the fact set context's domain-error sentinel.
+ * Detected contradictory facts return expr unchanged. */
+ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
+
+/* Fact-backed batch simplification.  On OOM or an expired/reset session all
+ * entries become NULL.  Invalid live input replaces the entire batch with the
+ * domain-error sentinel.  NULL and sentinel entries otherwise propagate;
+ * detected contradictory facts leave every entry unchanged. */
+void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,

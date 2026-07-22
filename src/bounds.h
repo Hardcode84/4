@@ -66,6 +66,9 @@ typedef struct {
 
 struct ixs_facts {
   ixs_session_impl *impl;
+  ixs_ctx *ctx;
+  uint64_t epoch;
+  bool usable;
   ixs_bounds bounds;
 };
 

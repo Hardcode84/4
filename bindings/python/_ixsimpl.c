@@ -95,6 +95,22 @@ static int raise_new_assumption_error(ixs_session *session, size_t before) {
   return 0;
 }
 
+static int raise_new_simplify_error(ixs_session *session, size_t before) {
+  size_t i;
+  size_t after;
+  if (raise_new_assumption_error(session, before) < 0)
+    return -1;
+  after = ixs_session_nerrors(session);
+  for (i = before; i < after; i++) {
+    const char *message = ixs_session_error(session, i);
+    if (message && strncmp(message, "facts:", 6) == 0) {
+      PyErr_SetString(PyExc_ValueError, message);
+      return -1;
+    }
+  }
+  return 0;
+}
+
 static int raise_new_divisibility_error(ixs_session *session, size_t before) {
   size_t i;
   size_t after = ixs_session_nerrors(session);
@@ -500,8 +516,8 @@ static PyNumberMethods Expr_as_number = {
 
 static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
                                PyObject *kwargs) {
-  static char *kwlist[] = {"assumptions", NULL};
-  PyObject *assumptions_obj = NULL;
+  static char *kwlist[] = {"assumptions", "facts", NULL};
+  PyObject *assumptions_obj = NULL, *facts_obj = NULL;
   ixs_node **assumptions = NULL;
   size_t n_assumptions = 0;
   size_t errors_before;
@@ -509,9 +525,26 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   ixs_node *result;
   Py_ssize_t i, n;
 
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist,
-                                   &assumptions_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO", kwlist,
+                                   &assumptions_obj, &facts_obj))
     return NULL;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self->ctx_obj) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+  }
 
   if (assumptions_obj && assumptions_obj != Py_None) {
     if (!PyList_Check(assumptions_obj) && !PyTuple_Check(assumptions_obj)) {
@@ -549,9 +582,12 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   }
 
   errors_before = ixs_session_nerrors(session);
-  result = ixs_simplify(session, self->node, assumptions, n_assumptions);
+  if (facts_obj && facts_obj != Py_None)
+    result = ixs_simplify_facts(((FactsObject *)facts_obj)->facts, self->node);
+  else
+    result = ixs_simplify(session, self->node, assumptions, n_assumptions);
   PyMem_Free(assumptions);
-  if (raise_new_assumption_error(session, errors_before) < 0)
+  if (raise_new_simplify_error(session, errors_before) < 0)
     return NULL;
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
@@ -813,7 +849,7 @@ static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
 
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
-     "Simplify with optional CMP/boolean or AND assumptions."},
+     "Simplify with either assumptions or a reusable fact set."},
     {"expand", (PyCFunction)Expr_expand, METH_NOARGS,
      "Distribute MUL over ADD (expand products of sums)."},
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
@@ -1836,16 +1872,33 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
 
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
-  static char *kwlist[] = {"exprs", "assumptions", NULL};
-  PyObject *exprs_obj, *assumptions_obj = NULL;
+  static char *kwlist[] = {"exprs", "assumptions", "facts", NULL};
+  PyObject *exprs_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_exprs, n_assumptions = 0;
   ixs_node **exprs = NULL, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
 
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &exprs_obj,
-                                   &assumptions_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &exprs_obj,
+                                   &assumptions_obj, &facts_obj))
     return NULL;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+  }
 
   if (!PyList_Check(exprs_obj)) {
     PyErr_SetString(PyExc_TypeError, "exprs must be a list of Expr");
@@ -1908,9 +1961,13 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
   }
 
   errors_before = ixs_session_nerrors(session);
-  ixs_simplify_batch(session, exprs, (size_t)n_exprs, assumptions,
-                     (size_t)n_assumptions);
-  if (raise_new_assumption_error(session, errors_before) < 0) {
+  if (facts_obj && facts_obj != Py_None)
+    ixs_simplify_batch_facts(((FactsObject *)facts_obj)->facts, exprs,
+                             (size_t)n_exprs);
+  else
+    ixs_simplify_batch(session, exprs, (size_t)n_exprs, assumptions,
+                       (size_t)n_assumptions);
+  if (raise_new_simplify_error(session, errors_before) < 0) {
     PyMem_Free(exprs);
     PyMem_Free(assumptions);
     return NULL;
@@ -2025,7 +2082,7 @@ static PyMethodDef Context_methods[] = {
      "AND predicates."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS,
-     "Simplify in-place with optional CMP/boolean or AND assumptions."},
+     "Simplify in-place with either assumptions or a reusable fact set."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,
      "Clear the error list."},
     {"stats", (PyCFunction)Context_stats, METH_NOARGS,
