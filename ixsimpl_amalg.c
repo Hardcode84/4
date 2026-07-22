@@ -1665,6 +1665,11 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
     return bounds_add_divisible(b, expr, m);
   }
 
+  if (expr->tag == IXS_MAX || expr->tag == IXS_MIN) {
+    return ixs_bounds_is_known_divisible(b, expr->u.binary.lhs, m) &&
+           ixs_bounds_is_known_divisible(b, expr->u.binary.rhs, m);
+  }
+
   return false;
 }
 
@@ -1785,16 +1790,40 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
 
 static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
   ixs_node *m = expr->u.binary.rhs;
-  if (m->tag == IXS_INT && m->u.ival > 0) {
+  ixs_interval mi = ixs_bounds_get(b, m);
+  int64_t exact_m;
+
+  if (interval_exact_int(&mi, &exact_m) && exact_m > 0) {
     ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
     if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
-        pi.hi_p < m->u.ival)
+        pi.hi_p < exact_m)
       return pi;
     if (ixs_node_is_integer_valued(expr->u.binary.lhs)) {
       int64_t step = mod_dividend_step(expr->u.binary.lhs);
-      int64_t g = ixs_gcd(step, m->u.ival);
-      return ixs_interval_range(0, 1, m->u.ival - g, 1);
+      int64_t g = ixs_gcd(step, exact_m);
+      return ixs_interval_range(0, 1, exact_m - g, 1);
     }
+  }
+
+  if (ixs_node_is_integer_valued(expr->u.binary.lhs) &&
+      ixs_node_is_integer_valued(m) && interval_lower_at_least(&mi, 1, 1)) {
+    ixs_interval result = ixs_interval_unknown();
+    result.valid = true;
+    result.lo_inf = false;
+    result.lo_p = 0;
+    result.lo_q = 1;
+    if (mi.hi_inf) {
+      ixs_interval_set_hi_pos_inf(&result);
+    } else {
+      int64_t upper = ixs_rat_floor(mi.hi_p, mi.hi_q);
+      if (!ixs_safe_sub(upper, 1, &result.hi_p))
+        ixs_interval_set_hi_pos_inf(&result);
+      else {
+        result.hi_q = 1;
+        result.hi_inf = false;
+      }
+    }
+    return result;
   }
   return ixs_interval_unknown();
 }
@@ -11653,7 +11682,9 @@ static ixs_node *mod_scale_extract_add(ixs_ctx *ctx, ixs_bounds *bnds,
   if (a->tag != IXS_ADD || a->u.add.nterms == 0)
     return n;
   bfactor = mul_int_factor(b);
-  if (bfactor == 0 || !mod_scale_add_gcd(a, bfactor, &g))
+  if (!mod_scale_add_gcd(a, bfactor, &g))
+    return n;
+  if (bfactor == 0 && (!bnds || !ixs_bounds_is_known_divisible(bnds, b, g)))
     return n;
 
   ixs_node_get_rat(a->u.add.coeff, &kp, &kq);

@@ -882,6 +882,12 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
 ```
 
+Interval propagation also handles symbolic integer moduli.  If assumptions
+prove `1 <= m <= U`, then an integer-valued `Mod(x, m)` is in `[0, U - 1]`.
+An equality-constrained symbolic modulus receives the same dividend-step
+tightening as a literal modulus.  No remainder bound is inferred unless the
+modulus is proven positive.
+
 The forward cancellation uses two verification strategies:
 
 1. **floor(A/m) == floor_node** — reconstructs the expected floor via
