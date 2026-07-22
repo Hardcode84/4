@@ -1177,30 +1177,107 @@ static PyObject *Facts_derive_affine(FactsObject *self, PyObject *args,
 }
 
 static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
-  PyObject *target_obj, *replacement_obj;
-  ixs_node *target, *replacement;
-  ixs_facts *new_facts;
-  FactsObject *wrapped;
+  Py_ssize_t nargs = PyTuple_GET_SIZE(args);
 
-  if (!PyArg_ParseTuple(args, "OO", &target_obj, &replacement_obj))
-    return NULL;
-  target = facts_expr_arg(self, target_obj, "target");
-  if (!target)
-    return NULL;
-  replacement = coerce_arg(self->ctx_obj, replacement_obj);
-  if (!replacement)
-    return NULL;
+  if (nargs == 1 && PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
+    PyObject *dict = PyTuple_GET_ITEM(args, 0);
+    Py_ssize_t n = PyDict_Size(dict);
+    ixs_node **targets = NULL;
+    ixs_node **replacements = NULL;
+    ixs_facts *new_facts;
+    FactsObject *wrapped;
+    Py_ssize_t pos = 0;
+    PyObject *key, *value;
+    uint32_t i = 0;
 
-  new_facts = ixs_facts_create(Context_session(self->ctx_obj));
-  wrapped = Facts_wrap(self->ctx_obj, new_facts);
-  if (!wrapped)
-    return NULL;
-  if (!ixs_facts_substitute(wrapped->facts, self->facts, target, replacement)) {
-    Py_DECREF(wrapped);
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: cannot substitute facts");
-    return NULL;
+    if ((size_t)n > (size_t)UINT32_MAX) {
+      PyErr_SetString(PyExc_OverflowError, "too many fact substitutions");
+      return NULL;
+    }
+    if (n != 0) {
+      targets = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(*targets));
+      replacements =
+          (ixs_node **)PyMem_Malloc((size_t)n * sizeof(*replacements));
+      if (!targets || !replacements) {
+        PyMem_Free(targets);
+        PyMem_Free(replacements);
+        return PyErr_NoMemory();
+      }
+    }
+    while (PyDict_Next(dict, &pos, &key, &value)) {
+      if (i >= (uint32_t)n) {
+        PyMem_Free(targets);
+        PyMem_Free(replacements);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "dict changed size during iteration");
+        return NULL;
+      }
+      targets[i] = coerce_subs_target(self->ctx_obj, key);
+      if (!targets[i]) {
+        PyMem_Free(targets);
+        PyMem_Free(replacements);
+        return NULL;
+      }
+      replacements[i] = coerce_arg(self->ctx_obj, value);
+      if (!replacements[i]) {
+        PyMem_Free(targets);
+        PyMem_Free(replacements);
+        return NULL;
+      }
+      i++;
+    }
+    if (i != (uint32_t)n) {
+      PyMem_Free(targets);
+      PyMem_Free(replacements);
+      PyErr_SetString(PyExc_RuntimeError, "dict changed size during iteration");
+      return NULL;
+    }
+    new_facts = ixs_facts_create(Context_session(self->ctx_obj));
+    wrapped = Facts_wrap(self->ctx_obj, new_facts);
+    if (!wrapped) {
+      PyMem_Free(targets);
+      PyMem_Free(replacements);
+      return NULL;
+    }
+    if (!ixs_facts_substitute_multi(wrapped->facts, self->facts, (uint32_t)n,
+                                    targets, replacements)) {
+      Py_DECREF(wrapped);
+      PyMem_Free(targets);
+      PyMem_Free(replacements);
+      PyErr_SetString(PyExc_ValueError, "ixsimpl: cannot substitute facts");
+      return NULL;
+    }
+    PyMem_Free(targets);
+    PyMem_Free(replacements);
+    return (PyObject *)wrapped;
   }
-  return (PyObject *)wrapped;
+
+  {
+    PyObject *target_obj, *replacement_obj;
+    ixs_node *target, *replacement;
+    ixs_facts *new_facts;
+    FactsObject *wrapped;
+
+    if (!PyArg_ParseTuple(args, "OO", &target_obj, &replacement_obj))
+      return NULL;
+    target = coerce_subs_target(self->ctx_obj, target_obj);
+    if (!target)
+      return NULL;
+    replacement = coerce_arg(self->ctx_obj, replacement_obj);
+    if (!replacement)
+      return NULL;
+    new_facts = ixs_facts_create(Context_session(self->ctx_obj));
+    wrapped = Facts_wrap(self->ctx_obj, new_facts);
+    if (!wrapped)
+      return NULL;
+    if (!ixs_facts_substitute(wrapped->facts, self->facts, target,
+                              replacement)) {
+      Py_DECREF(wrapped);
+      PyErr_SetString(PyExc_ValueError, "ixsimpl: cannot substitute facts");
+      return NULL;
+    }
+    return (PyObject *)wrapped;
+  }
 }
 
 static PyMethodDef Facts_methods[] = {
@@ -1212,7 +1289,7 @@ static PyMethodDef Facts_methods[] = {
      METH_VARARGS | METH_KEYWORDS,
      "Derive range(derived) from range(base) via scale*base + offset."},
     {"subs", (PyCFunction)Facts_subs, METH_VARARGS,
-     "Return a fact set with expression ranges substituted."},
+     "Return facts after one pair or a simultaneous substitution mapping."},
     {NULL}};
 
 static PyTypeObject FactsType = {

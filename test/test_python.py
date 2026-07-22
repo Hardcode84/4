@@ -2687,6 +2687,43 @@ def test_facts_range_transfer_and_substitution() -> None:
     assert ctx.range(2 * a + 16 * b, facts=subst) == (0, 2147483630)
 
 
+def test_facts_simultaneous_substitution_and_inverse_facts() -> None:
+    ctx = ixsimpl.Context()
+    x, y, z = (ctx.sym(name) for name in ("multi_x", "multi_y", "multi_z"))
+    ranged = ctx.facts()
+    ranged.assume_range(x, 0, 15)
+    ranged.assume_range(y, 20, 30)
+
+    simultaneous = ranged.subs({x: y, y: z})
+    assert ctx.range(y, facts=simultaneous) == (0, 15)
+    assert ctx.range(z, facts=simultaneous) == (20, 30)
+    assert ctx.range(x, facts=simultaneous) is None
+    unchanged = ranged.subs({})
+    assert ctx.range(x, facts=unchanged) == (0, 15)
+    assert ctx.range(y, facts=unchanged) == (20, 30)
+
+    k = ctx.sym("multi_k")
+    modular = ctx.facts()
+    modular.assume(
+        ixsimpl.and_(
+            ctx.eq(y % 8, 0),
+            ixsimpl.and_(ctx.eq(y & (y - 1), 0), y > 0),
+        )
+    )
+    transferred = modular.subs({y: 2 * k, k: z})
+    assert ctx.congruent(k, 4, 0, transferred) is True
+    assert ctx.congruent(k, 8, 0, transferred) is None
+    assert ctx.congruent(z, 4, 0, transferred) is None
+    known_zero, known_one, _ = ctx.known_bits(k, transferred) or (0, 0, None)
+    assert known_zero & 3 == 3
+    assert known_one & 3 == 0
+    assert ctx.pow2_fact(k, facts=transferred) == "positive"
+
+    nonlinear = modular.subs(y, k * z)
+    assert ctx.congruent(k, 4, 0, nonlinear) is None
+    assert ctx.pow2_fact(k, facts=nonlinear) is None
+
+
 def test_facts_assume_decomposes_conjunction() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")

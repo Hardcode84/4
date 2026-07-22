@@ -303,6 +303,30 @@ public:
                                    int64_t residue) const {
     return ixs_check_congruent_facts(facts_, expr.raw(), modulus, residue);
   }
+  bool substitute(const Facts &source, const Expr &target,
+                  const Expr &replacement) {
+    return ixs_facts_substitute(facts_, source.raw(), target.raw(),
+                                replacement.raw());
+  }
+  bool substitute_multi(const Facts &source, const std::vector<Expr> &targets,
+                        const std::vector<Expr> &replacements) {
+    std::vector<ixs_node *> raw_targets;
+    std::vector<ixs_node *> raw_replacements;
+    size_t i;
+    if (targets.size() != replacements.size() ||
+        targets.size() > static_cast<size_t>(UINT32_MAX))
+      return false;
+    raw_targets.reserve(targets.size());
+    raw_replacements.reserve(replacements.size());
+    for (i = 0; i < targets.size(); ++i) {
+      raw_targets.push_back(targets[i].raw());
+      raw_replacements.push_back(replacements[i].raw());
+    }
+    return ixs_facts_substitute_multi(
+        facts_, source.raw(), static_cast<uint32_t>(targets.size()),
+        raw_targets.empty() ? nullptr : raw_targets.data(),
+        raw_replacements.empty() ? nullptr : raw_replacements.data());
+  }
   ExactDivideResult try_exact_divide(const Expr &expr, int64_t divisor) const {
     ixs_exact_divide_result result =
         ixs_try_exact_divide_facts(facts_, expr.raw(), divisor);

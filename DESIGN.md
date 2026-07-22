@@ -1412,6 +1412,24 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   caches but do not weaken or consume the fact set. Detected contradictory
   facts leave simplification results unchanged; they never enable rewriting
   from an empty domain.
+- **Fact substitution transfer** (`ixs_facts_substitute_multi`, Python
+  `Facts.subs(mapping)`, C++ `Facts::substitute_multi`): applies all target
+  replacements simultaneously. Replacements are not traversed, overlapping
+  substitutions such as `{x -> y, y -> z}` produce facts for `y` and `z`, and
+  the first entry wins when the C/C++ arrays repeat a target. Unchanged source
+  facts and all pre-existing destination facts are merged. A direct symbol
+  alias transfers the complete symbol record. For an integer affine
+  replacement `a*K+b`, ranges are inverted when their exact rational bounds
+  remain representable, congruences are reduced by `gcd(a, modulus)`, a
+  contiguous known-low-bit prefix is treated as a congruence, and power-of-two
+  state transfers only for `b == 0` with positive power-of-two `a`. Thus
+  `8 | y` transferred through `y -> 2*K` proves `4 | K`, not `8 | K`.
+  Transferred ranges and nonzero constraints remain attached to the complete
+  substituted expression even when it is nonlinear; no symbol record is
+  guessed for unsupported congruence or bit facts. In-place transfer is additive:
+  original facts count as pre-existing destination facts. Validation or OOM
+  failure retains the old payload but poisons the destination, preventing
+  queries from observing a partially transferred set.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1764,6 +1782,10 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
+                                uint32_t nsubs,
+                                ixs_node *const *targets,
+                                ixs_node *const *replacements);
 ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
@@ -2342,7 +2364,9 @@ Key properties:
   `check_divisible()` methods expose fact-backed transforms and proofs.
   `get_known_bits()`, `get_symbol_congruence()`, and `check_congruent()` expose
   the low-64 and query-specific modular interfaces without adding wrapper-side
-  reasoning.
+  reasoning. `Facts::substitute()` and `Facts::substitute_multi()` mutate a
+  destination wrapper from a source fact set and mirror the transactional C
+  transfer contract.
   `Expr::simplify(const Facts&)` is the expression-oriented spelling.
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
@@ -2415,6 +2439,9 @@ facts.assume_range(orig, 0, 1073741815)
 facts.derive_affine(orig, 2, 0, 2*orig)
 subst_facts = facts.subs(orig, A + 8*B)
 print(ctx.range(2*A + 16*B, facts=subst_facts))  # (0, 2147483630)
+
+# Mapping form is simultaneous: the replacement A is not rewritten to B.
+multi_facts = facts.subs({orig: A, A: B})
 ```
 
 Implementation:
@@ -2470,8 +2497,10 @@ Implementation:
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
-  `scale*base + offset`, and `Facts.subs()` transfers expression ranges
-  through substitution. `Context.check`, `Context.range`,
+  `scale*base + offset`, and `Facts.subs()` accepts either one pair or a
+  simultaneous substitution dictionary. It transfers ranges and only the
+  congruence, known-bit, and power-of-two facts justified by each replacement.
+  `Context.check`, `Context.range`,
   `Context.integer_valued`, and `Context.pow2_fact` accept `facts=...` as an
   alternative to `assumptions=[...]`; `Context.divisible` requires a fact set.
 - Every Python `assumptions=[...]` entry and `Facts.assume()` predicate must be
@@ -2752,6 +2781,10 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
+                                uint32_t nsubs,
+                                ixs_node *const *targets,
+                                ixs_node *const *replacements);
 ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);

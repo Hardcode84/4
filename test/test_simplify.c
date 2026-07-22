@@ -1854,6 +1854,29 @@ static void test_fact_backed_simplification(void) {
   }
 
   {
+    ixs_facts *source = ixs_facts_create(ctx);
+    ixs_facts *substituted = ixs_facts_create(ctx);
+    ixs_node *source_symbol = ixs_sym(ctx, "facts_multi_source");
+    ixs_node *inner = ixs_sym(ctx, "facts_multi_inner");
+    ixs_node *final = ixs_sym(ctx, "facts_multi_final");
+    ixs_node *targets[2] = {source_symbol, inner};
+    ixs_node *replacements[2] = {ixs_mul(ctx, ixs_int(ctx, 2), inner), final};
+    ixs_node *mod4 = ixs_mod(ctx, inner, ixs_int(ctx, 4));
+    ixs_node *mod8 = ixs_mod(ctx, inner, ixs_int(ctx, 8));
+    ixs_node *final_mod4 = ixs_mod(ctx, final, ixs_int(ctx, 4));
+    ixs_node *mod8_pred =
+        ixs_cmp(ctx, ixs_mod(ctx, source_symbol, ixs_int(ctx, 8)), IXS_CMP_EQ,
+                ixs_int(ctx, 0));
+
+    CHECK(ixs_facts_assume_pred(source, mod8_pred));
+    CHECK(ixs_facts_substitute_multi(substituted, source, 2, targets,
+                                     replacements));
+    CHECK(ixs_simplify_facts(substituted, mod4) == ixs_int(ctx, 0));
+    CHECK(ixs_simplify_facts(substituted, mod8) == mod8);
+    CHECK(ixs_simplify_facts(substituted, final_mod4) == final_mod4);
+  }
+
+  {
     ixs_facts *contradictory = ixs_facts_create(ctx);
     ixs_node *contradictory_floor =
         ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 100)));

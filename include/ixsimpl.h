@@ -290,11 +290,23 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
 bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
                              int64_t offset, ixs_node *derived);
 
-/* Copy facts from src to dst and add range facts for every known expression
- * after substituting target with replacement.  Both sets must belong to the
- * same live session. */
+/* Merge facts from src into dst after one simultaneous substitution.  Facts
+ * unrelated to target are preserved; facts about target are transferred only
+ * when justified by replacement.  Both sets must belong to the same live
+ * session. */
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement);
+
+/* Multi-target form of ixs_facts_substitute.  Substitution is simultaneous:
+ * replacements are not recursively substituted.  When a target occurs more
+ * than once, its first entry wins, matching ixs_subs_multi.  nsubs == 0 accepts
+ * NULL arrays and merges src unchanged.  dst may equal src; in that case the
+ * original facts remain as pre-existing destination facts and transformed
+ * facts are added.  Any failure leaves dst's prior facts intact but marks dst
+ * unusable, so callers can never observe a partially transferred set. */
+bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
+                                uint32_t nsubs, ixs_node *const *targets,
+                                ixs_node *const *replacements);
 
 /* Simplify directly against an existing fact set without rebuilding bounds.
  * NULL reports OOM or an expired/reset session.  Sentinel input propagates;

@@ -1771,6 +1771,257 @@ static void test_public_facts_substitute_preserves_symbol_facts(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_facts_substitute_multi_semantics(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "multi_x");
+  ixs_node *y = ixs_sym(ctx, "multi_y");
+  ixs_node *z = ixs_sym(ctx, "multi_z");
+  ixs_node *a = ixs_sym(ctx, "multi_a");
+  ixs_node *b = ixs_sym(ctx, "multi_b");
+  ixs_node *d = ixs_sym(ctx, "multi_d");
+  ixs_node *seed = ixs_sym(ctx, "multi_seed");
+  ixs_node *pow2_expr = ixs_and(ctx, d, ixs_sub(ctx, d, ixs_int(ctx, 1)));
+  ixs_node *pow2_pred = ixs_cmp(ctx, pow2_expr, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *targets[2] = {x, y};
+  ixs_node *replacements[2] = {y, z};
+  ixs_node *duplicate_targets[2] = {x, x};
+  ixs_node *duplicate_replacements[2] = {a, b};
+  ixs_facts *src = ixs_facts_create(ctx);
+  ixs_facts *dst = ixs_facts_create(ctx);
+  ixs_facts *duplicates = ixs_facts_create(ctx);
+  ixs_facts *empty_copy = ixs_facts_create(ctx);
+  ixs_range_result input;
+  ixs_range_result range;
+
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_q = 1;
+  input.upper_q = 1;
+  input.lower_p = 0;
+  input.upper_p = 15;
+  CHECK(ixs_facts_assume_range(src, x, &input));
+  input.lower_p = 20;
+  input.upper_p = 30;
+  CHECK(ixs_facts_assume_range(src, y, &input));
+  CHECK(ixs_facts_assume_pred(src, pow2_pred));
+  input.lower_p = 100;
+  input.upper_p = 200;
+  CHECK(ixs_facts_assume_range(dst, seed, &input));
+
+  CHECK(ixs_facts_substitute_multi(dst, src, 2, targets, replacements));
+  CHECK(ixs_range_facts(dst, y, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 15 && range.upper_q == 1);
+  CHECK(ixs_range_facts(dst, z, &range));
+  CHECK(range.has_lower && range.lower_p == 20 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 30 && range.upper_q == 1);
+  CHECK(ixs_range_facts(dst, seed, &range));
+  CHECK(range.has_lower && range.lower_p == 100);
+  CHECK(range.has_upper && range.upper_p == 200);
+  CHECK(ixs_get_pow2_fact_facts(dst, d) == IXS_POW2_OR_ZERO);
+
+  CHECK(ixs_facts_substitute_multi(duplicates, src, 2, duplicate_targets,
+                                   duplicate_replacements));
+  CHECK(ixs_range_facts(duplicates, a, &range));
+  CHECK(range.has_lower && range.lower_p == 0);
+  CHECK(range.has_upper && range.upper_p == 15);
+  CHECK(!ixs_range_facts(duplicates, b, &range));
+
+  CHECK(ixs_facts_substitute_multi(empty_copy, src, 0, NULL, NULL));
+  CHECK(ixs_range_facts(empty_copy, x, &range));
+  CHECK(range.has_lower && range.lower_p == 0);
+  CHECK(range.has_upper && range.upper_p == 15);
+
+  CHECK(ixs_facts_substitute_multi(src, src, 1, &x, &a));
+  CHECK(ixs_range_facts(src, x, &range));
+  CHECK(range.has_lower && range.lower_p == 0);
+  CHECK(range.has_upper && range.upper_p == 15);
+  CHECK(ixs_range_facts(src, a, &range));
+  CHECK(range.has_lower && range.lower_p == 0);
+  CHECK(range.has_upper && range.upper_p == 15);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_substitute_inverse_facts(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *y = ixs_sym(ctx, "inverse_y");
+  ixs_node *k = ixs_sym(ctx, "inverse_k");
+  ixs_node *l = ixs_sym(ctx, "inverse_l");
+  ixs_node *two_k = ixs_mul(ctx, ixs_int(ctx, 2), k);
+  ixs_node *four_k_plus_two =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), k), ixs_int(ctx, 2));
+  ixs_node *nonlinear = ixs_mul(ctx, k, l);
+  ixs_node *mod8 = ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 8)), IXS_CMP_EQ,
+                           ixs_int(ctx, 0));
+  ixs_node *pow2_expr = ixs_and(ctx, y, ixs_sub(ctx, y, ixs_int(ctx, 1)));
+  ixs_node *pow2_pred = ixs_cmp(ctx, pow2_expr, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_facts *src = ixs_facts_create(ctx);
+  ixs_facts *dst = ixs_facts_create(ctx);
+  ixs_facts *offset_src = ixs_facts_create(ctx);
+  ixs_facts *offset_dst = ixs_facts_create(ctx);
+  ixs_facts *nonlinear_dst = ixs_facts_create(ctx);
+  ixs_known_bits bits;
+
+  CHECK(ixs_facts_assume_pred(src, mod8));
+  CHECK(ixs_facts_assume_pred(src, pow2_pred));
+  CHECK(
+      ixs_facts_assume_pred(src, ixs_cmp(ctx, y, IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_substitute(dst, src, y, two_k));
+  CHECK(ixs_check_congruent_facts(dst, k, 4, 0) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(dst, k, 8, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_get_known_bits_facts(dst, k, &bits));
+  CHECK((bits.known_zero & 3u) == 3u);
+  CHECK((bits.known_one & 3u) == 0);
+  CHECK(ixs_get_pow2_fact_facts(dst, k) == IXS_POW2_POSITIVE);
+
+  CHECK(ixs_facts_assume_pred(offset_src,
+                              ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 6)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_substitute(offset_dst, offset_src, y, four_k_plus_two));
+  CHECK(ixs_check_congruent_facts(offset_dst, k, 3, 0) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_substitute(nonlinear_dst, src, y, nonlinear));
+  CHECK(ixs_check_congruent_facts(nonlinear_dst, k, 4, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_get_pow2_fact_facts(nonlinear_dst, k) == IXS_POW2_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_substitute_contradiction_and_extrema(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "inverse_extreme_x");
+  ixs_node *y = ixs_sym(ctx, "inverse_extreme_y");
+  ixs_node *k = ixs_sym(ctx, "inverse_extreme_k");
+  ixs_node *two_k = ixs_mul(ctx, ixs_int(ctx, 2), k);
+  ixs_node *min_k = ixs_mul(ctx, ixs_int(ctx, INT64_MIN), k);
+  ixs_node *min_offset = ixs_add(ctx, k, ixs_int(ctx, INT64_MIN));
+  ixs_facts *incompatible = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_facts *extreme_src = ixs_facts_create(ctx);
+  ixs_facts *extreme_dst = ixs_facts_create(ctx);
+  ixs_facts *residue_src = ixs_facts_create(ctx);
+  ixs_facts *residue_dst = ixs_facts_create(ctx);
+  ixs_facts *merge_src = ixs_facts_create(ctx);
+  ixs_facts *merge_dst = ixs_facts_create(ctx);
+  ixs_facts *range_src = ixs_facts_create(ctx);
+  ixs_facts *range_dst = ixs_facts_create(ctx);
+  ixs_range_result input;
+  ixs_range_result range;
+  int64_t modulus;
+  int64_t residue;
+
+  CHECK(ixs_facts_assume_pred(incompatible,
+                              ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_substitute(contradictory, incompatible, y, two_k));
+  CHECK(ixs_check_congruent_facts(contradictory, k, 2, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_range_facts(contradictory, k, &range));
+
+  CHECK(ixs_facts_assume_pred(
+      extreme_src, ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, INT64_MAX)),
+                           IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_substitute(extreme_dst, extreme_src, y, min_k));
+  CHECK(ixs_check_congruent_facts(extreme_dst, k, INT64_MAX, 0) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(
+      residue_src, ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, INT64_MAX)),
+                           IXS_CMP_EQ, ixs_int(ctx, INT64_MAX - 2))));
+  CHECK(ixs_get_symbol_congruence_facts(residue_src, y, &modulus, &residue));
+  CHECK(modulus == INT64_MAX);
+  CHECK(residue == INT64_MAX - 2);
+  CHECK(ixs_facts_substitute(residue_dst, residue_src, y, ixs_neg(ctx, k)));
+  CHECK(ixs_get_symbol_congruence_facts(residue_dst, k, &modulus, &residue));
+  CHECK(modulus == INT64_MAX);
+  CHECK(residue == 2);
+  CHECK(ixs_check_congruent_facts(residue_dst, k, INT64_MAX, 2) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      merge_src, ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 2147483629)),
+                         IXS_CMP_EQ, ixs_int(ctx, 456))));
+  CHECK(ixs_facts_assume_pred(
+      merge_dst, ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 2147483647)),
+                         IXS_CMP_EQ, ixs_int(ctx, 123))));
+  CHECK(ixs_facts_substitute(merge_dst, merge_src, y, k));
+  CHECK(ixs_check_congruent_facts(merge_dst, k, 2147483629, 456) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(merge_dst, k, 2147483647, 123) ==
+        IXS_CHECK_TRUE);
+
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_p = 0;
+  input.lower_q = 1;
+  input.upper_p = 1;
+  input.upper_q = 1;
+  CHECK(ixs_facts_assume_range(range_src, x, &input));
+  CHECK(ixs_facts_substitute(range_dst, range_src, x, min_offset));
+  CHECK(ixs_range_facts(range_dst, min_offset, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 1 && range.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_substitute_failures_are_atomic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "substitute_failure_x");
+  ixs_node *y = ixs_sym(ctx, "substitute_failure_y");
+  ixs_node *other_y = ixs_sym(other, "substitute_failure_y");
+  ixs_node *targets[1] = {x};
+  ixs_node *replacements[1] = {y};
+  ixs_node *wrong_replacements[1] = {other_y};
+  ixs_node *sentinel_targets[1] = {ctx->sentinel_error};
+  ixs_facts *src = ixs_facts_create(ctx);
+  ixs_facts *other_src = ixs_facts_create(other);
+  ixs_facts *wrong_node_dst = ixs_facts_create(ctx);
+  ixs_facts *wrong_src_dst = ixs_facts_create(ctx);
+  ixs_facts *sentinel_dst = ixs_facts_create(ctx);
+  ixs_facts *null_array_dst = ixs_facts_create(ctx);
+  ixs_facts *oom_dst = ixs_facts_create(ctx);
+  ixs_range_result input;
+  ixs_range_result range;
+
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_p = 1;
+  input.lower_q = 1;
+  input.upper_p = 9;
+  input.upper_q = 1;
+  CHECK(ixs_facts_assume_range(src, x, &input));
+  CHECK(ixs_facts_assume_range(wrong_node_dst, y, &input));
+  CHECK(ixs_facts_assume_range(wrong_src_dst, y, &input));
+  CHECK(ixs_facts_assume_range(sentinel_dst, y, &input));
+  CHECK(ixs_facts_assume_range(null_array_dst, y, &input));
+  CHECK(ixs_facts_assume_range(oom_dst, y, &input));
+
+  CHECK(!ixs_facts_substitute_multi(wrong_node_dst, src, 1, targets,
+                                    wrong_replacements));
+  CHECK(!ixs_range_facts(wrong_node_dst, y, &range));
+  CHECK(!ixs_facts_substitute_multi(wrong_src_dst, other_src, 1, targets,
+                                    replacements));
+  CHECK(!ixs_range_facts(wrong_src_dst, y, &range));
+  CHECK(!ixs_facts_substitute_multi(sentinel_dst, src, 1, sentinel_targets,
+                                    replacements));
+  CHECK(!ixs_range_facts(sentinel_dst, y, &range));
+  CHECK(
+      !ixs_facts_substitute_multi(null_array_dst, src, 1, NULL, replacements));
+  CHECK(!ixs_range_facts(null_array_dst, y, &range));
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(!ixs_facts_substitute_multi(oom_dst, src, 1, targets, replacements));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!ixs_range_facts(oom_dst, y, &range));
+  CHECK(ixs_range_facts(src, x, &range));
+  CHECK(range.has_lower && range.lower_p == 1);
+  CHECK(range.has_upper && range.upper_p == 9);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Public integrality and divisibility                               */
 /* ------------------------------------------------------------------ */
@@ -3164,6 +3415,10 @@ int main(void) {
   test_compound_assumption_boolean_constants();
   test_public_facts_assume_deep_conjunction();
   test_public_facts_substitute_preserves_symbol_facts();
+  test_public_facts_substitute_multi_semantics();
+  test_public_facts_substitute_inverse_facts();
+  test_public_facts_substitute_contradiction_and_extrema();
+  test_public_facts_substitute_failures_are_atomic();
   test_public_structural_and_assumption_integrality();
   test_public_fact_integrality_piecewise();
   test_public_fact_divisibility();

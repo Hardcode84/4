@@ -340,16 +340,22 @@ static void apply_congruence_known_bits(ixs_bounds *b, ixs_var_bound *v) {
   apply_var_known_bits(b, v, (~rem) & mask, rem & mask);
 }
 
+static uint64_t bounds_normalize_residue(int64_t value, uint64_t modulus);
+static uint64_t bounds_mul_mod(uint64_t a, uint64_t b, uint64_t modulus);
+static bool bounds_mod_inverse(uint64_t value, uint64_t modulus,
+                               uint64_t *inverse);
+
 /* Record sym ≡ rem (mod m).  Merges with existing info via CRT.
  * Overflowing constraints are silently ignored.  Direct contradictions are
  * recorded on the bounds object so query APIs can decline concrete answers. */
 static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
                          int64_t rem) {
   ixs_var_bound *v;
-  int64_t g, new_mod, old_mod, step, m_div_g, target, k;
+  int64_t g, new_mod, old_mod, step, m_div_g, difference;
+  uint64_t inverse, k, merged;
   if (m <= 0)
     return;
-  rem = ((rem % m) + m) % m;
+  rem = (int64_t)bounds_normalize_residue(rem, (uint64_t)m);
   v = get_or_create_var(b, name);
   if (!v)
     return;
@@ -361,29 +367,32 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   }
   old_mod = v->modulus;
   g = ixs_gcd(old_mod, m);
-  if (((rem - v->remainder) % g + g) % g != 0) {
+  difference = rem - v->remainder;
+  if (bounds_normalize_residue(difference, (uint64_t)g) != 0) {
     b->contradiction = true;
     return;
   }
   if (old_mod > INT64_MAX / (m / g))
     return;
   new_mod = old_mod / g * m;
-  /* Solve old_mod/g * k ≡ (rem - v->remainder)/g  (mod m/g) by brute search.
-   * gcd(old_mod/g, m/g) == 1 guarantees a unique solution.  Moduli are
-   * small in practice (thread tile sizes), so the linear scan is fine. */
+  /* Solve old_mod/g * k == (rem - old_remainder)/g (mod m/g).
+   * Keep the modular arithmetic bounded so large public moduli do not turn
+   * this merge into either an overflow or a linear scan. */
   step = old_mod / g;
   m_div_g = m / g;
-  target = ((((rem - v->remainder) / g) % m_div_g) + m_div_g) % m_div_g;
-  for (k = 0; k < m_div_g; k++) {
-    if (((uint64_t)step * (uint64_t)k) % (uint64_t)m_div_g == (uint64_t)target)
-      break;
+  if (m_div_g == 1) {
+    k = 0;
+  } else {
+    uint64_t target =
+        bounds_normalize_residue(difference / g, (uint64_t)m_div_g);
+    if (!bounds_mod_inverse((uint64_t)step, (uint64_t)m_div_g, &inverse))
+      return;
+    k = bounds_mul_mod(target, inverse, (uint64_t)m_div_g);
   }
-  if (k >= m_div_g)
-    return;
   v->modulus = new_mod;
-  v->remainder =
-      (int64_t)(((uint64_t)v->remainder + (uint64_t)old_mod * (uint64_t)k) %
-                (uint64_t)new_mod);
+  merged = bounds_mul_mod((uint64_t)old_mod, k, (uint64_t)new_mod);
+  merged += (uint64_t)v->remainder;
+  v->remainder = (int64_t)(merged % (uint64_t)new_mod);
   apply_congruence_known_bits(b, v);
 }
 
@@ -441,7 +450,8 @@ static void extract_modrem(ixs_bounds *b, ixs_node *a) {
     if (dividend->tag != IXS_SYM || modulus->tag != IXS_INT ||
         modulus->u.ival <= 0)
       return;
-    rem_val = ((rem_val % modulus->u.ival) + modulus->u.ival) % modulus->u.ival;
+    rem_val =
+        (int64_t)bounds_normalize_residue(rem_val, (uint64_t)modulus->u.ival);
     apply_modrem(b, dividend->u.name, modulus->u.ival, rem_val);
   }
 }
@@ -1711,6 +1721,39 @@ static uint64_t bounds_mul_mod(uint64_t a, uint64_t b, uint64_t modulus) {
       a = bounds_add_mod(a, a, modulus);
   }
   return result;
+}
+
+static uint64_t bounds_sub_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  a %= modulus;
+  b %= modulus;
+  return a >= b ? a - b : modulus - (b - a);
+}
+
+/* Extended Euclid with coefficients kept as residues.  This avoids signed
+ * coefficient overflow while retaining portable C99 arithmetic. */
+static bool bounds_mod_inverse(uint64_t value, uint64_t modulus,
+                               uint64_t *inverse) {
+  uint64_t r, new_r, t, new_t;
+  if (!inverse || modulus <= 1u)
+    return false;
+  r = modulus;
+  new_r = value % modulus;
+  t = 0;
+  new_t = 1u;
+  while (new_r != 0) {
+    uint64_t quotient = r / new_r;
+    uint64_t next_r = r % new_r;
+    uint64_t product = bounds_mul_mod(quotient, new_t, modulus);
+    uint64_t next_t = bounds_sub_mod(t, product, modulus);
+    r = new_r;
+    new_r = next_r;
+    t = new_t;
+    new_t = next_t;
+  }
+  if (r != 1u)
+    return false;
+  *inverse = t;
+  return true;
 }
 
 static uint64_t bounds_pow_mod(uint64_t base, int32_t exponent,
@@ -3755,15 +3798,200 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
   apply_pow2_fact(dst, v, src->bits.pow2);
 }
 
-static void bounds_add_all_facts(ixs_bounds *dst, const ixs_bounds *src) {
-  size_t i;
-  dst->contradiction = dst->contradiction || src->contradiction;
-  for (i = 0; i < src->nvars; i++)
-    bounds_add_var_fact(dst, &src->vars[i]);
-  for (i = 0; i < src->nexprs; i++)
-    ixs_bounds_add_expr(dst, src->exprs[i].expr, src->exprs[i].iv);
-  for (i = 0; i < src->nnonzero; i++)
-    bounds_add_nonzero(dst, src->nonzero[i]);
+static void bounds_add_var_interval(ixs_bounds *dst, const char *name,
+                                    ixs_interval iv) {
+  ixs_var_bound fact;
+  if (!iv.valid)
+    return;
+  memset(&fact, 0, sizeof(fact));
+  fact.name = name;
+  fact.iv = iv;
+  bounds_add_var_fact(dst, &fact);
+}
+
+static bool bounds_extract_integer_affine(ixs_node *expr, const char **name,
+                                          int64_t *scale, int64_t *offset) {
+  int64_t p, q;
+  if (!expr || !name || !scale || !offset)
+    return false;
+  if (expr->tag == IXS_SYM) {
+    *name = expr->u.name;
+    *scale = 1;
+    *offset = 0;
+    return true;
+  }
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
+      expr->u.mul.factors[0].exp == 1 &&
+      expr->u.mul.factors[0].base->tag == IXS_SYM) {
+    ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+    if (q != 1 || p == 0)
+      return false;
+    *name = expr->u.mul.factors[0].base->u.name;
+    *scale = p;
+    *offset = 0;
+    return true;
+  }
+  if (expr->tag == IXS_ADD && expr->u.add.nterms == 1 &&
+      expr->u.add.terms[0].term->tag == IXS_SYM) {
+    ixs_node_get_rat(expr->u.add.coeff, offset, &q);
+    if (q != 1)
+      return false;
+    ixs_node_get_rat(expr->u.add.terms[0].coeff, scale, &q);
+    if (q != 1 || *scale == 0)
+      return false;
+    *name = expr->u.add.terms[0].term->u.name;
+    return true;
+  }
+  return false;
+}
+
+static bool bounds_interval_contains_rational(ixs_interval iv, int64_t p,
+                                              int64_t q) {
+  if (!iv.valid)
+    return true;
+  if (!iv.lo_inf && ixs_rat_cmp(p, q, iv.lo_p, iv.lo_q) < 0)
+    return false;
+  if (!iv.hi_inf && ixs_rat_cmp(p, q, iv.hi_p, iv.hi_q) > 0)
+    return false;
+  return true;
+}
+
+static void bounds_transfer_inverse_congruence(ixs_bounds *dst,
+                                               const char *name, int64_t scale,
+                                               int64_t offset, int64_t modulus,
+                                               int64_t residue) {
+  uint64_t m, a, rhs, g, reduced, inverse, result;
+  if (modulus <= 0)
+    return;
+  m = (uint64_t)modulus;
+  a = bounds_normalize_residue(scale, m);
+  rhs = bounds_sub_mod(bounds_normalize_residue(residue, m),
+                       bounds_normalize_residue(offset, m), m);
+  g = bounds_u64_gcd(a, m);
+  if (rhs % g != 0) {
+    dst->contradiction = true;
+    return;
+  }
+  reduced = m / g;
+  if (reduced == 1u)
+    return;
+  if (!bounds_mod_inverse((a / g) % reduced, reduced, &inverse)) {
+    dst->contradiction = true;
+    return;
+  }
+  result = bounds_mul_mod((rhs / g) % reduced, inverse, reduced);
+  apply_modrem(dst, name, (int64_t)reduced, (int64_t)result);
+}
+
+static void bounds_transfer_affine_range(ixs_bounds *dst, const char *name,
+                                         int64_t scale, int64_t offset,
+                                         ixs_interval iv) {
+  int64_t neg_offset, denominator;
+  ixs_interval shifted, inverse;
+  if (!iv.valid || !ixs_safe_neg(offset, &neg_offset))
+    return;
+  shifted = iv_add(iv, ixs_interval_exact(neg_offset, 1));
+  if (scale > 0) {
+    denominator = scale;
+    inverse = iv_mul_const(shifted, 1, denominator);
+  } else {
+    if (!ixs_safe_neg(scale, &denominator))
+      return;
+    inverse = iv_mul_const(shifted, -1, denominator);
+  }
+  if (inverse.valid)
+    bounds_add_var_interval(dst, name, inverse);
+}
+
+static void bounds_check_constant_var_fact(ixs_bounds *dst,
+                                           const ixs_var_bound *src, int64_t p,
+                                           int64_t q) {
+  uint64_t value;
+  if (!bounds_interval_contains_rational(src->iv, p, q))
+    dst->contradiction = true;
+  if (src->modulus > 0 &&
+      (q != 1 || bounds_normalize_residue(p, (uint64_t)src->modulus) !=
+                     (uint64_t)src->remainder))
+    dst->contradiction = true;
+  if (src->bits.known_zero != 0 || src->bits.known_one != 0) {
+    if (q != 1) {
+      dst->contradiction = true;
+    } else {
+      value = (uint64_t)p;
+      if ((src->bits.known_zero & value) != 0 ||
+          (src->bits.known_one & ~value) != 0)
+        dst->contradiction = true;
+    }
+  }
+  if (src->bits.pow2 != IXS_POW2_UNKNOWN) {
+    if (q != 1 ||
+        (src->bits.pow2 == IXS_POW2_POSITIVE && !int64_is_positive_pow2(p)) ||
+        (src->bits.pow2 == IXS_POW2_OR_ZERO && p != 0 &&
+         !int64_is_positive_pow2(p)))
+      dst->contradiction = true;
+  }
+}
+
+static void bounds_transfer_range(ixs_bounds *dst, ixs_node *replacement,
+                                  ixs_interval iv) {
+  const char *name;
+  int64_t scale, offset, p, q;
+  if (!iv.valid)
+    return;
+  if (ixs_node_is_const(replacement)) {
+    ixs_node_get_rat(replacement, &p, &q);
+    if (!bounds_interval_contains_rational(iv, p, q))
+      dst->contradiction = true;
+    return;
+  }
+  if (bounds_extract_integer_affine(replacement, &name, &scale, &offset))
+    bounds_transfer_affine_range(dst, name, scale, offset, iv);
+}
+
+static void bounds_transfer_var_fact(ixs_bounds *dst, const ixs_var_bound *src,
+                                     ixs_node *replacement) {
+  const char *name;
+  int64_t scale, offset, p, q;
+  unsigned low_bits = 0;
+  uint64_t known, modulus, mask, residue;
+  ixs_var_bound renamed;
+  ixs_var_bound *var;
+
+  if (replacement->tag == IXS_SYM) {
+    renamed = *src;
+    renamed.name = replacement->u.name;
+    bounds_add_var_fact(dst, &renamed);
+    return;
+  }
+  if (ixs_node_is_const(replacement)) {
+    ixs_node_get_rat(replacement, &p, &q);
+    bounds_check_constant_var_fact(dst, src, p, q);
+    return;
+  }
+  if (!bounds_extract_integer_affine(replacement, &name, &scale, &offset))
+    return;
+
+  bounds_transfer_affine_range(dst, name, scale, offset, src->iv);
+  if (src->modulus > 0)
+    bounds_transfer_inverse_congruence(dst, name, scale, offset, src->modulus,
+                                       src->remainder);
+
+  known = src->bits.known_zero | src->bits.known_one;
+  while (low_bits < 62u && (known & (UINT64_C(1) << low_bits)) != 0)
+    low_bits++;
+  if (low_bits != 0) {
+    modulus = UINT64_C(1) << low_bits;
+    mask = modulus - 1u;
+    residue = src->bits.known_one & mask;
+    bounds_transfer_inverse_congruence(dst, name, scale, offset,
+                                       (int64_t)modulus, (int64_t)residue);
+  }
+
+  if (offset == 0 && int64_is_positive_pow2(scale) &&
+      src->bits.pow2 != IXS_POW2_UNKNOWN) {
+    var = get_or_create_var(dst, name);
+    apply_pow2_fact(dst, var, src->bits.pow2);
+  }
 }
 
 ixs_facts *ixs_facts_create(ixs_session *s) {
@@ -3894,11 +4122,98 @@ cleanup:
 
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement) {
+  return ixs_facts_substitute_multi(dst, src, 1, &target, &replacement);
+}
+
+static bool facts_substitution_inputs_ok(const ixs_facts *dst,
+                                         const ixs_facts *src, ixs_ctx *ctx,
+                                         uint32_t nsubs,
+                                         ixs_node *const *targets,
+                                         ixs_node *const *replacements) {
+  uint32_t i;
+  if (!src || src->impl != dst->impl || src->ctx != ctx ||
+      src->epoch != dst->epoch || !facts_ready(src) ||
+      (nsubs != 0 && (!targets || !replacements)))
+    return false;
+  for (i = 0; i < nsubs; i++) {
+    if (!facts_node_ok(ctx, targets[i]) || !facts_node_ok(ctx, replacements[i]))
+      return false;
+  }
+  return true;
+}
+
+static bool bounds_transfer_substituted_exprs(ixs_bounds *dst,
+                                              const ixs_bounds *src,
+                                              ixs_ctx *ctx, uint32_t nsubs,
+                                              ixs_node *const *targets,
+                                              ixs_node *const *replacements) {
+  size_t i;
+  for (i = 0; i < src->nexprs; i++) {
+    ixs_node *subst =
+        simp_subs_multi(ctx, src->exprs[i].expr, nsubs, targets, replacements);
+    if (!subst || ixs_node_is_sentinel(subst))
+      return false;
+    ixs_bounds_add_expr(dst, subst, src->exprs[i].iv);
+    if (subst != src->exprs[i].expr)
+      bounds_transfer_range(dst, subst, src->exprs[i].iv);
+    if (dst->oom)
+      return false;
+  }
+  return true;
+}
+
+static bool bounds_transfer_substituted_vars(ixs_bounds *dst,
+                                             const ixs_bounds *src,
+                                             ixs_ctx *ctx, uint32_t nsubs,
+                                             ixs_node *const *targets,
+                                             ixs_node *const *replacements) {
+  size_t i;
+  for (i = 0; i < src->nvars; i++) {
+    ixs_node *sym =
+        ixs_node_sym(ctx, src->vars[i].name, strlen(src->vars[i].name));
+    ixs_node *subst;
+    if (!sym || ixs_node_is_sentinel(sym))
+      return false;
+    subst = simp_subs_multi(ctx, sym, nsubs, targets, replacements);
+    if (!subst || ixs_node_is_sentinel(subst))
+      return false;
+    if (subst == sym) {
+      bounds_add_var_fact(dst, &src->vars[i]);
+    } else {
+      ixs_bounds_add_expr(dst, subst, src->vars[i].iv);
+      bounds_transfer_var_fact(dst, &src->vars[i], subst);
+    }
+    if (dst->oom)
+      return false;
+  }
+  return true;
+}
+
+static bool bounds_transfer_substituted_nonzero(ixs_bounds *dst,
+                                                const ixs_bounds *src,
+                                                ixs_ctx *ctx, uint32_t nsubs,
+                                                ixs_node *const *targets,
+                                                ixs_node *const *replacements) {
+  size_t i;
+  for (i = 0; i < src->nnonzero; i++) {
+    ixs_node *subst =
+        simp_subs_multi(ctx, src->nonzero[i], nsubs, targets, replacements);
+    if (!subst || ixs_node_is_sentinel(subst))
+      return false;
+    bounds_add_nonzero(dst, subst);
+    if (dst->oom)
+      return false;
+  }
+  return true;
+}
+
+bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
+                                uint32_t nsubs, ixs_node *const *targets,
+                                ixs_node *const *replacements) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
   ixs_arena_mark mark;
   ixs_bounds candidate;
-  size_t nexprs, nvars, nnonzero, i;
   bool ok = false;
 
   if (!facts_bind(dst, &binding, &ctx))
@@ -3906,53 +4221,24 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
   if (!facts_ready(dst))
     goto cleanup;
   mark = ixs_arena_save(&ctx->scratch);
-  if (!src || src->impl != dst->impl || src->ctx != ctx ||
-      src->epoch != dst->epoch || !facts_ready(src) ||
-      !facts_node_ok(ctx, target) || !facts_node_ok(ctx, replacement))
+  if (!facts_substitution_inputs_ok(dst, src, ctx, nsubs, targets,
+                                    replacements))
     goto failed;
+  if (src == dst && nsubs == 0) {
+    ok = true;
+    goto cleanup;
+  }
   if (!ixs_bounds_fork(&candidate, &dst->bounds))
     goto failed;
-
-  nexprs = src->bounds.nexprs;
-  nvars = src->bounds.nvars;
-  nnonzero = src->bounds.nnonzero;
-  /* Symbol facts carry pow2, bit, and modular information; copying expression
-   * ranges alone loses public facts for non-empty destinations. */
-  bounds_add_all_facts(&candidate, &src->bounds);
-  if (candidate.oom)
+  candidate.contradiction =
+      candidate.contradiction || src->bounds.contradiction;
+  if (!bounds_transfer_substituted_exprs(&candidate, &src->bounds, ctx, nsubs,
+                                         targets, replacements) ||
+      !bounds_transfer_substituted_vars(&candidate, &src->bounds, ctx, nsubs,
+                                        targets, replacements) ||
+      !bounds_transfer_substituted_nonzero(&candidate, &src->bounds, ctx, nsubs,
+                                           targets, replacements))
     goto failed;
-
-  for (i = 0; i < nexprs; i++) {
-    ixs_node *subst =
-        simp_subs(ctx, src->bounds.exprs[i].expr, target, replacement);
-    if (!subst)
-      goto failed;
-    ixs_bounds_add_expr(&candidate, subst, src->bounds.exprs[i].iv);
-    if (candidate.oom)
-      goto failed;
-  }
-  for (i = 0; i < nvars; i++) {
-    ixs_node *sym = ixs_node_sym(ctx, src->bounds.vars[i].name,
-                                 strlen(src->bounds.vars[i].name));
-    ixs_node *subst;
-    if (!sym)
-      goto failed;
-    subst = simp_subs(ctx, sym, target, replacement);
-    if (!subst)
-      goto failed;
-    ixs_bounds_add_expr(&candidate, subst, src->bounds.vars[i].iv);
-    if (candidate.oom)
-      goto failed;
-  }
-  for (i = 0; i < nnonzero; i++) {
-    ixs_node *subst =
-        simp_subs(ctx, src->bounds.nonzero[i], target, replacement);
-    if (!subst)
-      goto failed;
-    bounds_add_nonzero(&candidate, subst);
-    if (candidate.oom)
-      goto failed;
-  }
   facts_commit(dst, &candidate);
   ok = true;
   goto cleanup;
