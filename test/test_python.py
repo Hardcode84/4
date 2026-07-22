@@ -1897,6 +1897,56 @@ def test_integrality_and_divisibility_invalid_inputs() -> None:
         ctx.divisible(x, 0, facts)
 
 
+def test_definedness_queries_assumptions_facts_and_piecewise() -> None:
+    ctx = ixsimpl.Context()
+    x, m = ctx.sym("defined_x"), ctx.sym("defined_m")
+    reciprocal = 1 / x
+
+    assert ctx.defined(reciprocal) is None
+    assert ctx.defined(reciprocal, assumptions=[x > 0]) is True
+    assert ctx.defined(reciprocal, assumptions=[x < 0]) is True
+    assert ctx.defined(reciprocal, assumptions=[ctx.ne(x, 0)]) is True
+    assert ctx.defined(reciprocal, assumptions=[ctx.eq(x, 0)]) is False
+    assert ctx.defined(reciprocal, assumptions=[x >= -1, x <= 1]) is None
+
+    symbolic_mod = x % m
+    assert ctx.defined(symbolic_mod) is None
+    assert ctx.defined(symbolic_mod, assumptions=[m > 0]) is True
+    assert ctx.defined(symbolic_mod, assumptions=[m < 0]) is False
+    assert ctx.defined(symbolic_mod, assumptions=[ctx.eq(m, 0)]) is False
+    assert ctx.defined(symbolic_mod, assumptions=[ctx.ne(m, 0)]) is None
+
+    branch_local = ixsimpl.pw((reciprocal, x > 0), (reciprocal + 1, x < 0), (1, ctx.true_()))
+    assert ctx.defined(branch_local) is True
+    nonzero_branch = ixsimpl.pw((reciprocal, ctx.ne(x, 0)), (1, ctx.true_()))
+    assert ctx.defined(nonzero_branch) is True
+
+    no_default = ixsimpl.pw((1, x < 16))
+    assert ctx.defined(no_default, assumptions=[x < 16]) is True
+    assert ctx.defined(no_default) is None
+    assert ctx.defined(no_default, assumptions=[x >= 16]) is False
+
+    undefined_condition = ixsimpl.pw((1, reciprocal > 0), (0, ctx.true_()))
+    assert ctx.defined(undefined_condition, assumptions=[ctx.eq(x, 0)]) is False
+    assert ctx.defined(undefined_condition, assumptions=[x > 0]) is True
+
+    facts = ctx.facts()
+    facts.assume(x > 0)
+    assert ctx.defined(reciprocal, facts=facts) is True
+
+
+def test_definedness_invalid_inputs() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    sentinel = ctx.parse_expr("(")
+
+    assert ctx.defined(sentinel) is None
+    with pytest.raises(ValueError, match="different context"):
+        ctx.defined(other.sym("x"))
+    with pytest.raises(ValueError, match="different context"):
+        ctx.defined(ctx.sym("x"), facts=other.facts())
+
+
 def test_fact_backed_exact_divide() -> None:
     ctx = ixsimpl.Context()
     item, slot, k = ctx.sym("item"), ctx.sym("slot"), ctx.sym("K")

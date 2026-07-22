@@ -4632,6 +4632,22 @@ simp_check_integer_valued(ixs_ctx *ctx, ixs_node *expr,
   return result;
 }
 
+IXS_STATIC ixs_check_result simp_check_defined(ixs_ctx *ctx, ixs_node *expr,
+                                               ixs_node *const *assumptions,
+                                               size_t n_assumptions) {
+  simp_bounds_scope scope;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (!ctx || !expr || ixs_node_is_sentinel(expr) ||
+      !ixs_ctx_owns_node(ctx, expr))
+    return IXS_CHECK_UNKNOWN;
+  if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
+    return IXS_CHECK_UNKNOWN;
+  result = ixs_bounds_check_defined(&scope.bounds, expr);
+  simp_bounds_scope_destroy(&scope);
+  return result;
+}
+
 static ixs_pow2_fact pow2_fact_from_int64(int64_t value) {
   uint64_t u;
   if (value == 0)

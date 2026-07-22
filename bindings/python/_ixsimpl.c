@@ -1499,6 +1499,12 @@ static PyObject *Context_integer_valued(ContextObject *self, PyObject *args,
                             ixs_check_integer_valued_facts);
 }
 
+static PyObject *Context_defined(ContextObject *self, PyObject *args,
+                                 PyObject *kwargs) {
+  return Context_check_with(self, args, kwargs, ixs_check_defined,
+                            ixs_check_defined_facts);
+}
+
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
   static char *kwlist[] = {"expr", "modulus", "facts", NULL};
@@ -2003,6 +2009,9 @@ static PyMethodDef Context_methods[] = {
     {"integer_valued", (PyCFunction)Context_integer_valued,
      METH_VARARGS | METH_KEYWORDS,
      "Prove integrality from assumptions or facts; return bool or None."},
+    {"defined", (PyCFunction)Context_defined, METH_VARARGS | METH_KEYWORDS,
+     "Prove full-domain definedness from assumptions or facts; return bool "
+     "or None."},
     {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
     {"try_exact_divide", (PyCFunction)Context_try_exact_divide,

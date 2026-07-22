@@ -1816,6 +1816,300 @@ static void test_public_integrality_invalid_and_contradictory(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_defined_reciprocal_and_children(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_x");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *reciprocal = ixs_div(ctx, one, x);
+  ixs_node *positive = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+  ixs_node *negative = ixs_cmp(ctx, x, IXS_CMP_LT, zero);
+  ixs_node *is_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *nonzero = ixs_cmp(ctx, x, IXS_CMP_NE, zero);
+  ixs_node *mixed[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -1)),
+                        ixs_cmp(ctx, x, IXS_CMP_LE, one)};
+  ixs_node *contradictory[2] = {nonzero, is_zero};
+  ixs_node *strict_nodes[10];
+  ixs_mulfactor strict_factor;
+  size_t i;
+
+  CHECK(ixs_check_defined(ctx, reciprocal, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, reciprocal, &positive, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, reciprocal, &negative, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, reciprocal, &nonzero, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, reciprocal, &is_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, reciprocal, mixed, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, reciprocal, contradictory, 2) ==
+        IXS_CHECK_UNKNOWN);
+
+  strict_nodes[0] = ixs_add(ctx, reciprocal, one);
+  strict_factor.base = reciprocal;
+  strict_factor.exp = 1;
+  strict_nodes[1] = ixs_node_mul(ctx, one, 1, &strict_factor);
+  strict_nodes[2] = ixs_floor(ctx, reciprocal);
+  strict_nodes[3] = ixs_ceil(ctx, reciprocal);
+  strict_nodes[4] = ixs_max(ctx, reciprocal, one);
+  strict_nodes[5] = ixs_min(ctx, reciprocal, one);
+  strict_nodes[6] = ixs_xor(ctx, reciprocal, one);
+  strict_nodes[7] = ixs_cmp(ctx, reciprocal, IXS_CMP_GT, zero);
+  strict_nodes[8] = ixs_and(ctx, strict_nodes[7], ixs_true(ctx));
+  strict_nodes[9] = ixs_not(ctx, strict_nodes[7]);
+  for (i = 0; i < sizeof(strict_nodes) / sizeof(strict_nodes[0]); i++)
+    CHECK(ixs_check_defined(ctx, strict_nodes[i], &is_zero, 1) ==
+          IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_mod_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_mod_x");
+  ixs_node *m = ixs_sym(ctx, "defined_mod_m");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *positive_mod = ixs_mod(ctx, x, ixs_int(ctx, 4));
+  ixs_node *rational_mod = ixs_mod(ctx, x, ixs_rat(ctx, 1, 2));
+  ixs_node *symbolic_mod = ixs_mod(ctx, x, m);
+  ixs_node *m_positive = ixs_cmp(ctx, m, IXS_CMP_GT, zero);
+  ixs_node *m_negative = ixs_cmp(ctx, m, IXS_CMP_LT, zero);
+  ixs_node *m_zero = ixs_cmp(ctx, m, IXS_CMP_EQ, zero);
+  ixs_node *m_nonzero = ixs_cmp(ctx, m, IXS_CMP_NE, zero);
+  ixs_node *raw_zero = ixs_node_binary(ctx, IXS_MOD, x, zero, IXS_CMP_EQ);
+  ixs_node *raw_negative =
+      ixs_node_binary(ctx, IXS_MOD, x, ixs_int(ctx, -4), IXS_CMP_EQ);
+  ixs_node *bad_lhs =
+      ixs_mod(ctx, ixs_div(ctx, ixs_int(ctx, 1), x), ixs_int(ctx, 4));
+  ixs_node *reciprocal_mod = ixs_div(ctx, ixs_int(ctx, 1), positive_mod);
+  ixs_node *x_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *x_nonzero = ixs_cmp(ctx, x, IXS_CMP_NE, zero);
+  ixs_node *mod_zero = ixs_cmp(ctx, positive_mod, IXS_CMP_EQ, zero);
+  ixs_node *mod_nonzero = ixs_cmp(ctx, positive_mod, IXS_CMP_NE, zero);
+  ixs_node *literal_zero = ixs_mod(ctx, x, zero);
+  ixs_node *literal_negative = ixs_mod(ctx, x, ixs_int(ctx, -1));
+
+  CHECK(ixs_check_defined(ctx, positive_mod, NULL, 0) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, rational_mod, NULL, 0) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, symbolic_mod, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, symbolic_mod, &m_positive, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, symbolic_mod, &m_negative, 1) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, symbolic_mod, &m_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, symbolic_mod, &m_nonzero, 1) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, raw_zero, NULL, 0) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, raw_negative, NULL, 0) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, bad_lhs, &x_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, bad_lhs, &x_nonzero, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, reciprocal_mod, &mod_nonzero, 1) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, reciprocal_mod, &mod_zero, 1) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, literal_zero, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, literal_negative, NULL, 0) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_piecewise_first_match(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_pw_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *reciprocal = ixs_div(ctx, one, x);
+  ixs_node *values[3];
+  ixs_node *conds[3];
+  ixs_node *piecewise;
+  ixs_node *x_positive = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+  ixs_node *x_negative = ixs_cmp(ctx, x, IXS_CMP_LT, zero);
+  ixs_node *x_nonnegative = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
+  ixs_node *x_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *x_nonzero = ixs_cmp(ctx, x, IXS_CMP_NE, zero);
+  ixs_node *x_lt_16 = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  ixs_node *x_ge_16 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 16));
+  ixs_pwcase raw_cases[2];
+
+  values[0] = reciprocal;
+  values[1] = ixs_add(ctx, reciprocal, one);
+  values[2] = one;
+  conds[0] = x_positive;
+  conds[1] = x_negative;
+  conds[2] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 3, values, conds);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_TRUE);
+
+  values[0] = reciprocal;
+  values[1] = one;
+  conds[0] = x_zero;
+  conds[1] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 2, values, conds);
+  CHECK(ixs_check_defined(ctx, piecewise, &x_positive, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, piecewise, &x_zero, 1) == IXS_CHECK_FALSE);
+
+  values[0] = reciprocal;
+  values[1] = one;
+  conds[0] = x_nonzero;
+  conds[1] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 2, values, conds);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_TRUE);
+
+  values[0] = one;
+  values[1] = reciprocal;
+  values[2] = two;
+  conds[0] = x_nonnegative;
+  conds[1] = x_zero;
+  conds[2] = ixs_true(ctx);
+  piecewise = ixs_pw(ctx, 3, values, conds);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_TRUE);
+
+  values[0] = one;
+  conds[0] = x_lt_16;
+  piecewise = ixs_pw(ctx, 1, values, conds);
+  CHECK(ixs_check_defined(ctx, piecewise, &x_lt_16, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, piecewise, &x_ge_16, 1) == IXS_CHECK_FALSE);
+
+  raw_cases[0].value = ctx->sentinel_error;
+  raw_cases[0].cond = ixs_false(ctx);
+  raw_cases[1].value = one;
+  raw_cases[1].cond = ixs_true(ctx);
+  piecewise = ixs_node_pw(ctx, 2, raw_cases);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_TRUE);
+
+  raw_cases[0].value = one;
+  raw_cases[0].cond = ixs_true(ctx);
+  raw_cases[1].value = ctx->sentinel_error;
+  raw_cases[1].cond = x_zero;
+  piecewise = ixs_node_pw(ctx, 2, raw_cases);
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_piecewise_condition(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_cond_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *reciprocal = ixs_div(ctx, one, x);
+  ixs_node *condition = ixs_cmp(ctx, reciprocal, IXS_CMP_GT, zero);
+  ixs_node *values[2] = {one, zero};
+  ixs_node *conds[2] = {condition, ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conds);
+  ixs_node *x_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *x_positive = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+  ixs_node *mixed[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -1)),
+                        ixs_cmp(ctx, x, IXS_CMP_LE, one)};
+
+  CHECK(ixs_check_defined(ctx, piecewise, &x_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_defined(ctx, piecewise, &x_positive, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, piecewise, mixed, 2) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_facts_and_invalid(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_fact_x");
+  ixs_node *other_x = ixs_sym(other, "defined_fact_x");
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_facts *positive = ixs_facts_create(ctx);
+  ixs_facts *zero = ixs_facts_create(ctx);
+  ixs_facts *nonzero = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  range.has_lower = true;
+  range.has_upper = true;
+  range.lower_p = 1;
+  range.lower_q = 1;
+  range.upper_p = 8;
+  range.upper_q = 1;
+  CHECK(ixs_facts_assume_range(positive, x, &range));
+  CHECK(ixs_check_defined_facts(positive, reciprocal) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(zero,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_check_defined_facts(zero, reciprocal) == IXS_CHECK_FALSE);
+  CHECK(ixs_facts_assume_pred(nonzero,
+                              ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_check_defined_facts(nonzero, reciprocal) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_check_defined_facts(contradictory, reciprocal) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_check_defined(ctx, NULL, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, ctx->sentinel_error, NULL, 0) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, other_x, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined_facts(positive, other_x) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined_facts(positive, ctx->sentinel_parse_error) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined_facts(NULL, x) == IXS_CHECK_UNKNOWN);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_check_defined_facts(positive, reciprocal) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_check_defined_facts(positive, reciprocal) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_traversal_bounds_and_sharing(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *shallow = ixs_sym(ctx, "defined_depth");
+  ixs_node *deep;
+  ixs_node *shared_base = ixs_sym(ctx, "defined_shared");
+  ixs_node *shared = shared_base;
+  ixs_node *guarded;
+  ixs_node *shared_pw;
+  ixs_node *shared_values[2];
+  ixs_node *shared_conds[2];
+  ixs_node *nested = ixs_int(ctx, 1);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *shared_positive =
+      ixs_cmp(ctx, shared_base, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_mulfactor guarded_factor;
+  ixs_pwcase one_case;
+  unsigned i;
+
+  for (i = 0; i < 300; i++)
+    shallow = ixs_node_floor(ctx, shallow);
+  CHECK(ixs_check_defined(ctx, shallow, NULL, 0) == IXS_CHECK_TRUE);
+
+  deep = shallow;
+  for (i = 300; i < 1100; i++)
+    deep = ixs_node_floor(ctx, deep);
+  CHECK(ixs_check_defined(ctx, deep, NULL, 0) == IXS_CHECK_UNKNOWN);
+
+  for (i = 0; i < 60; i++)
+    shared = ixs_node_binary(ctx, IXS_MAX, shared, shared, IXS_CMP_EQ);
+  CHECK(ixs_check_defined(ctx, shared, NULL, 0) == IXS_CHECK_TRUE);
+  guarded_factor.base = shared;
+  guarded_factor.exp = -1;
+  guarded = ixs_node_mul(ctx, one, 1, &guarded_factor);
+  CHECK(ixs_check_defined(ctx, guarded, &shared_positive, 1) == IXS_CHECK_TRUE);
+  shared_values[0] = guarded;
+  shared_values[1] = one;
+  shared_conds[0] = shared_positive;
+  shared_conds[1] = ixs_true(ctx);
+  shared_pw = ixs_pw(ctx, 2, shared_values, shared_conds);
+  CHECK(ixs_check_defined(ctx, shared_pw, NULL, 0) == IXS_CHECK_TRUE);
+
+  one_case.cond = ixs_true(ctx);
+  for (i = 0; i < 33; i++) {
+    one_case.value = nested;
+    nested = ixs_node_pw(ctx, 1, &one_case);
+  }
+  CHECK(ixs_check_defined(ctx, nested, NULL, 0) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
@@ -1925,6 +2219,12 @@ int main(void) {
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();
   test_public_integrality_invalid_and_contradictory();
+  test_public_defined_reciprocal_and_children();
+  test_public_defined_mod_contract();
+  test_public_defined_piecewise_first_match();
+  test_public_defined_piecewise_condition();
+  test_public_defined_facts_and_invalid();
+  test_public_defined_traversal_bounds_and_sharing();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

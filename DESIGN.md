@@ -1079,6 +1079,11 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   same range when both normalize to the same expanded form.  Comparison
   assumptions over integer-valued expressions also materialize expression
   range facts; for example `-C + expr <= 0` records `expr <= C`.
+- **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
+  pointer-keyed expression set. The set is copied by bounds forks and fact
+  substitution, so reciprocal guards can use both incoming disequalities and
+  branch-local conditions. A direct zero range for the same expression is a
+  detected contradiction.
 - **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
@@ -1125,13 +1130,13 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 **Compound assumption ingestion**: All predicate-bearing entry points use one
 bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
-`ixs_check_integer_valued`, `ixs_get_pow2_fact`, `ixs_range`, and
-`ixs_facts_assume_pred`. Each predicate root may be a CMP, a canonical
-true/false node, or an AND tree whose leaves have those forms. True contributes
-no fact; false marks the bounds as contradictory. Supporting these constants
-preserves predicates that simplify before ingestion, such as `(x & 0) == 0`.
-The walker visits at most 1024 nodes per root and therefore does not consume one
-C call frame per nested conjunction.
+`ixs_check_integer_valued`, `ixs_check_defined`, `ixs_get_pow2_fact`,
+`ixs_range`, and `ixs_facts_assume_pred`. Each predicate root may be a CMP, a
+canonical true/false node, or an AND tree whose leaves have those forms. True
+contributes no fact; false marks the bounds as contradictory. Supporting these
+constants preserves predicates that simplify before ingestion, such as
+`(x & 0) == 0`. The walker visits at most 1024 nodes per root and therefore does
+not consume one C call frame per nested conjunction.
 
 OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
@@ -1267,6 +1272,33 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   integral only when every branch not proven unreachable has an integral
   value. `TRUE` and `FALSE` are universal proofs; a failed sufficient proof is
   `UNKNOWN`, while an exact noninteger rational point may return `FALSE`.
+- **Public definedness queries** (`ixs_check_defined`,
+  `ixs_check_defined_facts`, Python `Context.defined`, C++
+  `Expr::check_defined` and `Facts::check_defined`): prove domain safety for
+  the complete incoming fact domain. Arithmetic and predicate nodes require
+  every evaluated child to be defined. A negative `MUL` exponent additionally
+  requires its base to be nonzero, and `Mod(a, b)` requires `b > 0`, matching
+  the constructor contract. `TRUE` means every feasible valuation is defined;
+  `FALSE` means every feasible valuation is necessarily undefined; mixed
+  domains, insufficient facts, unsupported reasoning, invalid input, detected
+  contradiction, and OOM return `UNKNOWN`.
+
+  `Piecewise` follows first-match semantics. Conditions are checked before
+  their values. Branch `i` is evaluated in a fork containing its condition and
+  the negations of all earlier conditions, while the sibling continuation is
+  refined only by the new negated condition. Infeasible branches are ignored.
+  A final true condition covers the remaining domain; otherwise a feasible
+  remainder is an undefined partition. Defined and undefined partitions mix to
+  `UNKNOWN`, so an undefined dead or shadowed branch cannot poison the result
+  and a partially uncovered expression cannot be reported as `FALSE` unless
+  the whole feasible domain is uncovered.
+
+  Ordinary nodes use per-environment memoized iterative walks with a query-wide
+  budget of 8192 node visits, a 1024-frame explicit stack, and a 16384-slot
+  memo table. Piecewise fact environments nest at most 32 levels and share the
+  same visit budget. Interval guard queries are attempted only for subgraphs
+  within 64 levels and 4096 local walk steps. Reaching any limit returns
+  `UNKNOWN`.
 - **Public divisibility query** (`ixs_check_divisible_facts`, Python
   `Context.divisible`, C++ `Facts::check_divisible`): first proves that the
   expression is integer-valued, then uses exact values, congruences, and known
@@ -1288,8 +1320,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   explicit expression ranges, affine range transfer (`scale*base + offset`),
   and substitution transfer. `Context.range(..., facts=f)`,
   `Context.check(..., facts=f)`, `Context.integer_valued(..., facts=f)`,
-  `Context.divisible(..., facts=f)`, and `Context.pow2_fact(..., facts=f)` query
-  these facts directly before relying on structural interval propagation.
+  `Context.defined(..., facts=f)`, `Context.divisible(..., facts=f)`, and
+  `Context.pow2_fact(..., facts=f)` query these facts directly before relying
+  on structural interval propagation.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
@@ -1598,6 +1631,9 @@ bool ixs_node_is_integer_valued(const ixs_node *expr);
 ixs_check_result ixs_check_integer_valued(
     ixs_session *s, ixs_node *expr,
     ixs_node *const *assumptions, size_t n_assumptions);
+ixs_check_result ixs_check_defined(
+    ixs_session *s, ixs_node *expr,
+    ixs_node *const *assumptions, size_t n_assumptions);
 
 // Power-of-two fact query under assumptions.  Returns the strongest provable
 // fact, or UNKNOWN when no fact is proven.
@@ -1638,6 +1674,7 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            ixs_node *expr,
                                            int64_t modulus);
@@ -2518,6 +2555,9 @@ ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
 ixs_check_result ixs_check_integer_valued(
     ixs_session *s, ixs_node *expr,
     ixs_node *const *assumptions, size_t n_assumptions);
+ixs_check_result ixs_check_defined(
+    ixs_session *s, ixs_node *expr,
+    ixs_node *const *assumptions, size_t n_assumptions);
 
 typedef enum {
   IXS_EXACT_DIVIDE_PROVEN,
@@ -2556,6 +2596,7 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            ixs_node *expr,
                                            int64_t modulus);

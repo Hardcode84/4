@@ -200,16 +200,16 @@ typedef struct {
 } ixs_range_result;
 
 /* Assumption contract shared by simplify, simplify_batch, check,
- * check_integer_valued, get_pow2_fact, range, and facts_assume_pred: each
- * predicate root must be a CMP, a canonical true/false node, or an AND tree
- * whose leaves have those forms.  True contributes no fact; false marks the set
- * contradictory.  Trees are walked iteratively and may contain at most 1024
- * visited nodes per root.  NULL, sentinel, malformed, cross-context, OR, NOT,
- * and other roots are rejected with an "assumptions:" session diagnostic; no
- * prefix of a rejected set is used.  A rejected set makes simplify return the
- * domain-error sentinel, makes simplify_batch set every element to that
- * sentinel, makes query APIs return unknown/no-result, and leaves an existing
- * fact set unchanged. */
+ * check_integer_valued, check_defined, get_pow2_fact, range, and
+ * facts_assume_pred: each predicate root must be a CMP, a canonical true/false
+ * node, or an AND tree whose leaves have those forms.  True contributes no
+ * fact; false marks the set contradictory.  Trees are walked iteratively and
+ * may contain at most 1024 visited nodes per root.  NULL, sentinel, malformed,
+ * cross-context, OR, NOT, and other roots are rejected with an "assumptions:"
+ * session diagnostic; no prefix of a rejected set is used.  A rejected set
+ * makes simplify return the domain-error sentinel, makes simplify_batch set
+ * every element to that sentinel, makes query APIs return unknown/no-result,
+ * and leaves an existing fact set unchanged. */
 
 /* Check whether a comparison is provably true or false given the
  * assumptions, using interval propagation, modular congruence facts, and
@@ -227,6 +227,17 @@ ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
 ixs_check_result ixs_check_integer_valued(ixs_session *s, ixs_node *expr,
                                           ixs_node *const *assumptions,
                                           size_t n_assumptions);
+
+/* Prove whether expr is defined over the full domain admitted by assumptions.
+ * Negative powers require nonzero bases and Mod requires a positive divisor.
+ * Piecewise uses first-match semantics and requires defined conditions and
+ * complete coverage.  FALSE is returned only when every feasible valuation is
+ * necessarily undefined; mixed domains, insufficient facts, invalid input,
+ * contradictory assumptions, bounded-traversal limits, and OOM return
+ * UNKNOWN. */
+ixs_check_result ixs_check_defined(ixs_session *s, ixs_node *expr,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions);
 
 /* Return the strongest known power-of-two fact for expr under assumptions.
  * POSITIVE means expr > 0 and exactly one bit is set.  OR_ZERO additionally
@@ -272,6 +283,7 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
 /* Check divisibility by a nonzero signed modulus.  Negative moduli are
  * normalized by magnitude without overflowing INT64_MIN.  Modulus zero emits
  * a session diagnostic and returns UNKNOWN. */

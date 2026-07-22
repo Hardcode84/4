@@ -113,6 +113,15 @@ public:
   ixs_check_result check_integer_valued() const {
     return ixs_check_integer_valued(session_, node_, nullptr, 0);
   }
+  ixs_check_result check_defined(const Expr *assumptions, size_t n) const {
+    std::vector<ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_check_defined(session_, node_, raw.data(), n);
+  }
+  ixs_check_result check_defined() const {
+    return ixs_check_defined(session_, node_, nullptr, 0);
+  }
   Expr subs(Expr target, Expr repl) const {
     return Expr(session_ctx(), session_,
                 ixs_subs(session_, node_, target.node_, repl.node_));
@@ -223,6 +232,9 @@ public:
   }
   ixs_check_result check_integer_valued(const Expr &expr) const {
     return ixs_check_integer_valued_facts(facts_, expr.raw());
+  }
+  ixs_check_result check_defined(const Expr &expr) const {
+    return ixs_check_defined_facts(facts_, expr.raw());
   }
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
     return ixs_check_divisible_facts(facts_, expr.raw(), modulus);

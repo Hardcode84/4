@@ -529,6 +529,17 @@ ixs_check_result ixs_check_integer_valued(ixs_session *s, ixs_node *expr,
   return result;
 }
 
+ixs_check_result ixs_check_defined(ixs_session *s, ixs_node *expr,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_check_result result =
+      simp_check_defined(ctx, expr, assumptions, n_assumptions);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
                                 size_t n_assumptions) {

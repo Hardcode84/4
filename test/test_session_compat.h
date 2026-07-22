@@ -136,6 +136,10 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
   IXS_TEST_WITH_CTX((ctx), (ixs_check_integer_valued)(IXS_TEST_SESSION(ctx),   \
                                                       (expr), (assumptions),   \
                                                       (n_assumptions)))
+#define ixs_check_defined(ctx, expr, assumptions, n_assumptions)               \
+  IXS_TEST_WITH_CTX((ctx),                                                     \
+                    (ixs_check_defined)(IXS_TEST_SESSION(ctx), (expr),         \
+                                        (assumptions), (n_assumptions)))
 #define ixs_get_pow2_fact(ctx, expr, assumptions, n_assumptions)               \
   IXS_TEST_WITH_CTX((ctx),                                                     \
                     (ixs_get_pow2_fact)(IXS_TEST_SESSION(ctx), (expr),         \

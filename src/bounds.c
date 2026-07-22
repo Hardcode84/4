@@ -68,6 +68,9 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nexprs = 0;
   b->expr_cap = 0;
   b->exprs = NULL;
+  b->nonzero = NULL;
+  b->nnonzero = 0;
+  b->nonzero_cap = 0;
   b->cache = NULL;
   b->cache_cap = 0;
   b->contradiction = false;
@@ -104,6 +107,9 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nexprs = src->nexprs;
   dst->expr_cap = src->nexprs ? src->nexprs : 0;
   dst->exprs = NULL;
+  dst->nnonzero = src->nnonzero;
+  dst->nonzero_cap = src->nnonzero;
+  dst->nonzero = NULL;
   dst->cache = NULL;
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
   dst->contradiction = src->contradiction;
@@ -114,6 +120,13 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
     if (!dst->exprs)
       return false;
     memcpy(dst->exprs, src->exprs, src->nexprs * sizeof(*src->exprs));
+  }
+  if (src->nnonzero) {
+    dst->nonzero = ixs_arena_alloc(
+        dst->scratch, dst->nonzero_cap * sizeof(*dst->nonzero), sizeof(void *));
+    if (!dst->nonzero)
+      return false;
+    memcpy(dst->nonzero, src->nonzero, src->nnonzero * sizeof(*src->nonzero));
   }
   return true;
 }
@@ -955,6 +968,43 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
     bounds_add_expr_raw(b, canon, iv);
 }
 
+static bool bounds_is_known_nonzero(const ixs_bounds *b, const ixs_node *expr) {
+  size_t i;
+  if (!b || !expr)
+    return false;
+  for (i = 0; i < b->nnonzero; i++) {
+    if (b->nonzero[i] == expr)
+      return true;
+  }
+  return false;
+}
+
+static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
+  ixs_node **grown;
+  size_t new_cap;
+  if (!b || !expr || b->oom || bounds_is_known_nonzero(b, expr))
+    return;
+  if (b->nnonzero < b->nonzero_cap) {
+    b->nonzero[b->nnonzero++] = expr;
+    return;
+  }
+  new_cap = b->nonzero_cap ? b->nonzero_cap * 2u : 4u;
+  if (new_cap < b->nonzero_cap || new_cap > SIZE_MAX / sizeof(*b->nonzero)) {
+    b->oom = true;
+    return;
+  }
+  grown = ixs_arena_alloc(b->scratch, new_cap * sizeof(*grown), sizeof(void *));
+  if (!grown) {
+    b->oom = true;
+    return;
+  }
+  if (b->nnonzero)
+    memcpy(grown, b->nonzero, b->nnonzero * sizeof(*grown));
+  b->nonzero = grown;
+  b->nonzero_cap = new_cap;
+  b->nonzero[b->nnonzero++] = expr;
+}
+
 /*
  * Extract interval bounds and modular congruence from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
@@ -970,6 +1020,13 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   ixs_node *lhs = a->u.binary.lhs;
   ixs_node *rhs = a->u.binary.rhs;
   ixs_cmp_op op = a->u.binary.cmp_op;
+
+  if (op == IXS_CMP_NE) {
+    if (ixs_node_is_zero(rhs))
+      bounds_add_nonzero(b, lhs);
+    else if (ixs_node_is_zero(lhs))
+      bounds_add_nonzero(b, rhs);
+  }
 
   /* Normalize to "sym op const" form. */
   if (lhs->tag == IXS_SYM && ixs_node_is_const(rhs)) {
@@ -1927,6 +1984,29 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   return iv;
 }
 
+static bool bounds_interval_is_zero(ixs_interval iv) {
+  return iv.valid && !iv.lo_inf && !iv.hi_inf && iv.lo_p == 0 && iv.hi_p == 0;
+}
+
+static bool bounds_has_zero_nonzero_conflict(ixs_bounds *b) {
+  size_t i;
+  for (i = 0; i < b->nnonzero; i++) {
+    ixs_node *expr = b->nonzero[i];
+    ixs_interval iv;
+    if (ixs_node_is_zero(expr))
+      return true;
+    if (expr->tag == IXS_SYM) {
+      ixs_var_bound *var = find_var(b, expr->u.name);
+      if (var && bounds_interval_is_zero(var->iv))
+        return true;
+    }
+    iv = bounds_get_expr_overrides(b, expr);
+    if (bounds_interval_is_zero(iv))
+      return true;
+  }
+  return false;
+}
+
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
   size_t i, j;
 
@@ -1951,6 +2031,9 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
       }
     }
   }
+
+  if (bounds_has_zero_nonzero_conflict(b))
+    return true;
 
   return false;
 }
@@ -2197,6 +2280,794 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   return interval_check_zero(&iv, cmp->u.binary.cmp_op);
 }
 
+/* Definedness is a proof query, not an evaluator.  Keep its traversal bounds
+ * explicit so a hostile or deeply shared DAG cannot consume the C call stack
+ * or expand without limit.  Piecewise needs nested fact environments; those
+ * calls have a separate, small bound and share the global node budget. */
+#define DEFINED_NODE_LIMIT 8192u
+#define DEFINED_STACK_LIMIT 1024u
+#define DEFINED_MEMO_CAP 16384u
+#define DEFINED_PW_DEPTH_LIMIT 32u
+#define DEFINED_BOUNDS_DEPTH_LIMIT 64u
+#define DEFINED_BOUNDS_VISIT_LIMIT 4096u
+#define DEFINED_BOUNDS_MEMO_CAP 8192u
+#define DEFINED_BOUNDS_CACHE_CAP 8192u
+
+typedef struct {
+  ixs_ctx *ctx;
+  size_t visited;
+  bool oom;
+  bool limited;
+} defined_state;
+
+typedef struct {
+  ixs_node *node;
+  ixs_check_result result;
+} defined_memo_entry;
+
+typedef struct {
+  ixs_node *node;
+  uint32_t next_child;
+  uint32_t nchildren;
+  ixs_check_result result;
+  bool started;
+} defined_frame;
+
+typedef struct {
+  ixs_node *node;
+  uint32_t next_child;
+  uint32_t nchildren;
+} defined_depth_frame;
+
+typedef struct {
+  ixs_node *node;
+  unsigned depth;
+} defined_depth_entry;
+
+typedef struct {
+  ixs_arena_mark mark;
+  ixs_ctx *old_ctx;
+  ixs_bounds_cache_entry *old_cache;
+  size_t old_cache_cap;
+  bool active;
+} defined_cache_scope;
+
+static ixs_check_result defined_combine(ixs_check_result lhs,
+                                        ixs_check_result rhs) {
+  if (lhs == IXS_CHECK_FALSE || rhs == IXS_CHECK_FALSE)
+    return IXS_CHECK_FALSE;
+  if (lhs == IXS_CHECK_UNKNOWN || rhs == IXS_CHECK_UNKNOWN)
+    return IXS_CHECK_UNKNOWN;
+  return IXS_CHECK_TRUE;
+}
+
+static bool defined_cmp_op_valid(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+  case IXS_CMP_GE:
+  case IXS_CMP_LT:
+  case IXS_CMP_LE:
+  case IXS_CMP_EQ:
+  case IXS_CMP_NE:
+    return true;
+  }
+  return false;
+}
+
+static ixs_cmp_op defined_negate_cmp_op(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LE;
+  case IXS_CMP_GE:
+    return IXS_CMP_LT;
+  case IXS_CMP_LT:
+    return IXS_CMP_GE;
+  case IXS_CMP_LE:
+    return IXS_CMP_GT;
+  case IXS_CMP_EQ:
+    return IXS_CMP_NE;
+  case IXS_CMP_NE:
+    return IXS_CMP_EQ;
+  }
+  return op;
+}
+
+static int defined_fixed_child_count(ixs_tag tag) {
+  switch (tag) {
+  case IXS_INT:
+  case IXS_RAT:
+  case IXS_SYM:
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return 0;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+  case IXS_NOT:
+    return 1;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return 2;
+  default:
+    return -1;
+  }
+}
+
+/* Keep this local walker independent of the public assert-based accessors.
+ * It also gives malformed internal nodes the required conservative result. */
+static bool defined_child_count(ixs_node *node, uint32_t *out) {
+  int fixed;
+  if (!node || !out)
+    return false;
+  fixed = defined_fixed_child_count(node->tag);
+  if (fixed >= 0) {
+    *out = (uint32_t)fixed;
+    return true;
+  }
+  switch (node->tag) {
+  case IXS_ADD:
+    if (!node->u.add.coeff || (node->u.add.nterms > 0 && !node->u.add.terms) ||
+        node->u.add.nterms > (UINT32_MAX - 1u) / 2u)
+      return false;
+    *out = 1u + 2u * node->u.add.nterms;
+    return true;
+  case IXS_MUL:
+    if (!node->u.mul.coeff ||
+        (node->u.mul.nfactors > 0 && !node->u.mul.factors) ||
+        node->u.mul.nfactors == UINT32_MAX)
+      return false;
+    *out = 1u + node->u.mul.nfactors;
+    return true;
+  case IXS_PIECEWISE:
+    if ((node->u.pw.ncases > 0 && !node->u.pw.cases) ||
+        node->u.pw.ncases > UINT32_MAX / 2u)
+      return false;
+    *out = 2u * node->u.pw.ncases;
+    return true;
+  case IXS_AND:
+  case IXS_OR:
+    if (node->u.logic.nargs < 2 || !node->u.logic.args)
+      return false;
+    *out = node->u.logic.nargs;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static ixs_node *defined_child_at(ixs_node *node, uint32_t child) {
+  switch (node->tag) {
+  case IXS_ADD:
+    if (child == 0)
+      return node->u.add.coeff;
+    child--;
+    return (child & 1u) == 0u ? node->u.add.terms[child / 2u].coeff
+                              : node->u.add.terms[child / 2u].term;
+  case IXS_MUL:
+    return child == 0 ? node->u.mul.coeff
+                      : node->u.mul.factors[child - 1u].base;
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    return node->u.unary.arg;
+  case IXS_NOT:
+    return node->u.unary_bool.arg;
+  case IXS_MOD:
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_CMP:
+    return child == 0 ? node->u.binary.lhs : node->u.binary.rhs;
+  case IXS_PIECEWISE:
+    return (child & 1u) == 0u ? node->u.pw.cases[child / 2u].value
+                              : node->u.pw.cases[child / 2u].cond;
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.logic.args[child];
+  default:
+    return NULL;
+  }
+}
+
+static defined_depth_entry *defined_depth_find(defined_depth_entry *memo,
+                                               ixs_node *node) {
+  size_t index = ((uintptr_t)node >> 3) & (DEFINED_BOUNDS_MEMO_CAP - 1u);
+  size_t probe;
+  for (probe = 0; probe < DEFINED_BOUNDS_MEMO_CAP; probe++) {
+    defined_depth_entry *entry = &memo[index];
+    if (!entry->node || entry->node == node)
+      return entry;
+    index = (index + 1u) & (DEFINED_BOUNDS_MEMO_CAP - 1u);
+  }
+  return NULL;
+}
+
+static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
+                                      ixs_node *root, bool *shared) {
+  defined_depth_frame stack[DEFINED_BOUNDS_DEPTH_LIMIT];
+  ixs_arena_mark mark;
+  defined_depth_entry *memo;
+  defined_depth_entry *entry;
+  size_t depth = 0;
+  size_t visited = 1;
+  uint32_t nchildren;
+  bool safe = false;
+
+  if (shared)
+    *shared = false;
+  if (!root || !defined_child_count(root, &nchildren))
+    return false;
+  mark = ixs_arena_save(b->scratch);
+  memo = ixs_arena_alloc(b->scratch, DEFINED_BOUNDS_MEMO_CAP * sizeof(*memo),
+                         sizeof(void *));
+  if (!memo) {
+    state->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  memset(memo, 0, DEFINED_BOUNDS_MEMO_CAP * sizeof(*memo));
+  entry = defined_depth_find(memo, root);
+  entry->node = root;
+  entry->depth = 1;
+  stack[depth].node = root;
+  stack[depth].next_child = 0;
+  stack[depth].nchildren = nchildren;
+  depth++;
+
+  while (depth > 0) {
+    defined_depth_frame *frame = &stack[depth - 1];
+    ixs_node *child;
+    if (frame->next_child >= frame->nchildren) {
+      depth--;
+      continue;
+    }
+    child = defined_child_at(frame->node, frame->next_child++);
+    if (!child || depth >= DEFINED_BOUNDS_DEPTH_LIMIT ||
+        !defined_child_count(child, &nchildren))
+      goto cleanup;
+    entry = defined_depth_find(memo, child);
+    if (!entry)
+      goto cleanup;
+    if (entry->node) {
+      if (shared)
+        *shared = true;
+      if (entry->depth >= depth + 1u)
+        continue;
+    }
+    if (++visited > DEFINED_BOUNDS_VISIT_LIMIT)
+      goto cleanup;
+    entry->node = child;
+    entry->depth = (unsigned)depth + 1u;
+    stack[depth].node = child;
+    stack[depth].next_child = 0;
+    stack[depth].nchildren = nchildren;
+    depth++;
+  }
+  safe = true;
+
+cleanup:
+  ixs_arena_restore(b->scratch, mark);
+  return safe;
+}
+
+static bool defined_cache_scope_init(defined_cache_scope *scope,
+                                     defined_state *state, ixs_bounds *b) {
+  ixs_bounds_cache_entry *cache;
+  scope->mark = ixs_arena_save(b->scratch);
+  scope->old_ctx = b->ctx;
+  scope->old_cache = b->cache;
+  scope->old_cache_cap = b->cache_cap;
+  scope->active = false;
+  cache = ixs_arena_alloc(b->scratch, DEFINED_BOUNDS_CACHE_CAP * sizeof(*cache),
+                          sizeof(void *));
+  if (!cache) {
+    state->oom = true;
+    ixs_arena_restore(b->scratch, scope->mark);
+    return false;
+  }
+  memset(cache, 0, DEFINED_BOUNDS_CACHE_CAP * sizeof(*cache));
+  b->cache = cache;
+  b->cache_cap = DEFINED_BOUNDS_CACHE_CAP;
+  /* Direct overrides are enough for a proof query. Canonical aliases expand
+   * recursively and can revisit a shared DAG before the interval cache sees
+   * it, so disable that optional path inside this bounded scope. */
+  b->ctx = NULL;
+  scope->active = true;
+  return true;
+}
+
+static void defined_cache_scope_destroy(defined_cache_scope *scope,
+                                        ixs_bounds *b) {
+  if (!scope->active)
+    return;
+  b->ctx = scope->old_ctx;
+  b->cache = scope->old_cache;
+  b->cache_cap = scope->old_cache_cap;
+  ixs_arena_restore(b->scratch, scope->mark);
+  scope->active = false;
+}
+
+static ixs_check_result defined_relation_zero(defined_state *state,
+                                              ixs_bounds *b, ixs_node *expr,
+                                              ixs_cmp_op op) {
+  ixs_interval iv;
+  ixs_check_result result;
+  ixs_bitfacts bits;
+  int64_t modulus, remainder;
+  defined_cache_scope cache_scope;
+  bool shared;
+
+  if ((op == IXS_CMP_EQ || op == IXS_CMP_NE) &&
+      bounds_is_known_nonzero(b, expr))
+    return op == IXS_CMP_NE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+  if (!defined_bounds_depth_safe(state, b, expr, &shared) ||
+      !defined_cache_scope_init(&cache_scope, state, b))
+    return IXS_CHECK_UNKNOWN;
+  iv = ixs_bounds_get(b, expr);
+  if (b->oom) {
+    state->oom = true;
+    result = IXS_CHECK_UNKNOWN;
+    goto cleanup;
+  }
+  if (iv.valid) {
+    result = interval_check_zero(&iv, op);
+    if (result != IXS_CHECK_UNKNOWN)
+      goto cleanup;
+  }
+
+  result = IXS_CHECK_UNKNOWN;
+  if (op != IXS_CMP_EQ && op != IXS_CMP_NE)
+    goto cleanup;
+  if (!shared && ixs_bounds_get_bitfacts(b, expr, &bits) &&
+      bits.known_one != 0) {
+    result = op == IXS_CMP_NE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+    goto cleanup;
+  }
+  if (b->oom) {
+    state->oom = true;
+    goto cleanup;
+  }
+  if (expr->tag == IXS_SYM &&
+      ixs_bounds_get_modrem(b, expr->u.name, &modulus, &remainder) &&
+      remainder != 0) {
+    (void)modulus;
+    result = op == IXS_CMP_NE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+  }
+
+cleanup:
+  defined_cache_scope_destroy(&cache_scope, b);
+  return result;
+}
+
+static ixs_check_result defined_condition_truth(defined_state *state,
+                                                ixs_bounds *b, ixs_node *cond) {
+  ixs_check_result result;
+  defined_cache_scope cache_scope;
+  bool shared;
+  if (ixs_node_is_known_false(cond))
+    return IXS_CHECK_FALSE;
+  if (ixs_node_is_known_true(cond))
+    return IXS_CHECK_TRUE;
+  if (cond->tag == IXS_CMP) {
+    if (ixs_node_is_zero(cond->u.binary.rhs)) {
+      result = defined_relation_zero(state, b, cond->u.binary.lhs,
+                                     cond->u.binary.cmp_op);
+      if (result != IXS_CHECK_UNKNOWN || state->oom)
+        return result;
+    }
+    if (!defined_bounds_depth_safe(state, b, cond, &shared))
+      return IXS_CHECK_UNKNOWN;
+    if (shared) {
+      if (!ixs_node_is_zero(cond->u.binary.rhs))
+        return IXS_CHECK_UNKNOWN;
+      return defined_relation_zero(state, b, cond->u.binary.lhs,
+                                   cond->u.binary.cmp_op);
+    }
+    if (!defined_cache_scope_init(&cache_scope, state, b))
+      return IXS_CHECK_UNKNOWN;
+    result = ixs_bounds_check(b, cond);
+    if (b->oom)
+      state->oom = true;
+    defined_cache_scope_destroy(&cache_scope, b);
+    return result;
+  }
+  return defined_relation_zero(state, b, cond, IXS_CMP_NE);
+}
+
+static ixs_node *defined_condition_assumption(defined_state *state,
+                                              ixs_node *cond, bool value,
+                                              ixs_node *storage) {
+  memset(storage, 0, sizeof(*storage));
+  storage->tag = IXS_CMP;
+  storage->u.binary.rhs = state->ctx->node_zero;
+  if (cond->tag == IXS_CMP) {
+    storage->u.binary.lhs = cond->u.binary.lhs;
+    storage->u.binary.rhs = cond->u.binary.rhs;
+    storage->u.binary.cmp_op =
+        value ? cond->u.binary.cmp_op
+              : defined_negate_cmp_op(cond->u.binary.cmp_op);
+  } else {
+    storage->u.binary.lhs = cond;
+    storage->u.binary.cmp_op = value ? IXS_CMP_NE : IXS_CMP_EQ;
+  }
+  return storage;
+}
+
+static defined_memo_entry *defined_memo_find(defined_memo_entry *memo,
+                                             ixs_node *node) {
+  size_t index = ((uintptr_t)node >> 3) & (DEFINED_MEMO_CAP - 1u);
+  size_t probe;
+  for (probe = 0; probe < DEFINED_MEMO_CAP; probe++) {
+    defined_memo_entry *entry = &memo[index];
+    if (!entry->node || entry->node == node)
+      return entry;
+    index = (index + 1u) & (DEFINED_MEMO_CAP - 1u);
+  }
+  return NULL;
+}
+
+static void defined_frame_init(defined_frame *frame, ixs_node *node) {
+  frame->node = node;
+  frame->next_child = 0;
+  frame->nchildren = 0;
+  frame->result = IXS_CHECK_TRUE;
+  frame->started = false;
+}
+
+static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
+                                     ixs_node *root, unsigned pw_depth);
+
+static void defined_partition_add(unsigned *partitions,
+                                  ixs_check_result result) {
+  if (result == IXS_CHECK_TRUE)
+    *partitions |= 1u;
+  else if (result == IXS_CHECK_FALSE)
+    *partitions |= 2u;
+  else
+    *partitions |= 4u;
+}
+
+static ixs_check_result defined_partition_result(unsigned partitions) {
+  if (partitions == 1u)
+    return IXS_CHECK_TRUE;
+  if (partitions == 2u)
+    return IXS_CHECK_FALSE;
+  return IXS_CHECK_UNKNOWN;
+}
+
+typedef enum {
+  DEFINED_PW_NEXT,
+  DEFINED_PW_STOP,
+  DEFINED_PW_FAILED
+} defined_pw_step;
+
+static bool defined_piecewise_active(defined_state *state,
+                                     ixs_bounds *remaining, ixs_node *cond,
+                                     ixs_node *value, unsigned pw_depth,
+                                     unsigned *partitions) {
+  ixs_arena_mark mark = ixs_arena_save(remaining->scratch);
+  ixs_bounds active;
+  ixs_node assumption;
+  if (!ixs_bounds_fork(&active, remaining)) {
+    state->oom = true;
+    ixs_arena_restore(remaining->scratch, mark);
+    return false;
+  }
+  if (!ixs_bounds_add_assumption(
+          &active,
+          defined_condition_assumption(state, cond, true, &assumption))) {
+    state->oom = true;
+    ixs_arena_restore(remaining->scratch, mark);
+    return false;
+  }
+  if (!ixs_bounds_has_empty(&active)) {
+    ixs_check_result result = defined_eval(state, &active, value, pw_depth);
+    defined_partition_add(partitions, result);
+  }
+  ixs_arena_restore(remaining->scratch, mark);
+  return !state->oom && !state->limited;
+}
+
+static defined_pw_step defined_piecewise_case(defined_state *state,
+                                              ixs_bounds *remaining,
+                                              const ixs_pwcase *pwcase,
+                                              unsigned pw_depth,
+                                              unsigned *partitions) {
+  ixs_node *cond = pwcase->cond;
+  ixs_check_result cond_defined =
+      defined_eval(state, remaining, cond, pw_depth);
+  ixs_check_result truth;
+  ixs_node assumption;
+
+  if (state->oom || state->limited)
+    return DEFINED_PW_FAILED;
+  if (cond_defined != IXS_CHECK_TRUE) {
+    defined_partition_add(partitions, cond_defined);
+    return DEFINED_PW_STOP;
+  }
+
+  truth = defined_condition_truth(state, remaining, cond);
+  if (state->oom)
+    return DEFINED_PW_FAILED;
+  if (truth == IXS_CHECK_FALSE)
+    return DEFINED_PW_NEXT;
+  if (!defined_bounds_depth_safe(state, remaining, cond, NULL)) {
+    defined_partition_add(partitions, IXS_CHECK_UNKNOWN);
+    return DEFINED_PW_STOP;
+  }
+  if (!defined_piecewise_active(state, remaining, cond, pwcase->value, pw_depth,
+                                partitions))
+    return DEFINED_PW_FAILED;
+  if (truth == IXS_CHECK_TRUE)
+    return DEFINED_PW_STOP;
+
+  if (!ixs_bounds_add_assumption(
+          remaining,
+          defined_condition_assumption(state, cond, false, &assumption))) {
+    state->oom = true;
+    return DEFINED_PW_FAILED;
+  }
+  return DEFINED_PW_NEXT;
+}
+
+static ixs_check_result defined_piecewise(defined_state *state, ixs_bounds *b,
+                                          ixs_node *expr, unsigned pw_depth) {
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  unsigned partitions = 0;
+  uint32_t i;
+  bool stopped = false;
+
+  if (pw_depth > DEFINED_PW_DEPTH_LIMIT)
+    return IXS_CHECK_UNKNOWN;
+  if ((expr->u.pw.ncases > 0 && !expr->u.pw.cases) ||
+      expr->u.pw.ncases > UINT32_MAX / 2u)
+    return IXS_CHECK_UNKNOWN;
+  if (expr->u.pw.ncases == 0)
+    return IXS_CHECK_FALSE;
+
+  outer_mark = ixs_arena_save(b->scratch);
+  if (!ixs_bounds_fork(&remaining, b)) {
+    state->oom = true;
+    ixs_arena_restore(b->scratch, outer_mark);
+    return IXS_CHECK_UNKNOWN;
+  }
+
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    defined_pw_step step;
+
+    if (remaining.oom) {
+      state->oom = true;
+      break;
+    }
+    if (ixs_bounds_has_empty(&remaining)) {
+      stopped = true;
+      break;
+    }
+    step = defined_piecewise_case(state, &remaining, &expr->u.pw.cases[i],
+                                  pw_depth, &partitions);
+    if (step == DEFINED_PW_STOP) {
+      stopped = true;
+      break;
+    }
+    if (step == DEFINED_PW_FAILED)
+      break;
+  }
+
+  if (!state->oom && !state->limited && !stopped && !remaining.oom &&
+      !ixs_bounds_has_empty(&remaining))
+    defined_partition_add(&partitions, IXS_CHECK_FALSE);
+  if (remaining.oom)
+    state->oom = true;
+
+  ixs_arena_restore(b->scratch, outer_mark);
+  if (state->oom || state->limited)
+    return IXS_CHECK_UNKNOWN;
+  return defined_partition_result(partitions);
+}
+
+static ixs_check_result defined_finalize_node(defined_state *state,
+                                              ixs_bounds *b, ixs_node *node,
+                                              ixs_check_result result) {
+  uint32_t i;
+  if (node->tag == IXS_MUL) {
+    for (i = 0; i < node->u.mul.nfactors; i++) {
+      ixs_check_result guard;
+      if (node->u.mul.factors[i].exp == 0)
+        result = defined_combine(result, IXS_CHECK_UNKNOWN);
+      if (node->u.mul.factors[i].exp >= 0)
+        continue;
+      guard = defined_relation_zero(state, b, node->u.mul.factors[i].base,
+                                    IXS_CMP_NE);
+      result = defined_combine(result, guard);
+    }
+  } else if (node->tag == IXS_MOD) {
+    ixs_check_result guard =
+        defined_relation_zero(state, b, node->u.binary.rhs, IXS_CMP_GT);
+    result = defined_combine(result, guard);
+  }
+  return result;
+}
+
+static bool defined_complete_frame(defined_state *state,
+                                   defined_memo_entry *memo,
+                                   defined_frame *stack, size_t *depth,
+                                   ixs_check_result result,
+                                   ixs_check_result *answer) {
+  defined_frame *frame = &stack[*depth - 1u];
+  defined_memo_entry *entry = defined_memo_find(memo, frame->node);
+  if (!entry) {
+    state->limited = true;
+    result = IXS_CHECK_UNKNOWN;
+  } else {
+    entry->node = frame->node;
+    entry->result = result;
+  }
+  (*depth)--;
+  if (*depth == 0) {
+    *answer = result;
+    return true;
+  }
+  frame = &stack[*depth - 1u];
+  frame->result = defined_combine(frame->result, result);
+  frame->next_child++;
+  return false;
+}
+
+static void defined_start_frame(defined_state *state, ixs_bounds *b,
+                                defined_frame *frame, unsigned pw_depth,
+                                ixs_check_result *direct, bool *has_direct) {
+  ixs_node *node = frame->node;
+  *direct = IXS_CHECK_UNKNOWN;
+  *has_direct = false;
+
+  if (!node || !ixs_ctx_owns_node(state->ctx, node) ||
+      ixs_node_is_sentinel(node)) {
+    *has_direct = true;
+    return;
+  }
+  if (++state->visited > DEFINED_NODE_LIMIT) {
+    state->limited = true;
+    return;
+  }
+
+  switch (node->tag) {
+  case IXS_INT:
+    *direct = IXS_CHECK_TRUE;
+    *has_direct = true;
+    return;
+  case IXS_RAT:
+    *direct = node->u.rat.q > 0 ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+    *has_direct = true;
+    return;
+  case IXS_SYM:
+    *direct = node->u.name ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+    *has_direct = true;
+    return;
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    *has_direct = true;
+    return;
+  case IXS_PIECEWISE:
+    *direct = defined_piecewise(state, b, node, pw_depth + 1u);
+    *has_direct = true;
+    return;
+  case IXS_CMP:
+    if (!defined_cmp_op_valid(node->u.binary.cmp_op)) {
+      *has_direct = true;
+      return;
+    }
+    break;
+  default:
+    break;
+  }
+  if (!defined_child_count(node, &frame->nchildren))
+    *has_direct = true;
+}
+
+static bool defined_process_child(defined_state *state,
+                                  defined_memo_entry *memo,
+                                  defined_frame *stack, size_t *depth) {
+  defined_frame *frame = &stack[*depth - 1u];
+  ixs_node *child;
+  defined_memo_entry *entry;
+  if (frame->next_child >= frame->nchildren)
+    return false;
+
+  child = defined_child_at(frame->node, frame->next_child);
+  if (!child) {
+    frame->result = defined_combine(frame->result, IXS_CHECK_UNKNOWN);
+    frame->next_child++;
+    return true;
+  }
+  entry = defined_memo_find(memo, child);
+  if (entry && entry->node) {
+    frame->result = defined_combine(frame->result, entry->result);
+    frame->next_child++;
+    return true;
+  }
+  if (*depth >= DEFINED_STACK_LIMIT) {
+    state->limited = true;
+    return true;
+  }
+  defined_frame_init(&stack[(*depth)++], child);
+  return true;
+}
+
+static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
+                                     ixs_node *root, unsigned pw_depth) {
+  ixs_arena_mark mark;
+  defined_memo_entry *memo;
+  defined_frame *stack;
+  size_t depth = 0;
+  ixs_check_result answer = IXS_CHECK_UNKNOWN;
+
+  if (!root || state->oom || state->limited)
+    return IXS_CHECK_UNKNOWN;
+  mark = ixs_arena_save(b->scratch);
+  memo = ixs_arena_alloc(b->scratch, DEFINED_MEMO_CAP * sizeof(*memo),
+                         sizeof(void *));
+  stack = ixs_arena_alloc(b->scratch, DEFINED_STACK_LIMIT * sizeof(*stack),
+                          sizeof(void *));
+  if (!memo || !stack) {
+    state->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return IXS_CHECK_UNKNOWN;
+  }
+  memset(memo, 0, DEFINED_MEMO_CAP * sizeof(*memo));
+  defined_frame_init(&stack[depth++], root);
+
+  while (depth > 0 && !state->oom && !state->limited) {
+    defined_frame *frame = &stack[depth - 1u];
+    ixs_node *node = frame->node;
+
+    if (!frame->started) {
+      ixs_check_result direct = IXS_CHECK_UNKNOWN;
+      bool has_direct = false;
+      defined_start_frame(state, b, frame, pw_depth, &direct, &has_direct);
+      if (state->limited)
+        break;
+      if (has_direct) {
+        if (defined_complete_frame(state, memo, stack, &depth, direct, &answer))
+          break;
+        continue;
+      }
+      frame->started = true;
+    }
+
+    if (defined_process_child(state, memo, stack, &depth))
+      continue;
+
+    frame->result = defined_finalize_node(state, b, node, frame->result);
+    if (defined_complete_frame(state, memo, stack, &depth, frame->result,
+                               &answer))
+      break;
+  }
+
+  ixs_arena_restore(b->scratch, mark);
+  if (state->oom || state->limited)
+    return IXS_CHECK_UNKNOWN;
+  return answer;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
+                                                     ixs_node *expr) {
+  defined_state state;
+  ixs_check_result result;
+  if (!b || !b->ctx || !b->scratch || !expr || b->oom ||
+      ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+  state.ctx = b->ctx;
+  state.visited = 0;
+  state.oom = false;
+  state.limited = false;
+  result = defined_eval(&state, b, expr, 0);
+  if (state.oom || state.limited || b->oom)
+    return IXS_CHECK_UNKNOWN;
+  return result;
+}
+
 static ixs_bounds_build_status assumption_invalid(ixs_bounds *b,
                                                   const char *message) {
   if (b && b->ctx)
@@ -2379,6 +3250,8 @@ static void bounds_add_all_facts(ixs_bounds *dst, const ixs_bounds *src) {
     bounds_add_var_fact(dst, &src->vars[i]);
   for (i = 0; i < src->nexprs; i++)
     ixs_bounds_add_expr(dst, src->exprs[i].expr, src->exprs[i].iv);
+  for (i = 0; i < src->nnonzero; i++)
+    bounds_add_nonzero(dst, src->nonzero[i]);
 }
 
 ixs_facts *ixs_facts_create(ixs_session *s) {
@@ -2470,7 +3343,7 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
                           ixs_node *target, ixs_node *replacement) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
-  size_t nexprs, nvars, i;
+  size_t nexprs, nvars, nnonzero, i;
   bool ok = false;
 
   if (!dst || !dst->impl || !src || !src->impl ||
@@ -2483,8 +3356,10 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 
   nexprs = src->bounds.nexprs;
   nvars = src->bounds.nvars;
+  nnonzero = src->bounds.nnonzero;
 
-  if (dst->bounds.nexprs == 0 && dst->bounds.nvars == 0) {
+  if (dst->bounds.nexprs == 0 && dst->bounds.nvars == 0 &&
+      dst->bounds.nnonzero == 0) {
     ixs_bounds forked;
     if (!ixs_bounds_fork(&forked, &src->bounds))
       goto cleanup;
@@ -2515,6 +3390,13 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
       goto cleanup;
     ixs_bounds_add_expr(&dst->bounds, subst, src->bounds.vars[i].iv);
   }
+  for (i = 0; i < nnonzero; i++) {
+    ixs_node *subst =
+        simp_subs(ctx, src->bounds.nonzero[i], target, replacement);
+    if (!subst)
+      goto cleanup;
+    bounds_add_nonzero(&dst->bounds, subst);
+  }
   ok = true;
 
 cleanup:
@@ -2543,6 +3425,18 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
     return IXS_CHECK_UNKNOWN;
   if (facts_node_ok(ctx, expr))
     result = ixs_bounds_check_integer_valued(&facts->bounds, expr);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (facts_node_ok(ctx, expr))
+    result = ixs_bounds_check_defined(&facts->bounds, expr);
   ixs_session_unbind(&binding);
   return result;
 }

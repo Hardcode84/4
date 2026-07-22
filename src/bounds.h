@@ -54,6 +54,9 @@ typedef struct {
   ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
   size_t nexprs;
   size_t expr_cap;
+  ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
+  size_t nnonzero;
+  size_t nonzero_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
   bool contradiction;
@@ -115,6 +118,8 @@ IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
 IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
                                                        ixs_node *expr,
                                                        int64_t modulus);
+IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
+                                                     ixs_node *expr);
 
 typedef enum {
   IXS_BOUNDS_BUILD_OK,
