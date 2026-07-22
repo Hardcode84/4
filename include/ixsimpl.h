@@ -173,6 +173,18 @@ typedef enum {
 } ixs_check_result;
 
 typedef enum {
+  IXS_EXACT_DIVIDE_PROVEN,
+  IXS_EXACT_DIVIDE_NOT_EXACT,
+  IXS_EXACT_DIVIDE_UNKNOWN,
+  IXS_EXACT_DIVIDE_ERROR
+} ixs_exact_divide_status;
+
+typedef struct {
+  ixs_exact_divide_status status;
+  ixs_node *quotient;
+} ixs_exact_divide_result;
+
+typedef enum {
   IXS_POW2_UNKNOWN,
   IXS_POW2_OR_ZERO,
   IXS_POW2_POSITIVE
@@ -265,6 +277,13 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
  * a session diagnostic and returns UNKNOWN. */
 ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
                                            int64_t modulus);
+/* Prove exact divisibility and construct the simplified quotient.  PROVEN is
+ * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
+ * nondivisibility; UNKNOWN means facts are insufficient or contradictory.
+ * Invalid input, divisor zero, unrepresentable results, and OOM return ERROR
+ * and append a diagnostic to the fact set's session when one is available. */
+ixs_exact_divide_result
+ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
 

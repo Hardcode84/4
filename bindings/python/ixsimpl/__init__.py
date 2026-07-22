@@ -165,6 +165,9 @@ if TYPE_CHECKING:
             facts: Facts | None = None,
         ) -> bool | None: ...
         def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
+        def try_exact_divide(
+            self, expr: _Expr, divisor: int, facts: Facts
+        ) -> tuple[Literal["proven", "not_exact", "unknown"], Expr | None]: ...
         def pow2_fact(
             self,
             expr: _Expr,

@@ -1897,6 +1897,53 @@ def test_integrality_and_divisibility_invalid_inputs() -> None:
         ctx.divisible(x, 0, facts)
 
 
+def test_fact_backed_exact_divide() -> None:
+    ctx = ixsimpl.Context()
+    item, slot, k = ctx.sym("item"), ctx.sym("slot"), ctx.sym("K")
+    facts = ctx.facts()
+    expr = 64 * item + 32 * slot
+
+    status, quotient = ctx.try_exact_divide(expr, 8, facts)
+    assert status == "proven"
+    assert quotient is not None
+    assert ixsimpl.same_node(quotient, 8 * item + 4 * slot)
+
+    status, quotient = ctx.try_exact_divide(expr, -8, facts)
+    assert status == "proven"
+    assert quotient is not None
+    assert ixsimpl.same_node(quotient, -8 * item - 4 * slot)
+
+    assert ctx.try_exact_divide(item + 1, 8, facts) == ("unknown", None)
+    assert ctx.try_exact_divide(ctx.int_(65), 8, facts) == ("not_exact", None)
+    assert ctx.try_exact_divide(1 / item, 1, facts) == ("unknown", None)
+
+    facts.assume(ctx.eq(k % 32, 0))
+    status, quotient = ctx.try_exact_divide(k, 32, facts)
+    assert status == "proven"
+    assert quotient is not None
+    assert ixsimpl.same_node(quotient, k / 32)
+
+    contradictory = ctx.facts()
+    contradictory.assume(item >= 10)
+    contradictory.assume(item <= 5)
+    assert ctx.try_exact_divide(expr, 8, contradictory) == ("unknown", None)
+
+    with pytest.raises(ValueError, match="divisor must be nonzero"):
+        ctx.try_exact_divide(expr, 0, facts)
+
+
+def test_exact_divide_binding_rejects_cross_context_inputs() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("x")
+    facts = ctx.facts()
+
+    with pytest.raises(ValueError, match="different context"):
+        ctx.try_exact_divide(other.sym("x"), 8, facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.try_exact_divide(x, 8, other.facts())
+
+
 @example(value=-(1 << 63), modulus=-(1 << 63))
 @example(value=(1 << 63) - 1, modulus=-(1 << 63))
 @given(
@@ -1910,6 +1957,19 @@ def test_exact_integer_divisibility_query(value: int, modulus: int) -> None:
     facts = ctx.facts()
 
     assert ctx.divisible(ctx.int_(value), modulus, facts) is (value % modulus == 0)
+    if value == -(1 << 63) and modulus == -1:
+        with pytest.raises(ValueError, match="rational overflow in division"):
+            ctx.try_exact_divide(ctx.int_(value), modulus, facts)
+        return
+
+    status, quotient = ctx.try_exact_divide(ctx.int_(value), modulus, facts)
+    if value % modulus == 0:
+        assert status == "proven"
+        assert quotient is not None
+        assert int(quotient) == value // modulus
+    else:
+        assert status == "not_exact"
+        assert quotient is None
 
 
 @given(

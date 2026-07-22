@@ -1642,6 +1642,149 @@ static void test_public_fact_divisibility(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_divide_basic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "item");
+  ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *k = ixs_sym(ctx, "K");
+  ixs_node *expr = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), item),
+                           ixs_mul(ctx, ixs_int(ctx, 32), slot));
+  ixs_node *expected = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), item),
+                               ixs_mul(ctx, ixs_int(ctx, 4), slot));
+  ixs_node *negative_expected =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -8), item),
+              ixs_mul(ctx, ixs_int(ctx, -4), slot));
+  ixs_node *congruence = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+
+  result = ixs_try_exact_divide_facts(facts, expr, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, expected));
+
+  result = ixs_try_exact_divide_facts(facts, expr, -8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, negative_expected));
+
+  result =
+      ixs_try_exact_divide_facts(facts, ixs_add(ctx, item, ixs_int(ctx, 1)), 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+  CHECK(result.quotient == NULL);
+  result = ixs_try_exact_divide_facts(facts, ixs_int(ctx, 65), 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_NOT_EXACT);
+  CHECK(result.quotient == NULL);
+  result =
+      ixs_try_exact_divide_facts(facts, ixs_div(ctx, ixs_int(ctx, 1), item), 1);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+  CHECK(result.quotient == NULL);
+
+  CHECK(ixs_facts_assume_pred(facts, congruence));
+  result = ixs_try_exact_divide_facts(facts, k, 32);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, ixs_div(ctx, k, ixs_int(ctx, 32))));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_exact_divide_extrema_and_overflow(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *k = ixs_sym(ctx, "K");
+  ixs_node *large = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MAX), x),
+                            ixs_mul(ctx, ixs_int(ctx, INT64_MAX), y));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *overflow_facts = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+
+  result =
+      ixs_try_exact_divide_facts(facts, ixs_int(ctx, INT64_MIN), INT64_MIN);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, ixs_int(ctx, 1)));
+  result =
+      ixs_try_exact_divide_facts(facts, ixs_int(ctx, INT64_MAX), INT64_MIN);
+  CHECK(result.status == IXS_EXACT_DIVIDE_NOT_EXACT);
+
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_try_exact_divide_facts(facts, ixs_int(ctx, INT64_MIN), -1);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(result.quotient == NULL);
+  CHECK(ixs_ctx_nerrors(ctx) >= 1);
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1),
+               "quotient is not representable") != NULL);
+
+  result = ixs_try_exact_divide_facts(facts, large, INT64_MAX);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, ixs_add(ctx, x, y)));
+
+  CHECK(ixs_facts_assume_pred(
+      overflow_facts, ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, INT64_MAX)),
+                              IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(overflow_facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  result = ixs_try_exact_divide_facts(overflow_facts, k, INT64_MAX);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  result = ixs_try_exact_divide_facts(overflow_facts, k, 2);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_exact_divide_invalid_and_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "item");
+  ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *expr = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), item),
+                           ixs_mul(ctx, ixs_int(ctx, 32), slot));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+
+  CHECK(ixs_facts_assume_pred(
+      contradictory, ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 5))));
+  result = ixs_try_exact_divide_facts(contradictory, expr, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+  CHECK(result.quotient == NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_try_exact_divide_facts(facts, expr, 0);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "divisor must be nonzero") != NULL);
+  result = ixs_try_exact_divide_facts(facts, ixs_sym(other, "item"), 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(strstr(ixs_ctx_error(ctx, 1), "different context") != NULL);
+  result = ixs_try_exact_divide_facts(facts, ctx->sentinel_error, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(strstr(ixs_ctx_error(ctx, 2), "sentinel expression") != NULL);
+  result = ixs_try_exact_divide_facts(facts, NULL, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(strstr(ixs_ctx_error(ctx, 3), "NULL expression") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  result = ixs_try_exact_divide_facts(facts, expr, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(result.quotient == NULL);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  result = ixs_try_exact_divide_facts(facts, expr, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(result.quotient != NULL);
+
+  result = ixs_try_exact_divide_facts(NULL, expr, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(result.quotient == NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_integrality_invalid_and_contradictory(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -1778,6 +1921,9 @@ int main(void) {
   test_public_structural_and_assumption_integrality();
   test_public_fact_integrality_piecewise();
   test_public_fact_divisibility();
+  test_public_exact_divide_basic();
+  test_public_exact_divide_extrema_and_overflow();
+  test_public_exact_divide_invalid_and_oom();
   test_public_integrality_invalid_and_contradictory();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);

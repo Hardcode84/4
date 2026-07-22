@@ -19,6 +19,7 @@ namespace ixs {
 
 class Expr;
 class Facts;
+struct ExactDivideResult;
 
 class Context {
   ixs_ctx *ctx_;
@@ -199,13 +200,20 @@ private:
   ixs_ctx *session_ctx() const { return ctx_; }
 };
 
+struct ExactDivideResult {
+  ixs_exact_divide_status status;
+  Expr quotient;
+};
+
 class Facts {
   ixs_ctx *ctx_;
+  ixs_session *session_;
   ixs_facts *facts_;
 
 public:
   explicit Facts(Context &ctx)
-      : ctx_(ctx.raw()), facts_(ixs_facts_create(ctx.session())) {
+      : ctx_(ctx.raw()), session_(ctx.session()),
+        facts_(ixs_facts_create(ctx.session())) {
     if (!facts_)
       throw std::bad_alloc();
   }
@@ -218,6 +226,11 @@ public:
   }
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
     return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
+  }
+  ExactDivideResult try_exact_divide(const Expr &expr, int64_t divisor) const {
+    ixs_exact_divide_result result =
+        ixs_try_exact_divide_facts(facts_, expr.raw(), divisor);
+    return {result.status, Expr(ctx_, session_, result.quotient)};
   }
   ixs_facts *raw() const { return facts_; }
   ixs_ctx *raw_ctx() const { return ctx_; }

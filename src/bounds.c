@@ -2566,6 +2566,105 @@ cleanup:
   return result;
 }
 
+static ixs_exact_divide_result
+exact_divide_result(ixs_exact_divide_status status, ixs_node *quotient) {
+  ixs_exact_divide_result result;
+  result.status = status;
+  result.quotient = quotient;
+  return result;
+}
+
+static ixs_exact_divide_result exact_divide_error(ixs_ctx *ctx,
+                                                  const char *message) {
+  if (ctx && message)
+    ixs_ctx_push_error(ctx, "exact divide: %s", message);
+  return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
+}
+
+ixs_exact_divide_result
+ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
+  ixs_session_binding binding;
+  ixs_check_result proof;
+  ixs_node *divisor_node;
+  ixs_node *quotient;
+  ixs_ctx *ctx;
+
+  if (!facts_bind(facts, &binding, &ctx))
+    return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
+  if (!expr) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "NULL expression");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (ixs_node_is_sentinel(expr)) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "sentinel expression is not accepted");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (!ixs_ctx_owns_node(ctx, expr)) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "expression belongs to a different context");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (divisor == 0) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "divisor must be nonzero");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+
+  proof = ixs_bounds_check_divisible(&facts->bounds, expr, divisor);
+  if (facts->bounds.oom) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (proof == IXS_CHECK_FALSE) {
+    ixs_session_unbind(&binding);
+    return exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
+  }
+  if (proof != IXS_CHECK_TRUE) {
+    ixs_session_unbind(&binding);
+    return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+  }
+
+  divisor_node = ixs_node_int(ctx, divisor);
+  if (!divisor_node) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  quotient = simp_div(ctx, expr, divisor_node);
+  if (!quotient) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (ixs_node_is_sentinel(quotient)) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "quotient is not representable");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  quotient = expand_impl(ctx, quotient);
+  if (!quotient) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+  if (ixs_node_is_sentinel(quotient)) {
+    ixs_exact_divide_result result =
+        exact_divide_error(ctx, "quotient expansion failed");
+    ixs_session_unbind(&binding);
+    return result;
+  }
+
+  ixs_session_unbind(&binding);
+  return exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, quotient);
+}
+
 static ixs_pow2_fact bounds_pow2_fact_from_int64(int64_t value) {
   uint64_t u;
   if (value == 0)

@@ -1274,6 +1274,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `UNKNOWN`. The modulus must be nonzero. Negative moduli use their unsigned
   magnitude, including the `2^63` magnitude of `INT64_MIN`, so normalization
   cannot overflow.
+- **Exact quotient construction** (`ixs_try_exact_divide_facts`, Python
+  `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): reuses the same
+  divisibility proof and returns a canonical expanded quotient only after that
+  proof succeeds. Its result separates `PROVEN`, proven `NOT_EXACT`,
+  insufficient or contradictory `UNKNOWN`, and domain/OOM `ERROR`. Only
+  `PROVEN` carries a quotient. Negative divisors preserve quotient sign;
+  `INT64_MIN` is handled without taking its signed magnitude. Every `ERROR`
+  reached through a valid fact set appends a session diagnostic.
 - **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
   proof contexts for callers that carry facts through IR rewrites instead of
   re-encoding everything as predicates.  A fact set accepts predicate facts,
@@ -1574,6 +1582,16 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 // congruence facts, but no rewriting.  Returns IXS_CHECK_TRUE, IXS_CHECK_FALSE, or
 // IXS_CHECK_UNKNOWN.  Lighter than ixs_simplify for pure truth queries.
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
+typedef enum {
+    IXS_EXACT_DIVIDE_PROVEN,
+    IXS_EXACT_DIVIDE_NOT_EXACT,
+    IXS_EXACT_DIVIDE_UNKNOWN,
+    IXS_EXACT_DIVIDE_ERROR
+} ixs_exact_divide_status;
+typedef struct {
+    ixs_exact_divide_status status;
+    ixs_node *quotient;
+} ixs_exact_divide_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
 bool ixs_node_is_integer_valued(const ixs_node *expr);
@@ -1623,6 +1641,9 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
 ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            ixs_node *expr,
                                            int64_t modulus);
+ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
+                                                   ixs_node *expr,
+                                                   int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
@@ -2163,7 +2184,9 @@ Key properties:
   `Expr::check_integer_valued()` consumes an assumption array. `Context::facts()`
   returns a lightweight session-owned `Facts` wrapper whose
   `check_integer_valued()` and `check_divisible()` methods expose fact-backed
-  proofs.
+  proofs. `Facts::try_exact_divide()` returns an `ExactDivideResult` containing
+  the four-way status and a nullable `Expr` quotient; errors remain available
+  through the owning `Context` diagnostics.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -2257,6 +2280,10 @@ Implementation:
   `facts=...` form expose tri-state integrality. `Context.divisible(expr,
   modulus, facts)` exposes fact-backed tri-state divisibility and raises
   `ValueError` for modulus zero.
+- `Context.try_exact_divide(expr, divisor, facts)` returns
+  `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
+  Core `ERROR` results raise `ValueError` for domain/representation failures
+  and `MemoryError` for OOM while preserving the session diagnostic.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
@@ -2492,6 +2519,17 @@ ixs_check_result ixs_check_integer_valued(
     ixs_session *s, ixs_node *expr,
     ixs_node *const *assumptions, size_t n_assumptions);
 
+typedef enum {
+  IXS_EXACT_DIVIDE_PROVEN,
+  IXS_EXACT_DIVIDE_NOT_EXACT,
+  IXS_EXACT_DIVIDE_UNKNOWN,
+  IXS_EXACT_DIVIDE_ERROR
+} ixs_exact_divide_status;
+typedef struct {
+  ixs_exact_divide_status status;
+  ixs_node *quotient;
+} ixs_exact_divide_result;
+
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
                                 size_t n_assumptions);
@@ -2521,6 +2559,9 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
 ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            ixs_node *expr,
                                            int64_t modulus);
+ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
+                                                   ixs_node *expr,
+                                                   int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);

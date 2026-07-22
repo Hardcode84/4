@@ -108,6 +108,55 @@ static int raise_new_divisibility_error(ixs_session *session, size_t before) {
   return 0;
 }
 
+static PyObject *raise_exact_divide_error(ixs_session *session, size_t before) {
+  const char *first = NULL;
+  size_t i;
+  size_t after = ixs_session_nerrors(session);
+  for (i = before; i < after; i++) {
+    const char *message = ixs_session_error(session, i);
+    if (!message)
+      continue;
+    if (!first)
+      first = message;
+    if (strstr(message, "out of memory"))
+      return PyErr_NoMemory();
+  }
+  if (first)
+    PyErr_SetString(PyExc_ValueError, first);
+  else
+    PyErr_SetString(PyExc_RuntimeError,
+                    "ixsimpl: exact division failed without a diagnostic");
+  return NULL;
+}
+
+static PyObject *exact_divide_pair(ContextObject *ctx_obj, const char *status,
+                                   ixs_node *quotient) {
+  PyObject *pair;
+  PyObject *quotient_obj;
+  PyObject *status_obj = PyUnicode_FromString(status);
+  if (!status_obj)
+    return NULL;
+  if (quotient) {
+    quotient_obj = (PyObject *)Expr_wrap(ctx_obj, quotient);
+    if (!quotient_obj) {
+      Py_DECREF(status_obj);
+      return NULL;
+    }
+  } else {
+    quotient_obj = Py_None;
+    Py_INCREF(quotient_obj);
+  }
+  pair = PyTuple_New(2);
+  if (!pair) {
+    Py_DECREF(status_obj);
+    Py_DECREF(quotient_obj);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(pair, 0, status_obj);
+  PyTuple_SET_ITEM(pair, 1, quotient_obj);
+  return pair;
+}
+
 typedef struct {
   PyObject *buf_obj;
 } BytesWriterState;
@@ -1494,6 +1543,61 @@ static PyObject *Context_divisible(ContextObject *self, PyObject *args,
   Py_RETURN_NONE;
 }
 
+static PyObject *Context_try_exact_divide(ContextObject *self, PyObject *args,
+                                          PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "divisor", "facts", NULL};
+  PyObject *expr_obj, *divisor_obj, *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_exact_divide_result result;
+  int64_t divisor;
+  size_t errors_before;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_obj,
+                                   &divisor_obj, &facts_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  if (!py_int64(divisor_obj, &divisor, "divisor"))
+    return NULL;
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_try_exact_divide_facts(((FactsObject *)facts_obj)->facts,
+                                      ((ExprObject *)expr_obj)->node, divisor);
+  switch (result.status) {
+  case IXS_EXACT_DIVIDE_PROVEN:
+    if (!result.quotient) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      "ixsimpl: exact division returned a NULL quotient");
+      return NULL;
+    }
+    return exact_divide_pair(self, "proven", result.quotient);
+  case IXS_EXACT_DIVIDE_NOT_EXACT:
+    return exact_divide_pair(self, "not_exact", NULL);
+  case IXS_EXACT_DIVIDE_UNKNOWN:
+    return exact_divide_pair(self, "unknown", NULL);
+  case IXS_EXACT_DIVIDE_ERROR:
+    return raise_exact_divide_error(session, errors_before);
+  }
+  PyErr_SetString(PyExc_RuntimeError,
+                  "ixsimpl: exact division returned an invalid status");
+  return NULL;
+}
+
 static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
   static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
@@ -1901,6 +2005,9 @@ static PyMethodDef Context_methods[] = {
      "Prove integrality from assumptions or facts; return bool or None."},
     {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
+    {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove exact division under facts; return (status, quotient)."},
     {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
      "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
      "or AND predicates."},
