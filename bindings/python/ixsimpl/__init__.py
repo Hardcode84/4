@@ -132,6 +132,9 @@ if TYPE_CHECKING:
     from ixsimpl._ixsimpl import Context as _Context
     from ixsimpl._ixsimpl import Facts
 
+    # Assumption inputs accept CMP/boolean roots and AND trees with those leaves.
+    # Unsupported predicate shapes raise ValueError.
+
     class Context(_Context):
         def sym(self, name: str) -> Expr: ...
         def parse(self, input: str) -> Expr: ...

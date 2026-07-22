@@ -81,6 +81,19 @@ static ixs_session *Context_session(ContextObject *ctx_obj) {
   return &ctx_obj->session;
 }
 
+static int raise_new_assumption_error(ixs_session *session, size_t before) {
+  size_t i;
+  size_t after = ixs_session_nerrors(session);
+  for (i = before; i < after; i++) {
+    const char *message = ixs_session_error(session, i);
+    if (message && strncmp(message, "assumptions:", 12) == 0) {
+      PyErr_SetString(PyExc_ValueError, message);
+      return -1;
+    }
+  }
+  return 0;
+}
+
 typedef struct {
   PyObject *buf_obj;
 } BytesWriterState;
@@ -428,6 +441,8 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   PyObject *assumptions_obj = NULL;
   ixs_node **assumptions = NULL;
   size_t n_assumptions = 0;
+  size_t errors_before;
+  ixs_session *session = Context_session(self->ctx_obj);
   ixs_node *result;
   Py_ssize_t i, n;
 
@@ -470,9 +485,11 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
     }
   }
 
-  result = ixs_simplify(Context_session(self->ctx_obj), self->node, assumptions,
-                        n_assumptions);
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_simplify(session, self->node, assumptions, n_assumptions);
   PyMem_Free(assumptions);
+  if (raise_new_assumption_error(session, errors_before) < 0)
+    return NULL;
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -733,7 +750,7 @@ static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
 
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
-     "Simplify expression with optional assumptions."},
+     "Simplify with optional CMP/boolean or AND assumptions."},
     {"expand", (PyCFunction)Expr_expand, METH_NOARGS,
      "Distribute MUL over ADD (expand products of sums)."},
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
@@ -982,9 +999,14 @@ static ixs_node *facts_expr_arg(FactsObject *self, PyObject *obj,
 
 static PyObject *Facts_assume(FactsObject *self, PyObject *arg) {
   ixs_node *pred = facts_expr_arg(self, arg, "predicate");
+  ixs_session *session = Context_session(self->ctx_obj);
+  size_t errors_before;
   if (!pred)
     return NULL;
+  errors_before = ixs_session_nerrors(session);
   if (!ixs_facts_assume_pred(self->facts, pred)) {
+    if (raise_new_assumption_error(session, errors_before) < 0)
+      return NULL;
     PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid fact predicate");
     return NULL;
   }
@@ -1070,7 +1092,8 @@ static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
 }
 
 static PyMethodDef Facts_methods[] = {
-    {"assume", (PyCFunction)Facts_assume, METH_O, "Add a predicate fact."},
+    {"assume", (PyCFunction)Facts_assume, METH_O,
+     "Atomically add a CMP/boolean or AND predicate fact."},
     {"assume_range", (PyCFunction)Facts_assume_range,
      METH_VARARGS | METH_KEYWORDS, "Add an explicit expression range fact."},
     {"derive_affine", (PyCFunction)Facts_derive_affine,
@@ -1303,6 +1326,8 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
+  ixs_session *session = Context_session(self);
+  size_t errors_before;
   ixs_check_result r;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
@@ -1372,9 +1397,11 @@ static PyObject *Context_check(ContextObject *self, PyObject *args,
     }
   }
 
-  r = ixs_check(Context_session(self), expr, assumptions,
-                (size_t)n_assumptions);
+  errors_before = ixs_session_nerrors(session);
+  r = ixs_check(session, expr, assumptions, (size_t)n_assumptions);
   PyMem_Free(assumptions);
+  if (raise_new_assumption_error(session, errors_before) < 0)
+    return NULL;
 
   if (r == IXS_CHECK_TRUE)
     Py_RETURN_TRUE;
@@ -1389,6 +1416,8 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
+  ixs_session *session = Context_session(self);
+  size_t errors_before;
   ixs_pow2_fact r;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
@@ -1458,9 +1487,11 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
     }
   }
 
-  r = ixs_get_pow2_fact(Context_session(self), expr, assumptions,
-                        (size_t)n_assumptions);
+  errors_before = ixs_session_nerrors(session);
+  r = ixs_get_pow2_fact(session, expr, assumptions, (size_t)n_assumptions);
   PyMem_Free(assumptions);
+  if (raise_new_assumption_error(session, errors_before) < 0)
+    return NULL;
 
   if (r == IXS_POW2_OR_ZERO)
     return PyUnicode_FromString("or_zero");
@@ -1506,7 +1537,10 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
   ixs_node *expr, **assumptions = NULL;
+  ixs_session *session = Context_session(self);
+  size_t errors_before;
   ixs_range_result r;
+  bool ok;
   PyObject *lo, *hi, *result;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
@@ -1584,12 +1618,13 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
     }
   }
 
-  if (!ixs_range(Context_session(self), expr, assumptions,
-                 (size_t)n_assumptions, &r)) {
-    PyMem_Free(assumptions);
-    Py_RETURN_NONE;
-  }
+  errors_before = ixs_session_nerrors(session);
+  ok = ixs_range(session, expr, assumptions, (size_t)n_assumptions, &r);
   PyMem_Free(assumptions);
+  if (raise_new_assumption_error(session, errors_before) < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
 
   lo = range_endpoint_to_py(r.has_lower, r.lower_p, r.lower_q);
   if (!lo)
@@ -1611,6 +1646,8 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
   PyObject *exprs_obj, *assumptions_obj = NULL;
   Py_ssize_t i, n_exprs, n_assumptions = 0;
   ixs_node **exprs = NULL, **assumptions = NULL;
+  ixs_session *session = Context_session(self);
+  size_t errors_before;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &exprs_obj,
                                    &assumptions_obj))
@@ -1676,8 +1713,14 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
     }
   }
 
-  ixs_simplify_batch(Context_session(self), exprs, (size_t)n_exprs, assumptions,
+  errors_before = ixs_session_nerrors(session);
+  ixs_simplify_batch(session, exprs, (size_t)n_exprs, assumptions,
                      (size_t)n_assumptions);
+  if (raise_new_assumption_error(session, errors_before) < 0) {
+    PyMem_Free(exprs);
+    PyMem_Free(assumptions);
+    return NULL;
+  }
 
   for (i = 0; i < n_exprs; i++) {
     if (!exprs[i]) {
@@ -1768,13 +1811,16 @@ static PyMethodDef Context_methods[] = {
      "Create a session-owned fact set."},
     {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
-     "bounds."},
+     "bounds. Assumptions accept CMP/boolean or AND predicates."},
     {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
-     "Return 'or_zero', 'positive', or None for a power-of-two fact."},
+     "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
+     "or AND predicates."},
     {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
-     "Return inferred inclusive range as (lower, upper), or None if unknown."},
+     "Return an inclusive range or None. Assumptions accept CMP/boolean or "
+     "AND predicates."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
-     METH_VARARGS | METH_KEYWORDS, "Simplify a list of Expr in-place."},
+     METH_VARARGS | METH_KEYWORDS,
+     "Simplify in-place with optional CMP/boolean or AND assumptions."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,
      "Clear the error list."},
     {"stats", (PyCFunction)Context_stats, METH_NOARGS,

@@ -14,6 +14,7 @@
 
 #include "test_check.h"
 #include <ixsimpl.h>
+#include <string.h>
 
 #ifndef INT64_MIN
 #define INT64_MIN (-9223372036854775807LL - 1)
@@ -973,13 +974,20 @@ static void test_bounds_check_mask_fact(void) {
 static void test_bounds_check_contradiction_unknown(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
-  ixs_node *assumes[2];
+  ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10));
+  ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5));
+  ixs_node *both = ixs_and(ctx, lo, hi);
+  ixs_node *query = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result r;
 
-  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10));
-  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5));
-
-  CHECK(ixs_check(ctx, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)), assumes,
-                  2) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check(ctx, query, &both, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_get_pow2_fact(ctx, x, &both, 1) == IXS_POW2_UNKNOWN);
+  CHECK(!ixs_range(ctx, x, &both, 1, &r));
+  CHECK(ixs_facts_assume_pred(facts, both));
+  CHECK(ixs_check_facts(facts, query) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_get_pow2_fact_facts(facts, x) == IXS_POW2_UNKNOWN);
+  CHECK(!ixs_range_facts(facts, x, &r));
 
   ixs_ctx_destroy(ctx);
 }
@@ -1307,6 +1315,160 @@ static void test_public_facts_assume_conjunction(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *raw_logic_node(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
+                                ixs_node **args) {
+  ixs_node *node = ixs_arena_alloc(&ctx->arena, sizeof(*node), sizeof(void *));
+  CHECK(node != NULL);
+  if (!node)
+    return NULL;
+  memset(node, 0, sizeof(*node));
+  node->tag = tag;
+  node->u.logic.nargs = nargs;
+  node->u.logic.args = args;
+  return node;
+}
+
+static void test_compound_assumption_legacy_fact_parity(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *d = ixs_sym(ctx, "d");
+  ixs_node *range_pred =
+      ixs_and(ctx, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31)));
+  ixs_node *dm1 = ixs_sub(ctx, d, ixs_int(ctx, 1));
+  ixs_node *pow2_pred = ixs_and(
+      ctx, ixs_cmp(ctx, ixs_and(ctx, d, dm1), IXS_CMP_EQ, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0)));
+  ixs_node *all = ixs_and(ctx, range_pred, pow2_pred);
+  ixs_node *query = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result legacy_range;
+  ixs_range_result fact_range;
+
+  CHECK(ixs_range(ctx, x, &all, 1, &legacy_range));
+  CHECK(legacy_range.has_lower && legacy_range.lower_p == 0 &&
+        legacy_range.lower_q == 1);
+  CHECK(legacy_range.has_upper && legacy_range.upper_p == 31 &&
+        legacy_range.upper_q == 1);
+  CHECK(ixs_check(ctx, query, &all, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_get_pow2_fact(ctx, d, &all, 1) == IXS_POW2_POSITIVE);
+
+  CHECK(ixs_facts_assume_pred(facts, all));
+  CHECK(ixs_range_facts(facts, x, &fact_range));
+  CHECK(fact_range.has_lower == legacy_range.has_lower);
+  CHECK(fact_range.has_upper == legacy_range.has_upper);
+  CHECK(fact_range.lower_p == legacy_range.lower_p);
+  CHECK(fact_range.lower_q == legacy_range.lower_q);
+  CHECK(fact_range.upper_p == legacy_range.upper_p);
+  CHECK(fact_range.upper_q == legacy_range.upper_q);
+  CHECK(ixs_check_facts(facts, query) == IXS_CHECK_TRUE);
+  CHECK(ixs_get_pow2_fact_facts(facts, d) == IXS_POW2_POSITIVE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_compound_assumption_rejection_is_atomic(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *ge0 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *le10 = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 10));
+  ixs_node *or_pred = ixs_or(ctx, ge0, le10);
+  ixs_node *not_pred = ixs_not(ctx, ixs_and(ctx, ge0, le10));
+  ixs_node *query = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *non_boolean = ixs_int(ctx, 2);
+  ixs_node *legacy[2];
+  ixs_node *raw_children[2];
+  ixs_node *malformed_child[1];
+  ixs_node *sentinel_tree;
+  ixs_node *malformed_tree;
+  ixs_node *atomic_tree;
+  ixs_node *other_pred =
+      ixs_cmp(other, ixs_sym(other, "x"), IXS_CMP_GE, ixs_int(other, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result r;
+
+  legacy[0] = ge0;
+  legacy[1] = or_pred;
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check(ctx, query, legacy, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "OR") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_range(ctx, x, &not_pred, 1, &r));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NOT") != NULL);
+
+  raw_children[0] = ge0;
+  raw_children[1] = ctx->sentinel_error;
+  sentinel_tree = raw_logic_node(ctx, IXS_AND, 2, raw_children);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_range(ctx, x, &sentinel_tree, 1, &r));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  malformed_child[0] = ge0;
+  malformed_tree = raw_logic_node(ctx, IXS_AND, 1, malformed_child);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_range(ctx, x, &malformed_tree, 1, &r));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "malformed") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check(ctx, query, NULL, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NULL array") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check(ctx, query, &other_pred, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check(ctx, query, &non_boolean, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "boolean constant") != NULL);
+
+  CHECK(ixs_facts_assume_pred(facts, ge0));
+  raw_children[0] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 5));
+  raw_children[1] = or_pred;
+  atomic_tree = raw_logic_node(ctx, IXS_AND, 2, raw_children);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_pred(facts, atomic_tree));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "OR") != NULL);
+  CHECK(ixs_range_facts(facts, x, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(!ixs_range_facts(facts, y, &r));
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_compound_assumption_boolean_constants(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *value = ixs_int(ctx, 7);
+  ixs_node *truth = ixs_true(ctx);
+  ixs_node *falsehood = ixs_false(ctx);
+  ixs_facts *true_facts = ixs_facts_create(ctx);
+  ixs_facts *false_facts = ixs_facts_create(ctx);
+  ixs_range_result r;
+
+  CHECK(ixs_range(ctx, value, &truth, 1, &r));
+  CHECK(r.has_lower && r.lower_p == 7 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 7 && r.upper_q == 1);
+  CHECK(!ixs_range(ctx, value, &falsehood, 1, &r));
+
+  CHECK(ixs_facts_assume_pred(true_facts, truth));
+  CHECK(ixs_range_facts(true_facts, value, &r));
+  CHECK(ixs_facts_assume_pred(false_facts, falsehood));
+  CHECK(!ixs_range_facts(false_facts, value, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_facts_assume_deep_conjunction(void) {
   enum { N = 300 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -1331,6 +1493,8 @@ static void test_public_facts_assume_deep_conjunction(void) {
   }
 
   CHECK(ixs_facts_assume_pred(facts, pred));
+  CHECK(ixs_range(ctx, last, &pred, 1, &r));
+  CHECK(r.has_lower && r.lower_p == N - 1 && r.lower_q == 1);
   CHECK(ixs_range_facts(facts, first, &r));
   CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
   CHECK(ixs_range_facts(facts, last, &r));
@@ -1465,6 +1629,9 @@ int main(void) {
   test_public_facts_range_and_transfer();
   test_failed_expand_is_not_expression_fact_alias();
   test_public_facts_assume_conjunction();
+  test_compound_assumption_legacy_fact_parity();
+  test_compound_assumption_rejection_is_atomic();
+  test_compound_assumption_boolean_constants();
   test_public_facts_assume_deep_conjunction();
   test_public_facts_substitute_preserves_symbol_facts();
 

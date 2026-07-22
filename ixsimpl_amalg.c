@@ -223,7 +223,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #define BOUNDS_INIT_CAP 16
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
-#define FACTS_PRED_STACK_LIMIT 256u
+#define ASSUMPTION_NODE_LIMIT 1024u
 
 static void bounds_cache_clear(ixs_bounds *b) {
   if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
@@ -284,6 +284,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->cache = NULL;
   b->cache_cap = 0;
   b->contradiction = false;
+  b->oom = false;
   if (b->vars)
     bounds_cache_alloc(b);
   return b->vars != NULL;
@@ -301,6 +302,8 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
 
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
+  if (!dst || !src || src->oom)
+    return false;
   dst->ctx = src->ctx;
   dst->scratch = src->scratch;
   dst->nvars = src->nvars;
@@ -317,6 +320,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->cache = NULL;
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
   dst->contradiction = src->contradiction;
+  dst->oom = false;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
         dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
@@ -342,14 +346,18 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   ixs_var_bound *v = find_var(b, name);
   if (v)
     return v;
-  if (!b->vars)
+  if (!b->vars) {
+    b->oom = true;
     return NULL;
+  }
   if (b->nvars >= b->cap) {
     ixs_var_bound *grown =
         ixs_arena_grow(b->scratch, b->vars, b->cap * sizeof(*b->vars),
                        b->cap * 2 * sizeof(*b->vars), sizeof(void *));
-    if (!grown)
+    if (!grown) {
+      b->oom = true;
       return NULL;
+    }
     b->vars = grown;
     b->cap *= 2;
   }
@@ -746,11 +754,15 @@ static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
     ixs_node *coeff = expr->u.add.terms[i].coeff;
     ixs_node *scaled =
         ixs_node_is_one(coeff) ? term : simp_mul(b->ctx, coeff, term);
-    if (!scaled)
+    if (!scaled) {
+      b->oom = true;
       return NULL;
+    }
     result = simp_add(b->ctx, result, scaled);
-    if (!result)
+    if (!result) {
+      b->oom = true;
       return NULL;
+    }
   }
   return result;
 }
@@ -1112,9 +1124,13 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   b->ctx->nerrors = saved_nerrors;
   b->ctx->errors_cap = saved_errors_cap;
 
+  if (!expanded) {
+    b->oom = true;
+    return expr;
+  }
   if (ixs_node_is_sentinel(expanded))
     return expr;
-  return expanded ? expanded : expr;
+  return expanded;
 }
 
 static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
@@ -1126,8 +1142,10 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
     size_t new_cap = b->expr_cap ? b->expr_cap * 2 : 4;
     ixs_expr_bound *new_arr =
         ixs_arena_alloc(b->scratch, new_cap * sizeof(*new_arr), sizeof(void *));
-    if (!new_arr)
+    if (!new_arr) {
+      b->oom = true;
       return;
+    }
     if (b->nexprs)
       memcpy(new_arr, b->exprs, b->nexprs * sizeof(*b->exprs));
     b->exprs = new_arr;
@@ -1143,6 +1161,8 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                     ixs_interval iv) {
   ixs_node *canon;
   bounds_add_expr_raw(b, expr, iv);
+  if (b->oom)
+    return;
   canon = bounds_canonical_expr(b, expr);
   if (canon && canon != expr)
     bounds_add_expr_raw(b, canon, iv);
@@ -1152,7 +1172,7 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
  * Extract interval bounds and modular congruence from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
  */
-IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
+static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   if (a->tag != IXS_CMP)
     return;
   bounds_cache_clear(b);
@@ -1226,6 +1246,13 @@ IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
   /* Fallback: expr op 0 for non-symbol lhs. Store as expression bound. */
   if (ixs_node_is_zero(rhs))
     add_expr_integer_zero_cmp(b, lhs, op);
+}
+
+IXS_STATIC bool ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
+  if (!b || !a || b->oom)
+    return false;
+  bounds_add_assumption_impl(b, a);
+  return !b->oom;
 }
 
 /* GCD of a positive modulus and a conservative dividend step.  Computing the
@@ -2267,22 +2294,111 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   return interval_check_zero(&iv, cmp->u.binary.cmp_op);
 }
 
-IXS_STATIC bool ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx,
-                                     ixs_arena *scratch,
-                                     ixs_node *const *assumptions,
-                                     size_t n_assumptions) {
-  if (!ixs_bounds_init_ctx(b, ctx, scratch))
-    return false;
-  if (assumptions) {
-    size_t i;
-    for (i = 0; i < n_assumptions; i++) {
-      ixs_node *a = assumptions[i];
-      if (!a || ixs_node_is_sentinel(a))
-        continue;
-      ixs_bounds_add_assumption(b, a);
-    }
+static ixs_bounds_build_status assumption_invalid(ixs_bounds *b,
+                                                  const char *message) {
+  if (b && b->ctx)
+    ixs_ctx_push_error(b->ctx, "assumptions: %s", message);
+  return IXS_BOUNDS_BUILD_INVALID;
+}
+
+static bool assumption_cmp_op_valid(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+  case IXS_CMP_GE:
+  case IXS_CMP_LT:
+  case IXS_CMP_LE:
+  case IXS_CMP_EQ:
+  case IXS_CMP_NE:
+    return true;
   }
-  return true;
+  return false;
+}
+
+static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
+                                                       ixs_node *pred) {
+  ixs_node *stack[ASSUMPTION_NODE_LIMIT];
+  size_t nstack = 0;
+  size_t visited = 0;
+
+  if (!pred)
+    return assumption_invalid(b, "NULL predicate");
+  stack[nstack++] = pred;
+
+  while (nstack > 0) {
+    ixs_node *cur = stack[--nstack];
+    uint32_t i;
+
+    if (++visited > ASSUMPTION_NODE_LIMIT)
+      return assumption_invalid(b, "predicate node limit (1024) exceeded");
+    if (!cur)
+      return assumption_invalid(b, "NULL predicate child");
+    if (!ixs_ctx_owns_node(b->ctx, cur))
+      return assumption_invalid(b, "predicate belongs to a different context");
+    if (ixs_node_is_sentinel(cur))
+      return assumption_invalid(b, "sentinel predicates are not accepted");
+
+    if (cur == b->ctx->node_true)
+      continue;
+    if (cur == b->ctx->node_false) {
+      b->contradiction = true;
+      bounds_cache_clear(b);
+      continue;
+    }
+
+    if (cur->tag == IXS_CMP) {
+      ixs_node *lhs = cur->u.binary.lhs;
+      ixs_node *rhs = cur->u.binary.rhs;
+      if (!lhs || !rhs || !assumption_cmp_op_valid(cur->u.binary.cmp_op))
+        return assumption_invalid(b, "malformed CMP predicate");
+      if (!ixs_ctx_owns_node(b->ctx, lhs) || !ixs_ctx_owns_node(b->ctx, rhs))
+        return assumption_invalid(b,
+                                  "CMP child belongs to a different context");
+      if (ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
+        return assumption_invalid(b, "sentinel CMP children are not accepted");
+      if (!ixs_bounds_add_assumption(b, cur))
+        return IXS_BOUNDS_BUILD_OOM;
+      continue;
+    }
+
+    if (cur->tag == IXS_AND) {
+      if (cur->u.logic.nargs < 2 || !cur->u.logic.args)
+        return assumption_invalid(b, "malformed AND predicate");
+      if ((size_t)cur->u.logic.nargs > ASSUMPTION_NODE_LIMIT - nstack)
+        return assumption_invalid(b, "predicate node limit (1024) exceeded");
+      for (i = cur->u.logic.nargs; i > 0; i--)
+        stack[nstack++] = cur->u.logic.args[i - 1];
+      continue;
+    }
+
+    if (cur->tag == IXS_OR)
+      return assumption_invalid(b, "OR predicates are not supported");
+    if (cur->tag == IXS_NOT)
+      return assumption_invalid(b, "NOT predicates are not supported");
+    return assumption_invalid(
+        b, "expected a CMP, AND, or boolean constant predicate");
+  }
+
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+IXS_STATIC ixs_bounds_build_status
+ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
+                     ixs_node *const *assumptions, size_t n_assumptions) {
+  size_t i;
+  ixs_bounds_build_status status;
+
+  if (n_assumptions > 0 && !assumptions) {
+    ixs_ctx_push_error(ctx, "assumptions: NULL array with nonzero count");
+    return IXS_BOUNDS_BUILD_INVALID;
+  }
+  if (!ixs_bounds_init_ctx(b, ctx, scratch))
+    return IXS_BOUNDS_BUILD_OOM;
+  for (i = 0; i < n_assumptions; i++) {
+    status = bounds_ingest_predicate(b, assumptions[i]);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
+  return IXS_BOUNDS_BUILD_OK;
 }
 
 static bool range_result_to_interval(const ixs_range_result *range,
@@ -2332,74 +2448,6 @@ static bool facts_bind(ixs_facts *facts, ixs_session_binding *binding,
 
 static bool facts_node_ok(ixs_ctx *ctx, ixs_node *node) {
   return node && !ixs_node_is_sentinel(node) && ixs_ctx_owns_node(ctx, node);
-}
-
-static bool facts_pred_push(ixs_node **stack, size_t *nstack, ixs_node *pred) {
-  if (*nstack >= FACTS_PRED_STACK_LIMIT)
-    return false;
-  stack[(*nstack)++] = pred;
-  return true;
-}
-
-static bool facts_pred_push_children(ixs_node **stack, size_t *nstack,
-                                     ixs_node *pred) {
-  uint32_t i;
-  for (i = 0; i < pred->u.logic.nargs; i++) {
-    ixs_node *child = pred->u.logic.args[i];
-    if (child && child->tag == IXS_AND &&
-        !facts_pred_push(stack, nstack, child))
-      return false;
-  }
-  for (i = 0; i < pred->u.logic.nargs; i++) {
-    ixs_node *child = pred->u.logic.args[i];
-    if ((!child || child->tag != IXS_AND) &&
-        !facts_pred_push(stack, nstack, child))
-      return false;
-  }
-  return true;
-}
-
-static bool facts_pred_supported(ixs_node *pred) {
-  ixs_node *stack[FACTS_PRED_STACK_LIMIT];
-  size_t nstack = 0;
-  if (!pred || ixs_node_is_sentinel(pred))
-    return false;
-  if (!facts_pred_push(stack, &nstack, pred))
-    return false;
-
-  while (nstack > 0) {
-    ixs_node *cur = stack[--nstack];
-    if (!cur || ixs_node_is_sentinel(cur))
-      return false;
-    if (cur->tag == IXS_CMP)
-      continue;
-    if (cur->tag != IXS_AND)
-      return false;
-    if (!facts_pred_push_children(stack, &nstack, cur))
-      return false;
-  }
-  return true;
-}
-
-static void facts_add_pred(ixs_bounds *bounds, ixs_node *pred) {
-  ixs_node *stack[FACTS_PRED_STACK_LIMIT];
-  size_t nstack = 0;
-
-  /* Facts.assume() accepts programmatically built conjunctions; walk them
-   * without one C call frame per AND node. */
-  if (!facts_pred_push(stack, &nstack, pred))
-    return;
-  while (nstack > 0) {
-    ixs_node *cur = stack[--nstack];
-    if (!cur || ixs_node_is_sentinel(cur)) {
-      return;
-    } else if (cur->tag == IXS_CMP) {
-      ixs_bounds_add_assumption(bounds, cur);
-    } else if (cur->tag != IXS_AND ||
-               !facts_pred_push_children(stack, &nstack, cur)) {
-      return;
-    }
-  }
 }
 
 static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
@@ -2455,14 +2503,25 @@ ixs_facts *ixs_facts_create(ixs_session *s) {
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
-  bool ok;
+  ixs_arena_mark mark;
+  ixs_bounds candidate;
+  ixs_bounds_build_status status;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
-  ok = facts_node_ok(ctx, pred) && facts_pred_supported(pred);
-  if (ok)
-    facts_add_pred(&facts->bounds, pred);
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!ixs_bounds_fork(&candidate, &facts->bounds)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    ixs_session_unbind(&binding);
+    return false;
+  }
+  status = bounds_ingest_predicate(&candidate, pred);
+  if (status == IXS_BOUNDS_BUILD_OK) {
+    facts->bounds = candidate;
+  } else {
+    ixs_arena_restore(&ctx->scratch, mark);
+  }
   ixs_session_unbind(&binding);
-  return ok;
+  return status == IXS_BOUNDS_BUILD_OK;
 }
 
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
@@ -13325,10 +13384,11 @@ IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  ixs_bounds_build_status status = ixs_bounds_build_ctx(
+      &bnds, ctx, &ctx->scratch, assumptions, n_assumptions);
+  if (status != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
-    return NULL;
+    return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
   }
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
@@ -13341,11 +13401,14 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                                     size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
+  ixs_bounds_build_status status;
   size_t i;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  status = ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                                n_assumptions);
+  if (status != IXS_BOUNDS_BUILD_OK) {
     for (i = 0; i < n; i++)
-      exprs[i] = NULL;
+      exprs[i] =
+          status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
     ixs_arena_restore(&ctx->scratch, m);
     return;
   }
@@ -13372,8 +13435,8 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   ixs_check_result r;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  if (ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                           n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
     return IXS_CHECK_UNKNOWN;
   }
@@ -13398,8 +13461,8 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   scope->mark = ixs_arena_save(&ctx->scratch);
   scope->active = true;
   scope->built = false;
-  if (!ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  if (ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
+                           n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, scope->mark);
     scope->active = false;
     return false;

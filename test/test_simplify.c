@@ -1770,6 +1770,43 @@ static void test_simplify_batch(void) {
   CHECK(exprs[2] == ixs_int(ctx, 7));
 }
 
+static void test_compound_assumption_simplification(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "compound_x");
+  ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 32));
+  ixs_node *both = ixs_and(ctx, lo, hi);
+  ixs_node *either = ixs_or(ctx, lo, hi);
+  ixs_node *mod = ixs_mod(ctx, x, ixs_int(ctx, 32));
+  ixs_node *floor = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)));
+  ixs_node *exprs[2];
+  ixs_node *result;
+
+  result = ixs_simplify(ctx, mod, &both, 1);
+  CHECK(result == x);
+
+  exprs[0] = mod;
+  exprs[1] = floor;
+  ixs_simplify_batch(ctx, exprs, 2, &both, 1);
+  CHECK(exprs[0] == x);
+  CHECK(exprs[1] == ixs_int(ctx, 0));
+
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_simplify(ctx, mod, &either, 1);
+  CHECK(ixs_is_domain_error(result));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "OR") != NULL);
+
+  exprs[0] = mod;
+  exprs[1] = floor;
+  ixs_ctx_clear_errors(ctx);
+  ixs_simplify_batch(ctx, exprs, 2, &either, 1);
+  CHECK(ixs_is_domain_error(exprs[0]));
+  CHECK(ixs_is_domain_error(exprs[1]));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "OR") != NULL);
+}
+
 static void test_print_c(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3013,6 +3050,7 @@ int main(void) {
   test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
   test_simplify_batch();
+  test_compound_assumption_simplification();
   test_print_c();
   test_floor_drop_fractional_const();
   test_round_extract_rat_split();

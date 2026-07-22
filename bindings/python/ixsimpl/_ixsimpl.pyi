@@ -4,6 +4,9 @@ from collections.abc import Sequence
 from fractions import Fraction
 from typing import Literal, Self, overload
 
+# Assumption inputs accept CMP/boolean roots and AND trees with those leaves.
+# Unsupported predicate shapes raise ValueError.
+
 INT: int
 RAT: int
 SYM: int

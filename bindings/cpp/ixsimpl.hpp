@@ -87,6 +87,8 @@ public:
     return Expr(ctx.raw(), ctx.session(), ixs_rat(ctx.session(), p, q));
   }
 
+  /* Assumptions must be CMP/boolean roots or AND trees with those leaves.
+   * Unsupported shapes produce an error Expr and a session diagnostic. */
   Expr simplify(const Expr *assumptions, size_t n) const {
     std::vector<ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)

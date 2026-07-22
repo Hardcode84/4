@@ -57,6 +57,7 @@ typedef struct {
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
   bool contradiction;
+  bool oom;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
@@ -76,8 +77,8 @@ IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
 /* Deep-copy bounds onto the scratch arena. Returns false on OOM. */
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
-/* Extract variable bounds from an assumption (e.g., $T0 >= 0). */
-IXS_STATIC void ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
+/* Extract variable bounds from one validated CMP assumption. */
+IXS_STATIC bool ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 
 /* Store an explicit interval for an arbitrary expression node. */
 IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
@@ -108,10 +109,15 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr);
 
-IXS_STATIC bool ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx,
-                                     ixs_arena *scratch,
-                                     ixs_node *const *assumptions,
-                                     size_t n_assumptions);
+typedef enum {
+  IXS_BOUNDS_BUILD_OK,
+  IXS_BOUNDS_BUILD_INVALID,
+  IXS_BOUNDS_BUILD_OOM
+} ixs_bounds_build_status;
+
+IXS_STATIC ixs_bounds_build_status
+ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
+                     ixs_node *const *assumptions, size_t n_assumptions);
 
 /* Check a normalized CMP node (lhs op 0) against current bounds.
  * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or

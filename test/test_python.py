@@ -2155,6 +2155,58 @@ def test_facts_assume_decomposes_conjunction() -> None:
         facts.assume(ixsimpl.or_(x >= 0, x <= 10))
 
 
+def test_compound_assumption_ingestion_parity() -> None:
+    ctx = ixsimpl.Context()
+    x, d = ctx.sym("x"), ctx.sym("d")
+    range_pred = ixsimpl.and_(x >= 0, x < 32)
+    pow2_pred = ixsimpl.and_(ctx.eq(d & (d - 1), 0), d > 0)
+    pred = ixsimpl.and_(range_pred, pow2_pred)
+    query = x <= 31
+    exprs = [x % 32, ixsimpl.floor(x / 32)]
+
+    assert (x % 32).simplify(assumptions=[pred]) == x
+    ctx.simplify_batch(exprs, assumptions=[pred])
+    assert exprs == [x, ctx.int_(0)]
+    assert ctx.check(query, assumptions=[pred]) is True
+    assert ctx.pow2_fact(d, assumptions=[pred]) == "positive"
+    assert ctx.range(x, assumptions=[pred]) == (0, 31)
+
+    facts = ctx.facts()
+    facts.assume(pred)
+    assert ctx.check(query, facts=facts) is True
+    assert ctx.pow2_fact(d, facts=facts) == "positive"
+    assert ctx.range(x, facts=facts) == (0, 31)
+
+
+def test_compound_assumption_rejection_is_atomic() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    ge0, le10 = x >= 0, x <= 10
+    either = ixsimpl.or_(ge0, le10)
+    negated = ixsimpl.not_(ixsimpl.and_(ge0, le10))
+    mod = x % 32
+
+    with pytest.raises(ValueError, match="OR predicates"):
+        mod.simplify(assumptions=[either])
+    with pytest.raises(ValueError, match="OR predicates"):
+        ctx.simplify_batch([mod], assumptions=[either])
+    with pytest.raises(ValueError, match="OR predicates"):
+        ctx.check(x >= 0, assumptions=[either])
+    with pytest.raises(ValueError, match="OR predicates"):
+        ctx.pow2_fact(x, assumptions=[either])
+    with pytest.raises(ValueError, match="OR predicates"):
+        ctx.range(x, assumptions=[either])
+    with pytest.raises(ValueError, match="NOT predicates"):
+        ctx.range(x, assumptions=[negated])
+
+    facts = ctx.facts()
+    facts.assume(ge0)
+    with pytest.raises(ValueError, match="OR predicates"):
+        facts.assume(ixsimpl.and_(y >= 5, either))
+    assert ctx.range(x, facts=facts) == (0, None)
+    assert ctx.range(y, facts=facts) is None
+
+
 def test_facts_assume_deep_conjunction() -> None:
     ctx = ixsimpl.Context()
     facts = ctx.facts()
@@ -2165,6 +2217,7 @@ def test_facts_assume_deep_conjunction() -> None:
         pred = ixsimpl.and_(pred, sym >= i)
 
     facts.assume(pred)
+    assert ctx.range(symbols[-1], assumptions=[pred]) == (299, None)
     assert ctx.range(symbols[0], facts=facts) == (0, None)
     assert ctx.range(symbols[-1], facts=facts) == (299, None)
 

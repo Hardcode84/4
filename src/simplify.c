@@ -4519,10 +4519,11 @@ IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  ixs_bounds_build_status status = ixs_bounds_build_ctx(
+      &bnds, ctx, &ctx->scratch, assumptions, n_assumptions);
+  if (status != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
-    return NULL;
+    return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
   }
   expr = simp_simplify_with_bounds(ctx, expr, &bnds);
   ixs_bounds_destroy(&bnds);
@@ -4535,11 +4536,14 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
                                     size_t n_assumptions) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
+  ixs_bounds_build_status status;
   size_t i;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  status = ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                                n_assumptions);
+  if (status != IXS_BOUNDS_BUILD_OK) {
     for (i = 0; i < n; i++)
-      exprs[i] = NULL;
+      exprs[i] =
+          status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
     ixs_arena_restore(&ctx->scratch, m);
     return;
   }
@@ -4566,8 +4570,8 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   ixs_check_result r;
-  if (!ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  if (ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                           n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
     return IXS_CHECK_UNKNOWN;
   }
@@ -4592,8 +4596,8 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   scope->mark = ixs_arena_save(&ctx->scratch);
   scope->active = true;
   scope->built = false;
-  if (!ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
-                            n_assumptions)) {
+  if (ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
+                           n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, scope->mark);
     scope->active = false;
     return false;

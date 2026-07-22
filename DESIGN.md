@@ -1115,6 +1115,27 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
 
+**Compound assumption ingestion**: All predicate-bearing entry points use one
+bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
+`ixs_get_pow2_fact`, `ixs_range`, and `ixs_facts_assume_pred`. Each predicate
+root may be a CMP, a canonical true/false node, or an AND tree whose leaves
+have those forms. True contributes no fact; false marks the bounds as
+contradictory. Supporting these constants preserves predicates that simplify
+before ingestion, such as `(x & 0) == 0`. The walker visits at most 1024 nodes
+per root and therefore does not consume one C call frame per nested
+conjunction.
+
+OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
+nodes from another context are rejected with an `assumptions:` diagnostic.
+Legacy array ingestion discards the whole temporary bound context when any
+entry is rejected or fails; it never queries a partially ingested prefix.
+`ixs_facts_assume_pred` applies the predicate to a fork and commits only after
+the entire tree succeeds, so an existing fact set is unchanged on rejection or
+OOM. Rejection returns the domain-error sentinel from `ixs_simplify`, fills an
+entire batch with that sentinel, returns unknown/no-result from the three query
+APIs, and returns false from `ixs_facts_assume_pred`. Structurally valid but
+contradictory conjunctions retain the existing unknown/no-result behavior.
+
 **Conflicting assumptions**: User-assumption validation and error reporting are
 **best-effort**. Direct contradictions are detected where the local domains can
 see them: empty interval intersections, duplicate expression bounds that
@@ -1454,8 +1475,11 @@ ixs_node *ixs_not(ixs_session *s, ixs_node *a);
 ixs_node *ixs_true(ixs_session *s);
 ixs_node *ixs_false(ixs_session *s);
 
-// Simplify with assumptions built in the same bound context. Pass NULL/0 if
-// none. NULL/sentinel entries in the assumptions array are silently skipped.
+// Assumption roots must be CMP or canonical true/false nodes, or AND trees with
+// those leaves, built in the same context. True is a no-op and false is a
+// contradiction. OR, NOT, malformed, NULL, sentinel, and other roots are
+// rejected atomically with an `assumptions:` diagnostic. Trees are walked with
+// a 1024-node limit per root. Pass NULL/0 for no assumptions.
 // NOTE: if the fixed-point iteration limit is reached without convergence, the
 // current best result is returned and an error is appended to the session list.
 ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
@@ -1511,12 +1535,13 @@ size_t ixs_print_c(ixs_node *expr, char *buf, size_t bufsize); // C code
 // Batch: simplify multiple expressions **in place**, sharing the same
 // assumption-derived bounds (parsed once, reused for every element).
 // Each exprs[i] is overwritten with its simplified form.
-// NULL/sentinel entries in exprs are left unchanged. NULL/sentinel
-// entries in assumptions are silently skipped.
+// NULL/sentinel entries in exprs are left unchanged. Assumptions use the
+// shared compound-predicate contract above. Rejection sets every entry to
+// IXS_ERROR.
 // OOM: if any simplification hits OOM, ALL entries in exprs are set to
 // NULL (the arena is likely exhausted, so no expression is trustworthy).
-// Precondition: exprs must be non-NULL when n > 0; assumptions must be
-// non-NULL when n_assumptions > 0. No-op when n == 0.
+// Precondition: exprs must be non-NULL when n > 0. A NULL assumptions pointer
+// with n_assumptions > 0 is rejected. No-op when n == 0.
 void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
                         ixs_node *const *assumptions, size_t n_assumptions);
 
@@ -1555,6 +1580,8 @@ bool ixs_range(ixs_session *s, ixs_node *expr,
 // instead of being rediscovered from predicates.
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
+// Uses the same compound-assumption walker. Rejection and OOM leave the
+// existing fact set unchanged and return false.
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
                             const ixs_range_result *range);
@@ -2190,6 +2217,10 @@ Implementation:
   through substitution.  `Context.check`, `Context.range`, and
   `Context.pow2_fact` accept `facts=...` as an alternative to
   `assumptions=[...]`.
+- Every Python `assumptions=[...]` entry and `Facts.assume()` predicate must be
+  a CMP, a canonical boolean constant, or an AND tree with those leaves.
+  Unsupported or malformed predicate shapes raise `ValueError`; a failed
+  `Facts.assume()` leaves prior facts unchanged.
 - Operator overloading: `__add__`, `__mul__`, `__sub__`, `__mod__`, `__and__`,
   `__or__`, `__neg__`, `__ge__`, `__gt__`, `__le__`, `__lt__`, `__eq__`
   (comparisons return

@@ -184,6 +184,17 @@ typedef struct {
   int64_t upper_q;
 } ixs_range_result;
 
+/* Assumption contract shared by simplify, simplify_batch, check,
+ * get_pow2_fact, range, and facts_assume_pred: each predicate root must be a
+ * CMP, a canonical true/false node, or an AND tree whose leaves have those
+ * forms.  True contributes no fact; false marks the set contradictory.  Trees
+ * are walked iteratively and may contain at most 1024 visited nodes per root.
+ * NULL, sentinel, malformed, cross-context, OR, NOT, and other roots are
+ * rejected with an "assumptions:" session diagnostic; no prefix of a rejected
+ * set is used.  A rejected set makes simplify return the domain-error sentinel,
+ * makes simplify_batch set every element to that sentinel, makes query APIs
+ * return unknown/no-result, and leaves an existing fact set unchanged. */
+
 /* Check whether a comparison is provably true or false given the
  * assumptions, using interval propagation, modular congruence facts, and
  * bitwise facts.
@@ -216,8 +227,8 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
  * session/context that created them. */
 ixs_facts *ixs_facts_create(ixs_session *s);
 
-/* Import a predicate into the fact set.  This is the fact-set equivalent of
- * passing the predicate through an assumptions[] array. */
+/* Import a predicate under the shared assumption contract above.  Returns
+ * false and leaves facts unchanged when ingestion is rejected or fails. */
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;
@@ -241,12 +252,14 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 
-/* Simplify expr under the given assumptions (array of CMP/AND/OR nodes).
- * Pass NULL/0 for no assumptions.  Returns simplified node, or sentinel. */
+/* Simplify expr under the shared assumption contract above.  Pass NULL/0 for
+ * no assumptions.  Returns the simplified node, NULL on OOM, or the
+ * domain-error sentinel for rejected assumptions. */
 ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
-/* Simplify exprs[0..n-1] in place, sharing the same assumption set.
+/* Simplify exprs[0..n-1] in place under the shared assumption contract,
+ * sharing the same assumption set.
  * Each element is replaced by its simplified form.  On OOM, all
  * elements are set to NULL.  NULL or sentinel entries are skipped.
  * Bounds are parsed from assumptions once and reused across all elements. */
