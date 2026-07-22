@@ -10,6 +10,7 @@
 #include <stddef.h>
 
 #define IXS_ARENA_DEFAULT_SIZE 4096
+#define IXS_ARENA_FAILURE_DISABLED ((size_t)-1)
 
 typedef struct ixs_arena_chunk {
   char *base;
@@ -23,6 +24,7 @@ typedef struct {
   ixs_arena_chunk *spare;
   ixs_arena_chunk *inline_chunk;
   size_t min_chunk;
+  size_t fail_after;
 } ixs_arena;
 
 typedef struct {
@@ -35,6 +37,12 @@ IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
                                       size_t storage_bytes,
                                       size_t initial_size);
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a);
+
+/* Test hook: permit count allocation/grow operations, then fail persistently.
+ * Pass IXS_ARENA_FAILURE_DISABLED to disable injection. */
+#ifndef IXS_AMALGAMATED
+IXS_STATIC void ixs_arena_set_fail_after(ixs_arena *a, size_t count);
+#endif
 
 /* Returns NULL on OOM or overflow. align must be a power of 2, at most 16. */
 IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align);

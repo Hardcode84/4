@@ -26,6 +26,15 @@ static bool chunk_is_inline(const ixs_arena *a, const ixs_arena_chunk *c) {
   return c && c == a->inline_chunk;
 }
 
+static bool arena_should_fail(ixs_arena *a) {
+  if (a->fail_after == IXS_ARENA_FAILURE_DISABLED)
+    return false;
+  if (a->fail_after == 0)
+    return true;
+  a->fail_after--;
+  return false;
+}
+
 /*
  * Single allocation per chunk: the ixs_arena_chunk header lives at the
  * start of the malloc'd block, followed by the data region aligned to
@@ -53,6 +62,7 @@ IXS_STATIC void ixs_arena_init(ixs_arena *a, size_t initial_size) {
   a->current = NULL;
   a->spare = NULL;
   a->inline_chunk = NULL;
+  a->fail_after = IXS_ARENA_FAILURE_DISABLED;
 }
 
 IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
@@ -70,6 +80,7 @@ IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
   a->current = c;
   a->spare = NULL;
   a->inline_chunk = c;
+  a->fail_after = IXS_ARENA_FAILURE_DISABLED;
 }
 
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
@@ -84,9 +95,16 @@ IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
     free(a->spare);
   a->current = NULL;
   a->spare = NULL;
+  a->fail_after = IXS_ARENA_FAILURE_DISABLED;
 }
 
-IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
+#ifndef IXS_AMALGAMATED
+IXS_STATIC void ixs_arena_set_fail_after(ixs_arena *a, size_t count) {
+  a->fail_after = count;
+}
+#endif
+
+static void *arena_alloc_impl(ixs_arena *a, size_t size, size_t align) {
   if (size == 0)
     size = 1;
   if (align == 0)
@@ -133,6 +151,12 @@ IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
 
   c->used = size;
   return c->base;
+}
+
+IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align) {
+  if (arena_should_fail(a))
+    return NULL;
+  return arena_alloc_impl(a, size, align);
 }
 
 IXS_STATIC char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
@@ -193,6 +217,8 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
     return ixs_arena_alloc(a, new_size, align);
   if (new_size < old_size)
     return NULL;
+  if (arena_should_fail(a))
+    return NULL;
   if (a->current && (char *)ptr >= a->current->base &&
       (size_t)((char *)ptr - a->current->base) + old_size == a->current->used) {
     size_t extra = new_size - old_size;
@@ -201,7 +227,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
       return ptr;
     }
   }
-  void *p = ixs_arena_alloc(a, new_size, align);
+  void *p = arena_alloc_impl(a, new_size, align);
   if (p)
     memcpy(p, ptr, old_size);
   return p;

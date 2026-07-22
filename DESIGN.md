@@ -187,6 +187,7 @@ typedef struct {
   ixs_arena_chunk *spare;
   ixs_arena_chunk *inline_chunk;
   size_t min_chunk;      /* default 4096 */
+  size_t fail_after;     /* internal deterministic OOM injection */
 } ixs_arena;
 ```
 
@@ -197,6 +198,13 @@ also has one inline chunk and may retain one detached heap chunk as `spare` for
 reuse. Heap chunks grow by doubling (with overflow check — if doubling would
 exceed `SIZE_MAX`, treat as OOM). Typical working set for one expression is
 < 64 KB.
+
+Tests can call the internal `ixs_arena_set_fail_after` hook to permit a fixed
+number of allocation or grow operations before all later operations return
+NULL. Injection applies even when an existing or inline chunk has capacity, so
+tests do not depend on allocator warm-up. It is stored per arena, remains active
+across save/restore, and is disabled by default; production behavior and
+thread-safety therefore do not depend on global test state.
 
 #### Scratch Arena
 
@@ -2590,6 +2598,7 @@ typedef struct ixs_arena {
   ixs_arena_chunk *spare;
   ixs_arena_chunk *inline_chunk;
   size_t min_chunk;
+  size_t fail_after;
 } ixs_arena;
 ```
 

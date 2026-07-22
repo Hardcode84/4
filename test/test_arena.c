@@ -287,6 +287,78 @@ static void test_grow_same_size(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  deterministic allocation failure                                  */
+/* ------------------------------------------------------------------ */
+
+static void test_fail_after_allocations(void) {
+  ixs_arena a;
+  size_t used;
+  ixs_arena_init(&a, 4096);
+
+  ixs_arena_set_fail_after(&a, 2);
+  CHECK(ixs_arena_alloc(&a, 16, sizeof(void *)) != NULL);
+  CHECK(ixs_arena_alloc(&a, 32, sizeof(void *)) != NULL);
+  used = a.current->used;
+  CHECK(ixs_arena_alloc(&a, 64, sizeof(void *)) == NULL);
+  CHECK(a.current->used == used);
+  CHECK(ixs_arena_alloc(&a, 64, sizeof(void *)) == NULL);
+
+  ixs_arena_set_fail_after(&a, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_arena_alloc(&a, 64, sizeof(void *)) != NULL);
+
+  ixs_arena_destroy(&a);
+}
+
+static void test_fail_in_inline_capacity(void) {
+  union {
+    void *align;
+    unsigned char bytes[4096];
+  } storage;
+  ixs_arena a;
+  size_t used;
+
+  ixs_arena_init_inline(&a, storage.bytes, sizeof(storage.bytes), 4096);
+  CHECK(ixs_arena_alloc(&a, 16, sizeof(void *)) != NULL);
+  used = a.current->used;
+
+  ixs_arena_set_fail_after(&a, 0);
+  CHECK(ixs_arena_alloc(&a, 16, sizeof(void *)) == NULL);
+  CHECK(a.current->used == used);
+
+  ixs_arena_set_fail_after(&a, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_arena_alloc(&a, 16, sizeof(void *)) != NULL);
+  ixs_arena_destroy(&a);
+}
+
+static void test_fail_grow_without_mutation(void) {
+  ixs_arena a;
+  int *values;
+  size_t used;
+  ixs_arena_init(&a, 4096);
+
+  values = ixs_arena_alloc(&a, 4 * sizeof(*values), sizeof(void *));
+  CHECK(values != NULL);
+  values[0] = 17;
+  values[3] = 29;
+  used = a.current->used;
+
+  ixs_arena_set_fail_after(&a, 0);
+  CHECK(ixs_arena_grow(&a, values, 4 * sizeof(*values), 8 * sizeof(*values),
+                       sizeof(void *)) == NULL);
+  CHECK(a.current->used == used);
+  CHECK(values[0] == 17);
+  CHECK(values[3] == 29);
+
+  ixs_arena_set_fail_after(&a, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_arena_grow(&a, values, 4 * sizeof(*values), 8 * sizeof(*values),
+                       sizeof(void *)) == values);
+  CHECK(values[0] == 17);
+  CHECK(values[3] == 29);
+
+  ixs_arena_destroy(&a);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void) {
   test_save_restore_basic();
@@ -300,6 +372,9 @@ int main(void) {
   test_grow_with_save_restore();
   test_save_restore_deep_nesting();
   test_grow_same_size();
+  test_fail_after_allocations();
+  test_fail_in_inline_capacity();
+  test_fail_grow_without_mutation();
 
   printf("test_arena: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
