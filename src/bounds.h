@@ -121,6 +121,10 @@ IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
 IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
                                                        ixs_node *expr,
                                                        int64_t modulus);
+IXS_STATIC ixs_check_result ixs_bounds_check_congruent(ixs_bounds *b,
+                                                       ixs_node *expr,
+                                                       int64_t modulus,
+                                                       int64_t residue);
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
                                                      ixs_node *expr);
 

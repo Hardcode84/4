@@ -1897,6 +1897,65 @@ def test_integrality_and_divisibility_invalid_inputs() -> None:
         ctx.divisible(x, 0, facts)
 
 
+def test_known_bits_and_congruence_bindings() -> None:
+    ctx = ixsimpl.Context()
+    item = ctx.sym("binding_item")
+    slot = ctx.sym("binding_slot")
+    k = ctx.sym("binding_k")
+    facts = ctx.facts()
+    facts.assume(ixsimpl.and_(slot >= 0, slot <= 15))
+    facts.assume(ctx.eq(k % 15, 4))
+
+    assert ctx.known_bits(item, facts) == (0, 0, None)
+    slot_zero, slot_one, slot_pow2 = ctx.known_bits(slot, facts) or (0, 0, None)
+    assert slot_zero & ~15 == ((1 << 64) - 1) & ~15
+    assert slot_one & 15 == 0
+    assert slot_pow2 is None
+
+    scaled_zero, scaled_one, _ = ctx.known_bits(16 * item, facts) or (0, 0, None)
+    assert scaled_zero & 15 == 15
+    assert scaled_one & 15 == 0
+
+    assert ctx.symbol_congruence(k, facts) == (15, 4)
+    assert ctx.symbol_congruence(item, facts) is None
+    assert ctx.congruent(k, 15, 4, facts) is True
+    assert ctx.congruent(k, -15, -11, facts) is True
+    assert ctx.congruent(k, 15, 5, facts) is False
+    assert ctx.congruent(k, 30, 4, facts) is None
+    assert ctx.congruent(3 * k + 2, 15, 14, facts) is True
+    assert ctx.congruent(6 * item + 2, 3, 2, facts) is True
+    assert ctx.congruent(ctx.int_(-(1 << 63)), -(1 << 63), 0, facts) is True
+    assert ctx.congruent(ctx.int_((1 << 63) - 1), -(1 << 63), -1, facts) is True
+
+
+def test_known_bits_and_congruence_binding_failures() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("binding_invalid_x")
+    facts = ctx.facts()
+    contradictory = ctx.facts()
+    contradictory.assume(x >= 10)
+    contradictory.assume(x <= 5)
+    sentinel = ctx.parse_expr("(")
+
+    assert ctx.known_bits(x, contradictory) is None
+    assert ctx.symbol_congruence(x, contradictory) is None
+    assert ctx.congruent(ctx.int_(1), 2, 1, contradictory) is None
+
+    with pytest.raises(ValueError, match="must be a symbol"):
+        ctx.symbol_congruence(x + 1, facts)
+    with pytest.raises(ValueError, match="modulus must be nonzero"):
+        ctx.congruent(x, 0, 0, facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.known_bits(other.sym("x"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.congruent(x, 8, 0, other.facts())
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.known_bits(sentinel, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.congruent(sentinel, 8, 0, facts)
+
+
 def test_definedness_queries_assumptions_facts_and_piecewise() -> None:
     ctx = ixsimpl.Context()
     x, m = ctx.sym("defined_x"), ctx.sym("defined_m")

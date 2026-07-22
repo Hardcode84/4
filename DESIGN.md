@@ -1262,10 +1262,31 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   interval is conservative rather than the mathematical image of the full
   assumption set.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
-  `Context.pow2_fact`): exposes only the semantic pow2 lattice
-  (`unknown`, `or_zero`, `positive`), not the internal known-bit masks.
-  It uses both direct bitfacts and exact integer intervals inferred for
-  arithmetic expressions.  Detected contradictory assumptions return unknown.
+  `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
+  `or_zero`, `positive`). It uses both direct bitfacts and exact integer
+  intervals inferred for arithmetic expressions. Detected contradictory
+  assumptions return unknown.
+- **Public known-bit query** (`ixs_get_known_bits_facts`, Python
+  `Context.known_bits`, C++ `Facts::get_known_bits`): exposes the sound low-64
+  `known_zero`, `known_one`, and pow2 facts from a reusable fact set. A valid
+  query with no information returns true with zero masks; invalid input,
+  contradictory facts, or OOM returns false and initializes the output to that
+  same no-information value. The query first proves the expression integer-
+  valued, so a rational interval cannot be misread as integer bits. Interval,
+  `ADD`, positive power-of-two `MUL`, floor division, `Mod`, and bitwise
+  propagation never infer anything about source bits above bit 63.
+- **Public congruence queries** (`ixs_get_symbol_congruence_facts`,
+  `ixs_check_congruent_facts`, Python `Context.symbol_congruence` and
+  `Context.congruent`, C++ `Facts::get_symbol_congruence` and
+  `Facts::check_congruent`): the first API exports only the stored positive
+  modulus and normalized residue for a symbol. It does not compute a strongest
+  congruence for arbitrary expressions. The second answers one requested
+  modulus/residue query using exact intervals, known low bits, stored symbol
+  facts, and bounded `ADD`/`MUL` propagation at that modulus. Negative moduli
+  and residues normalize without signed negation, including the `2^63`
+  magnitude of `INT64_MIN`; modulus zero emits a diagnostic and returns
+  `UNKNOWN`. Known conflicting residues return `FALSE`, incomplete evidence
+  returns `UNKNOWN`, and contradictory facts never establish a result.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -1649,6 +1670,11 @@ typedef enum {
     IXS_POW2_OR_ZERO,
     IXS_POW2_POSITIVE
 } ixs_pow2_fact;
+typedef struct {
+    uint64_t known_zero;
+    uint64_t known_one;
+    ixs_pow2_fact pow2;
+} ixs_known_bits;
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
                                 size_t n_assumptions);
@@ -1689,6 +1715,14 @@ ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    ixs_node *expr,
                                                    int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
+                              ixs_known_bits *out);
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
+                                     int64_t *modulus, int64_t *residue);
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                           ixs_node *expr,
+                                           int64_t modulus,
+                                           int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
 
@@ -2229,6 +2263,9 @@ Key properties:
   returns a lightweight session-owned `Facts` wrapper whose
   `simplify()`, `simplify_batch()`, `check_integer_valued()`, and
   `check_divisible()` methods expose fact-backed transforms and proofs.
+  `get_known_bits()`, `get_symbol_congruence()`, and `check_congruent()` expose
+  the low-64 and query-specific modular interfaces without adding wrapper-side
+  reasoning.
   `Expr::simplify(const Facts&)` is the expression-oriented spelling.
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
@@ -2333,6 +2370,12 @@ Implementation:
   `facts=...` form expose tri-state integrality. `Context.divisible(expr,
   modulus, facts)` exposes fact-backed tri-state divisibility and raises
   `ValueError` for modulus zero.
+- `Context.known_bits(expr, facts)` returns
+  `(known_zero, known_one, pow2)` for a valid query, including `(0, 0, None)`
+  when nothing is known. `Context.symbol_congruence(symbol, facts)` returns the
+  stored `(modulus, residue)` or `None`. `Context.congruent(expr, modulus,
+  residue, facts)` returns tri-state `True`, `False`, or `None`; modulus zero
+  raises `ValueError`.
 - `Context.try_exact_divide(expr, divisor, facts)` returns
   `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
   Core `ERROR` results raise `ValueError` for domain/representation failures
@@ -2598,6 +2641,12 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 size_t n_assumptions);
 
 typedef struct {
+  uint64_t known_zero;
+  uint64_t known_one;
+  ixs_pow2_fact pow2;
+} ixs_known_bits;
+
+typedef struct {
   bool has_lower;
   bool has_upper;
   int64_t lower_p, lower_q;
@@ -2629,6 +2678,14 @@ ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    ixs_node *expr,
                                                    int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
+                              ixs_known_bits *out);
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
+                                     int64_t *modulus, int64_t *residue);
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                           ixs_node *expr,
+                                           int64_t modulus,
+                                           int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
 

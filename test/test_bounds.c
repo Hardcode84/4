@@ -1642,6 +1642,248 @@ static void test_public_fact_divisibility(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_known_bits_propagation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "item");
+  ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *x = ixs_sym(ctx, "known_x");
+  ixs_node *y = ixs_sym(ctx, "known_y");
+  ixs_node *wide = ixs_floor(
+      ctx, ixs_div(ctx, item, ixs_int(ctx, INT64_C(4611686018427387904))));
+  ixs_node *scaled16 = ixs_mul(ctx, ixs_int(ctx, 16), item);
+  ixs_node *scaled8 = ixs_mul(ctx, ixs_int(ctx, 8), item);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *src = ixs_facts_create(ctx);
+  ixs_facts *subst = ixs_facts_create(ctx);
+  ixs_known_bits bits;
+  ixs_known_bits a_bits;
+  ixs_known_bits b_bits;
+
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, slot, IXS_CMP_LE, ixs_int(ctx, 15))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 15)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 5))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_and(ctx, y, ixs_int(ctx, 15)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+
+  CHECK(ixs_get_known_bits_facts(facts, ixs_int(ctx, 5), &bits));
+  CHECK(bits.known_zero == ~(uint64_t)5);
+  CHECK(bits.known_one == 5u);
+  CHECK(bits.pow2 == IXS_POW2_UNKNOWN);
+
+  CHECK(ixs_get_known_bits_facts(facts, slot, &bits));
+  CHECK((bits.known_zero & ~(uint64_t)15) == ~(uint64_t)15);
+  CHECK((bits.known_one & 15u) == 0);
+
+  CHECK(
+      ixs_get_known_bits_facts(facts, ixs_add(ctx, x, ixs_int(ctx, 3)), &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
+  CHECK((bits.known_one & 15u) == 8u);
+
+  CHECK(ixs_get_known_bits_facts(facts, ixs_mul(ctx, ixs_int(ctx, 16), x),
+                                 &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 255u) == 255u);
+  CHECK((bits.known_one & 255u) == 80u);
+
+  CHECK(ixs_get_known_bits_facts(facts, ixs_xor(ctx, x, y), &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
+  CHECK((bits.known_one & 15u) == 15u);
+
+  CHECK(ixs_get_known_bits_facts(facts, scaled16, &a_bits));
+  CHECK(ixs_get_known_bits_facts(facts, slot, &b_bits));
+  CHECK(((~a_bits.known_zero) & (~b_bits.known_zero)) == 0);
+  CHECK(ixs_get_known_bits_facts(facts, scaled8, &a_bits));
+  CHECK((((~a_bits.known_zero) & (~b_bits.known_zero)) & 8u) != 0);
+
+  /* Dividing by 2^62 can expose source bits 62 and 63 only.  Source bits
+   * beyond the low-64 abstraction stay unknown. */
+  CHECK(ixs_get_known_bits_facts(facts, wide, &bits));
+  CHECK(((bits.known_zero | bits.known_one) & ~(uint64_t)3) == 0);
+
+  CHECK(
+      ixs_facts_assume_pred(src, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7))));
+  CHECK(ixs_facts_substitute(subst, src, x, y));
+  CHECK(ixs_get_known_bits_facts(subst, y, &bits));
+  CHECK(bits.known_zero == ~(uint64_t)7);
+  CHECK(bits.known_one == 7u);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_known_bits_failures(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "known_invalid_x");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_known_bits bits;
+
+  CHECK(ixs_get_known_bits_facts(facts, x, &bits));
+  CHECK(bits.known_zero == 0 && bits.known_one == 0);
+  CHECK(ixs_get_known_bits_facts(facts, ixs_rat(ctx, 1, 2), &bits));
+  CHECK(bits.known_zero == 0 && bits.known_one == 0);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+  bits.known_zero = ~(uint64_t)0;
+  bits.known_one = ~(uint64_t)0;
+  bits.pow2 = IXS_POW2_POSITIVE;
+  CHECK(!ixs_get_known_bits_facts(contradictory, x, &bits));
+  CHECK(bits.known_zero == 0 && bits.known_one == 0);
+  CHECK(bits.pow2 == IXS_POW2_UNKNOWN);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_known_bits_facts(facts, ixs_sym(other, "x"), &bits));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_known_bits_facts(facts, ctx->sentinel_error, &bits));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_known_bits_facts(facts, NULL, &bits));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NULL expression") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_known_bits_facts(facts, x, NULL));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NULL output") != NULL);
+
+  bits.known_zero = ~(uint64_t)0;
+  bits.known_one = ~(uint64_t)0;
+  CHECK(!ixs_get_known_bits_facts(NULL, x, &bits));
+  CHECK(bits.known_zero == 0 && bits.known_one == 0);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_symbol_congruence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *k = ixs_sym(ctx, "congruence_k");
+  ixs_node *x = ixs_sym(ctx, "congruence_x");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  int64_t modulus = -1;
+  int64_t residue = -1;
+
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 5))));
+  CHECK(ixs_get_symbol_congruence_facts(facts, k, &modulus, &residue));
+  CHECK(modulus == 32 && residue == 5);
+
+  CHECK(!ixs_get_symbol_congruence_facts(facts, x, &modulus, &residue));
+  CHECK(modulus == 0 && residue == 0);
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 8)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 8)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 2))));
+  CHECK(!ixs_get_symbol_congruence_facts(contradictory, k, &modulus, &residue));
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_symbol_congruence_facts(facts, ixs_add(ctx, k, x), &modulus,
+                                         &residue));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "must be a symbol") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_symbol_congruence_facts(facts, ixs_sym(other, "k"), &modulus,
+                                         &residue));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_symbol_congruence_facts(facts, ctx->sentinel_error, &modulus,
+                                         &residue));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_get_symbol_congruence_facts(facts, k, &modulus, &modulus));
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "distinct") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_congruence_query(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *k = ixs_sym(ctx, "query_k");
+  ixs_node *n = ixs_sym(ctx, "query_n");
+  ixs_node *x = ixs_sym(ctx, "query_x");
+  ixs_node *int64_scaled =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MIN), x), ixs_int(ctx, 7));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *nonpow = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 5))));
+  CHECK(ixs_check_congruent_facts(facts, k, 32, 5) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, k, 32, 6) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_congruent_facts(facts, k, -32, -27) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, k, 16, 5) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, k, 64, 5) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_congruent_facts(
+            facts,
+            ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), k), ixs_int(ctx, 2)), 32,
+            17) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(nonpow,
+                              ixs_cmp(ctx, ixs_mod(ctx, n, ixs_int(ctx, 15)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 4))));
+  CHECK(ixs_check_congruent_facts(
+            nonpow,
+            ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), n), ixs_int(ctx, 2)), 15,
+            14) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(nonpow, ixs_mul(ctx, ixs_int(ctx, 5), n), 15,
+                                  5) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(
+            nonpow,
+            ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 6), x), ixs_int(ctx, 2)), 3,
+            2) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_check_congruent_facts(facts, ixs_int(ctx, INT64_MIN), INT64_MIN,
+                                  0) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, ixs_int(ctx, INT64_MAX), INT64_MIN,
+                                  -1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, int64_scaled, INT64_MIN, 7) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, ixs_int(ctx, 65), 32, 1) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, ixs_int(ctx, 65), 32, 2) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_congruent_facts(facts, ixs_rat(ctx, 1, 2), 3, 1) ==
+        IXS_CHECK_FALSE);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(ixs_check_congruent_facts(contradictory, ixs_int(ctx, 1), 2, 1) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_congruent_facts(facts, x, 0, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "modulus must be nonzero") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_congruent_facts(facts, ixs_sym(other, "x"), 8, 0) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_congruent_facts(facts, ctx->sentinel_error, 8, 0) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_basic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
@@ -2287,6 +2529,10 @@ int main(void) {
   test_public_structural_and_assumption_integrality();
   test_public_fact_integrality_piecewise();
   test_public_fact_divisibility();
+  test_public_known_bits_propagation();
+  test_public_known_bits_failures();
+  test_public_symbol_congruence();
+  test_public_congruence_query();
   test_public_exact_divide_basic();
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();

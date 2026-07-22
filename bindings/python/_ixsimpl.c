@@ -111,17 +111,23 @@ static int raise_new_simplify_error(ixs_session *session, size_t before) {
   return 0;
 }
 
-static int raise_new_divisibility_error(ixs_session *session, size_t before) {
+static int raise_new_prefixed_error(ixs_session *session, size_t before,
+                                    const char *prefix) {
   size_t i;
   size_t after = ixs_session_nerrors(session);
+  size_t prefix_len = strlen(prefix);
   for (i = before; i < after; i++) {
     const char *message = ixs_session_error(session, i);
-    if (message && strncmp(message, "divisibility:", 13) == 0) {
+    if (message && strncmp(message, prefix, prefix_len) == 0) {
       PyErr_SetString(PyExc_ValueError, message);
       return -1;
     }
   }
   return 0;
+}
+
+static int raise_new_divisibility_error(ixs_session *session, size_t before) {
+  return raise_new_prefixed_error(session, before, "divisibility:");
 }
 
 static PyObject *raise_exact_divide_error(ixs_session *session, size_t before) {
@@ -1585,6 +1591,142 @@ static PyObject *Context_divisible(ContextObject *self, PyObject *args,
   Py_RETURN_NONE;
 }
 
+static PyObject *known_bits_to_py(const ixs_known_bits *bits) {
+  PyObject *result = PyTuple_New(3);
+  PyObject *known_zero;
+  PyObject *known_one;
+  PyObject *pow2;
+  if (!result)
+    return NULL;
+  known_zero =
+      PyLong_FromUnsignedLongLong((unsigned long long)bits->known_zero);
+  known_one = PyLong_FromUnsignedLongLong((unsigned long long)bits->known_one);
+  if (bits->pow2 == IXS_POW2_OR_ZERO)
+    pow2 = PyUnicode_FromString("or_zero");
+  else if (bits->pow2 == IXS_POW2_POSITIVE)
+    pow2 = PyUnicode_FromString("positive");
+  else {
+    Py_INCREF(Py_None);
+    pow2 = Py_None;
+  }
+  if (!known_zero || !known_one || !pow2) {
+    Py_XDECREF(known_zero);
+    Py_XDECREF(known_one);
+    Py_XDECREF(pow2);
+    Py_DECREF(result);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(result, 0, known_zero);
+  PyTuple_SET_ITEM(result, 1, known_one);
+  PyTuple_SET_ITEM(result, 2, pow2);
+  return result;
+}
+
+static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
+                                     PyObject *facts_obj, ixs_node **expr,
+                                     ixs_facts **facts) {
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return false;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return false;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return false;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return false;
+  }
+  *expr = ((ExprObject *)expr_obj)->node;
+  *facts = ((FactsObject *)facts_obj)->facts;
+  return true;
+}
+
+static PyObject *Context_known_bits(ContextObject *self, PyObject *args,
+                                    PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "facts", NULL};
+  PyObject *expr_obj, *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_node *expr;
+  ixs_facts *facts;
+  ixs_known_bits bits;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
+                                   &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  ok = ixs_get_known_bits_facts(facts, expr, &bits);
+  if (raise_new_prefixed_error(session, errors_before, "known bits:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return known_bits_to_py(&bits);
+}
+
+static PyObject *Context_symbol_congruence(ContextObject *self, PyObject *args,
+                                           PyObject *kwargs) {
+  static char *kwlist[] = {"symbol", "facts", NULL};
+  PyObject *symbol_obj, *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_node *symbol;
+  ixs_facts *facts;
+  int64_t modulus;
+  int64_t residue;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &symbol_obj,
+                                   &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, symbol_obj, facts_obj, &symbol, &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  ok = ixs_get_symbol_congruence_facts(facts, symbol, &modulus, &residue);
+  if (raise_new_prefixed_error(session, errors_before, "symbol congruence:") <
+      0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return Py_BuildValue("(LL)", (long long)modulus, (long long)residue);
+}
+
+static PyObject *Context_congruent(ContextObject *self, PyObject *args,
+                                   PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "modulus", "residue", "facts", NULL};
+  PyObject *expr_obj, *modulus_obj, *residue_obj, *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_node *expr;
+  ixs_facts *facts;
+  ixs_check_result result;
+  int64_t modulus;
+  int64_t residue;
+  size_t errors_before;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_obj,
+                                   &modulus_obj, &residue_obj, &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
+    return NULL;
+  if (!py_int64(modulus_obj, &modulus, "modulus") ||
+      !py_int64(residue_obj, &residue, "residue"))
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_check_congruent_facts(facts, expr, modulus, residue);
+  if (raise_new_prefixed_error(session, errors_before, "congruence:") < 0)
+    return NULL;
+  if (result == IXS_CHECK_TRUE)
+    Py_RETURN_TRUE;
+  if (result == IXS_CHECK_FALSE)
+    Py_RETURN_FALSE;
+  Py_RETURN_NONE;
+}
+
 static PyObject *Context_try_exact_divide(ContextObject *self, PyObject *args,
                                           PyObject *kwargs) {
   static char *kwlist[] = {"expr", "divisor", "facts", NULL};
@@ -2071,6 +2213,15 @@ static PyMethodDef Context_methods[] = {
      "or None."},
     {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
+    {"known_bits", (PyCFunction)Context_known_bits,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return (known_zero, known_one, pow2) under a fact set, or None on an "
+     "invalid query."},
+    {"symbol_congruence", (PyCFunction)Context_symbol_congruence,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return a symbol's stored (modulus, residue), or None."},
+    {"congruent", (PyCFunction)Context_congruent, METH_VARARGS | METH_KEYWORDS,
+     "Prove a requested congruence under a fact set; return bool or None."},
     {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
      METH_VARARGS | METH_KEYWORDS,
      "Prove exact division under facts; return (status, quotient)."},

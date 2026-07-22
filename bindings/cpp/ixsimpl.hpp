@@ -252,6 +252,18 @@ public:
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
     return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
   }
+  bool get_known_bits(const Expr &expr, ixs_known_bits &out) const {
+    return ixs_get_known_bits_facts(facts_, expr.raw(), &out);
+  }
+  bool get_symbol_congruence(const Expr &symbol, int64_t &modulus,
+                             int64_t &residue) const {
+    return ixs_get_symbol_congruence_facts(facts_, symbol.raw(), &modulus,
+                                           &residue);
+  }
+  ixs_check_result check_congruent(const Expr &expr, int64_t modulus,
+                                   int64_t residue) const {
+    return ixs_check_congruent_facts(facts_, expr.raw(), modulus, residue);
+  }
   ExactDivideResult try_exact_divide(const Expr &expr, int64_t divisor) const {
     ixs_exact_divide_result result =
         ixs_try_exact_divide_facts(facts_, expr.raw(), divisor);

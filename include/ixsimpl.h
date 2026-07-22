@@ -190,6 +190,14 @@ typedef enum {
   IXS_POW2_POSITIVE
 } ixs_pow2_fact;
 
+/* Sound facts about the low 64 bits of an unbounded integer expression.
+ * Zero in both masks is a valid result with no known bits. */
+typedef struct {
+  uint64_t known_zero;
+  uint64_t known_one;
+  ixs_pow2_fact pow2;
+} ixs_known_bits;
+
 typedef struct {
   bool has_lower;
   bool has_upper;
@@ -315,6 +323,21 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
 ixs_exact_divide_result
 ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+/* Return sound low-64-bit facts.  True with zero masks means that the query
+ * was valid but proved no bits.  Invalid input, contradictory facts, and OOM
+ * return false and leave out initialized to the no-information value. */
+bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
+                              ixs_known_bits *out);
+/* Export the stored congruence record for a symbol.  Output pointers must be
+ * non-NULL and distinct.  This deliberately does not synthesize a strongest
+ * congruence for arbitrary expressions. */
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
+                                     int64_t *modulus, int64_t *residue);
+/* Prove expr == residue (mod modulus).  Negative moduli are normalized by
+ * magnitude without overflowing INT64_MIN.  Modulus zero emits a diagnostic
+ * and returns UNKNOWN. */
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
+                                           int64_t modulus, int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */

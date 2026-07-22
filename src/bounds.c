@@ -1185,9 +1185,12 @@ static bool bounds_get_symbol_bitfacts(ixs_bounds *b, const char *name,
                                        ixs_bitfacts *out) {
   int64_t exact;
   ixs_var_bound *v = find_var(b, name);
-  bitfacts_unknown(out);
   if (v) {
-    *out = v->bits;
+    out->known_zero |= v->bits.known_zero;
+    out->known_one |= v->bits.known_one;
+    if (v->bits.pow2 == IXS_POW2_POSITIVE ||
+        (v->bits.pow2 == IXS_POW2_OR_ZERO && out->pow2 == IXS_POW2_UNKNOWN))
+      out->pow2 = v->bits.pow2;
     bitfacts_apply_modrem(out, v->modulus, v->remainder);
     if (interval_exact_int(&v->iv, &exact))
       bitfacts_apply_exact(out, exact);
@@ -1667,6 +1670,231 @@ static bool bounds_int64_divisible_by_u64(int64_t value, uint64_t modulus) {
   return bounds_int64_magnitude(value) % modulus == 0;
 }
 
+static uint64_t bounds_normalize_residue(int64_t value, uint64_t modulus) {
+  uint64_t magnitude;
+  uint64_t remainder;
+  if (value >= 0)
+    return (uint64_t)value % modulus;
+  magnitude = bounds_int64_magnitude(value);
+  remainder = magnitude % modulus;
+  return remainder == 0 ? 0 : modulus - remainder;
+}
+
+static uint64_t bounds_u64_gcd(uint64_t a, uint64_t b) {
+  while (b != 0) {
+    uint64_t next = a % b;
+    a = b;
+    b = next;
+  }
+  return a;
+}
+
+static uint64_t bounds_add_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  return (a + b) % modulus;
+}
+
+/* modulus is at most 2^63, so doubling two normalized operands cannot
+ * overflow uint64_t.  This keeps modular multiplication portable C99. */
+static uint64_t bounds_mul_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  uint64_t result = 0;
+  a %= modulus;
+  while (b != 0) {
+    if ((b & 1u) != 0)
+      result = bounds_add_mod(result, a, modulus);
+    b >>= 1;
+    if (b != 0)
+      a = bounds_add_mod(a, a, modulus);
+  }
+  return result;
+}
+
+static uint64_t bounds_pow_mod(uint64_t base, int32_t exponent,
+                               uint64_t modulus) {
+  uint64_t result = 1u % modulus;
+  while (exponent > 0) {
+    if ((exponent & 1) != 0)
+      result = bounds_mul_mod(result, base, modulus);
+    exponent >>= 1;
+    if (exponent != 0)
+      base = bounds_mul_mod(base, base, modulus);
+  }
+  return result;
+}
+
+#define CONGRUENCE_DEPTH_LIMIT 64u
+
+static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
+                                       uint64_t modulus, uint64_t *out,
+                                       unsigned depth);
+
+static bool bounds_known_scaled_residue(ixs_bounds *b, ixs_node *expr,
+                                        int64_t coefficient, uint64_t modulus,
+                                        uint64_t *out, unsigned depth) {
+  uint64_t coeff = bounds_normalize_residue(coefficient, modulus);
+  uint64_t reduced = modulus / bounds_u64_gcd(coeff, modulus);
+  uint64_t residue;
+  if (reduced == 1u) {
+    *out = 0;
+    return true;
+  }
+  if (!bounds_known_residue_depth(b, expr, reduced, &residue, depth))
+    return false;
+  *out = bounds_mul_mod(coeff, residue, modulus);
+  return true;
+}
+
+static bool bounds_known_add_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out,
+                                     unsigned depth) {
+  uint64_t result;
+  uint32_t i;
+  int64_t p, q;
+  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+  if (q != 1)
+    return false;
+  result = bounds_normalize_residue(p, modulus);
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    uint64_t term;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    if (q != 1 || !bounds_known_scaled_residue(b, expr->u.add.terms[i].term, p,
+                                               modulus, &term, depth - 1))
+      return false;
+    result = bounds_add_mod(result, term, modulus);
+  }
+  *out = result;
+  return true;
+}
+
+static bool bounds_known_mul_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out,
+                                     unsigned depth) {
+  uint64_t coeff, reduced, product;
+  uint32_t i;
+  int64_t p, q;
+  ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+  if (q != 1)
+    return false;
+  coeff = bounds_normalize_residue(p, modulus);
+  reduced = modulus / bounds_u64_gcd(coeff, modulus);
+  if (reduced == 1u) {
+    *out = 0;
+    return true;
+  }
+  product = 1u % reduced;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    uint64_t base;
+    int32_t exponent = expr->u.mul.factors[i].exp;
+    if (exponent < 0 ||
+        !bounds_known_residue_depth(b, expr->u.mul.factors[i].base, reduced,
+                                    &base, depth - 1))
+      return false;
+    product = bounds_mul_mod(product, bounds_pow_mod(base, exponent, reduced),
+                             reduced);
+    if (product == 0)
+      break;
+  }
+  *out = bounds_mul_mod(coeff, product, modulus);
+  return true;
+}
+
+static bool bounds_known_symbol_residue(ixs_bounds *b, ixs_node *expr,
+                                        uint64_t modulus, uint64_t *out) {
+  int64_t stored_modulus, stored_residue;
+  if (modulus > (uint64_t)INT64_MAX ||
+      !ixs_bounds_get_modrem(b, expr->u.name, &stored_modulus,
+                             &stored_residue) ||
+      (uint64_t)stored_modulus % modulus != 0)
+    return false;
+  *out = (uint64_t)stored_residue % modulus;
+  return true;
+}
+
+static bool bounds_known_mod_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out,
+                                     unsigned depth) {
+  if (expr->u.binary.rhs->tag != IXS_INT || expr->u.binary.rhs->u.ival <= 0 ||
+      (uint64_t)expr->u.binary.rhs->u.ival % modulus != 0)
+    return false;
+  return bounds_known_residue_depth(b, expr->u.binary.lhs, modulus, out,
+                                    depth - 1);
+}
+
+static bool bounds_known_extrema_residue(ixs_bounds *b, ixs_node *expr,
+                                         uint64_t modulus, uint64_t *out,
+                                         unsigned depth) {
+  uint64_t lhs, rhs;
+  if (!bounds_known_residue_depth(b, expr->u.binary.lhs, modulus, &lhs,
+                                  depth - 1) ||
+      !bounds_known_residue_depth(b, expr->u.binary.rhs, modulus, &rhs,
+                                  depth - 1) ||
+      lhs != rhs)
+    return false;
+  *out = lhs;
+  return true;
+}
+
+static bool bounds_known_structural_residue(ixs_bounds *b, ixs_node *expr,
+                                            uint64_t modulus, uint64_t *out,
+                                            unsigned depth) {
+  switch (expr->tag) {
+  case IXS_INT:
+    *out = bounds_normalize_residue(expr->u.ival, modulus);
+    return true;
+  case IXS_RAT:
+    if (expr->u.rat.q != 1)
+      return false;
+    *out = bounds_normalize_residue(expr->u.rat.p, modulus);
+    return true;
+  case IXS_SYM:
+    return bounds_known_symbol_residue(b, expr, modulus, out);
+  case IXS_ADD:
+    return bounds_known_add_residue(b, expr, modulus, out, depth);
+  case IXS_MUL:
+    return bounds_known_mul_residue(b, expr, modulus, out, depth);
+  case IXS_MOD:
+    return bounds_known_mod_residue(b, expr, modulus, out, depth);
+  case IXS_MAX:
+  case IXS_MIN:
+    return bounds_known_extrema_residue(b, expr, modulus, out, depth);
+  default:
+    return false;
+  }
+}
+
+static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
+                                       uint64_t modulus, uint64_t *out,
+                                       unsigned depth) {
+  ixs_interval iv;
+  ixs_bitfacts bits;
+  int64_t exact;
+  if (!b || !expr || !out || modulus == 0 || depth == 0 || b->oom ||
+      ixs_bounds_check_integer_valued(b, expr) != IXS_CHECK_TRUE)
+    return false;
+  if (modulus == 1u) {
+    *out = 0;
+    return true;
+  }
+
+  iv = ixs_bounds_get(b, expr);
+  if (b->oom)
+    return false;
+  if (ixs_interval_is_point_int(iv, &exact)) {
+    *out = bounds_normalize_residue(exact, modulus);
+    return true;
+  }
+
+  if (uint64_is_pow2(modulus) && ixs_bounds_get_bitfacts(b, expr, &bits)) {
+    uint64_t mask = modulus - 1u;
+    if (((bits.known_zero | bits.known_one) & mask) == mask) {
+      *out = bits.known_one & mask;
+      return true;
+    }
+  }
+  if (b->oom)
+    return false;
+  return bounds_known_structural_residue(b, expr, modulus, out, depth);
+}
+
 IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
                                                        ixs_node *expr,
                                                        int64_t modulus) {
@@ -1711,6 +1939,27 @@ IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
   }
 
   return IXS_CHECK_UNKNOWN;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_congruent(ixs_bounds *b,
+                                                       ixs_node *expr,
+                                                       int64_t modulus,
+                                                       int64_t residue) {
+  ixs_check_result integer_result;
+  uint64_t actual;
+  uint64_t magnitude;
+  uint64_t expected;
+  if (!b || !expr || modulus == 0 || b->oom || ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+  integer_result = ixs_bounds_check_integer_valued(b, expr);
+  if (integer_result != IXS_CHECK_TRUE)
+    return integer_result;
+  magnitude = bounds_int64_magnitude(modulus);
+  expected = bounds_normalize_residue(residue, magnitude);
+  if (!bounds_known_residue_depth(b, expr, magnitude, &actual,
+                                  CONGRUENCE_DEPTH_LIMIT))
+    return IXS_CHECK_UNKNOWN;
+  return actual == expected ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 }
 
 static ixs_interval bounds_get_and_mask(ixs_node *expr) {
@@ -3242,6 +3491,24 @@ static bool facts_node_ok(ixs_ctx *ctx, ixs_node *node) {
   return node && !ixs_node_is_sentinel(node) && ixs_ctx_owns_node(ctx, node);
 }
 
+static bool facts_query_node_ok(ixs_ctx *ctx, ixs_node *node,
+                                const char *query) {
+  if (!node) {
+    ixs_ctx_push_error(ctx, "%s: NULL expression", query);
+    return false;
+  }
+  if (ixs_node_is_sentinel(node)) {
+    ixs_ctx_push_error(ctx, "%s: sentinel expression is not accepted", query);
+    return false;
+  }
+  if (!ixs_ctx_owns_node(ctx, node)) {
+    ixs_ctx_push_error(ctx, "%s: expression belongs to a different context",
+                       query);
+    return false;
+  }
+  return true;
+}
+
 static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
   ixs_var_bound *v = find_var(dst, src->name);
   bounds_cache_clear(dst);
@@ -3773,6 +4040,118 @@ ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr) {
     iv = ixs_bounds_get(&facts->bounds, expr);
     if (ixs_interval_is_point_int(iv, &exact))
       result = bounds_pow2_fact_from_int64(exact);
+  }
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
+                              ixs_known_bits *out) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_bitfacts bits;
+  bool ok = false;
+  if (out) {
+    out->known_zero = 0;
+    out->known_one = 0;
+    out->pow2 = IXS_POW2_UNKNOWN;
+  }
+  if (!facts_bind(facts, &binding, &ctx))
+    return false;
+  if (!out) {
+    ixs_ctx_push_error(ctx, "known bits: NULL output");
+    goto cleanup;
+  }
+  if (!facts_ready(facts)) {
+    ixs_ctx_push_error(ctx, "known bits: fact set is unusable");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, expr, "known bits") ||
+      ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+
+  bitfacts_unknown(&bits);
+  if (ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
+    (void)ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits);
+  if (facts->bounds.oom) {
+    ixs_ctx_push_error(ctx, "known bits: out of memory");
+    goto cleanup;
+  }
+  out->known_zero = bits.known_zero;
+  out->known_one = bits.known_one;
+  out->pow2 = bits.pow2;
+  ok = true;
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return ok;
+}
+
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
+                                     int64_t *modulus, int64_t *residue) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  int64_t stored_modulus;
+  int64_t stored_residue;
+  bool ok = false;
+  if (modulus)
+    *modulus = 0;
+  if (residue)
+    *residue = 0;
+  if (!facts_bind(facts, &binding, &ctx))
+    return false;
+  if (!modulus || !residue || modulus == residue) {
+    ixs_ctx_push_error(
+        ctx, "symbol congruence: outputs must be non-NULL and distinct");
+    goto cleanup;
+  }
+  if (!facts_ready(facts)) {
+    ixs_ctx_push_error(ctx, "symbol congruence: fact set is unusable");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, symbol, "symbol congruence") ||
+      ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  if (symbol->tag != IXS_SYM) {
+    ixs_ctx_push_error(ctx, "symbol congruence: expression must be a symbol");
+    goto cleanup;
+  }
+  if (!ixs_bounds_get_modrem(&facts->bounds, symbol->u.name, &stored_modulus,
+                             &stored_residue))
+    goto cleanup;
+  *modulus = stored_modulus;
+  *residue = stored_residue;
+  ok = true;
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return ok;
+}
+
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
+                                           int64_t modulus, int64_t residue) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (!facts_ready(facts)) {
+    ixs_ctx_push_error(ctx, "congruence: fact set is unusable");
+    goto cleanup;
+  }
+  if (modulus == 0) {
+    ixs_ctx_push_error(ctx, "congruence: modulus must be nonzero");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, expr, "congruence") ||
+      ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  result = ixs_bounds_check_congruent(&facts->bounds, expr, modulus, residue);
+  if (facts->bounds.oom) {
+    ixs_ctx_push_error(ctx, "congruence: out of memory");
+    result = IXS_CHECK_UNKNOWN;
   }
 
 cleanup:
