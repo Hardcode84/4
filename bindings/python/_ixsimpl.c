@@ -1547,6 +1547,81 @@ static PyObject *Context_defined(ContextObject *self, PyObject *args,
                             ixs_check_defined_facts);
 }
 
+static PyObject *check_result_to_py(ixs_check_result result) {
+  if (result == IXS_CHECK_TRUE)
+    Py_RETURN_TRUE;
+  if (result == IXS_CHECK_FALSE)
+    Py_RETURN_FALSE;
+  Py_RETURN_NONE;
+}
+
+static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
+                                     PyObject *facts_obj, ixs_node **expr,
+                                     ixs_facts **facts);
+
+static PyObject *Context_check_predicate(ContextObject *self, PyObject *args,
+                                         PyObject *kwargs) {
+  static char *kwlist[] = {"predicate", "facts", NULL};
+  PyObject *predicate_obj;
+  PyObject *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_node *predicate;
+  ixs_facts *facts;
+  ixs_check_result result;
+  size_t errors_before;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &predicate_obj,
+                                   &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, predicate_obj, facts_obj, &predicate,
+                                &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_check_predicate_facts(facts, predicate);
+  if (raise_new_prefixed_error(session, errors_before, "predicate:") < 0)
+    return NULL;
+  return check_result_to_py(result);
+}
+
+static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
+                                    PyObject *kwargs) {
+  static char *kwlist[] = {"lhs", "rhs", "facts", NULL};
+  PyObject *lhs_obj;
+  PyObject *rhs_obj;
+  PyObject *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_check_result result;
+  size_t errors_before;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &lhs_obj,
+                                   &rhs_obj, &facts_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
+      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
+    return NULL;
+  }
+  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
+      ((ExprObject *)rhs_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_equivalent_facts(((FactsObject *)facts_obj)->facts,
+                                ((ExprObject *)lhs_obj)->node,
+                                ((ExprObject *)rhs_obj)->node);
+  if (raise_new_prefixed_error(session, errors_before, "equivalence:") < 0)
+    return NULL;
+  return check_result_to_py(result);
+}
+
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
   static char *kwlist[] = {"expr", "modulus", "facts", NULL};
@@ -2211,6 +2286,12 @@ static PyMethodDef Context_methods[] = {
     {"defined", (PyCFunction)Context_defined, METH_VARARGS | METH_KEYWORDS,
      "Prove full-domain definedness from assumptions or facts; return bool "
      "or None."},
+    {"check_predicate", (PyCFunction)Context_check_predicate,
+     METH_VARARGS | METH_KEYWORDS,
+     "Check a compound predicate under a fact set; return bool or None."},
+    {"equivalent", (PyCFunction)Context_equivalent,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove total expression or predicate equivalence under a fact set."},
     {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
     {"known_bits", (PyCFunction)Context_known_bits,

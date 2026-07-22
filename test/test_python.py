@@ -1956,6 +1956,73 @@ def test_known_bits_and_congruence_binding_failures() -> None:
         ctx.congruent(sentinel, 8, 0, facts)
 
 
+def test_predicate_tree_and_total_equivalence_bindings() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("binding_equiv_x")
+    y = ctx.sym("binding_equiv_y")
+    z = ctx.sym("binding_equiv_z")
+    k = ctx.sym("binding_equiv_k")
+    p, q, r = x >= 0, y < 4, ctx.ne(z, 0)
+    lhs = ixsimpl.and_(ixsimpl.and_(p, q), r)
+    rhs = ixsimpl.and_(p, ixsimpl.and_(r, q))
+    facts = ctx.facts()
+
+    assert ctx.check_predicate(lhs, facts) is None
+    facts.assume(p)
+    facts.assume(q)
+    facts.assume(r)
+    assert ctx.check_predicate(lhs, facts) is True
+    assert ctx.check_predicate(ixsimpl.not_(lhs), facts) is False
+    assert ctx.equivalent(lhs, rhs, facts) is True
+
+    empty = ctx.facts()
+    polynomial = (x + 1) * (x + 1)
+    expanded = x * x + 2 * x + 1
+    reciprocal = 1 / x
+    reciprocal_lhs = (x + 1) / x
+    reciprocal_rhs = 1 + reciprocal
+    assert ctx.equivalent(polynomial, expanded, empty) is True
+    assert ctx.equivalent(reciprocal, reciprocal, empty) is None
+    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is None
+
+    nonzero = ctx.facts()
+    nonzero.assume(ctx.ne(x, 0))
+    assert ctx.equivalent(reciprocal, reciprocal, nonzero) is True
+    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, nonzero) is True
+
+    modular = ctx.facts()
+    modular.assume(ctx.eq(k % 16, 0))
+    mod_lhs = x % 16 < 8
+    mod_rhs = (x + k) % 16 < 8
+    assert ctx.equivalent(mod_lhs, mod_rhs, modular) is True
+    assert ctx.equivalent(x < 8, x + k < 8, modular) is None
+    grid = ctx.facts()
+    grid.assume(ctx.eq(x % 16, 0))
+    assert ctx.equivalent(ctx.eq(x, 0), ctx.eq(x % 16, 0), grid) is None
+
+    with pytest.raises(ValueError, match="not a predicate tree"):
+        ctx.check_predicate(x & 7, empty)
+    with pytest.raises(ValueError, match="not a predicate tree"):
+        ctx.check_predicate(ixsimpl.or_(x, y), empty)
+
+
+def test_equivalence_binding_invalid_inputs() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("binding_equiv_invalid_x")
+    facts = ctx.facts()
+    sentinel = ctx.parse_expr("(")
+
+    with pytest.raises(ValueError, match="different context"):
+        ctx.equivalent(x, other.sym("x"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.equivalent(x, x, other.facts())
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.equivalent(sentinel, sentinel, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.check_predicate(sentinel, facts)
+
+
 def test_definedness_queries_assumptions_facts_and_piecewise() -> None:
     ctx = ixsimpl.Context()
     x, m = ctx.sym("defined_x"), ctx.sym("defined_m")

@@ -249,6 +249,12 @@ public:
   ixs_check_result check_defined(const Expr &expr) const {
     return ixs_check_defined_facts(facts_, expr.raw());
   }
+  ixs_check_result check_predicate(const Expr &predicate) const {
+    return ixs_check_predicate_facts(facts_, predicate.raw());
+  }
+  ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
+    return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
+  }
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
     return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
   }

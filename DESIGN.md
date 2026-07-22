@@ -1287,6 +1287,31 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   magnitude of `INT64_MIN`; modulus zero emits a diagnostic and returns
   `UNKNOWN`. Known conflicting residues return `FALSE`, incomplete evidence
   returns `UNKNOWN`, and contradictory facts never establish a result.
+- **Public predicate-tree checking** (`ixs_check_predicate_facts`, Python
+  `Context.check_predicate`, C++ `Facts::check_predicate`): accepts only nodes
+  classified by `ixs_node_is_pred`. It simplifies once against the reusable
+  facts, then evaluates `AND`, `OR`, and `NOT` with conservative tri-state
+  truth tables. `AND` is true only when every child is true and false when any
+  child is false; `OR` is true when any child is true and false only when every
+  child is false; `NOT` inverts true and false. Predicate-valued `Piecewise`
+  nodes that do not collapse during fact-backed simplification remain
+  unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
+  diagnostic rather than interpreted as boolean trees. The evaluator uses a
+  1024-frame stack and an 8192-node visit budget.
+- **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
+  `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
+  defined over every valuation admitted by the incoming facts before pointer
+  identity can prove equality. It then tries fact-backed simplification of the
+  difference, expansion followed by simplification under the shared fact
+  environment, flattened order-independent matching of predicate `AND`/`OR`
+  terms, and a query-specific congruence proof for otherwise identical
+  comparisons of `Mod` residuals. Congruence is deliberately not a generic
+  equality rule: a divisible residual delta does not prove arbitrary
+  comparisons or `x == 0`. A nonzero constant difference or predicates with
+  opposite proven truth values return `FALSE`; other failed sufficient proofs
+  return `UNKNOWN`. Contradictory facts never prove equivalence. Recursive
+  predicate-shape comparison has depth 32, 4096 proof visits, and at most 1024
+  flattened terms, so this API is not an unbounded theorem prover.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -1705,6 +1730,10 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                           ixs_node *predicate);
+ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
+                                      ixs_node *lhs, ixs_node *rhs);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
@@ -2668,6 +2697,10 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
 ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                           ixs_node *predicate);
+ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
+                                      ixs_node *lhs, ixs_node *rhs);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);

@@ -307,6 +307,18 @@ ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
 void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
 
 ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+/* Check a predicate tree against an existing fact set.  AND, OR, and NOT use
+ * conservative three-valued logic.  Numeric bitwise AND/OR expressions are
+ * rejected because they are not predicate trees. */
+ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                           ixs_node *predicate);
+/* Prove total equivalence over the full domain admitted by facts.  TRUE is
+ * returned only after both operands are proved defined everywhere.  FALSE is
+ * returned only for a universal proof of different values; insufficient
+ * facts, contradictory facts, invalid input, and resource limits return
+ * UNKNOWN. */
+ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
+                                      ixs_node *rhs);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr);
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);

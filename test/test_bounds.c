@@ -1884,6 +1884,202 @@ static void test_public_congruence_query(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_predicate_tree_query(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "predicate_x");
+  ixs_node *y = ixs_sym(ctx, "predicate_y");
+  ixs_node *x_nonnegative = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *y_small = ixs_cmp(ctx, y, IXS_CMP_LT, ixs_int(ctx, 4));
+  ixs_node *both = ixs_and(ctx, x_nonnegative, y_small);
+  ixs_node *either = ixs_or(ctx, x_nonnegative, y_small);
+  ixs_node *not_x = ixs_not(ctx, x);
+  ixs_facts *all_true = ixs_facts_create(ctx);
+  ixs_facts *one_false = ixs_facts_create(ctx);
+  ixs_facts *all_false = ixs_facts_create(ctx);
+  ixs_facts *partial = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(all_true, x_nonnegative));
+  CHECK(ixs_facts_assume_pred(all_true, y_small));
+  CHECK(ixs_facts_assume_pred(all_true,
+                              ixs_cmp(ctx, y, IXS_CMP_NE, ixs_int(ctx, 2))));
+  CHECK(ixs_check_predicate_facts(all_true, both) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_predicate_facts(
+            all_true, ixs_cmp(ctx, y, IXS_CMP_NE, ixs_int(ctx, 2))) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_predicate_facts(all_true, either) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_predicate_facts(all_true, ixs_not(ctx, both)) ==
+        IXS_CHECK_FALSE);
+
+  CHECK(ixs_facts_assume_pred(one_false,
+                              ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_check_predicate_facts(one_false, both) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_predicate_facts(one_false, either) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(all_false,
+                              ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(all_false,
+                              ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 4))));
+  CHECK(ixs_check_predicate_facts(all_false, either) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_predicate_facts(all_false, ixs_not(ctx, either)) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(partial,
+                              ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(ixs_check_predicate_facts(partial, not_x) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_predicate_facts(partial, ixs_not(ctx, y)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_predicate_facts(partial, both) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_predicate_facts(partial, ixs_and(ctx, x, ixs_int(ctx, 7))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "not a predicate tree") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_predicate_facts(partial, ixs_or(ctx, x, y)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "not a predicate tree") != NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_total_equivalence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "equiv_x");
+  ixs_node *y = ixs_sym(ctx, "equiv_y");
+  ixs_node *z = ixs_sym(ctx, "equiv_z");
+  ixs_node *k = ixs_sym(ctx, "equiv_k");
+  ixs_node *slot = ixs_sym(ctx, "equiv_slot");
+  ixs_node *p = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *q = ixs_cmp(ctx, y, IXS_CMP_LT, ixs_int(ctx, 4));
+  ixs_node *r = ixs_cmp(ctx, z, IXS_CMP_NE, ixs_int(ctx, 0));
+  ixs_node *and_lhs = ixs_and(ctx, ixs_and(ctx, p, q), r);
+  ixs_node *and_rhs = ixs_and(ctx, p, ixs_and(ctx, r, q));
+  ixs_node *or_lhs = ixs_or(ctx, ixs_or(ctx, p, q), r);
+  ixs_node *or_rhs = ixs_or(ctx, r, ixs_or(ctx, q, p));
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_node *reciprocal_algebraic_lhs =
+      ixs_div(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), x);
+  ixs_node *reciprocal_algebraic_rhs =
+      ixs_add(ctx, ixs_int(ctx, 1), reciprocal);
+  ixs_node *polynomial = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)),
+                                 ixs_add(ctx, x, ixs_int(ctx, 1)));
+  ixs_node *expanded = ixs_add(
+      ctx, ixs_add(ctx, ixs_mul(ctx, x, x), ixs_mul(ctx, ixs_int(ctx, 2), x)),
+      ixs_int(ctx, 1));
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 16), x);
+  ixs_node *disjoint_xor = ixs_xor(ctx, scaled, slot);
+  ixs_node *disjoint_add = ixs_add(ctx, scaled, slot);
+  ixs_node *overlap_xor = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 8), x), slot);
+  ixs_node *overlap_add = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), x), slot);
+  ixs_node *mod_lhs = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                              IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *mod_rhs =
+      ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, x, k), ixs_int(ctx, 16)),
+              IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *ordinary_lhs = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *ordinary_rhs =
+      ixs_cmp(ctx, ixs_add(ctx, x, k), IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *x_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *x_grid = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                             ixs_int(ctx, 0));
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *nonzero = ixs_facts_create(ctx);
+  ixs_facts *xor_facts = ixs_facts_create(ctx);
+  ixs_facts *mod_facts = ixs_facts_create(ctx);
+  ixs_facts *grid_facts = ixs_facts_create(ctx);
+  ixs_facts *opposite = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  CHECK(ixs_equivalent_facts(empty, x, x) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(empty, polynomial, expanded) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(empty, and_lhs, and_rhs) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(empty, or_lhs, or_rhs) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_equivalent_facts(empty, reciprocal, reciprocal) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(empty, reciprocal_algebraic_lhs,
+                             reciprocal_algebraic_rhs) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(nonzero,
+                              ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_equivalent_facts(nonzero, reciprocal, reciprocal) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(nonzero, reciprocal_algebraic_lhs,
+                             reciprocal_algebraic_rhs) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(xor_facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      xor_facts, ixs_cmp(ctx, slot, IXS_CMP_LE, ixs_int(ctx, 15))));
+  CHECK(ixs_facts_assume_pred(xor_facts,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(xor_facts,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 100))));
+  CHECK(ixs_equivalent_facts(xor_facts, disjoint_xor, disjoint_add) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(xor_facts, overlap_xor, overlap_add) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(mod_facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 16)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_equivalent_facts(mod_facts, mod_lhs, mod_rhs) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(mod_facts, ordinary_lhs, ordinary_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(grid_facts, x_grid));
+  CHECK(ixs_equivalent_facts(grid_facts, x_zero, x_grid) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(opposite,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_equivalent_facts(opposite, ordinary_lhs,
+                             ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 8))) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_equivalent_facts(empty, ordinary_lhs,
+                             ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 9))) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(ixs_equivalent_facts(contradictory, ixs_int(ctx, 1), ixs_int(ctx, 2)) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_equivalence_invalid_inputs(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "equiv_invalid_x");
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_facts(facts, x, ixs_sym(other, "x")) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_facts(facts, ctx->sentinel_error, ctx->sentinel_error) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_predicate_facts(facts, ixs_sym(other, "p")) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check_predicate_facts(facts, ctx->sentinel_parse_error) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_basic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
@@ -2533,6 +2729,9 @@ int main(void) {
   test_public_known_bits_failures();
   test_public_symbol_congruence();
   test_public_congruence_query();
+  test_public_predicate_tree_query();
+  test_public_total_equivalence();
+  test_public_equivalence_invalid_inputs();
   test_public_exact_divide_basic();
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();
