@@ -250,6 +250,9 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
+#define RANGE_POWER_EXP_LIMIT 64u
+#define RANGE_PW_DEPTH_LIMIT 32u
+#define RANGE_PW_CASE_LIMIT 1024u
 
 static void bounds_cache_clear(ixs_bounds *b) {
   if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
@@ -312,6 +315,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nonzero_cap = 0;
   b->cache = NULL;
   b->cache_cap = 0;
+  b->range_pw_depth = 0;
   b->contradiction = false;
   b->oom = false;
   if (b->vars)
@@ -351,6 +355,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nonzero = NULL;
   dst->cache = NULL;
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
+  dst->range_pw_depth = src->range_pw_depth;
   dst->contradiction = src->contradiction;
   dst->oom = false;
   if (src->nexprs) {
@@ -2218,6 +2223,51 @@ static ixs_interval bounds_get_and_mask(ixs_node *expr) {
   return ixs_interval_unknown();
 }
 
+static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval lhs, rhs, result;
+  ixs_bitfacts lhs_bits, rhs_bits, result_bits;
+  int64_t lhs_hi, rhs_hi;
+  uint64_t span, possible, required;
+
+  if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) ||
+      !ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs))
+    return ixs_interval_unknown();
+  lhs = ixs_bounds_get(b, expr->u.binary.lhs);
+  rhs = ixs_bounds_get(b, expr->u.binary.rhs);
+  if (!interval_lower_at_least(&lhs, 0, 1) ||
+      !interval_lower_at_least(&rhs, 0, 1))
+    return ixs_interval_unknown();
+
+  result = ixs_interval_unknown();
+  result.valid = true;
+  result.lo_p = 0;
+  result.lo_q = 1;
+  result.lo_inf = false;
+  result.hi_inf = false;
+  if (lhs.hi_inf || rhs.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&result);
+    return result;
+  }
+
+  lhs_hi = ixs_rat_floor(lhs.hi_p, lhs.hi_q);
+  rhs_hi = ixs_rat_floor(rhs.hi_p, rhs.hi_q);
+  span = value_span_mask((uint64_t)(lhs_hi >= rhs_hi ? lhs_hi : rhs_hi));
+  possible = span;
+  required = 0;
+  if (ixs_bounds_get_bitfacts(b, expr->u.binary.lhs, &lhs_bits) &&
+      ixs_bounds_get_bitfacts(b, expr->u.binary.rhs, &rhs_bits)) {
+    bitfacts_apply_xor(&result_bits, &lhs_bits, &rhs_bits);
+    possible &= ~result_bits.known_zero;
+    required = result_bits.known_one & span;
+  }
+  if (required > possible)
+    return ixs_interval_unknown();
+  result.lo_p = (int64_t)required;
+  result.hi_p = (int64_t)possible;
+  result.hi_q = 1;
+  return result;
+}
+
 static inline ixs_interval bounds_get_symbol(ixs_bounds *b, ixs_node *expr) {
   ixs_var_bound *v = find_var(b, expr->u.name);
   return v ? v->iv : ixs_interval_unknown();
@@ -2245,19 +2295,23 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
   result = ixs_interval_exact(cp, cq);
   for (i = 0; i < expr->u.mul.nfactors; i++) {
     int32_t exp = expr->u.mul.factors[i].exp;
+    int64_t exp64 = exp;
+    uint32_t magnitude;
     ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[i].base);
+    ixs_interval powered;
     if (!fi.valid)
       return ixs_interval_unknown();
-    if (exp == 1) {
-      result = iv_mul(result, fi);
-    } else if (exp == -1) {
-      ixs_interval ri = iv_recip(fi);
-      if (!ri.valid)
-        return ixs_interval_unknown();
-      result = iv_mul(result, ri);
-    } else {
+    if (exp == 0)
       return ixs_interval_unknown();
-    }
+    magnitude = (uint32_t)(exp64 < 0 ? -exp64 : exp64);
+    if (magnitude > RANGE_POWER_EXP_LIMIT)
+      return ixs_interval_unknown();
+    powered = iv_pow(fi, magnitude);
+    if (exp < 0)
+      powered = iv_recip(powered);
+    if (!powered.valid)
+      return ixs_interval_unknown();
+    result = iv_mul(result, powered);
   }
   return result;
 }
@@ -2407,6 +2461,175 @@ static inline ixs_interval bounds_get_extrema(ixs_bounds *b, ixs_node *expr,
   return result;
 }
 
+static ixs_cmp_op bounds_negate_cmp_op(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LE;
+  case IXS_CMP_GE:
+    return IXS_CMP_LT;
+  case IXS_CMP_LT:
+    return IXS_CMP_GE;
+  case IXS_CMP_LE:
+    return IXS_CMP_GT;
+  case IXS_CMP_EQ:
+    return IXS_CMP_NE;
+  case IXS_CMP_NE:
+    return IXS_CMP_EQ;
+  }
+  return op;
+}
+
+static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
+                                             bool value, ixs_node *storage) {
+  if (!b->ctx)
+    return NULL;
+  memset(storage, 0, sizeof(*storage));
+  storage->tag = IXS_CMP;
+  storage->u.binary.rhs = b->ctx->node_zero;
+  if (cond->tag == IXS_CMP) {
+    storage->u.binary.lhs = cond->u.binary.lhs;
+    storage->u.binary.rhs = cond->u.binary.rhs;
+    storage->u.binary.cmp_op =
+        value ? cond->u.binary.cmp_op
+              : bounds_negate_cmp_op(cond->u.binary.cmp_op);
+  } else {
+    storage->u.binary.lhs = cond;
+    storage->u.binary.cmp_op = value ? IXS_CMP_NE : IXS_CMP_EQ;
+  }
+  return storage;
+}
+
+static ixs_check_result bounds_condition_truth(ixs_bounds *b, ixs_node *cond) {
+  ixs_node cmp;
+  if (ixs_node_is_known_false(cond))
+    return IXS_CHECK_FALSE;
+  if (ixs_node_is_known_true(cond))
+    return IXS_CHECK_TRUE;
+  if (!bounds_condition_assumption(b, cond, true, &cmp))
+    return IXS_CHECK_UNKNOWN;
+  return ixs_bounds_check(b, &cmp);
+}
+
+static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
+                                    ixs_node *cond, ixs_node *value,
+                                    ixs_interval *result, bool *have_result) {
+  ixs_arena_mark mark = ixs_arena_save(owner->scratch);
+  ixs_bounds active;
+  ixs_node assumption;
+  ixs_interval branch;
+  bool ok = false;
+
+  memset(&active, 0, sizeof(active));
+  if (!ixs_bounds_fork(&active, remaining)) {
+    owner->oom = true;
+    goto cleanup;
+  }
+  if (!ixs_bounds_add_assumption(
+          &active,
+          bounds_condition_assumption(&active, cond, true, &assumption))) {
+    if (active.oom)
+      owner->oom = true;
+    goto cleanup;
+  }
+  if (ixs_bounds_has_empty(&active)) {
+    ok = true;
+    goto cleanup;
+  }
+  if (ixs_bounds_check_defined(&active, value) != IXS_CHECK_TRUE)
+    goto cleanup;
+  branch = ixs_bounds_get(&active, value);
+  if (!branch.valid)
+    goto cleanup;
+  if (!*have_result) {
+    *result = branch;
+    *have_result = true;
+  } else {
+    *result = iv_hull(*result, branch);
+  }
+  ok = true;
+
+cleanup:
+  if (active.oom)
+    owner->oom = true;
+  ixs_arena_restore(owner->scratch, mark);
+  return ok;
+}
+
+static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval result = ixs_interval_unknown();
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  bool have_result = false;
+  bool covered = false;
+  bool failed = false;
+  uint32_t i;
+
+  if (!b->ctx || b->range_pw_depth >= RANGE_PW_DEPTH_LIMIT ||
+      expr->u.pw.ncases == 0 || expr->u.pw.ncases > RANGE_PW_CASE_LIMIT ||
+      (expr->u.pw.ncases > 0 && !expr->u.pw.cases))
+    return result;
+
+  outer_mark = ixs_arena_save(b->scratch);
+  b->range_pw_depth++;
+  if (!ixs_bounds_fork(&remaining, b)) {
+    b->oom = true;
+    failed = true;
+    goto cleanup;
+  }
+
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    ixs_node *cond = expr->u.pw.cases[i].cond;
+    ixs_node *value = expr->u.pw.cases[i].value;
+    ixs_check_result truth;
+    ixs_node assumption;
+
+    if (!cond || !value || remaining.oom) {
+      failed = true;
+      break;
+    }
+    if (ixs_bounds_has_empty(&remaining)) {
+      covered = true;
+      break;
+    }
+    if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
+      failed = true;
+      break;
+    }
+    truth = bounds_condition_truth(&remaining, cond);
+    if (truth == IXS_CHECK_FALSE)
+      continue;
+
+    if (!bounds_piecewise_active(b, &remaining, cond, value, &result,
+                                 &have_result)) {
+      failed = true;
+      break;
+    }
+    if (truth == IXS_CHECK_TRUE) {
+      covered = true;
+      break;
+    }
+    if (!ixs_bounds_add_assumption(
+            &remaining, bounds_condition_assumption(&remaining, cond, false,
+                                                    &assumption))) {
+      b->oom = true;
+      failed = true;
+      break;
+    }
+  }
+
+  if (!failed && !covered && ixs_bounds_has_empty(&remaining))
+    covered = true;
+  if (!covered)
+    failed = true;
+
+cleanup:
+  ixs_arena_restore(b->scratch, outer_mark);
+  b->range_pw_depth--;
+  if (failed || !have_result)
+    return ixs_interval_unknown();
+  return result;
+}
+
 static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
                                                  ixs_node *expr) {
   if (!expr)
@@ -2435,6 +2658,10 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
     return bounds_get_extrema(b, expr, false);
   case IXS_AND:
     return bounds_get_and_mask(expr);
+  case IXS_XOR:
+    return bounds_get_xor(b, expr);
+  case IXS_PIECEWISE:
+    return bounds_get_piecewise(b, expr);
   default:
     return ixs_interval_unknown();
   }
@@ -6603,22 +6830,160 @@ IXS_STATIC ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
   return r;
 }
 
-IXS_STATIC ixs_interval iv_recip(ixs_interval a) {
+static bool iv_rat_pow(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                       int64_t *rq) {
+  int64_t base_p = p, base_q = q;
+  int64_t result_p = 1, result_q = 1;
+
+  while (exp != 0) {
+    if ((exp & 1u) != 0u &&
+        !ixs_rat_mul(result_p, result_q, base_p, base_q, &result_p, &result_q))
+      return false;
+    exp >>= 1;
+    if (exp != 0 &&
+        !ixs_rat_mul(base_p, base_q, base_p, base_q, &base_p, &base_q))
+      return false;
+  }
+  *rp = result_p;
+  *rq = result_q;
+  return true;
+}
+
+static void iv_pow_lower(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                         int64_t *rq, bool *neg_inf) {
+  *neg_inf = false;
+  if (iv_rat_pow(p, q, exp, rp, rq))
+    return;
+  if (p < 0 && (exp & 1u) != 0u) {
+    *neg_inf = true;
+    ixs_interval_set_neg_inf(rp, rq);
+  } else {
+    *rp = 0;
+    *rq = 1;
+  }
+}
+
+static void iv_pow_upper(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                         int64_t *rq, bool *pos_inf) {
+  *pos_inf = false;
+  if (iv_rat_pow(p, q, exp, rp, rq))
+    return;
+  if (p >= 0 || (exp & 1u) == 0u) {
+    *pos_inf = true;
+    ixs_interval_set_pos_inf(rp, rq);
+  } else {
+    *rp = 0;
+    *rq = 1;
+  }
+}
+
+IXS_STATIC ixs_interval iv_pow(ixs_interval a, uint32_t exp) {
   ixs_interval r;
-  if (!a.valid || ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) <= 0)
+  int lo_cmp, hi_cmp;
+
+  if (!a.valid)
     return ixs_interval_unknown();
+  if (exp == 0)
+    return ixs_interval_exact(1, 1);
+
   r.valid = true;
   r.lo_inf = false;
   r.hi_inf = false;
-  if (a.hi_inf) {
-    r.lo_p = 0;
-    r.lo_q = 1;
-  } else {
-    r.lo_p = a.hi_q;
-    r.lo_q = a.hi_p;
+  lo_cmp = a.lo_inf ? -1 : ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1);
+  hi_cmp = a.hi_inf ? 1 : ixs_rat_cmp(a.hi_p, a.hi_q, 0, 1);
+
+  if ((exp & 1u) != 0u) {
+    if (a.lo_inf)
+      ixs_interval_set_lo_neg_inf(&r);
+    else
+      iv_pow_lower(a.lo_p, a.lo_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.hi_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.hi_p, a.hi_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
   }
-  r.hi_p = a.lo_q;
-  r.hi_q = a.lo_p;
+
+  if (lo_cmp >= 0) {
+    iv_pow_lower(a.lo_p, a.lo_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.hi_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.hi_p, a.hi_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
+  }
+
+  if (hi_cmp <= 0) {
+    iv_pow_lower(a.hi_p, a.hi_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.lo_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.lo_p, a.lo_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
+  }
+
+  r.lo_p = 0;
+  r.lo_q = 1;
+  if (a.lo_inf || a.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&r);
+  } else {
+    int64_t lp, lq, hp, hq;
+    bool linf, hinf;
+    iv_pow_upper(a.lo_p, a.lo_q, exp, &lp, &lq, &linf);
+    iv_pow_upper(a.hi_p, a.hi_q, exp, &hp, &hq, &hinf);
+    if (linf || hinf) {
+      ixs_interval_set_hi_pos_inf(&r);
+    } else if (ixs_rat_cmp(lp, lq, hp, hq) >= 0) {
+      r.hi_p = lp;
+      r.hi_q = lq;
+    } else {
+      r.hi_p = hp;
+      r.hi_q = hq;
+    }
+  }
+  return r;
+}
+
+static bool iv_recip_endpoint(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
+  return ixs_rat_div(1, 1, p, q, rp, rq);
+}
+
+IXS_STATIC ixs_interval iv_recip(ixs_interval a) {
+  ixs_interval r;
+  bool positive, negative;
+
+  if (!a.valid)
+    return ixs_interval_unknown();
+  positive = !a.lo_inf && ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) > 0;
+  negative = !a.hi_inf && ixs_rat_cmp(a.hi_p, a.hi_q, 0, 1) < 0;
+  if (!positive && !negative)
+    return ixs_interval_unknown();
+
+  r.valid = true;
+  r.lo_inf = false;
+  r.hi_inf = false;
+
+  if (positive) {
+    if (a.hi_inf) {
+      r.lo_p = 0;
+      r.lo_q = 1;
+    } else if (!iv_recip_endpoint(a.hi_p, a.hi_q, &r.lo_p, &r.lo_q)) {
+      r.lo_p = 0;
+      r.lo_q = 1;
+    }
+    if (!iv_recip_endpoint(a.lo_p, a.lo_q, &r.hi_p, &r.hi_q))
+      ixs_interval_set_hi_pos_inf(&r);
+  } else {
+    if (!iv_recip_endpoint(a.hi_p, a.hi_q, &r.lo_p, &r.lo_q))
+      ixs_interval_set_lo_neg_inf(&r);
+    if (a.lo_inf) {
+      r.hi_p = 0;
+      r.hi_q = 1;
+    } else if (!iv_recip_endpoint(a.lo_p, a.lo_q, &r.hi_p, &r.hi_q)) {
+      r.hi_p = 0;
+      r.hi_q = 1;
+    }
+  }
   return r;
 }
 
@@ -6667,6 +7032,34 @@ IXS_STATIC ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
   }
   if (!r.lo_inf && !r.hi_inf && ixs_rat_cmp(r.lo_p, r.lo_q, r.hi_p, r.hi_q) > 0)
     r.valid = false;
+  return r;
+}
+
+IXS_STATIC ixs_interval iv_hull(ixs_interval a, ixs_interval b) {
+  ixs_interval r;
+  if (!a.valid || !b.valid)
+    return ixs_interval_unknown();
+  r.valid = true;
+  r.lo_inf = false;
+  r.hi_inf = false;
+  if (a.lo_inf || b.lo_inf) {
+    ixs_interval_set_lo_neg_inf(&r);
+  } else if (ixs_rat_cmp(a.lo_p, a.lo_q, b.lo_p, b.lo_q) <= 0) {
+    r.lo_p = a.lo_p;
+    r.lo_q = a.lo_q;
+  } else {
+    r.lo_p = b.lo_p;
+    r.lo_q = b.lo_q;
+  }
+  if (a.hi_inf || b.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&r);
+  } else if (ixs_rat_cmp(a.hi_p, a.hi_q, b.hi_p, b.hi_q) >= 0) {
+    r.hi_p = a.hi_p;
+    r.hi_q = a.hi_q;
+  } else {
+    r.hi_p = b.hi_p;
+    r.hi_q = b.hi_q;
+  }
   return r;
 }
 

@@ -11,6 +11,9 @@
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
+#define RANGE_POWER_EXP_LIMIT 64u
+#define RANGE_PW_DEPTH_LIMIT 32u
+#define RANGE_PW_CASE_LIMIT 1024u
 
 static void bounds_cache_clear(ixs_bounds *b) {
   if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
@@ -73,6 +76,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nonzero_cap = 0;
   b->cache = NULL;
   b->cache_cap = 0;
+  b->range_pw_depth = 0;
   b->contradiction = false;
   b->oom = false;
   if (b->vars)
@@ -112,6 +116,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nonzero = NULL;
   dst->cache = NULL;
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
+  dst->range_pw_depth = src->range_pw_depth;
   dst->contradiction = src->contradiction;
   dst->oom = false;
   if (src->nexprs) {
@@ -1979,6 +1984,51 @@ static ixs_interval bounds_get_and_mask(ixs_node *expr) {
   return ixs_interval_unknown();
 }
 
+static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval lhs, rhs, result;
+  ixs_bitfacts lhs_bits, rhs_bits, result_bits;
+  int64_t lhs_hi, rhs_hi;
+  uint64_t span, possible, required;
+
+  if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) ||
+      !ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs))
+    return ixs_interval_unknown();
+  lhs = ixs_bounds_get(b, expr->u.binary.lhs);
+  rhs = ixs_bounds_get(b, expr->u.binary.rhs);
+  if (!interval_lower_at_least(&lhs, 0, 1) ||
+      !interval_lower_at_least(&rhs, 0, 1))
+    return ixs_interval_unknown();
+
+  result = ixs_interval_unknown();
+  result.valid = true;
+  result.lo_p = 0;
+  result.lo_q = 1;
+  result.lo_inf = false;
+  result.hi_inf = false;
+  if (lhs.hi_inf || rhs.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&result);
+    return result;
+  }
+
+  lhs_hi = ixs_rat_floor(lhs.hi_p, lhs.hi_q);
+  rhs_hi = ixs_rat_floor(rhs.hi_p, rhs.hi_q);
+  span = value_span_mask((uint64_t)(lhs_hi >= rhs_hi ? lhs_hi : rhs_hi));
+  possible = span;
+  required = 0;
+  if (ixs_bounds_get_bitfacts(b, expr->u.binary.lhs, &lhs_bits) &&
+      ixs_bounds_get_bitfacts(b, expr->u.binary.rhs, &rhs_bits)) {
+    bitfacts_apply_xor(&result_bits, &lhs_bits, &rhs_bits);
+    possible &= ~result_bits.known_zero;
+    required = result_bits.known_one & span;
+  }
+  if (required > possible)
+    return ixs_interval_unknown();
+  result.lo_p = (int64_t)required;
+  result.hi_p = (int64_t)possible;
+  result.hi_q = 1;
+  return result;
+}
+
 static inline ixs_interval bounds_get_symbol(ixs_bounds *b, ixs_node *expr) {
   ixs_var_bound *v = find_var(b, expr->u.name);
   return v ? v->iv : ixs_interval_unknown();
@@ -2006,19 +2056,23 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
   result = ixs_interval_exact(cp, cq);
   for (i = 0; i < expr->u.mul.nfactors; i++) {
     int32_t exp = expr->u.mul.factors[i].exp;
+    int64_t exp64 = exp;
+    uint32_t magnitude;
     ixs_interval fi = ixs_bounds_get(b, expr->u.mul.factors[i].base);
+    ixs_interval powered;
     if (!fi.valid)
       return ixs_interval_unknown();
-    if (exp == 1) {
-      result = iv_mul(result, fi);
-    } else if (exp == -1) {
-      ixs_interval ri = iv_recip(fi);
-      if (!ri.valid)
-        return ixs_interval_unknown();
-      result = iv_mul(result, ri);
-    } else {
+    if (exp == 0)
       return ixs_interval_unknown();
-    }
+    magnitude = (uint32_t)(exp64 < 0 ? -exp64 : exp64);
+    if (magnitude > RANGE_POWER_EXP_LIMIT)
+      return ixs_interval_unknown();
+    powered = iv_pow(fi, magnitude);
+    if (exp < 0)
+      powered = iv_recip(powered);
+    if (!powered.valid)
+      return ixs_interval_unknown();
+    result = iv_mul(result, powered);
   }
   return result;
 }
@@ -2168,6 +2222,175 @@ static inline ixs_interval bounds_get_extrema(ixs_bounds *b, ixs_node *expr,
   return result;
 }
 
+static ixs_cmp_op bounds_negate_cmp_op(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LE;
+  case IXS_CMP_GE:
+    return IXS_CMP_LT;
+  case IXS_CMP_LT:
+    return IXS_CMP_GE;
+  case IXS_CMP_LE:
+    return IXS_CMP_GT;
+  case IXS_CMP_EQ:
+    return IXS_CMP_NE;
+  case IXS_CMP_NE:
+    return IXS_CMP_EQ;
+  }
+  return op;
+}
+
+static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
+                                             bool value, ixs_node *storage) {
+  if (!b->ctx)
+    return NULL;
+  memset(storage, 0, sizeof(*storage));
+  storage->tag = IXS_CMP;
+  storage->u.binary.rhs = b->ctx->node_zero;
+  if (cond->tag == IXS_CMP) {
+    storage->u.binary.lhs = cond->u.binary.lhs;
+    storage->u.binary.rhs = cond->u.binary.rhs;
+    storage->u.binary.cmp_op =
+        value ? cond->u.binary.cmp_op
+              : bounds_negate_cmp_op(cond->u.binary.cmp_op);
+  } else {
+    storage->u.binary.lhs = cond;
+    storage->u.binary.cmp_op = value ? IXS_CMP_NE : IXS_CMP_EQ;
+  }
+  return storage;
+}
+
+static ixs_check_result bounds_condition_truth(ixs_bounds *b, ixs_node *cond) {
+  ixs_node cmp;
+  if (ixs_node_is_known_false(cond))
+    return IXS_CHECK_FALSE;
+  if (ixs_node_is_known_true(cond))
+    return IXS_CHECK_TRUE;
+  if (!bounds_condition_assumption(b, cond, true, &cmp))
+    return IXS_CHECK_UNKNOWN;
+  return ixs_bounds_check(b, &cmp);
+}
+
+static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
+                                    ixs_node *cond, ixs_node *value,
+                                    ixs_interval *result, bool *have_result) {
+  ixs_arena_mark mark = ixs_arena_save(owner->scratch);
+  ixs_bounds active;
+  ixs_node assumption;
+  ixs_interval branch;
+  bool ok = false;
+
+  memset(&active, 0, sizeof(active));
+  if (!ixs_bounds_fork(&active, remaining)) {
+    owner->oom = true;
+    goto cleanup;
+  }
+  if (!ixs_bounds_add_assumption(
+          &active,
+          bounds_condition_assumption(&active, cond, true, &assumption))) {
+    if (active.oom)
+      owner->oom = true;
+    goto cleanup;
+  }
+  if (ixs_bounds_has_empty(&active)) {
+    ok = true;
+    goto cleanup;
+  }
+  if (ixs_bounds_check_defined(&active, value) != IXS_CHECK_TRUE)
+    goto cleanup;
+  branch = ixs_bounds_get(&active, value);
+  if (!branch.valid)
+    goto cleanup;
+  if (!*have_result) {
+    *result = branch;
+    *have_result = true;
+  } else {
+    *result = iv_hull(*result, branch);
+  }
+  ok = true;
+
+cleanup:
+  if (active.oom)
+    owner->oom = true;
+  ixs_arena_restore(owner->scratch, mark);
+  return ok;
+}
+
+static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval result = ixs_interval_unknown();
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  bool have_result = false;
+  bool covered = false;
+  bool failed = false;
+  uint32_t i;
+
+  if (!b->ctx || b->range_pw_depth >= RANGE_PW_DEPTH_LIMIT ||
+      expr->u.pw.ncases == 0 || expr->u.pw.ncases > RANGE_PW_CASE_LIMIT ||
+      (expr->u.pw.ncases > 0 && !expr->u.pw.cases))
+    return result;
+
+  outer_mark = ixs_arena_save(b->scratch);
+  b->range_pw_depth++;
+  if (!ixs_bounds_fork(&remaining, b)) {
+    b->oom = true;
+    failed = true;
+    goto cleanup;
+  }
+
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    ixs_node *cond = expr->u.pw.cases[i].cond;
+    ixs_node *value = expr->u.pw.cases[i].value;
+    ixs_check_result truth;
+    ixs_node assumption;
+
+    if (!cond || !value || remaining.oom) {
+      failed = true;
+      break;
+    }
+    if (ixs_bounds_has_empty(&remaining)) {
+      covered = true;
+      break;
+    }
+    if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
+      failed = true;
+      break;
+    }
+    truth = bounds_condition_truth(&remaining, cond);
+    if (truth == IXS_CHECK_FALSE)
+      continue;
+
+    if (!bounds_piecewise_active(b, &remaining, cond, value, &result,
+                                 &have_result)) {
+      failed = true;
+      break;
+    }
+    if (truth == IXS_CHECK_TRUE) {
+      covered = true;
+      break;
+    }
+    if (!ixs_bounds_add_assumption(
+            &remaining, bounds_condition_assumption(&remaining, cond, false,
+                                                    &assumption))) {
+      b->oom = true;
+      failed = true;
+      break;
+    }
+  }
+
+  if (!failed && !covered && ixs_bounds_has_empty(&remaining))
+    covered = true;
+  if (!covered)
+    failed = true;
+
+cleanup:
+  ixs_arena_restore(b->scratch, outer_mark);
+  b->range_pw_depth--;
+  if (failed || !have_result)
+    return ixs_interval_unknown();
+  return result;
+}
+
 static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
                                                  ixs_node *expr) {
   if (!expr)
@@ -2196,6 +2419,10 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
     return bounds_get_extrema(b, expr, false);
   case IXS_AND:
     return bounds_get_and_mask(expr);
+  case IXS_XOR:
+    return bounds_get_xor(b, expr);
+  case IXS_PIECEWISE:
+    return bounds_get_piecewise(b, expr);
   default:
     return ixs_interval_unknown();
   }

@@ -174,22 +174,160 @@ IXS_STATIC ixs_interval iv_mul(ixs_interval a, ixs_interval b) {
   return r;
 }
 
-IXS_STATIC ixs_interval iv_recip(ixs_interval a) {
+static bool iv_rat_pow(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                       int64_t *rq) {
+  int64_t base_p = p, base_q = q;
+  int64_t result_p = 1, result_q = 1;
+
+  while (exp != 0) {
+    if ((exp & 1u) != 0u &&
+        !ixs_rat_mul(result_p, result_q, base_p, base_q, &result_p, &result_q))
+      return false;
+    exp >>= 1;
+    if (exp != 0 &&
+        !ixs_rat_mul(base_p, base_q, base_p, base_q, &base_p, &base_q))
+      return false;
+  }
+  *rp = result_p;
+  *rq = result_q;
+  return true;
+}
+
+static void iv_pow_lower(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                         int64_t *rq, bool *neg_inf) {
+  *neg_inf = false;
+  if (iv_rat_pow(p, q, exp, rp, rq))
+    return;
+  if (p < 0 && (exp & 1u) != 0u) {
+    *neg_inf = true;
+    ixs_interval_set_neg_inf(rp, rq);
+  } else {
+    *rp = 0;
+    *rq = 1;
+  }
+}
+
+static void iv_pow_upper(int64_t p, int64_t q, uint32_t exp, int64_t *rp,
+                         int64_t *rq, bool *pos_inf) {
+  *pos_inf = false;
+  if (iv_rat_pow(p, q, exp, rp, rq))
+    return;
+  if (p >= 0 || (exp & 1u) == 0u) {
+    *pos_inf = true;
+    ixs_interval_set_pos_inf(rp, rq);
+  } else {
+    *rp = 0;
+    *rq = 1;
+  }
+}
+
+IXS_STATIC ixs_interval iv_pow(ixs_interval a, uint32_t exp) {
   ixs_interval r;
-  if (!a.valid || ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) <= 0)
+  int lo_cmp, hi_cmp;
+
+  if (!a.valid)
     return ixs_interval_unknown();
+  if (exp == 0)
+    return ixs_interval_exact(1, 1);
+
   r.valid = true;
   r.lo_inf = false;
   r.hi_inf = false;
-  if (a.hi_inf) {
-    r.lo_p = 0;
-    r.lo_q = 1;
-  } else {
-    r.lo_p = a.hi_q;
-    r.lo_q = a.hi_p;
+  lo_cmp = a.lo_inf ? -1 : ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1);
+  hi_cmp = a.hi_inf ? 1 : ixs_rat_cmp(a.hi_p, a.hi_q, 0, 1);
+
+  if ((exp & 1u) != 0u) {
+    if (a.lo_inf)
+      ixs_interval_set_lo_neg_inf(&r);
+    else
+      iv_pow_lower(a.lo_p, a.lo_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.hi_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.hi_p, a.hi_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
   }
-  r.hi_p = a.lo_q;
-  r.hi_q = a.lo_p;
+
+  if (lo_cmp >= 0) {
+    iv_pow_lower(a.lo_p, a.lo_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.hi_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.hi_p, a.hi_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
+  }
+
+  if (hi_cmp <= 0) {
+    iv_pow_lower(a.hi_p, a.hi_q, exp, &r.lo_p, &r.lo_q, &r.lo_inf);
+    if (a.lo_inf)
+      ixs_interval_set_hi_pos_inf(&r);
+    else
+      iv_pow_upper(a.lo_p, a.lo_q, exp, &r.hi_p, &r.hi_q, &r.hi_inf);
+    return r;
+  }
+
+  r.lo_p = 0;
+  r.lo_q = 1;
+  if (a.lo_inf || a.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&r);
+  } else {
+    int64_t lp, lq, hp, hq;
+    bool linf, hinf;
+    iv_pow_upper(a.lo_p, a.lo_q, exp, &lp, &lq, &linf);
+    iv_pow_upper(a.hi_p, a.hi_q, exp, &hp, &hq, &hinf);
+    if (linf || hinf) {
+      ixs_interval_set_hi_pos_inf(&r);
+    } else if (ixs_rat_cmp(lp, lq, hp, hq) >= 0) {
+      r.hi_p = lp;
+      r.hi_q = lq;
+    } else {
+      r.hi_p = hp;
+      r.hi_q = hq;
+    }
+  }
+  return r;
+}
+
+static bool iv_recip_endpoint(int64_t p, int64_t q, int64_t *rp, int64_t *rq) {
+  return ixs_rat_div(1, 1, p, q, rp, rq);
+}
+
+IXS_STATIC ixs_interval iv_recip(ixs_interval a) {
+  ixs_interval r;
+  bool positive, negative;
+
+  if (!a.valid)
+    return ixs_interval_unknown();
+  positive = !a.lo_inf && ixs_rat_cmp(a.lo_p, a.lo_q, 0, 1) > 0;
+  negative = !a.hi_inf && ixs_rat_cmp(a.hi_p, a.hi_q, 0, 1) < 0;
+  if (!positive && !negative)
+    return ixs_interval_unknown();
+
+  r.valid = true;
+  r.lo_inf = false;
+  r.hi_inf = false;
+
+  if (positive) {
+    if (a.hi_inf) {
+      r.lo_p = 0;
+      r.lo_q = 1;
+    } else if (!iv_recip_endpoint(a.hi_p, a.hi_q, &r.lo_p, &r.lo_q)) {
+      r.lo_p = 0;
+      r.lo_q = 1;
+    }
+    if (!iv_recip_endpoint(a.lo_p, a.lo_q, &r.hi_p, &r.hi_q))
+      ixs_interval_set_hi_pos_inf(&r);
+  } else {
+    if (!iv_recip_endpoint(a.hi_p, a.hi_q, &r.lo_p, &r.lo_q))
+      ixs_interval_set_lo_neg_inf(&r);
+    if (a.lo_inf) {
+      r.hi_p = 0;
+      r.hi_q = 1;
+    } else if (!iv_recip_endpoint(a.lo_p, a.lo_q, &r.hi_p, &r.hi_q)) {
+      r.hi_p = 0;
+      r.hi_q = 1;
+    }
+  }
   return r;
 }
 
@@ -238,5 +376,33 @@ IXS_STATIC ixs_interval iv_intersect(ixs_interval a, ixs_interval b) {
   }
   if (!r.lo_inf && !r.hi_inf && ixs_rat_cmp(r.lo_p, r.lo_q, r.hi_p, r.hi_q) > 0)
     r.valid = false;
+  return r;
+}
+
+IXS_STATIC ixs_interval iv_hull(ixs_interval a, ixs_interval b) {
+  ixs_interval r;
+  if (!a.valid || !b.valid)
+    return ixs_interval_unknown();
+  r.valid = true;
+  r.lo_inf = false;
+  r.hi_inf = false;
+  if (a.lo_inf || b.lo_inf) {
+    ixs_interval_set_lo_neg_inf(&r);
+  } else if (ixs_rat_cmp(a.lo_p, a.lo_q, b.lo_p, b.lo_q) <= 0) {
+    r.lo_p = a.lo_p;
+    r.lo_q = a.lo_q;
+  } else {
+    r.lo_p = b.lo_p;
+    r.lo_q = b.lo_q;
+  }
+  if (a.hi_inf || b.hi_inf) {
+    ixs_interval_set_hi_pos_inf(&r);
+  } else if (ixs_rat_cmp(a.hi_p, a.hi_q, b.hi_p, b.hi_q) >= 0) {
+    r.hi_p = a.hi_p;
+    r.hi_q = a.hi_q;
+  } else {
+    r.hi_p = b.hi_p;
+    r.hi_q = b.hi_q;
+  }
   return r;
 }

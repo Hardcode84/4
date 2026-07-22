@@ -109,10 +109,14 @@ IXS_STATIC ixs_interval iv_add(ixs_interval a, ixs_interval b);
 IXS_STATIC ixs_interval iv_mul_const(ixs_interval a, int64_t cp, int64_t cq);
 IXS_STATIC ixs_interval iv_mul(ixs_interval a, ixs_interval b);
 
-/* Reciprocal of a strictly positive interval. Returns unknown if
- * the interval contains zero or is invalid. */
+/* Positive integer power. Overflow widens only the affected endpoint. */
+IXS_STATIC ixs_interval iv_pow(ixs_interval a, uint32_t exp);
+
+/* Reciprocal of a same-sign interval. Returns unknown if the interval
+ * contains zero or is invalid. */
 IXS_STATIC ixs_interval iv_recip(ixs_interval a);
 
 IXS_STATIC ixs_interval iv_intersect(ixs_interval a, ixs_interval b);
+IXS_STATIC ixs_interval iv_hull(ixs_interval a, ixs_interval b);
 
 #endif /* IXS_INTERVAL_H */

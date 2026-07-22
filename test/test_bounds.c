@@ -166,13 +166,71 @@ static void test_iv_recip_unbounded(void) {
   CHECK(ixs_rat_cmp(r.hi_p, r.hi_q, 1, 3) == 0);
 }
 
+static void test_iv_recip_negative(void) {
+  ixs_interval a = ixs_interval_range(-4, 1, -2, 1);
+  ixs_interval r = iv_recip(a);
+  CHECK(r.valid);
+  CHECK(ixs_rat_cmp(r.lo_p, r.lo_q, -1, 2) == 0);
+  CHECK(ixs_rat_cmp(r.hi_p, r.hi_q, -1, 4) == 0);
+
+  a = ixs_interval_range(INT64_MIN, 1, -3, 1);
+  ixs_interval_set_lo_neg_inf(&a);
+  r = iv_recip(a);
+  CHECK(r.valid);
+  CHECK(ixs_rat_cmp(r.lo_p, r.lo_q, -1, 3) == 0);
+  CHECK(r.hi_p == 0 && r.hi_q == 1);
+}
+
 static void test_iv_recip_contains_zero(void) {
   ixs_interval a = ixs_interval_range(-1, 1, 5, 1);
+  CHECK(!iv_recip(a).valid);
+  a = ixs_interval_range(-1, 1, 0, 1);
+  CHECK(!iv_recip(a).valid);
+  a = ixs_interval_range(0, 1, 1, 1);
   CHECK(!iv_recip(a).valid);
 }
 
 static void test_iv_recip_invalid(void) {
   CHECK(!iv_recip(ixs_interval_unknown()).valid);
+}
+
+static void test_iv_pow_sign_and_parity(void) {
+  ixs_interval r = iv_pow(ixs_interval_range(0, 1, 15, 1), 2);
+  CHECK(r.valid && r.lo_p == 0 && r.lo_q == 1);
+  CHECK(r.hi_p == 225 && r.hi_q == 1);
+
+  r = iv_pow(ixs_interval_range(-3, 1, 5, 1), 2);
+  CHECK(r.valid && r.lo_p == 0 && r.lo_q == 1);
+  CHECK(r.hi_p == 25 && r.hi_q == 1);
+
+  r = iv_pow(ixs_interval_range(-5, 1, -3, 1), 3);
+  CHECK(r.valid && r.lo_p == -125 && r.lo_q == 1);
+  CHECK(r.hi_p == -27 && r.hi_q == 1);
+
+  r = iv_pow(ixs_interval_range(-5, 1, -3, 1), 2);
+  CHECK(r.valid && r.lo_p == 9 && r.lo_q == 1);
+  CHECK(r.hi_p == 25 && r.hi_q == 1);
+
+  r = iv_pow(ixs_interval_range(-3, 2, 5, 2), 2);
+  CHECK(r.valid && r.lo_p == 0 && r.lo_q == 1);
+  CHECK(r.hi_p == 25 && r.hi_q == 4);
+}
+
+static void test_iv_pow_limits_and_overflow(void) {
+  ixs_interval a = ixs_interval_range(INT64_MIN, 1, -2, 1);
+  ixs_interval r;
+  ixs_interval_set_lo_neg_inf(&a);
+  r = iv_pow(a, 2);
+  CHECK(r.valid && r.lo_p == 4 && r.lo_q == 1);
+  CHECK(r.hi_inf);
+
+  r = iv_pow(ixs_interval_range(INT64_MAX - 1, 1, INT64_MAX, 1), 2);
+  CHECK(r.valid && r.lo_p == 0 && r.lo_q == 1);
+  CHECK(r.hi_inf);
+
+  r = iv_pow(ixs_interval_range(-2, 1, 3, 1), 0);
+  CHECK(r.valid && r.lo_p == 1 && r.hi_p == 1);
+  CHECK(!iv_pow(ixs_interval_unknown(), 2).valid);
 }
 
 static void test_iv_intersect_basic(void) {
@@ -203,6 +261,15 @@ static void test_iv_intersect_one_invalid(void) {
   CHECK(r.valid);
   CHECK(r.lo_p == 0 && r.lo_q == 1);
   CHECK(r.hi_p == 10 && r.hi_q == 1);
+}
+
+static void test_iv_hull(void) {
+  ixs_interval a = ixs_interval_range(-3, 1, 4, 1);
+  ixs_interval b = ixs_interval_range(2, 1, 10, 1);
+  ixs_interval r = iv_hull(a, b);
+  CHECK(r.valid && r.lo_p == -3 && r.lo_q == 1);
+  CHECK(r.hi_p == 10 && r.hi_q == 1);
+  CHECK(!iv_hull(a, ixs_interval_unknown()).valid);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1261,6 +1328,178 @@ static ixs_node *raw_power(ixs_ctx *ctx, ixs_node *base, int32_t exp) {
   factor.base = base;
   factor.exp = exp;
   return ixs_node_mul(ctx, ctx->node_one, 1, &factor);
+}
+
+static void test_public_range_powers(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "power_x");
+  ixs_node *assumes[2];
+  ixs_range_result r;
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, 2), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 225 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -3));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, 2), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 25 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -5));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, -3));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, 3), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == -125 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == -27 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 4));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, -2), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 1 && r.lower_q == 16);
+  CHECK(r.has_upper && r.upper_p == 1 && r.upper_q == 4);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -4));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, -2));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, -3), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == -1 && r.lower_q == 8);
+  CHECK(r.has_upper && r.upper_p == -1 && r.upper_q == 64);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -1));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 1));
+  CHECK(!ixs_range(ctx, raw_power(ctx, x, -2), assumes, 2, &r));
+  CHECK(!ixs_range(ctx, raw_power(ctx, x, 65), assumes, 2, &r));
+  CHECK(!ixs_range(ctx, raw_power(ctx, x, INT32_MIN), assumes, 2, &r));
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, INT64_MAX - 1));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, INT64_MAX));
+  CHECK(ixs_range(ctx, raw_power(ctx, x, 2), assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(!r.has_upper);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_xor(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "xor_x");
+  ixs_node *y = ixs_sym(ctx, "xor_y");
+  ixs_node *expr = ixs_xor(ctx, x, y);
+  ixs_node *assumes[4];
+  ixs_range_result r;
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  assumes[2] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[3] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(ixs_range(ctx, expr, assumes, 4, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 15)), IXS_CMP_EQ,
+                       ixs_int(ctx, 5));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[2] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  assumes[3] = ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_int(ctx, 3));
+  CHECK(ixs_range(ctx, expr, assumes, 4, &r));
+  CHECK(r.has_lower && r.lower_p == 6 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 6 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[2] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(ixs_range(ctx, expr, assumes, 3, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(!r.has_upper);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -1));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  assumes[2] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[3] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(!ixs_range(ctx, expr, assumes, 4, &r));
+
+  expr = ixs_xor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), y);
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(!ixs_range(ctx, expr, assumes, 4, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_piecewise(void) {
+  enum { MANY_CASES = 1025 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "range_pw_x");
+  ixs_node *y = ixs_sym(ctx, "range_pw_y");
+  ixs_node *assumes[2];
+  ixs_node *values[3];
+  ixs_node *conds[3];
+  ixs_node *expr;
+  ixs_range_result r;
+  ixs_pwcase raw_case;
+  ixs_pwcase many_cases[MANY_CASES];
+  unsigned i;
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31));
+  values[0] = x;
+  values[1] = ixs_sub(ctx, ixs_int(ctx, 31), x);
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  conds[1] = ixs_true(ctx);
+  expr = ixs_pw(ctx, 2, values, conds);
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
+
+  values[0] = ixs_div(ctx, ixs_int(ctx, 1), x);
+  values[1] = x;
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0));
+  conds[1] = ixs_true(ctx);
+  expr = ixs_pw(ctx, 2, values, conds);
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 31 && r.upper_q == 1);
+
+  values[0] = x;
+  values[1] = ixs_int(ctx, 1000);
+  values[2] = ixs_sub(ctx, ixs_int(ctx, 31), x);
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  conds[1] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
+  conds[2] = ixs_true(ctx);
+  expr = ixs_pw(ctx, 3, values, conds);
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
+
+  values[0] = x;
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  expr = ixs_pw(ctx, 1, values, conds);
+  CHECK(!ixs_range(ctx, expr, assumes, 2, &r));
+
+  values[0] = y;
+  values[1] = ixs_int(ctx, 0);
+  conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
+  conds[1] = ixs_true(ctx);
+  expr = ixs_pw(ctx, 2, values, conds);
+  CHECK(!ixs_range(ctx, expr, assumes, 2, &r));
+
+  expr = ixs_int(ctx, 1);
+  raw_case.cond = ixs_true(ctx);
+  for (i = 0; i <= 32u; i++) {
+    raw_case.value = expr;
+    expr = ixs_node_pw(ctx, 1, &raw_case);
+  }
+  CHECK(!ixs_range(ctx, expr, NULL, 0, &r));
+
+  for (i = 0; i < MANY_CASES; i++) {
+    many_cases[i].value = ixs_int(ctx, 1);
+    many_cases[i].cond = ixs_true(ctx);
+  }
+  expr = ixs_node_pw(ctx, MANY_CASES, many_cases);
+  CHECK(!ixs_range(ctx, expr, NULL, 0, &r));
+
+  ixs_ctx_destroy(ctx);
 }
 
 static void test_failed_expand_is_not_expression_fact_alias(void) {
@@ -2641,11 +2880,15 @@ int main(void) {
   test_iv_mul_invalid();
   test_iv_recip_basic();
   test_iv_recip_unbounded();
+  test_iv_recip_negative();
   test_iv_recip_contains_zero();
   test_iv_recip_invalid();
+  test_iv_pow_sign_and_parity();
+  test_iv_pow_limits_and_overflow();
   test_iv_intersect_basic();
   test_iv_intersect_empty();
   test_iv_intersect_one_invalid();
+  test_iv_hull();
 
   /* Endpoint widening */
   test_iv_endpoint_widen_positive();
@@ -2715,6 +2958,9 @@ int main(void) {
   test_public_range_mod_requires_positive_divisor();
   test_public_range_composite_predicate_fact();
   test_public_facts_range_and_transfer();
+  test_public_range_powers();
+  test_public_range_xor();
+  test_public_range_piecewise();
   test_failed_expand_is_not_expression_fact_alias();
   test_public_facts_assume_conjunction();
   test_compound_assumption_legacy_fact_parity();

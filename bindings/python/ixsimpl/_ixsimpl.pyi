@@ -196,7 +196,9 @@ class Context:
         *,
         assumptions: Sequence[_Expr] | None = None,
         facts: Facts | None = None,
-    ) -> tuple[int | Fraction | None, int | Fraction | None] | None: ...
+    ) -> tuple[int | Fraction | None, int | Fraction | None] | None:
+        """Infer bounds through supported powers, XOR, and first-match Piecewise."""
+
     def simplify_batch(
         self,
         exprs: Sequence[_Expr],

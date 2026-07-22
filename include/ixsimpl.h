@@ -255,7 +255,9 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
                                 size_t n_assumptions);
 
-/* Infer an inclusive rational range for expr under assumptions.
+/* Infer an inclusive rational range for expr under assumptions. Propagation
+ * includes bounded integer powers, sound nonnegative XOR, and first-match
+ * Piecewise branch hulls; unsupported domains remain unknown.
  * Returns false when the interval engine cannot derive a range, on OOM,
  * for NULL/sentinel expr, or when out is NULL.  Unbounded sides are reported
  * with has_lower/has_upper false; finite endpoints are exact p/q rationals. */

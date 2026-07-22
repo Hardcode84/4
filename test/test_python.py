@@ -1257,6 +1257,100 @@ def test_range_soundness(expr: ExprTree, bounds: RangeBounds, envs: list[Env]) -
     assume(checked > 0)
 
 
+def _assert_range_contains(
+    result: tuple[int | Fraction | None, int | Fraction | None] | None,
+    value: int | Fraction,
+) -> None:
+    assert result is not None
+    lo, hi = result
+    if lo is not None:
+        assert lo <= value
+    if hi is not None:
+        assert value <= hi
+
+
+@given(
+    lo=st.integers(min_value=-8, max_value=8),
+    width=st.integers(min_value=0, max_value=8),
+    exponent=st.sampled_from([-4, -3, -2, 2, 3, 4]),
+)
+def test_power_range_soundness(lo: int, width: int, exponent: int) -> None:
+    """Power bounds contain every integer-domain evaluation."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    hi = lo + width
+    magnitude = abs(exponent)
+    positive_power = x
+    for _ in range(magnitude - 1):
+        positive_power = positive_power * x
+    expr = positive_power if exponent > 0 else ctx.int_(1) / positive_power
+    result = ctx.range(expr, assumptions=[x >= lo, x <= hi])
+
+    if exponent < 0 and lo <= 0 <= hi:
+        assert result is None
+        return
+    assert result is not None
+    for value in range(lo, hi + 1):
+        actual = value**exponent if exponent > 0 else Fraction(1, value**magnitude)
+        _assert_range_contains(result, actual)
+
+
+@given(
+    x_lo=st.integers(min_value=0, max_value=63),
+    x_width=st.integers(min_value=0, max_value=6),
+    y_lo=st.integers(min_value=0, max_value=63),
+    y_width=st.integers(min_value=0, max_value=6),
+)
+def test_xor_range_soundness(x_lo: int, x_width: int, y_lo: int, y_width: int) -> None:
+    """Nonnegative XOR bounds contain all values in the input rectangle."""
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    x_hi = x_lo + x_width
+    y_hi = y_lo + y_width
+    result = ctx.range(
+        ixsimpl.xor_(x, y),
+        assumptions=[x >= x_lo, x <= x_hi, y >= y_lo, y <= y_hi],
+    )
+
+    assert result is not None
+    for x_value in range(x_lo, x_hi + 1):
+        for y_value in range(y_lo, y_hi + 1):
+            _assert_range_contains(result, x_value ^ y_value)
+
+
+@given(
+    lo=st.integers(min_value=-16, max_value=16),
+    width=st.integers(min_value=0, max_value=12),
+    split_delta=st.integers(min_value=-2, max_value=14),
+    left_offset=st.integers(min_value=-16, max_value=16),
+    right_offset=st.integers(min_value=-16, max_value=16),
+)
+def test_piecewise_range_soundness(
+    lo: int,
+    width: int,
+    split_delta: int,
+    left_offset: int,
+    right_offset: int,
+) -> None:
+    """First-match branch hulls contain the selected branch evaluations."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    hi = lo + width
+    split = lo + split_delta
+    dead_value = ctx.int_(1) / (x - (split - 2))
+    expr = ixsimpl.pw(
+        (x + left_offset, x < split),
+        (dead_value, x < split - 1),
+        (right_offset - x, ctx.true_()),
+    )
+    result = ctx.range(expr, assumptions=[x >= lo, x <= hi])
+
+    assert result is not None
+    for value in range(lo, hi + 1):
+        actual = value + left_offset if value < split else right_offset - value
+        _assert_range_contains(result, actual)
+
+
 _LARGE_VALS_MUL = [-(1 << 30), -(1 << 30) + 1, -1, 0, 1, (1 << 30) - 1, (1 << 30)]
 _LARGE_VALS_I64 = [
     -(1 << 62),

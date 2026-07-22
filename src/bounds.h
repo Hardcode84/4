@@ -59,6 +59,7 @@ typedef struct {
   size_t nonzero_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
+  unsigned range_pw_depth;
   bool contradiction;
   bool oom;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */

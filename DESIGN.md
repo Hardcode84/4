@@ -1229,7 +1229,7 @@ This enables rules like:
   non-negative integer (verified via bounds), `0 < r < 1/lcm(denoms)`,
   so `r` is too small to shift the floor past an integer boundary.
 
-**Interval propagation through symbolic MUL/DIV**:
+**Interval propagation through powers, XOR, and Piecewise**:
 
 The bounds engine propagates intervals through `IXS_MUL` nodes with
 arbitrary numbers of factors and negative exponents (division by symbolic
@@ -1241,18 +1241,40 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   interval for `[a,b] * [c,d]` by evaluating all four corner products
   `{a*c, a*d, b*c, b*d}` and selecting the min/max.  Handles mixed-sign
   intervals correctly.
-- **Interval reciprocal** (`iv_recip`): for a strictly positive interval
-  `[a,b]` with `a > 0`, returns `[1/b, 1/a]`.  When the upper bound
-  is effectively infinite (`INT64_MAX`), the lower bound of the reciprocal
-  is `0` (safe over-approximation: `1/+inf → 0`).
+- **Integer powers** (`iv_pow`): positive exponents use checked
+  exponentiation by squaring. Odd powers preserve endpoint order. Even powers
+  select the nearer endpoint for the lower bound and the larger endpoint
+  magnitude for the upper bound, with lower bound zero when the input crosses
+  zero. `IXS_MUL` propagation accepts exponent magnitudes through 64; larger
+  or zero exponents report unknown.
+- **Interval reciprocal** (`iv_recip`): for a strictly positive or strictly
+  negative interval `[a,b]`, returns `[1/b, 1/a]`. An infinite endpoint maps
+  to zero on the corresponding side. An interval containing or touching zero
+  reports unknown, including every negative power whose powered base interval
+  crosses zero.
+- **Bitwise XOR**: propagation requires both operands to be provably integer
+  and nonnegative. Finite upper bounds determine the possible high-bit span;
+  operand known bits then tighten the result's required and possible bits. If
+  either nonnegative operand is unbounded above, the result is `[0,+inf)`.
+  A negative or sign-unknown operand reports unknown. Low-64-bit facts never
+  impose a signed or unsigned machine width on the expression.
+- **Piecewise**: propagation follows first-match semantics. Each reachable
+  branch is evaluated in a fork containing its condition and the negations of
+  all earlier conditions; dead and shadowed branches are ignored. All
+  reachable conditions and values must be proven defined, every feasible
+  input must be covered, and every reachable value must have a range. The
+  result is the hull of those branch ranges. Otherwise the query reports
+  unknown. Nested range partitioning is capped at 32 Piecewise levels and
+  1024 cases per node.
 - **Overflow widening** (`iv_endpoint_widen`): when `ixs_rat_mul` overflows
   during interval arithmetic, the endpoint is widened to `INT64_MIN` or
   `INT64_MAX` (representing −∞ or +∞) based on the sign of the factors.
   Actual interval endpoints also carry explicit infinity flags, so finite
   values equal to `INT64_MIN` or `INT64_MAX` remain distinguishable from
   unbounded sides.
-  This trades precision for soundness: the interval is always a correct
-  over-approximation.
+  Power and reciprocal endpoints use the same directional rule: a failed
+  lower endpoint widens down, while a failed upper endpoint widens up. This
+  trades precision for soundness: the interval remains an over-approximation.
 - **Public range query** (`ixs_range`, Python `Context.range`): exposes the
   same bounds-only interval query used by entailment checks.  It returns
   exact rational endpoints for the inferred inclusive interval, with
@@ -1380,11 +1402,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 
 ```
-MUL(coeff, f1^e1, f2^e2, ...) where each ei ∈ {-1, +1}:
+MUL(coeff, f1^e1, f2^e2, ...) where 0 < abs(ei) <= 64:
   result = interval(coeff)
   for each factor fi:
-    if ei == +1:  result = iv_mul(result, bounds(fi))
-    if ei == -1:  result = iv_mul(result, iv_recip(bounds(fi)))
+    powered = iv_pow(bounds(fi), abs(ei))
+    if ei < 0: powered = iv_recip(powered)
+    result = iv_mul(result, powered)
 ```
 
 Example: `floor(x / (128*K))` with `x ∈ [0,127], K ≥ 1`.

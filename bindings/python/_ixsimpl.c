@@ -2310,8 +2310,9 @@ static PyMethodDef Context_methods[] = {
      "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
      "or AND predicates."},
     {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
-     "Return an inclusive range or None. Assumptions accept CMP/boolean or "
-     "AND predicates."},
+     "Return an inclusive range or None, including supported powers, XOR, "
+     "and first-match piecewise expressions. Assumptions accept CMP/boolean "
+     "or AND predicates."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS,
      "Simplify in-place with either assumptions or a reusable fact set."},
