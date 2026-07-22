@@ -2993,6 +2993,40 @@ static ixs_node *mod_scale_extract(ixs_ctx *ctx, ixs_bounds *bnds,
 
 /* ---- Mod rule wrappers ------------------------------------------- */
 
+typedef enum {
+  MOD_DOMAIN_VALID_OR_UNKNOWN,
+  MOD_DOMAIN_ZERO,
+  MOD_DOMAIN_NEGATIVE,
+  MOD_DOMAIN_NONPOSITIVE
+} mod_domain_status;
+
+static mod_domain_status mod_divisor_domain(ixs_bounds *bnds, ixs_node *b) {
+  ixs_mod_divisor_class constant = ixs_node_classify_mod_divisor(b);
+
+  if (constant == IXS_MOD_DIVISOR_ZERO)
+    return MOD_DOMAIN_ZERO;
+  if (constant == IXS_MOD_DIVISOR_NEGATIVE)
+    return MOD_DOMAIN_NEGATIVE;
+  if (!bnds || ixs_bounds_has_empty(bnds))
+    return MOD_DOMAIN_VALID_OR_UNKNOWN;
+
+  {
+    ixs_interval iv = ixs_bounds_get(bnds, b);
+    int upper_cmp;
+
+    if (!iv.valid || ixs_interval_is_empty(iv) || iv.hi_inf)
+      return MOD_DOMAIN_VALID_OR_UNKNOWN;
+    upper_cmp = ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1);
+    if (upper_cmp < 0)
+      return MOD_DOMAIN_NEGATIVE;
+    if (upper_cmp > 0)
+      return MOD_DOMAIN_VALID_OR_UNKNOWN;
+    if (!iv.lo_inf && ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0)
+      return MOD_DOMAIN_ZERO;
+    return MOD_DOMAIN_NONPOSITIVE;
+  }
+}
+
 static ixs_node *rule_mod_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *n) {
   int64_t ap, aq, bp, bq, rp, rq;
@@ -3079,6 +3113,7 @@ static const ixs_rule mod_rules[] = {
 
 static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
                                ixs_node *b) {
+  mod_domain_status domain;
   ixs_node *node;
   if (!a || !b)
     return NULL;
@@ -3087,8 +3122,13 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
     if (prop)
       return prop;
   }
-  if (ixs_node_is_zero(b))
+  domain = mod_divisor_domain(bnds, b);
+  if (domain == MOD_DOMAIN_ZERO)
     return simp_err(ctx, "Mod: divisor is zero");
+  if (domain == MOD_DOMAIN_NEGATIVE)
+    return simp_err(ctx, "Mod: divisor is negative");
+  if (domain == MOD_DOMAIN_NONPOSITIVE)
+    return simp_err(ctx, "Mod: divisor is not positive under assumptions");
   node = ixs_node_binary(ctx, IXS_MOD, a, b, (ixs_cmp_op)0);
   if (!node)
     return NULL;

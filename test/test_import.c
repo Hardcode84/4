@@ -3,6 +3,10 @@
  */
 #include <ixsimpl.h>
 
+#ifndef IXS_TEST_AMALGAMATION
+#include "node.h"
+#endif
+
 #include <stdio.h>
 #include <string.h>
 
@@ -207,6 +211,39 @@ static void test_sentinel_mapping(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+#ifndef IXS_TEST_AMALGAMATION
+static void test_nonpositive_mod_rejected_on_import(void) {
+  ixs_ctx *src_ctx = NULL;
+  ixs_ctx *dst_ctx = NULL;
+  ixs_session src_s;
+  ixs_session dst_s;
+  ixs_node *x;
+  ixs_node *bad;
+  ixs_node *imported;
+
+  if (!init_session(&src_ctx, &src_s))
+    return;
+  if (!init_session(&dst_ctx, &dst_s)) {
+    destroy_session(src_ctx, &src_s);
+    return;
+  }
+
+  x = ixs_sym(&src_s, "x");
+  bad = ixs_node_binary(src_ctx, IXS_MOD, x, ixs_node_int(src_ctx, -3),
+                        IXS_CMP_EQ);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&dst_s);
+  imported = ixs_import_node(&dst_s, bad);
+  CHECK(imported != NULL);
+  CHECK(ixs_is_domain_error(imported));
+  CHECK(ixs_session_nerrors(&dst_s) == 1);
+  CHECK(strstr(ixs_session_error(&dst_s, 0), "negative") != NULL);
+
+  destroy_session(dst_ctx, &dst_s);
+  destroy_session(src_ctx, &src_s);
+}
+#endif
+
 static void test_import_many_zero(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
@@ -325,6 +362,9 @@ int main(void) {
   test_cross_store_import();
   test_cross_store_tag_smoke();
   test_sentinel_mapping();
+#ifndef IXS_TEST_AMALGAMATION
+  test_nonpositive_mod_rejected_on_import();
+#endif
   test_import_many_zero();
   test_import_null_inputs();
   test_import_many_failure_preserves_out();

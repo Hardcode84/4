@@ -2017,7 +2017,7 @@ static PyMethodDef module_methods[] = {
     {"ceil", (PyCFunction)mod_ceil, METH_O,
      "ceil(expr) -> Expr: apply ceiling function."},
     {"mod", (PyCFunction)mod_mod, METH_VARARGS,
-     "mod(a, b) -> Expr: floored modulo."},
+     "mod(a, b) -> Expr: floored modulo, defined for b > 0."},
     {"max_", (PyCFunction)mod_max_, METH_VARARGS,
      "max_(a, b) -> Expr: maximum."},
     {"min_", (PyCFunction)mod_min_, METH_VARARGS,

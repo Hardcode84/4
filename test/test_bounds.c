@@ -1148,6 +1148,33 @@ static void test_public_range_mod_int64_min_step(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_mod_requires_positive_divisor(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *m = ixs_sym(ctx, "m");
+  ixs_node *expr = ixs_mod(ctx, x, m);
+  ixs_node *positive[2];
+  ixs_node *negative;
+  ixs_node *mixed[2];
+  ixs_range_result r;
+
+  positive[0] = ixs_cmp(ctx, m, IXS_CMP_GE, ixs_int(ctx, 1));
+  positive[1] = ixs_cmp(ctx, m, IXS_CMP_LE, ixs_int(ctx, 8));
+  CHECK(ixs_range(ctx, expr, positive, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 7 && r.upper_q == 1);
+
+  negative = ixs_cmp(ctx, m, IXS_CMP_LT, ixs_int(ctx, 0));
+  CHECK(!ixs_range(ctx, expr, &negative, 1, &r));
+  CHECK(!ixs_range(ctx, expr, NULL, 0, &r));
+
+  mixed[0] = ixs_cmp(ctx, m, IXS_CMP_GE, ixs_int(ctx, -1));
+  mixed[1] = ixs_cmp(ctx, m, IXS_CMP_LE, ixs_int(ctx, 8));
+  CHECK(!ixs_range(ctx, expr, mixed, 2, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -1433,6 +1460,7 @@ int main(void) {
   test_public_range_unknown();
   test_public_range_int64_extrema();
   test_public_range_mod_int64_min_step();
+  test_public_range_mod_requires_positive_divisor();
   test_public_range_composite_predicate_fact();
   test_public_facts_range_and_transfer();
   test_failed_expand_is_not_expression_fact_alias();

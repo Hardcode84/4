@@ -258,6 +258,21 @@ IXS_STATIC int64_t ixs_rat_ceil(int64_t p, int64_t q) {
 
 IXS_STATIC bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
                             int64_t *rp, int64_t *rq) {
+  if (bp <= 0)
+    return false;
+
+  /* Keep integer Mod in the integer domain.  Expanding it through rational
+   * division can overflow on a large negative dividend even though the
+   * remainder is small and exactly representable. */
+  if (aq == 1 && bq == 1) {
+    int64_t rem = ap % bp;
+    if (rem < 0)
+      rem += bp;
+    *rp = rem;
+    *rq = 1;
+    return true;
+  }
+
   /* mod(a, b) = a - b * floor(a / b) */
   int64_t dp, dq;
   if (!ixs_rat_div(ap, aq, bp, bq, &dp, &dq))

@@ -584,11 +584,13 @@ overflow.
 any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
 `q < 0` normalizes to `(-p, -q)`.
 
-**Mod with negative divisor**: `Mod(x, b)` requires `b > 0`. If `b` is a
-known negative constant, the constructor returns `IXS_ERROR`. If `b` is
-symbolic, it is assumed positive (the caller's responsibility via
-assumptions). This matches the corpus where all Mod divisors are positive
-constants or expressions provably positive under assumptions.
+**Mod divisor domain**: `Mod(x, b)` requires `b > 0`. A known nonpositive
+constant returns `IXS_ERROR`. A symbolic divisor remains representable without
+a positivity proof, but substitution or assumption-aware simplification
+returns `IXS_ERROR` when it proves `b <= 0`. Unknown sign remains unresolved;
+range and modular-fact queries use no Mod-specific facts until positivity is
+proven. This matches the corpus, where every Mod divisor is a positive constant
+or is provably positive under assumptions.
 
 ### Layer 3: Parser
 
@@ -1358,6 +1360,8 @@ Each string includes the error kind and location, e.g.:
 - `"parse error: recursion depth limit (256) exceeded"`
 - `"division by zero"`
 - `"Mod: divisor is zero"`
+- `"Mod: divisor is negative"`
+- `"Mod: divisor is not positive under assumptions"`
 - `"rational overflow in multiply"`
 - `"integer literal overflow at offset 42"`
 

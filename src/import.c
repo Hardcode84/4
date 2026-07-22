@@ -343,8 +343,20 @@ static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
                                      const ixs_node *src) {
   ixs_node *lhs = import_memo_dst(state, src->u.binary.lhs);
   ixs_node *rhs = import_memo_dst(state, src->u.binary.rhs);
+  ixs_mod_divisor_class divisor;
   if (!lhs || !rhs)
     return NULL;
+  if (src->tag == IXS_MOD) {
+    divisor = ixs_node_classify_mod_divisor(rhs);
+    if (divisor == IXS_MOD_DIVISOR_ZERO) {
+      ixs_ctx_push_error(dst_ctx, "Mod: divisor is zero");
+      return dst_ctx->sentinel_error;
+    }
+    if (divisor == IXS_MOD_DIVISOR_NEGATIVE) {
+      ixs_ctx_push_error(dst_ctx, "Mod: divisor is negative");
+      return dst_ctx->sentinel_error;
+    }
+  }
   return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
 }
 

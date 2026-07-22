@@ -87,6 +87,10 @@ static void test_mod(void) {
   int64_t p, q;
   CHECK(ixs_rat_mod(17, 1, 5, 1, &p, &q) && p == 2 && q == 1);
   CHECK(ixs_rat_mod(-7, 1, 2, 1, &p, &q) && p == 1 && q == 1);
+  CHECK(ixs_rat_mod(INT64_MIN, 1, 2, 1, &p, &q) && p == 0 && q == 1);
+  CHECK(ixs_rat_mod(INT64_MIN + 1, 1, 2, 1, &p, &q) && p == 1 && q == 1);
+  CHECK(ixs_rat_mod(INT64_MIN, 1, INT64_MAX, 1, &p, &q) && p == INT64_MAX - 1 &&
+        q == 1);
   CHECK(ixs_rat_mod(0, 1, 3, 1, &p, &q) && p == 0 && q == 1);
   CHECK(ixs_rat_mod(7, 2, 3, 1, &p, &q)); /* 3.5 mod 3 = 0.5 */
 }

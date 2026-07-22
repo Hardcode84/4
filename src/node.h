@@ -198,6 +198,17 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n);
 
+typedef enum {
+  IXS_MOD_DIVISOR_UNKNOWN,
+  IXS_MOD_DIVISOR_POSITIVE,
+  IXS_MOD_DIVISOR_ZERO,
+  IXS_MOD_DIVISOR_NEGATIVE
+} ixs_mod_divisor_class;
+
+/* Classify only exact numeric constants.  Non-constant divisors are UNKNOWN. */
+IXS_STATIC ixs_mod_divisor_class
+ixs_node_classify_mod_divisor(const ixs_node *n);
+
 /* True if the node is guaranteed to produce an integer for all
  * variable assignments.  Conservative: may return false for some
  * integer-valued expressions. */

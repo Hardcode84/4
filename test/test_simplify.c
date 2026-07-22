@@ -424,6 +424,78 @@ static void test_mod_rules(void) {
   }
 }
 
+static void test_mod_divisor_contract(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *m = ixs_sym(ctx, "m");
+  ixs_node *symbolic = ixs_mod(ctx, x, m);
+  ixs_node *assumption;
+  ixs_node *assumptions[2];
+  ixs_node *result;
+
+  CHECK(ixs_node_tag(ixs_mod(ctx, x, ixs_int(ctx, 3))) == IXS_MOD);
+  CHECK(ixs_node_tag(ixs_mod(ctx, x, ixs_rat(ctx, 1, 2))) == IXS_MOD);
+  CHECK(ixs_node_int_val(
+            ixs_mod(ctx, ixs_int(ctx, INT64_MIN + 1), ixs_int(ctx, 2))) == 1);
+  CHECK(symbolic && ixs_node_tag(symbolic) == IXS_MOD);
+
+  result = ixs_mod(ctx, x, ixs_int(ctx, 0));
+  CHECK(result && ixs_is_domain_error(result));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "zero") != NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  result = ixs_mod(ctx, x, ixs_int(ctx, -3));
+  CHECK(result && ixs_is_domain_error(result));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "negative") !=
+        NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  result = ixs_mod(ctx, x, ixs_rat(ctx, -1, 2));
+  CHECK(result && ixs_is_domain_error(result));
+  ixs_ctx_clear_errors(ctx);
+
+  result = ixs_mod(ctx, x, ixs_int(ctx, INT64_MIN));
+  CHECK(result && ixs_is_domain_error(result));
+  ixs_ctx_clear_errors(ctx);
+
+  assumption = ixs_cmp(ctx, m, IXS_CMP_GT, ixs_int(ctx, 0));
+  result = ixs_simplify(ctx, symbolic, &assumption, 1);
+  CHECK(result == symbolic);
+
+  assumption = ixs_cmp(ctx, m, IXS_CMP_LT, ixs_int(ctx, 0));
+  result = ixs_simplify(ctx, symbolic, &assumption, 1);
+  CHECK(result && ixs_is_domain_error(result));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "negative") !=
+        NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  assumption = ixs_cmp(ctx, m, IXS_CMP_LE, ixs_int(ctx, 0));
+  result = ixs_simplify(ctx, symbolic, &assumption, 1);
+  CHECK(result && ixs_is_domain_error(result));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "not positive") !=
+        NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  assumption = ixs_cmp(ctx, m, IXS_CMP_EQ, ixs_int(ctx, 0));
+  result = ixs_simplify(ctx, symbolic, &assumption, 1);
+  CHECK(result && ixs_is_domain_error(result));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "zero") != NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  assumptions[0] = ixs_cmp(ctx, m, IXS_CMP_GT, ixs_int(ctx, 0));
+  assumptions[1] = ixs_cmp(ctx, m, IXS_CMP_LT, ixs_int(ctx, 0));
+  result = ixs_simplify(ctx, symbolic, assumptions, 2);
+  CHECK(result && !ixs_is_error(result));
+
+  result = ixs_subs(ctx, symbolic, m, ixs_int(ctx, -3));
+  CHECK(result && ixs_is_domain_error(result));
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_subs(ctx, symbolic, m, ixs_int(ctx, 3));
+  CHECK(result && ixs_node_tag(result) == IXS_MOD);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_boolean(void) {
   ixs_ctx *ctx = get_ctx();
 
@@ -2912,6 +2984,7 @@ int main(void) {
   test_hash_consing();
   test_floor_rules();
   test_mod_rules();
+  test_mod_divisor_contract();
   test_boolean();
   test_xor_known_bit_simplification();
   test_simplify_with_bounds();

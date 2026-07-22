@@ -3793,8 +3793,20 @@ static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
                                      const ixs_node *src) {
   ixs_node *lhs = import_memo_dst(state, src->u.binary.lhs);
   ixs_node *rhs = import_memo_dst(state, src->u.binary.rhs);
+  ixs_mod_divisor_class divisor;
   if (!lhs || !rhs)
     return NULL;
+  if (src->tag == IXS_MOD) {
+    divisor = ixs_node_classify_mod_divisor(rhs);
+    if (divisor == IXS_MOD_DIVISOR_ZERO) {
+      ixs_ctx_push_error(dst_ctx, "Mod: divisor is zero");
+      return dst_ctx->sentinel_error;
+    }
+    if (divisor == IXS_MOD_DIVISOR_NEGATIVE) {
+      ixs_ctx_push_error(dst_ctx, "Mod: divisor is negative");
+      return dst_ctx->sentinel_error;
+    }
+  }
   return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
 }
 
@@ -5074,6 +5086,21 @@ IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
     *p = 0;
     *q = 1;
   }
+}
+
+IXS_STATIC ixs_mod_divisor_class
+ixs_node_classify_mod_divisor(const ixs_node *n) {
+  int64_t p, q;
+
+  if (!n || !ixs_node_is_const(n))
+    return IXS_MOD_DIVISOR_UNKNOWN;
+  ixs_node_get_rat(n, &p, &q);
+  (void)q;
+  if (p > 0)
+    return IXS_MOD_DIVISOR_POSITIVE;
+  if (p == 0)
+    return IXS_MOD_DIVISOR_ZERO;
+  return IXS_MOD_DIVISOR_NEGATIVE;
 }
 
 IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n) {
@@ -7092,6 +7119,21 @@ IXS_STATIC int64_t ixs_rat_ceil(int64_t p, int64_t q) {
 
 IXS_STATIC bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
                             int64_t *rp, int64_t *rq) {
+  if (bp <= 0)
+    return false;
+
+  /* Keep integer Mod in the integer domain.  Expanding it through rational
+   * division can overflow on a large negative dividend even though the
+   * remainder is small and exactly representable. */
+  if (aq == 1 && bq == 1) {
+    int64_t rem = ap % bp;
+    if (rem < 0)
+      rem += bp;
+    *rp = rem;
+    *rq = 1;
+    return true;
+  }
+
   /* mod(a, b) = a - b * floor(a / b) */
   int64_t dp, dq;
   if (!ixs_rat_div(ap, aq, bp, bq, &dp, &dq))
@@ -7781,6 +7823,18 @@ static bool serial_write_binary(ixs_ctx *ctx, ixs_writer *w,
          serial_write_ref(ctx, w, state, rhs);
 }
 
+static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
+                             const ixs_node *node) {
+  ixs_mod_divisor_class divisor =
+      ixs_node_classify_mod_divisor(node->u.binary.rhs);
+  if (divisor == IXS_MOD_DIVISOR_ZERO)
+    return serial_error(ctx, "Mod divisor is zero");
+  if (divisor == IXS_MOD_DIVISOR_NEGATIVE)
+    return serial_error(ctx, "Mod divisor is negative");
+  return serial_write_binary(ctx, w, state, WIRE_MOD, node->u.binary.lhs,
+                             node->u.binary.rhs);
+}
+
 static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
                                    serial_state *state, const ixs_node *node) {
   uint32_t i;
@@ -7839,8 +7893,7 @@ static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   case IXS_CEIL:
     return serial_write_unary(ctx, w, state, WIRE_CEIL, node->u.unary.arg);
   case IXS_MOD:
-    return serial_write_binary(ctx, w, state, WIRE_MOD, node->u.binary.lhs,
-                               node->u.binary.rhs);
+    return serial_write_mod(ctx, w, state, node);
   case IXS_PIECEWISE:
     return serial_write_piecewise(ctx, w, state, node);
   case IXS_MAX:
@@ -8174,6 +8227,22 @@ static decode_status decode_read_binary(ixs_ctx *ctx, decode_input *in,
   return decode_validate_child(ctx, in, nodes, index, node->u.binary.rhs);
 }
 
+static decode_status decode_read_mod(ixs_ctx *ctx, decode_input *in,
+                                     decode_node *nodes, uint32_t index,
+                                     decode_node *node) {
+  const decode_node *divisor;
+  decode_status status =
+      decode_read_binary(ctx, in, nodes, index, node, WIRE_MOD);
+
+  if (status != DECODE_OK)
+    return status;
+  divisor = &nodes[node->u.binary.rhs];
+  if ((divisor->tag == WIRE_INT && divisor->u.ival <= 0) ||
+      (divisor->tag == WIRE_RAT && divisor->u.rat.p <= 0))
+    return decode_error(ctx, in, "Mod divisor is not positive");
+  return DECODE_OK;
+}
+
 static decode_status decode_read_cmp(ixs_ctx *ctx, decode_input *in,
                                      decode_node *nodes, uint32_t index,
                                      decode_node *node) {
@@ -8320,6 +8389,8 @@ static decode_status decode_read_record(ixs_ctx *ctx, decode_input *in,
     return decode_read_unary(ctx, in, nodes, index, node, (wire_tag)raw_tag);
 
   case WIRE_MOD:
+    return decode_read_mod(ctx, in, nodes, index, node);
+
   case WIRE_MAX:
   case WIRE_MIN:
   case WIRE_XOR:
@@ -11728,6 +11799,40 @@ static ixs_node *mod_scale_extract(ixs_ctx *ctx, ixs_bounds *bnds,
 
 /* ---- Mod rule wrappers ------------------------------------------- */
 
+typedef enum {
+  MOD_DOMAIN_VALID_OR_UNKNOWN,
+  MOD_DOMAIN_ZERO,
+  MOD_DOMAIN_NEGATIVE,
+  MOD_DOMAIN_NONPOSITIVE
+} mod_domain_status;
+
+static mod_domain_status mod_divisor_domain(ixs_bounds *bnds, ixs_node *b) {
+  ixs_mod_divisor_class constant = ixs_node_classify_mod_divisor(b);
+
+  if (constant == IXS_MOD_DIVISOR_ZERO)
+    return MOD_DOMAIN_ZERO;
+  if (constant == IXS_MOD_DIVISOR_NEGATIVE)
+    return MOD_DOMAIN_NEGATIVE;
+  if (!bnds || ixs_bounds_has_empty(bnds))
+    return MOD_DOMAIN_VALID_OR_UNKNOWN;
+
+  {
+    ixs_interval iv = ixs_bounds_get(bnds, b);
+    int upper_cmp;
+
+    if (!iv.valid || ixs_interval_is_empty(iv) || iv.hi_inf)
+      return MOD_DOMAIN_VALID_OR_UNKNOWN;
+    upper_cmp = ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1);
+    if (upper_cmp < 0)
+      return MOD_DOMAIN_NEGATIVE;
+    if (upper_cmp > 0)
+      return MOD_DOMAIN_VALID_OR_UNKNOWN;
+    if (!iv.lo_inf && ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) == 0)
+      return MOD_DOMAIN_ZERO;
+    return MOD_DOMAIN_NONPOSITIVE;
+  }
+}
+
 static ixs_node *rule_mod_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
                                      ixs_node *n) {
   int64_t ap, aq, bp, bq, rp, rq;
@@ -11814,6 +11919,7 @@ static const ixs_rule mod_rules[] = {
 
 static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
                                ixs_node *b) {
+  mod_domain_status domain;
   ixs_node *node;
   if (!a || !b)
     return NULL;
@@ -11822,8 +11928,13 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
     if (prop)
       return prop;
   }
-  if (ixs_node_is_zero(b))
+  domain = mod_divisor_domain(bnds, b);
+  if (domain == MOD_DOMAIN_ZERO)
     return simp_err(ctx, "Mod: divisor is zero");
+  if (domain == MOD_DOMAIN_NEGATIVE)
+    return simp_err(ctx, "Mod: divisor is negative");
+  if (domain == MOD_DOMAIN_NONPOSITIVE)
+    return simp_err(ctx, "Mod: divisor is not positive under assumptions");
   node = ixs_node_binary(ctx, IXS_MOD, a, b, (ixs_cmp_op)0);
   if (!node)
     return NULL;

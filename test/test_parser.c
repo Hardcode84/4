@@ -370,6 +370,20 @@ static void test_errors(void) {
   CHECK(n && ixs_is_domain_error(n));
   ixs_ctx_clear_errors(ctx);
 
+  /* Mod requires a positive divisor. */
+  n = ixs_parse_expr(ctx, "Mod(x, -3)", 10);
+  CHECK(n && ixs_is_domain_error(n));
+  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1), "negative") !=
+        NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  n = ixs_parse_expr(ctx, "Mod(x, -1/2)", 12);
+  CHECK(n && ixs_is_domain_error(n));
+  ixs_ctx_clear_errors(ctx);
+
+  n = ixs_parse_expr(ctx, "Mod(x, m)", 9);
+  CHECK(n && !ixs_is_error(n) && ixs_node_tag(n) == IXS_MOD);
+
   /* Parse error: trailing chars */
   n = ixs_parse_expr(ctx, "x y", 3);
   CHECK(n && ixs_is_parse_error(n));

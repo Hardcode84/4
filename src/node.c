@@ -767,6 +767,21 @@ IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q) {
   }
 }
 
+IXS_STATIC ixs_mod_divisor_class
+ixs_node_classify_mod_divisor(const ixs_node *n) {
+  int64_t p, q;
+
+  if (!n || !ixs_node_is_const(n))
+    return IXS_MOD_DIVISOR_UNKNOWN;
+  ixs_node_get_rat(n, &p, &q);
+  (void)q;
+  if (p > 0)
+    return IXS_MOD_DIVISOR_POSITIVE;
+  if (p == 0)
+    return IXS_MOD_DIVISOR_ZERO;
+  return IXS_MOD_DIVISOR_NEGATIVE;
+}
+
 IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n) {
   int64_t p, q;
   if (!n)

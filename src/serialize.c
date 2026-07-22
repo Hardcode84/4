@@ -590,6 +590,18 @@ static bool serial_write_binary(ixs_ctx *ctx, ixs_writer *w,
          serial_write_ref(ctx, w, state, rhs);
 }
 
+static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
+                             const ixs_node *node) {
+  ixs_mod_divisor_class divisor =
+      ixs_node_classify_mod_divisor(node->u.binary.rhs);
+  if (divisor == IXS_MOD_DIVISOR_ZERO)
+    return serial_error(ctx, "Mod divisor is zero");
+  if (divisor == IXS_MOD_DIVISOR_NEGATIVE)
+    return serial_error(ctx, "Mod divisor is negative");
+  return serial_write_binary(ctx, w, state, WIRE_MOD, node->u.binary.lhs,
+                             node->u.binary.rhs);
+}
+
 static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
                                    serial_state *state, const ixs_node *node) {
   uint32_t i;
@@ -648,8 +660,7 @@ static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   case IXS_CEIL:
     return serial_write_unary(ctx, w, state, WIRE_CEIL, node->u.unary.arg);
   case IXS_MOD:
-    return serial_write_binary(ctx, w, state, WIRE_MOD, node->u.binary.lhs,
-                               node->u.binary.rhs);
+    return serial_write_mod(ctx, w, state, node);
   case IXS_PIECEWISE:
     return serial_write_piecewise(ctx, w, state, node);
   case IXS_MAX:
@@ -983,6 +994,22 @@ static decode_status decode_read_binary(ixs_ctx *ctx, decode_input *in,
   return decode_validate_child(ctx, in, nodes, index, node->u.binary.rhs);
 }
 
+static decode_status decode_read_mod(ixs_ctx *ctx, decode_input *in,
+                                     decode_node *nodes, uint32_t index,
+                                     decode_node *node) {
+  const decode_node *divisor;
+  decode_status status =
+      decode_read_binary(ctx, in, nodes, index, node, WIRE_MOD);
+
+  if (status != DECODE_OK)
+    return status;
+  divisor = &nodes[node->u.binary.rhs];
+  if ((divisor->tag == WIRE_INT && divisor->u.ival <= 0) ||
+      (divisor->tag == WIRE_RAT && divisor->u.rat.p <= 0))
+    return decode_error(ctx, in, "Mod divisor is not positive");
+  return DECODE_OK;
+}
+
 static decode_status decode_read_cmp(ixs_ctx *ctx, decode_input *in,
                                      decode_node *nodes, uint32_t index,
                                      decode_node *node) {
@@ -1129,6 +1156,8 @@ static decode_status decode_read_record(ixs_ctx *ctx, decode_input *in,
     return decode_read_unary(ctx, in, nodes, index, node, (wire_tag)raw_tag);
 
   case WIRE_MOD:
+    return decode_read_mod(ctx, in, nodes, index, node);
+
   case WIRE_MAX:
   case WIRE_MIN:
   case WIRE_XOR:

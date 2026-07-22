@@ -138,7 +138,10 @@ ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
 ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
 
-/* Floored modulo (Python/SymPy semantics).  Returns ERROR on b == 0. */
+/* Floored modulo a - b*floor(a/b), defined only for b > 0.
+ * Returns ERROR when b is a known nonpositive constant.  A symbolic divisor
+ * may be constructed without a positivity proof; assumption-aware
+ * simplification returns ERROR when the supplied facts prove b <= 0. */
 ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);

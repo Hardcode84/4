@@ -469,11 +469,11 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
 
 
 def _floored_mod(a: Any, b: Any) -> Any:
-    """Floored modulo: result has the sign of b (Python's native %).
+    """Floored modulo with the ixsimpl-required positive divisor.
 
     Uses Python's built-in % which is exact for integers — an earlier
     version using math.floor(a/b) lost precision for large values."""
-    if b == 0:
+    if b <= 0:
         raise ZeroDivisionError
     return a % b
 
@@ -2308,6 +2308,42 @@ def test_eval_floor_mod() -> None:
     expr2 = ixsimpl.mod(x, 4)
     assert expr2.eval({"x": 10}) == 2
     assert expr2.eval({"x": 8}) == 0
+
+
+@given(
+    dividend=st.integers(min_value=-(1 << 63), max_value=(1 << 63) - 1),
+    divisor=st.integers(min_value=1, max_value=(1 << 63) - 1),
+)
+def test_mod_positive_literal_contract(dividend: int, divisor: int) -> None:
+    ctx = ixsimpl.Context()
+    result = ixsimpl.mod(ctx.int_(dividend), ctx.int_(divisor))
+    assert not result.is_error
+    assert result.eval({}) == dividend % divisor
+
+
+@given(divisor=st.integers(min_value=-(1 << 63), max_value=0))
+def test_mod_rejects_nonpositive_literal(divisor: int) -> None:
+    ctx = ixsimpl.Context()
+    result = ixsimpl.mod(ctx.sym("x"), ctx.int_(divisor))
+    assert result.is_domain_error
+    assert any("divisor" in error for error in ctx.errors)
+
+
+def test_mod_symbolic_divisor_contract() -> None:
+    ctx = ixsimpl.Context()
+    x, m = ctx.sym("x"), ctx.sym("m")
+    expr = ixsimpl.mod(x, m)
+
+    assert not expr.is_error
+    assert ixsimpl.same_node(expr.simplify(assumptions=[m > 0]), expr)
+    assert expr.simplify(assumptions=[m < 0]).is_domain_error
+    assert expr.simplify(assumptions=[m <= 0]).is_domain_error
+    assert expr.simplify(assumptions=[ctx.eq(m, 0)]).is_domain_error
+    assert expr.eval({"x": -7, "m": 3}) == 2
+    with pytest.raises(TypeError):
+        expr.eval({"x": -7, "m": -3})
+
+    assert ixsimpl.mod(x, ctx.rat(-1, 2)).is_domain_error
 
 
 def test_percent_operator_builds_mod() -> None:

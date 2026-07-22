@@ -13,6 +13,10 @@ static int failures;
 
 #define TEST_SERIAL_MAGIC 0x42535849u
 #define TEST_SERIAL_VERSION 1u
+#define TEST_WIRE_INT 0u
+#define TEST_WIRE_RAT 1u
+#define TEST_WIRE_SYM 2u
+#define TEST_WIRE_MOD 7u
 
 #define CHECK(expr)                                                            \
   do {                                                                         \
@@ -138,6 +142,56 @@ static void store_le32(unsigned char *dst, uint32_t v) {
   dst[1] = (unsigned char)((v >> 8) & 0xffu);
   dst[2] = (unsigned char)((v >> 16) & 0xffu);
   dst[3] = (unsigned char)((v >> 24) & 0xffu);
+}
+
+static void store_le64(unsigned char *dst, int64_t v) {
+  uint64_t u = (uint64_t)v;
+  size_t i;
+
+  for (i = 0; i < 8u; i++) {
+    dst[i] = (unsigned char)(u & 0xffu);
+    u >>= 8;
+  }
+}
+
+static void build_literal_mod_blob(byte_buffer *buf, int64_t divisor) {
+  unsigned char blob[40];
+
+  store_le32(blob + 0u, TEST_SERIAL_MAGIC);
+  store_le32(blob + 4u, TEST_SERIAL_VERSION);
+  store_le32(blob + 8u, 3u);
+  blob[12] = TEST_WIRE_SYM;
+  store_le32(blob + 13u, 1u);
+  blob[17] = 'x';
+  blob[18] = TEST_WIRE_INT;
+  store_le64(blob + 19u, divisor);
+  blob[27] = TEST_WIRE_MOD;
+  store_le32(blob + 28u, 0u);
+  store_le32(blob + 32u, 1u);
+  store_le32(blob + 36u, 2u);
+  buffer_reset(buf);
+  CHECK(buffer_write(buf, blob, sizeof(blob)));
+}
+
+static void build_rational_mod_blob(byte_buffer *buf, int64_t numerator,
+                                    int64_t denominator) {
+  unsigned char blob[48];
+
+  store_le32(blob + 0u, TEST_SERIAL_MAGIC);
+  store_le32(blob + 4u, TEST_SERIAL_VERSION);
+  store_le32(blob + 8u, 3u);
+  blob[12] = TEST_WIRE_SYM;
+  store_le32(blob + 13u, 1u);
+  blob[17] = 'x';
+  blob[18] = TEST_WIRE_RAT;
+  store_le64(blob + 19u, numerator);
+  store_le64(blob + 27u, denominator);
+  blob[35] = TEST_WIRE_MOD;
+  store_le32(blob + 36u, 0u);
+  store_le32(blob + 40u, 1u);
+  store_le32(blob + 44u, 2u);
+  buffer_reset(buf);
+  CHECK(buffer_write(buf, blob, sizeof(blob)));
 }
 
 static void check_same_print(ixs_node *a, ixs_node *b) {
@@ -394,7 +448,77 @@ static void test_noncanonical_mul_rejected_on_serialize(void) {
   buffer_destroy(&buf);
   destroy_session(ctx, &s);
 }
+
+static void test_nonpositive_mod_rejected_on_serialize(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *x;
+  ixs_node *bad;
+
+  buf.fail_after = (size_t)-1;
+
+  if (!init_session(&ctx, &s))
+    return;
+
+  x = ixs_sym(&s, "x");
+  bad = ixs_node_binary(ctx, IXS_MOD, x, ixs_node_int(ctx, -3), IXS_CMP_EQ);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "negative") != NULL);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
 #endif
+
+static void test_nonpositive_mod_rejected_on_deserialize(void) {
+  static const int64_t invalid[] = {-3, 0, INT64_MIN};
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  size_t i;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+    ixs_node *decoded;
+    size_t before_used;
+
+    build_literal_mod_blob(&buf, invalid[i]);
+    before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded != NULL);
+    CHECK(ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "not positive") != NULL);
+  }
+
+  build_rational_mod_blob(&buf, -1, 2);
+  ixs_session_clear_errors(&s);
+  CHECK(ixs_is_parse_error(deserialize_from_buffer(&s, &buf)));
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "not positive") != NULL);
+
+  build_literal_mod_blob(&buf, 3);
+  ixs_session_clear_errors(&s);
+  {
+    ixs_node *decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded != NULL);
+    CHECK(!ixs_is_error(decoded));
+    CHECK(ixs_node_tag(decoded) == IXS_MOD);
+    CHECK(ixs_session_nerrors(&s) == 0);
+  }
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
 
 static void test_node_limit_rejected_without_pollution(void) {
   ixs_ctx *ctx = NULL;
@@ -438,7 +562,9 @@ int main(void) {
   test_malformed_root_rejected_without_pollution();
 #ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();
+  test_nonpositive_mod_rejected_on_serialize();
 #endif
+  test_nonpositive_mod_rejected_on_deserialize();
   test_node_limit_rejected_without_pollution();
   if (failures) {
     fprintf(stderr, "%d serialize test(s) failed\n", failures);
