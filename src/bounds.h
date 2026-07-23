@@ -60,6 +60,7 @@ typedef struct {
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
   unsigned range_pw_depth;
+  bool has_modrem;
   bool contradiction;
   bool empty_cache_valid;
   bool empty_cache_value;

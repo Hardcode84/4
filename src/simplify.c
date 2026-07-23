@@ -7,6 +7,7 @@
 #include <string.h>
 
 #define SIMPLIFY_ITER_LIMIT 64
+#define CONGRUENT_MOD_PAIR_LIMIT 256u
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
 /* Rule-chain functions (rules and the helpers they call):
@@ -977,6 +978,56 @@ static ixs_node *rebuild_add_from_terms(ixs_ctx *ctx, ixs_addterm *terms,
       return NULL;
   }
   return result;
+}
+
+static ixs_node *rebuild_add_without_pair(ixs_ctx *ctx, ixs_node *add,
+                                          uint32_t skip_a, uint32_t skip_b) {
+  uint32_t i;
+  ixs_node *result = add->u.add.coeff;
+  for (i = 0; i < add->u.add.nterms && result; i++) {
+    ixs_node *term;
+    if (i == skip_a || i == skip_b)
+      continue;
+    term = simp_mul(ctx, add->u.add.terms[i].coeff, add->u.add.terms[i].term);
+    result = term ? simp_add(ctx, result, term) : NULL;
+  }
+  return result;
+}
+
+/* O(n) over ADD terms plus at most CONGRUENT_MOD_PAIR_LIMIT bounded
+ * congruence probes. */
+static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
+                                                 ixs_node *add) {
+  uint32_t i, j;
+  size_t inspected = 0;
+  if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
+    return add;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    ixs_node *left = add->u.add.terms[i].term;
+    if (left->tag != IXS_MOD || left->u.binary.rhs->tag != IXS_INT ||
+        left->u.binary.rhs->u.ival <= 0)
+      continue;
+    for (j = i + 1; j < add->u.add.nterms; j++) {
+      ixs_node *right = add->u.add.terms[j].term;
+      int64_t cp, cq;
+      ixs_node *difference;
+      if (inspected++ == CONGRUENT_MOD_PAIR_LIMIT)
+        return add;
+      if (right->tag != IXS_MOD || right->u.binary.rhs != left->u.binary.rhs ||
+          !addterm_coeffs_cancel(add->u.add.terms, i, j, &cp, &cq))
+        continue;
+      difference = simp_sub(ctx, left->u.binary.lhs, right->u.binary.lhs);
+      if (!difference || ixs_node_is_sentinel(difference))
+        return difference;
+      if (ixs_bounds_check_congruent(bnds, difference,
+                                     left->u.binary.rhs->u.ival,
+                                     0) != IXS_CHECK_TRUE)
+        continue;
+      IXS_STAT_HIT(ctx);
+      return rebuild_add_without_pair(ctx, add, i, j);
+    }
+  }
+  return add;
 }
 
 static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
@@ -3426,6 +3477,8 @@ static const ixs_rule cmp_rules[] = {
 static const char *extra_transforms[] = {
     "recognize_mod",
     "cancel_floor_mod_pairs",
+    "cancel_congruent_mod_difference",
+    "cancel_scaled_mod_quotient",
     "not_cmp_flip",
 };
 
@@ -4308,30 +4361,68 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
+static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
+                                   ixs_cmp_op op) {
+  ixs_interval iv;
+  if (!bnds || !lhs)
+    return false;
+  iv = ixs_bounds_get(bnds, lhs);
+  if (!iv.valid)
+    return false;
+  switch (op) {
+  case IXS_CMP_GT:
+    return !iv.lo_inf && ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) > 0;
+  case IXS_CMP_GE:
+    return !iv.lo_inf && ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0;
+  case IXS_CMP_LT:
+    return !iv.hi_inf && ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) < 0;
+  case IXS_CMP_LE:
+    return !iv.hi_inf && ixs_rat_cmp(iv.hi_p, iv.hi_q, 0, 1) <= 0;
+  case IXS_CMP_EQ:
+  case IXS_CMP_NE:
+    return false;
+  }
+  return false;
+}
+
 /* Mod(x, M) -> x when 0 <= x < M; -> r when x == r (mod m) and m % M == 0;
  * -> 0 when M | x. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
   ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
-  if (!bnds || r->tag != IXS_INT || r->u.ival <= 0)
+  ixs_node *diff;
+  if (!bnds || ixs_bounds_has_empty(bnds))
     return n;
 
-  ixs_interval iv = ixs_bounds_get(bnds, l);
-  if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
-      iv.hi_p < r->u.ival)
-    return l;
+  if (r->tag == IXS_INT && r->u.ival > 0) {
+    ixs_interval iv = ixs_bounds_get(bnds, l);
+    if (iv.valid && iv.lo_q == 1 && iv.hi_q == 1 && iv.lo_p >= 0 &&
+        iv.hi_p < r->u.ival)
+      return l;
 
-  /* x == rem (mod m) with m % M == 0  =>  Mod(x, M) == rem % M */
-  if (l->tag == IXS_SYM) {
-    int64_t sym_mod, sym_rem;
-    if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
-        sym_mod % r->u.ival == 0)
-      return ixs_node_int(ctx, sym_rem % r->u.ival);
+    /* x == rem (mod m) with m % M == 0  =>  Mod(x, M) == rem % M */
+    if (l->tag == IXS_SYM) {
+      int64_t sym_mod, sym_rem;
+      if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
+          sym_mod % r->u.ival == 0)
+        return ixs_node_int(ctx, sym_rem % r->u.ival);
+    }
+
+    if (ixs_node_is_integer_valued(l) &&
+        ixs_bounds_is_known_divisible(bnds, l, r->u.ival))
+      return ixs_node_int(ctx, 0);
+    return n;
   }
 
-  if (ixs_node_is_integer_valued(l) &&
-      ixs_bounds_is_known_divisible(bnds, l, r->u.ival))
-    return ixs_node_int(ctx, 0);
-
+  /* Literal moduli use interval and congruence facts above. Only symbolic
+   * moduli need the more expensive normalized comparison probes. */
+  if (!bounds_proves_zero_cmp(bnds, r, IXS_CMP_GT) ||
+      !bounds_proves_zero_cmp(bnds, l, IXS_CMP_GE))
+    return n;
+  diff = simp_sub(ctx, l, r);
+  if (!diff || ixs_node_is_sentinel(diff))
+    return diff;
+  if (bounds_proves_zero_cmp(bnds, diff, IXS_CMP_LT))
+    return l;
   return n;
 }
 
@@ -4491,7 +4582,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     if (!result)
       return NULL;
   }
-  return result;
+  return cancel_congruent_mod_difference(ctx, bnds, result);
 }
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,
@@ -4506,6 +4597,34 @@ static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,
     pw = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
     return pw ? simp_mul(ctx, result, pw) : NULL;
   }
+}
+
+static ixs_node *cancel_scaled_mod_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
+                                            ixs_node *mul) {
+  ixs_node *mod, *inner, *modulus, *reduced;
+  int64_t p, q;
+  if (mul->tag != IXS_MUL || mul->u.mul.nfactors != 1 ||
+      mul->u.mul.factors[0].exp != 1 ||
+      mul->u.mul.factors[0].base->tag != IXS_MOD)
+    return mul;
+  ixs_node_get_rat(mul->u.mul.coeff, &p, &q);
+  mod = mul->u.mul.factors[0].base;
+  if (q <= 1 || mod->u.binary.rhs->tag != IXS_INT ||
+      mod->u.binary.rhs->u.ival <= 0 || mod->u.binary.rhs->u.ival % q != 0)
+    return mul;
+  inner = simp_div(ctx, mod->u.binary.lhs, ixs_node_int(ctx, q));
+  modulus = ixs_node_int(ctx, mod->u.binary.rhs->u.ival / q);
+  if (!inner || !modulus)
+    return NULL;
+  if (ixs_node_is_sentinel(inner))
+    return inner;
+  if (!node_is_integer(bnds, inner))
+    return mul;
+  reduced = simp_mod_bnds(ctx, bnds, inner, modulus);
+  if (!reduced)
+    return NULL;
+  IXS_STAT_HIT(ctx);
+  return p == 1 ? reduced : simp_mul(ctx, ixs_node_int(ctx, p), reduced);
 }
 
 static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
@@ -4523,7 +4642,7 @@ static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     if (!result)
       return NULL;
   }
-  return result;
+  return cancel_scaled_mod_quotient(ctx, bnds, result);
 }
 
 static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,

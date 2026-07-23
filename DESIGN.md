@@ -904,6 +904,8 @@ Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
                      all terms integer   → g*Mod(x, m) + r
 Mod(c*x, c*m)       where c > 1         → c*Mod(x, m)
+(p/q)*Mod(q*x, q*m) where q > 1, m > 0,
+                     x is integer-valued → p*Mod(x, m)
 
 (reverse direction, in simp_add — recognize_mod)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)
@@ -913,13 +915,32 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
+
+(bounds-aware ADD cancellation)
+c*Mod(A, m) - c*Mod(B, m)               → 0
+                     when m > 0 is literal and A-B ≡ 0 (mod m)
 ```
 
-Interval propagation also handles symbolic integer moduli.  If assumptions
-prove `1 <= m <= U`, then an integer-valued `Mod(x, m)` is in `[0, U - 1]`.
-An equality-constrained symbolic modulus receives the same dividend-step
-tightening as a literal modulus.  No remainder bound is inferred unless the
-modulus is proven positive.
+Bounds-aware elimination accepts symbolic integer moduli: proofs of `m > 0`,
+`x >= 0`, and `x-m < 0` reduce `Mod(x,m)` to `x`. Interval propagation also
+handles symbolic integer moduli. If assumptions prove `1 <= m <= U`, then an
+integer-valued `Mod(x, m)` is in `[0, U - 1]`. An equality-constrained symbolic
+modulus receives the same dividend-step tightening as a literal modulus. No
+remainder bound is inferred unless the modulus is proven positive.
+
+For literal positive moduli, a symbol's finite interval and stored congruence
+are intersected before computing the `Mod` range. A full reachable residue
+cycle uses its gcd extrema; a partial cycle is enumerated up to 1024 steps.
+Larger partial cycles fall back to the structural over-approximation. An exact
+known residue produces an exact interval. Bounds environments record whether
+any congruence exists, so ordinary interval-only `Mod` queries skip the
+recursive residue proof. Empty interval/congruence intersections mark the fact
+domain contradictory.
+
+Scaled exact division keeps modular wrap explicit. For example,
+`Mod(2*x,2^32)/2` reduces to `Mod(x,2^31)` when `x` is integer-valued, then to
+`x` only when the bounds prove `0 <= x < 2^31`. A signed 32-bit range crosses
+the wrap and does not justify the second reduction.
 
 Scale extraction may establish the `g*m` condition through congruence facts
 instead of a structural leading coefficient.  If every non-constant dividend
@@ -1209,11 +1230,15 @@ This enables rules like:
 - `floor(x/64)` where `0 <= x < 64` → `0`
 - `floor(x)` → constant when `floor(lo) == floor(hi)` (same for ceiling)
 - `Mod(x, m)` bounds tightened to dividend's bounds when `0 <= x < m`
+- `Mod(x, m)` → `x` when symbolic relations prove `m > 0`, `x >= 0`,
+  and `x < m`
 - `Mod(x, m)` upper bound tightened to `m - gcd(d, m)` when `x` is
   integer-valued and `d` is the gcd of its top-level integer coefficients
   (e.g. `Mod(4*a, 16)` in `[0, 12]` instead of `[0, 15]`).  The implementation
   computes `gcd(d, m)` directly, so an `INT64_MIN` coefficient never requires
   representing its `2^63` magnitude in `int64_t`.
+- A symbol's finite interval and congruence narrow literal-`Mod` bounds to the
+  extrema of reachable residues. Empty intersections are contradictions.
 - `Max(1, expr)` where `expr >= 1` → `expr`
 
 **Congruence-gated rewrites** (requires `Mod(sym, M) == R` assumption):
@@ -1229,6 +1254,8 @@ This enables rules like:
 - `floor(a + (p/q)*sym + rest)` → `(p/q)*sym + floor(a + rest)` when
   `q/gcd(|p|,q)` divides sym's known modulus (the rational addend is
   integer per congruence and can be extracted from the floor)
+- `c*Mod(A,m) - c*Mod(B,m)` → `0` when `A-B ≡ 0 (mod m)` is proven
+  for the shared positive literal modulus
 
 **Bitwise-fact extraction and consumers**:
 
@@ -1481,13 +1508,12 @@ Propagation: `[1/128, 1/128] * [0, 127] * iv_recip([1, +inf))`
 = `[0, 127/128] * [0, 1]` = `[0, 127/128]`.
 Then `floor([0, 127/128]) = [0, 0]`, collapsing to constant `0`.
 
-**Limitation**: independent interval propagation cannot handle relational
-constraints between variables.  For `floor(x/K)` with `x < K-1, K >= 2`,
-the bounds engine sees `x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]`
-independently, so `x/K` has an unbounded interval.  Proving `floor(x/K) = 0`
-from `x < K` requires tracking cross-variable relationships, which is a
-non-goal for the current bounds engine.  The planned alternative is
-divisibility-aware floor reasoning (see beads tracker).
+**Limitation**: general interval propagation remains non-relational. For
+`floor(x/K)` with `x < K-1, K >= 2`, the bounds engine sees
+`x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]` independently, so `x/K`
+has an unbounded interval. Targeted rules can query normalized comparisons for
+specific proofs such as `0 <= x < K` in `Mod(x,K)`; arbitrary cross-variable
+interval projection remains out of scope.
 
 ## Error Model
 

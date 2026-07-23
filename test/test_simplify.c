@@ -883,6 +883,63 @@ static void test_mod_bounds_tighten(void) {
   r = ixs_simplify(ctx, expr, a50, 2);
   CHECK(r == x);
 
+  /* Relational upper bounds work when the positive modulus is symbolic. */
+  {
+    ixs_node *d = ixs_sym(ctx, "mod_rel_d");
+    ixs_node *m = ixs_mul(ctx, ixs_int(ctx, 8), d);
+    ixs_node *positive = ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0));
+    ixs_node *lower = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *upper = ixs_cmp(ctx, x, IXS_CMP_LT, m);
+    ixs_node *relational[] = {positive, lower, upper};
+    ixs_node *missing_positive[] = {lower, upper};
+    ixs_node *missing_lower[] = {positive, upper};
+    ixs_node *missing_upper[] = {positive, lower};
+    ixs_node *boundary[] = {positive, lower, ixs_cmp(ctx, x, IXS_CMP_LE, m)};
+    ixs_node *contradictory[] = {
+        positive, ixs_cmp(ctx, d, IXS_CMP_LE, ixs_int(ctx, 0)), lower, upper};
+    ixs_node *nonpositive[] = {ixs_cmp(ctx, d, IXS_CMP_LE, ixs_int(ctx, 0)),
+                               lower, upper};
+    ixs_node *mod_rel = ixs_mod(ctx, x, m);
+
+    CHECK(ixs_simplify(ctx, mod_rel, relational, 3) == x);
+    CHECK(ixs_simplify(ctx, mod_rel, missing_positive, 2) != x);
+    CHECK(ixs_simplify(ctx, mod_rel, missing_lower, 2) != x);
+    CHECK(ixs_simplify(ctx, mod_rel, missing_upper, 2) != x);
+    CHECK(ixs_simplify(ctx, mod_rel, boundary, 3) != x);
+    CHECK(ixs_simplify(ctx, mod_rel, contradictory, 4) != x);
+    CHECK(ixs_simplify(ctx, mod_rel, nonpositive, 3) != x);
+  }
+
+  {
+    ixs_node *two31 = ixs_int(ctx, INT64_C(2147483648));
+    ixs_node *two32 = ixs_int(ctx, INT64_C(4294967296));
+    ixs_node *scaled_mod =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), two32);
+    ixs_node *quotient = ixs_div(ctx, scaled_mod, ixs_int(ctx, 2));
+    ixs_node *expected = ixs_mod(ctx, x, two31);
+    ixs_node *nonnegative[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LT, two31),
+    };
+    ixs_node *signed_range[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, INT32_MIN)),
+        ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, INT32_MAX)),
+    };
+    ixs_node *negative = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, -1));
+    ixs_node *nondividing =
+        ixs_div(ctx, ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), x), two32),
+                ixs_int(ctx, 3));
+    ixs_node *nonintegral =
+        ixs_div(ctx, ixs_mod(ctx, x, two32), ixs_int(ctx, 2));
+
+    CHECK(ixs_simplify(ctx, quotient, NULL, 0) == expected);
+    CHECK(ixs_simplify(ctx, quotient, nonnegative, 2) == x);
+    CHECK(ixs_simplify(ctx, quotient, signed_range, 2) == expected);
+    CHECK(ixs_simplify(ctx, quotient, &negative, 1) == ixs_int(ctx, INT32_MAX));
+    CHECK(ixs_simplify(ctx, nondividing, NULL, 0) == nondividing);
+    CHECK(ixs_simplify(ctx, nonintegral, NULL, 0) == nonintegral);
+  }
+
   /* Mod(3/2*x, 1) must NOT get bounds [0,0] — dividend is not integer.
    * ceiling(Mod(3/2*x, 1)) must not collapse to 0. */
   ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
@@ -2387,6 +2444,28 @@ static void test_modrem_congruence(void) {
   CHECK(ixs_node_int_val(r) == 1);
 }
 
+static void test_mod_difference_congruence(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "mod_diff_x");
+  ixs_node *z = ixs_sym(ctx, "mod_diff_z");
+  ixs_node *m16 = ixs_int(ctx, 16);
+  ixs_node *lhs = ixs_mod(ctx, ixs_add(ctx, x, z), m16);
+  ixs_node *rhs = ixs_mod(ctx, x, m16);
+  ixs_node *difference = ixs_sub(ctx, lhs, rhs);
+  ixs_node *divisible =
+      ixs_cmp(ctx, ixs_mod(ctx, z, m16), IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *wrong_residue =
+      ixs_cmp(ctx, ixs_mod(ctx, z, m16), IXS_CMP_EQ, ixs_int(ctx, 1));
+
+  CHECK(ixs_simplify(ctx, difference, &divisible, 1) == ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, ixs_add(ctx, ixs_int(ctx, 7), difference), &divisible,
+                     1) == ixs_int(ctx, 7));
+  CHECK(ixs_simplify(ctx, difference, &wrong_residue, 1) != ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, ixs_sub(ctx, lhs, ixs_mod(ctx, x, ixs_int(ctx, 8))),
+                     &divisible, 1) != ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, difference, NULL, 0) != ixs_int(ctx, 0));
+}
+
 static void test_subs_power_overflow(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3346,6 +3425,7 @@ int main(void) {
   test_floor_non_integer_min();
   test_add_flatten_neg();
   test_modrem_congruence();
+  test_mod_difference_congruence();
   test_subs_power_overflow();
   test_floor_mod_cancel();
   test_floor_mod_cancel_symbolic();

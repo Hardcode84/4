@@ -1257,6 +1257,73 @@ def test_range_soundness(expr: ExprTree, bounds: RangeBounds, envs: list[Env]) -
     assume(checked > 0)
 
 
+@given(
+    lo=st.integers(min_value=-64, max_value=32),
+    width=st.integers(min_value=0, max_value=64),
+    known_modulus=st.integers(min_value=2, max_value=16),
+    remainder=st.integers(min_value=0, max_value=15),
+    query_modulus=st.integers(min_value=2, max_value=16),
+)
+def test_mod_range_intersects_interval_and_congruence(
+    lo: int,
+    width: int,
+    known_modulus: int,
+    remainder: int,
+    query_modulus: int,
+) -> None:
+    """Mod ranges equal reachable residue extrema on small finite domains."""
+    remainder %= known_modulus
+    hi = lo + width
+    ctx = ixsimpl.Context()
+    x = ctx.sym("mod_intersection_x")
+    facts = ctx.facts()
+    facts.assume_range(x, lo, hi)
+    facts.assume(ctx.eq(x % known_modulus, remainder))
+    reachable = [
+        value % query_modulus for value in range(lo, hi + 1) if value % known_modulus == remainder
+    ]
+
+    result = ctx.range(x % query_modulus, facts=facts)
+    if not reachable:
+        assert result is None
+    else:
+        assert result == (min(reachable), max(reachable))
+
+
+def test_relational_symbolic_mod_elimination() -> None:
+    ctx = ixsimpl.Context()
+    x, d = ctx.sym("rel_mod_x"), ctx.sym("rel_mod_d")
+    modulus = 8 * d
+    expr = x % modulus
+
+    assert expr.simplify(assumptions=[d > 0, x >= 0, x < modulus]) == x
+    assert expr.simplify(assumptions=[x >= 0, x < modulus]) != x
+    assert expr.simplify(assumptions=[d > 0, x < modulus]) != x
+    assert expr.simplify(assumptions=[d > 0, x >= 0]) != x
+    assert expr.simplify(assumptions=[d > 0, x >= 0, x <= modulus]) != x
+    assert expr.simplify(assumptions=[d <= 0, x >= 0, x < modulus]) != x
+    assert expr.simplify(assumptions=[d > 0, d <= 0, x >= 0, x < modulus]) != x
+
+
+def test_equal_mod_difference_uses_congruence() -> None:
+    ctx = ixsimpl.Context()
+    x, z = ctx.sym("mod_diff_x"), ctx.sym("mod_diff_z")
+    expr = (x + z) % 16 - x % 16
+
+    assert expr.simplify(assumptions=[ctx.eq(z % 16, 0)]) == ctx.int_(0)
+    assert expr.simplify(assumptions=[ctx.eq(z % 16, 1)]) != ctx.int_(0)
+
+
+@given(value=st.integers(min_value=-(1 << 31), max_value=(1 << 31)))
+def test_scaled_mod_division_preserves_wrap(value: int) -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("scaled_mod_x")
+    expr = ((2 * x) % (1 << 32)) / 2
+
+    simplified = expr.simplify(assumptions=[ctx.eq(x, value)])
+    assert simplified == ctx.int_(value % (1 << 31))
+
+
 def _assert_range_contains(
     result: tuple[int | Fraction | None, int | Fraction | None] | None,
     value: int | Fraction,

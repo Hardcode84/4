@@ -14,6 +14,7 @@
 #define RANGE_POWER_EXP_LIMIT 64u
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
+#define MOD_RANGE_ENUM_LIMIT 1024u
 
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
@@ -88,6 +89,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->cache = NULL;
   b->cache_cap = 0;
   b->range_pw_depth = 0;
+  b->has_modrem = false;
   b->contradiction = false;
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
@@ -130,6 +132,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->cache = NULL;
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
   dst->range_pw_depth = src->range_pw_depth;
+  dst->has_modrem = src->has_modrem;
   dst->contradiction = src->contradiction;
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
@@ -273,6 +276,23 @@ static bool interval_exact_int(const ixs_interval *iv, int64_t *value) {
   return true;
 }
 
+static bool interval_has_congruent_integer(const ixs_interval *iv,
+                                           int64_t modulus, int64_t remainder) {
+  int64_t lo, hi, current, delta, first;
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || modulus <= 0)
+    return true;
+  lo = ixs_rat_ceil(iv->lo_p, iv->lo_q);
+  hi = ixs_rat_floor(iv->hi_p, iv->hi_q);
+  if (lo > hi)
+    return false;
+  current = lo % modulus;
+  if (current < 0)
+    current += modulus;
+  delta = remainder >= current ? remainder - current
+                               : modulus - (current - remainder);
+  return ixs_safe_add(lo, delta, &first) && first <= hi;
+}
+
 static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
   int64_t exact;
   if (!v)
@@ -296,6 +316,9 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
     if (v->bits.pow2 == IXS_POW2_POSITIVE && exact == 0)
       bounds_mark_contradiction(b);
   }
+  if (v->modulus > 0 &&
+      !interval_has_congruent_integer(&v->iv, v->modulus, v->remainder))
+    bounds_mark_contradiction(b);
   if (bitfacts_conflict(&v->bits))
     bounds_mark_contradiction(b);
 }
@@ -377,6 +400,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   v = get_or_create_var(b, name);
   if (!v)
     return;
+  b->has_modrem = true;
   if (v->modulus == 0) {
     v->modulus = m;
     v->remainder = rem;
@@ -2147,6 +2171,60 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
   return result;
 }
 
+/* O(1) for a full residue cycle; partial cycles inspect at most
+ * MOD_RANGE_ENUM_LIMIT reachable values. */
+static bool bounds_symbol_mod_range(ixs_bounds *b, ixs_node *symbol,
+                                    const ixs_interval *iv, int64_t modulus,
+                                    ixs_interval *out) {
+  int64_t known_modulus, known_remainder, lo, hi, current, delta, first;
+  uint64_t steps, cycle, step, residue, min_residue, max_residue, i;
+  uint64_t g;
+
+  if (symbol->tag != IXS_SYM || !iv->valid || iv->lo_inf || iv->hi_inf ||
+      modulus <= 0 ||
+      !ixs_bounds_get_modrem(b, symbol->u.name, &known_modulus,
+                             &known_remainder))
+    return false;
+
+  lo = ixs_rat_ceil(iv->lo_p, iv->lo_q);
+  hi = ixs_rat_floor(iv->hi_p, iv->hi_q);
+  if (lo > hi)
+    return false;
+  current = lo % known_modulus;
+  if (current < 0)
+    current += known_modulus;
+  delta = known_remainder >= current
+              ? known_remainder - current
+              : known_modulus - (current - known_remainder);
+  if (!ixs_safe_add(lo, delta, &first) || first > hi)
+    return false;
+
+  steps = ((uint64_t)hi - (uint64_t)first) / (uint64_t)known_modulus;
+  step = (uint64_t)known_modulus % (uint64_t)modulus;
+  residue = bounds_normalize_residue(first, (uint64_t)modulus);
+  g = bounds_u64_gcd(step, (uint64_t)modulus);
+  cycle = (uint64_t)modulus / g;
+  if (steps >= cycle - 1u) {
+    min_residue = residue % g;
+    max_residue = min_residue + (uint64_t)modulus - g;
+  } else {
+    if (steps > MOD_RANGE_ENUM_LIMIT)
+      return false;
+    min_residue = residue;
+    max_residue = residue;
+    for (i = 0; i < steps; i++) {
+      residue = bounds_add_mod(residue, step, (uint64_t)modulus);
+      if (residue < min_residue)
+        min_residue = residue;
+      if (residue > max_residue)
+        max_residue = residue;
+    }
+  }
+
+  *out = ixs_interval_range((int64_t)min_residue, 1, (int64_t)max_residue, 1);
+  return true;
+}
+
 static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
   ixs_node *m = expr->u.binary.rhs;
   ixs_interval mi = ixs_bounds_get(b, m);
@@ -2154,6 +2232,19 @@ static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
 
   if (interval_exact_int(&mi, &exact_m) && exact_m > 0) {
     ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
+    int64_t exact_lhs;
+    uint64_t residue;
+    ixs_interval congruent;
+    if (interval_exact_int(&pi, &exact_lhs))
+      return ixs_interval_exact(
+          (int64_t)bounds_normalize_residue(exact_lhs, (uint64_t)exact_m), 1);
+    if (b->has_modrem &&
+        bounds_known_residue_depth(b, expr->u.binary.lhs, (uint64_t)exact_m,
+                                   &residue, CONGRUENCE_DEPTH_LIMIT))
+      return ixs_interval_exact((int64_t)residue, 1);
+    if (b->has_modrem && bounds_symbol_mod_range(b, expr->u.binary.lhs, &pi,
+                                                 exact_m, &congruent))
+      return congruent;
     if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
         pi.hi_p < exact_m)
       return pi;
@@ -2578,12 +2669,22 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
 
   for (i = 0; i < b->nexprs; i++) {
     ixs_interval iv = b->exprs[i].iv;
+    ixs_var_bound *var = NULL;
     for (j = i + 1; j < b->nexprs; j++) {
       if (b->exprs[j].expr == b->exprs[i].expr) {
         iv = iv_intersect(iv, b->exprs[j].iv);
         if (!iv.valid || ixs_interval_is_empty(iv))
           return bounds_cache_empty_result(b, true);
       }
+    }
+    if (b->exprs[i].expr->tag == IXS_SYM)
+      var = find_var(b, b->exprs[i].expr->u.name);
+    if (var) {
+      iv = iv_intersect(iv, var->iv);
+      if (!iv.valid || ixs_interval_is_empty(iv) ||
+          (var->modulus > 0 &&
+           !interval_has_congruent_integer(&iv, var->modulus, var->remainder)))
+        return bounds_cache_empty_result(b, true);
     }
   }
 
@@ -3858,6 +3959,8 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
     if (!v)
       return;
     *v = *src;
+    if (src->modulus > 0)
+      dst->has_modrem = true;
     refine_var_bit_consistency(dst, v);
     return;
   }

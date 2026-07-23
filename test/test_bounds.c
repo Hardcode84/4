@@ -1308,6 +1308,102 @@ static void test_public_range_mod_requires_positive_divisor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_mod_congruence_intersection(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "mod_intersection_x");
+  ixs_range_result input;
+  ixs_range_result result;
+  ixs_facts *cycle = ixs_facts_create(ctx);
+  ixs_facts *partial = ixs_facts_create(ctx);
+  ixs_facts *negative = ixs_facts_create(ctx);
+  ixs_facts *exact = ixs_facts_create(ctx);
+  ixs_facts *extreme = ixs_facts_create(ctx);
+  ixs_facts *fallback = ixs_facts_create(ctx);
+  ixs_facts *insufficient = ixs_facts_create(ctx);
+  ixs_facts *incompatible = ixs_facts_create(ctx);
+  ixs_node *mod8 = ixs_mod(ctx, x, ixs_int(ctx, 8));
+
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_q = 1;
+  input.upper_q = 1;
+
+  input.lower_p = -100;
+  input.upper_p = 100;
+  CHECK(ixs_facts_assume_range(cycle, x, &input));
+  CHECK(ixs_facts_assume_pred(cycle,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 6)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(ixs_range_facts(cycle, mod8, &result));
+  CHECK(result.has_lower && result.lower_p == 1 && result.lower_q == 1);
+  CHECK(result.has_upper && result.upper_p == 7 && result.upper_q == 1);
+
+  input.lower_p = 0;
+  input.upper_p = 1;
+  CHECK(ixs_facts_assume_range(partial, x, &input));
+  CHECK(ixs_facts_assume_pred(partial,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_range_facts(partial, ixs_mod(ctx, x, ixs_int(ctx, 3)), &result));
+  CHECK(result.has_lower && result.lower_p == 0);
+  CHECK(result.has_upper && result.upper_p == 0);
+
+  input.lower_p = -10;
+  input.upper_p = 0;
+  CHECK(ixs_facts_assume_range(negative, x, &input));
+  CHECK(ixs_facts_assume_pred(negative,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 6)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(ixs_range_facts(negative, mod8, &result));
+  CHECK(result.has_lower && result.lower_p == 3);
+  CHECK(result.has_upper && result.upper_p == 3);
+
+  CHECK(ixs_facts_assume_pred(exact,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 5))));
+  CHECK(ixs_range_facts(exact, mod8, &result));
+  CHECK(result.has_lower && result.lower_p == 5);
+  CHECK(result.has_upper && result.upper_p == 5);
+
+  input.lower_p = INT64_MAX - 1;
+  input.upper_p = INT64_MAX;
+  CHECK(ixs_facts_assume_range(extreme, x, &input));
+  CHECK(ixs_facts_assume_pred(
+      extreme, ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, INT64_MAX)),
+                       IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_range_facts(extreme, mod8, &result));
+  CHECK(result.has_lower && result.lower_p == 7);
+  CHECK(result.has_upper && result.upper_p == 7);
+
+  input.lower_p = -10000;
+  input.upper_p = 0;
+  CHECK(ixs_facts_assume_range(fallback, x, &input));
+  CHECK(ixs_facts_assume_pred(fallback,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(
+      ixs_range_facts(fallback, ixs_mod(ctx, x, ixs_int(ctx, 10007)), &result));
+  CHECK(result.has_lower && result.lower_p == 0);
+  CHECK(result.has_upper && result.upper_p == 10006);
+
+  input.lower_p = -100;
+  input.upper_p = 100;
+  CHECK(ixs_facts_assume_range(insufficient, x, &input));
+  CHECK(ixs_range_facts(insufficient, mod8, &result));
+  CHECK(result.has_lower && result.lower_p == 0);
+  CHECK(result.has_upper && result.upper_p == 7);
+
+  input.lower_p = 0;
+  input.upper_p = 2;
+  CHECK(ixs_facts_assume_range(incompatible, x, &input));
+  CHECK(ixs_facts_assume_pred(incompatible,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 3))));
+  CHECK(!ixs_range_facts(incompatible, mod8, &result));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -2998,6 +3094,58 @@ static void test_public_exact_divide_basic(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_divide_scaled_mod_domain(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "scaled_mod_x");
+  ixs_node *two31 = ixs_int(ctx, INT64_C(2147483648));
+  ixs_node *two32 = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 2), x);
+  ixs_node *mod = ixs_mod(ctx, scaled, two32);
+  ixs_node *expected_signed = ixs_mod(ctx, x, two31);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+  ixs_facts *signed_range = ixs_facts_create(ctx);
+  ixs_facts *negative_wrap = ixs_facts_create(ctx);
+  ixs_facts *upper_wrap = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+  ixs_node *quotient;
+
+  CHECK(ixs_facts_assume_pred(nonnegative,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(nonnegative, ixs_cmp(ctx, x, IXS_CMP_LT, two31)));
+  result = ixs_try_exact_divide_facts(nonnegative, mod, 2);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  quotient = ixs_simplify_facts(nonnegative, result.quotient);
+  CHECK(ixs_same_node(quotient, x));
+  CHECK(ixs_equivalent_facts(nonnegative, result.quotient, x) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      signed_range, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      signed_range, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  result = ixs_try_exact_divide_facts(signed_range, mod, 2);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  quotient = ixs_simplify_facts(signed_range, result.quotient);
+  CHECK(ixs_same_node(quotient, expected_signed));
+  CHECK(ixs_equivalent_facts(signed_range, result.quotient, x) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(negative_wrap,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, -1))));
+  result = ixs_try_exact_divide_facts(negative_wrap, mod, 2);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  quotient = ixs_simplify_facts(negative_wrap, result.quotient);
+  CHECK(ixs_same_node(quotient, ixs_int(ctx, INT32_MAX)));
+
+  CHECK(ixs_facts_assume_pred(upper_wrap, ixs_cmp(ctx, x, IXS_CMP_EQ, two31)));
+  result = ixs_try_exact_divide_facts(upper_wrap, mod, 2);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  quotient = ixs_simplify_facts(upper_wrap, result.quotient);
+  CHECK(ixs_same_node(quotient, ixs_int(ctx, 0)));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_extrema_and_overflow(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3544,6 +3692,44 @@ static void test_batch_rewrite_cache_oom_is_atomic(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_mod_rewrite_oom_propagates(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "mod_rewrite_oom_x");
+  ixs_node *y = ixs_sym(ctx, "mod_rewrite_oom_y");
+  ixs_node *z = ixs_sym(ctx, "mod_rewrite_oom_z");
+  ixs_node *m16 = ixs_int(ctx, 16);
+  ixs_node *left_arg = ixs_add(ctx, x, z);
+  ixs_node *right_arg = ixs_add(ctx, y, z);
+  ixs_node *difference =
+      ixs_sub(ctx, ixs_mod(ctx, left_arg, m16), ixs_mod(ctx, right_arg, m16));
+  ixs_node *congruences[] = {
+      ixs_cmp(ctx, ixs_mod(ctx, x, m16), IXS_CMP_EQ, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_mod(ctx, y, m16), IXS_CMP_EQ, ixs_int(ctx, 0)),
+  };
+  ixs_node *m32 = ixs_int(ctx, 32);
+  ixs_node *scaled_arg = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x),
+                                 ixs_mul(ctx, ixs_int(ctx, 2), y));
+  ixs_node *scaled_quotient =
+      ixs_div(ctx, ixs_mod(ctx, scaled_arg, m32), ixs_int(ctx, 2));
+
+  /* Prebuild the literal-Mod relational probes; leave each transform's
+   * result as the first new permanent-arena node. */
+  CHECK(ixs_sub(ctx, left_arg, m16) != NULL);
+  CHECK(ixs_sub(ctx, right_arg, m16) != NULL);
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_simplify(ctx, difference, congruences, 2) == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify(ctx, difference, congruences, 2) == ixs_int(ctx, 0));
+
+  CHECK(ixs_sub(ctx, scaled_arg, m32) != NULL);
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_simplify(ctx, scaled_quotient, NULL, 0) == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify(ctx, scaled_quotient, NULL, 0) != NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
@@ -3642,6 +3828,7 @@ int main(void) {
   test_public_range_int64_extrema();
   test_public_range_mod_int64_min_step();
   test_public_range_mod_requires_positive_divisor();
+  test_public_range_mod_congruence_intersection();
   test_public_range_composite_predicate_fact();
   test_public_facts_range_and_transfer();
   test_public_range_powers();
@@ -3676,6 +3863,7 @@ int main(void) {
   test_public_algebra_helpers_use_facts();
   test_public_algebra_helper_invalid_inputs();
   test_public_exact_divide_basic();
+  test_public_exact_divide_scaled_mod_domain();
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();
   test_public_integrality_invalid_and_contradictory();
@@ -3687,6 +3875,7 @@ int main(void) {
   test_public_defined_traversal_bounds_and_sharing();
   test_fact_simplify_session_lifetime_and_oom();
   test_batch_rewrite_cache_oom_is_atomic();
+  test_mod_rewrite_oom_propagates();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
