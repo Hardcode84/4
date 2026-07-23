@@ -16,6 +16,9 @@ static int failures;
 #define TEST_WIRE_INT 0u
 #define TEST_WIRE_RAT 1u
 #define TEST_WIRE_SYM 2u
+#define TEST_WIRE_ADD 3u
+#define TEST_WIRE_MUL 4u
+#define TEST_WIRE_FLOOR 5u
 #define TEST_WIRE_MOD 7u
 
 #define CHECK(expr)                                                            \
@@ -152,6 +155,118 @@ static void store_le64(unsigned char *dst, int64_t v) {
     dst[i] = (unsigned char)(u & 0xffu);
     u >>= 8;
   }
+}
+
+static void append_u8(byte_buffer *buf, uint8_t value) {
+  CHECK(buffer_write(buf, &value, sizeof(value)));
+}
+
+static void append_le32(byte_buffer *buf, uint32_t value) {
+  unsigned char bytes[4];
+
+  store_le32(bytes, value);
+  CHECK(buffer_write(buf, bytes, sizeof(bytes)));
+}
+
+static void append_le64(byte_buffer *buf, int64_t value) {
+  unsigned char bytes[8];
+
+  store_le64(bytes, value);
+  CHECK(buffer_write(buf, bytes, sizeof(bytes)));
+}
+
+static void append_int_node(byte_buffer *buf, int64_t value) {
+  append_u8(buf, TEST_WIRE_INT);
+  append_le64(buf, value);
+}
+
+static void append_rat_node(byte_buffer *buf, int64_t p, int64_t q) {
+  append_u8(buf, TEST_WIRE_RAT);
+  append_le64(buf, p);
+  append_le64(buf, q);
+}
+
+static void append_sym_node(byte_buffer *buf, const char *name) {
+  size_t len = strlen(name);
+
+  CHECK(len <= UINT32_MAX);
+  append_u8(buf, TEST_WIRE_SYM);
+  append_le32(buf, (uint32_t)len);
+  CHECK(buffer_write(buf, name, len));
+}
+
+static void append_mul_header(byte_buffer *buf, uint32_t count,
+                              uint32_t coefficient) {
+  append_u8(buf, TEST_WIRE_MUL);
+  append_le32(buf, count);
+  append_le32(buf, coefficient);
+}
+
+static void append_mul_factor(byte_buffer *buf, uint32_t base,
+                              int64_t exponent) {
+  append_le32(buf, base);
+  append_le64(buf, exponent);
+}
+
+static void append_add_term(byte_buffer *buf, uint32_t term,
+                            uint32_t coefficient) {
+  append_le32(buf, term);
+  append_le32(buf, coefficient);
+}
+
+static void build_bounds_alias_blob(byte_buffer *buf) {
+  enum {
+    ZERO,
+    ONE,
+    ONE_EIGHTH,
+    EIGHT,
+    OUTER,
+    X,
+    QUOTIENT,
+    FLOOR_QUOTIENT,
+    REMAINDER,
+    FLOOR_TERM,
+    REMAINDER_TERM,
+    RAW_SUM,
+    NODE_COUNT
+  };
+
+  buffer_reset(buf);
+  append_le32(buf, TEST_SERIAL_MAGIC);
+  append_le32(buf, TEST_SERIAL_VERSION);
+  append_le32(buf, NODE_COUNT);
+
+  append_int_node(buf, 0);
+  append_int_node(buf, 1);
+  append_rat_node(buf, 1, 8);
+  append_int_node(buf, 8);
+  append_sym_node(buf, "outer");
+  append_sym_node(buf, "x");
+
+  append_mul_header(buf, 1, ONE_EIGHTH);
+  append_mul_factor(buf, X, 1);
+
+  append_u8(buf, TEST_WIRE_FLOOR);
+  append_le32(buf, QUOTIENT);
+
+  append_u8(buf, TEST_WIRE_MOD);
+  append_le32(buf, X);
+  append_le32(buf, EIGHT);
+
+  append_mul_header(buf, 2, EIGHT);
+  append_mul_factor(buf, OUTER, 1);
+  append_mul_factor(buf, FLOOR_QUOTIENT, 1);
+
+  append_mul_header(buf, 2, ONE);
+  append_mul_factor(buf, OUTER, 1);
+  append_mul_factor(buf, REMAINDER, 1);
+
+  append_u8(buf, TEST_WIRE_ADD);
+  append_le32(buf, 2);
+  append_le32(buf, ZERO);
+  append_add_term(buf, FLOOR_TERM, ONE);
+  append_add_term(buf, REMAINDER_TERM, ONE);
+  append_le32(buf, RAW_SUM);
 }
 
 static void build_literal_mod_blob(byte_buffer *buf, int64_t divisor) {
@@ -364,6 +479,62 @@ static void test_writer_failure_no_diagnostics(void) {
   destroy_session(ctx, &s);
 }
 
+static void test_bounds_canonical_alias_public(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *raw;
+  ixs_node *canonical;
+  ixs_node *outer;
+  ixs_node *x;
+  ixs_facts *raw_facts;
+  ixs_facts *canonical_facts;
+  ixs_range_result input;
+  ixs_range_result result;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  build_bounds_alias_blob(&buf);
+  raw = deserialize_from_buffer(&s, &buf);
+  outer = ixs_sym(&s, "outer");
+  x = ixs_sym(&s, "x");
+  canonical = ixs_mul(&s, outer, x);
+  raw_facts = ixs_facts_create(&s);
+  canonical_facts = ixs_facts_create(&s);
+
+  CHECK(raw != NULL);
+  CHECK(!ixs_is_error(raw));
+  CHECK(!ixs_same_node(raw, canonical));
+  CHECK(ixs_same_node(ixs_simplify(&s, raw, NULL, 0), canonical));
+  CHECK(raw_facts != NULL);
+  CHECK(canonical_facts != NULL);
+
+  input.has_lower = true;
+  input.lower_p = 0;
+  input.lower_q = 1;
+  input.has_upper = true;
+  input.upper_p = 2147483632;
+  input.upper_q = 1;
+
+  CHECK(ixs_facts_assume_range(raw_facts, raw, &input));
+  CHECK(ixs_range_facts(raw_facts, canonical, &result));
+  CHECK(result.has_lower && result.lower_p == 0 && result.lower_q == 1);
+  CHECK(result.has_upper && result.upper_p == 2147483632 &&
+        result.upper_q == 1);
+
+  CHECK(ixs_facts_assume_range(canonical_facts, canonical, &input));
+  CHECK(ixs_range_facts(canonical_facts, raw, &result));
+  CHECK(result.has_lower && result.lower_p == 0 && result.lower_q == 1);
+  CHECK(result.has_upper && result.upper_p == 2147483632 &&
+        result.upper_q == 1);
+  CHECK(ixs_session_nerrors(&s) == 0);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
 static void test_malformed_root_rejected_without_pollution(void) {
   ixs_ctx *src_ctx = NULL;
   ixs_ctx *dst_ctx = NULL;
@@ -559,6 +730,7 @@ int main(void) {
   test_roundtrip_deterministic();
   test_singletons_and_sentinels();
   test_writer_failure_no_diagnostics();
+  test_bounds_canonical_alias_public();
   test_malformed_root_rejected_without_pollution();
 #ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();

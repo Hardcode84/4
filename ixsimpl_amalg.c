@@ -1198,8 +1198,22 @@ static void extract_bitfacts(ixs_bounds *b, ixs_node *a) {
   }
 }
 
+static ixs_node *bounds_simplify_fact_free(ixs_ctx *ctx, ixs_node *expr) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_bounds empty;
+  ixs_node *result = NULL;
+  if (ixs_bounds_init_ctx(&empty, ctx, &ctx->scratch)) {
+    result = simp_simplify_bounds(ctx, expr, &empty);
+    if (empty.oom)
+      result = NULL;
+    ixs_bounds_destroy(&empty);
+  }
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
-  ixs_node *expanded;
+  ixs_node *cached, *canonical, *expanded;
   ixs_arena_mark diag_mark;
   const char **saved_errors;
   size_t saved_nerrors, saved_errors_cap;
@@ -1208,13 +1222,20 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   if (expr->tag == IXS_INT || expr->tag == IXS_RAT || expr->tag == IXS_SYM)
     return expr;
 
-  /* Canonical aliases are optional.  Expansion failures must not become
-   * user-visible diagnostics for otherwise successful bounds queries. */
+  cached = ixs_node_transform_cache_lookup(b->ctx, expr,
+                                           IXS_NODE_TRANSFORM_BOUNDS_CANONICAL);
+  if (cached)
+    return cached;
+
+  /* Alias diagnostics must not leak into otherwise valid range queries. */
   diag_mark = ixs_arena_save(&b->ctx->diag);
   saved_errors = b->ctx->errors;
   saved_nerrors = b->ctx->nerrors;
   saved_errors_cap = b->ctx->errors_cap;
   expanded = expand_impl(b->ctx, expr);
+  canonical = expanded && !ixs_node_is_sentinel(expanded)
+                  ? bounds_simplify_fact_free(b->ctx, expanded)
+                  : expanded;
   ixs_arena_restore(&b->ctx->diag, diag_mark);
   b->ctx->errors = saved_errors;
   b->ctx->nerrors = saved_nerrors;
@@ -1226,7 +1247,15 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   }
   if (ixs_node_is_sentinel(expanded))
     return expr;
-  return expanded;
+  if (!canonical) {
+    b->oom = true;
+    return expr;
+  }
+  if (ixs_node_is_sentinel(canonical))
+    return expanded;
+  ixs_node_transform_cache_store(
+      b->ctx, expr, IXS_NODE_TRANSFORM_BOUNDS_CANONICAL, canonical);
+  return canonical;
 }
 
 static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
@@ -4075,8 +4104,20 @@ static bool assumption_cmp_op_valid(ixs_cmp_op op) {
   return false;
 }
 
-static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
-                                                       ixs_node *pred) {
+static void bounds_ingest_validated_leaf(ixs_bounds *b, ixs_node *pred,
+                                         bool ingest) {
+  if (!ingest)
+    return;
+  if (pred == b->ctx->node_false) {
+    bounds_mark_contradiction(b);
+    bounds_cache_clear(b);
+    return;
+  }
+  (void)ixs_bounds_add_assumption(b, pred);
+}
+
+static ixs_bounds_build_status
+bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   ixs_node *stack[ASSUMPTION_NODE_LIMIT];
   size_t nstack = 0;
   size_t visited = 0;
@@ -4101,8 +4142,7 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
     if (cur == b->ctx->node_true)
       continue;
     if (cur == b->ctx->node_false) {
-      bounds_mark_contradiction(b);
-      bounds_cache_clear(b);
+      bounds_ingest_validated_leaf(b, cur, ingest);
       continue;
     }
 
@@ -4116,7 +4156,8 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
                                   "CMP child belongs to a different context");
       if (ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
         return assumption_invalid(b, "sentinel CMP children are not accepted");
-      if (!ixs_bounds_add_assumption(b, cur))
+      bounds_ingest_validated_leaf(b, cur, ingest);
+      if (b->oom)
         return IXS_BOUNDS_BUILD_OOM;
       continue;
     }
@@ -4139,6 +4180,32 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
         b, "expected a CMP, AND, or boolean constant predicate");
   }
 
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static ixs_bounds_build_status bounds_validate_predicate(ixs_bounds *b,
+                                                         ixs_node *pred) {
+  return bounds_process_predicate(b, pred, false);
+}
+
+static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
+                                                       ixs_node *pred) {
+  return bounds_process_predicate(b, pred, true);
+}
+
+static ixs_bounds_build_status
+bounds_validate_predicates(ixs_bounds *b, ixs_node *const *predicates,
+                           size_t n_predicates) {
+  size_t i;
+  ixs_bounds_build_status status;
+
+  if (n_predicates > 0 && !predicates)
+    return assumption_invalid(b, "NULL array with nonzero count");
+  for (i = 0; i < n_predicates; i++) {
+    status = bounds_validate_predicate(b, predicates[i]);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
   return IXS_BOUNDS_BUILD_OK;
 }
 
@@ -4527,7 +4594,19 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
     ixs_session_unbind(&binding);
     return false;
   }
-  status = bounds_ingest_predicates(&candidate, predicates, n_predicates);
+  status = bounds_validate_predicates(&candidate, predicates, n_predicates);
+  if (status == IXS_BOUNDS_BUILD_OK) {
+    size_t i;
+    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
+      ixs_node *simplified =
+          simp_simplify_bounds(ctx, predicates[i], &candidate);
+      if (!simplified || candidate.oom) {
+        status = IXS_BOUNDS_BUILD_OOM;
+        break;
+      }
+      status = bounds_ingest_predicate(&candidate, simplified);
+    }
+  }
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {
@@ -6246,6 +6325,29 @@ static ixs_exact_divide_result exact_divide_error(ixs_ctx *ctx,
   return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
 }
 
+static ixs_node *exact_divide_simplify_facts(ixs_facts *facts, ixs_ctx *ctx,
+                                             ixs_node *expr, bool *oom) {
+  /* Fact simplification is a proof probe; discard scratch and diagnostics. */
+  ixs_arena_mark scratch_mark = ixs_arena_save(&ctx->scratch);
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  bool old_oom = facts->bounds.oom;
+  ixs_node *result = simp_simplify_bounds(ctx, expr, &facts->bounds);
+
+  *oom = !result || (!old_oom && facts->bounds.oom);
+  if (*oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, scratch_mark);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  return result && !ixs_node_is_sentinel(result) ? result : expr;
+}
+
 ixs_exact_divide_result
 ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_session_binding binding;
@@ -6253,6 +6355,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_node *divisor_node;
   ixs_node *quotient;
   ixs_ctx *ctx;
+  bool oom;
 
   if (!facts_bind(facts, &binding, &ctx))
     return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
@@ -6286,6 +6389,12 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
     return result;
   }
 
+  expr = exact_divide_simplify_facts(facts, ctx, expr, &oom);
+  if (oom) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
   proof = ixs_bounds_check_divisible(&facts->bounds, expr, divisor);
   if (facts->bounds.oom) {
     ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
@@ -13040,6 +13149,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r) {
 #define SIMPLIFY_ITER_LIMIT 64
 #define CONGRUENT_MOD_PAIR_LIMIT 256u
 #define EQUAL_FLOOR_PAIR_LIMIT 256u
+#define FLOOR_MOD_PAIR_LIMIT 256u
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
 /* Rule-chain functions (rules and the helpers they call):
@@ -13240,7 +13350,7 @@ static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                int64_t const_q);
 static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                         uint32_t nterms, int64_t const_p,
-                                        int64_t const_q);
+                                        int64_t const_q, bool allow_wide);
 static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
                                        uint32_t nterms, int64_t const_p,
                                        int64_t const_q);
@@ -13252,12 +13362,55 @@ static inline int32_t find_pow1_factor(ixs_node *mul, ixs_tag tag) {
   uint32_t k;
   if (mul->tag != IXS_MUL)
     return -1;
+  if (mul->u.mul.nfactors == 0 || mul->u.mul.factors[0].base->tag > tag ||
+      mul->u.mul.factors[mul->u.mul.nfactors - 1].base->tag < tag)
+    return -1;
   for (k = 0; k < mul->u.mul.nfactors; k++) {
+    if (mul->u.mul.factors[k].base->tag < tag)
+      continue;
+    if (mul->u.mul.factors[k].base->tag > tag)
+      break;
     if (mul->u.mul.factors[k].base->tag == tag &&
         mul->u.mul.factors[k].exp == 1)
       return (int32_t)k;
   }
   return -1;
+}
+
+/* Failed optional folds keep structural power and no diagnostic. */
+static ixs_node *try_mul_power(ixs_ctx *ctx, ixs_node *result, ixs_node *base,
+                               int32_t exp) {
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_node *power = apply_pow(ctx, ixs_node_int(ctx, 1), base, exp);
+
+  if (power && !ixs_node_is_sentinel(power))
+    power = simp_mul(ctx, result, power);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  return power && !ixs_node_is_sentinel(power) ? power : NULL;
+}
+
+static ixs_node *mul_power_or_raw(ixs_ctx *ctx, ixs_node *result,
+                                  ixs_node *base, int32_t exp, bool try_fold) {
+  ixs_node *power;
+  ixs_mulfactor factor;
+
+  if (try_fold) {
+    if (exp < 0 && ixs_node_is_zero(base))
+      return simp_div(ctx, result, base);
+    power = try_mul_power(ctx, result, base, exp);
+    if (power)
+      return power;
+  }
+  factor.base = base;
+  factor.exp = exp;
+  power = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &factor);
+  return power ? simp_mul(ctx, result, power) : NULL;
 }
 
 static inline ixs_node *mul_without_factor(ixs_ctx *ctx, ixs_node *mul,
@@ -13397,7 +13550,7 @@ static ixs_node *add_try_rewrites(ixs_ctx *ctx, add_accum *acc) {
   if (result)
     return result;
   result = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
-                                  acc->const_q);
+                                  acc->const_q, false);
   if (result)
     return result;
   result = xor_difference_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
@@ -13941,6 +14094,13 @@ typedef struct {
   ixs_node *mul;
 } floor_term_parts;
 
+typedef struct {
+  ixs_node *node;
+  ixs_node *arg;
+  ixs_node *modulus;
+  ixs_node *outer;
+} mod_term_parts;
+
 static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
                                      floor_term_parts *parts) {
   int32_t floor_idx;
@@ -13968,6 +14128,33 @@ static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
   parts->arg = parts->node->u.unary.arg;
   parts->mul = simp_mul(ctx, term->coeff, mul_rest);
   return parts->mul != NULL;
+}
+
+static bool mod_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
+                                   mod_term_parts *parts) {
+  int32_t mod_idx;
+  parts->node = NULL;
+  parts->arg = NULL;
+  parts->modulus = NULL;
+  parts->outer = NULL;
+
+  if (term->term->tag == IXS_MOD) {
+    parts->node = term->term;
+    parts->outer = ixs_node_int(ctx, 1);
+  } else {
+    if (term->term->tag != IXS_MUL)
+      return false;
+    mod_idx = find_pow1_factor(term->term, IXS_MOD);
+    if (mod_idx < 0)
+      return false;
+    parts->node = term->term->u.mul.factors[mod_idx].base;
+    parts->outer = mul_without_factor(ctx, term->term, mod_idx);
+  }
+  if (!parts->outer || ixs_node_is_sentinel(parts->outer))
+    return false;
+  parts->arg = parts->node->u.binary.lhs;
+  parts->modulus = parts->node->u.binary.rhs;
+  return true;
 }
 
 static bool floor_mul_matches(ixs_ctx *ctx, ixs_node *floor_mul,
@@ -14062,74 +14249,100 @@ static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
   return add;
 }
 
-static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
-                               uint32_t nterms, uint32_t i) {
+static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
+                                    uint32_t nterms, uint32_t i,
+                                    size_t *inspected) {
   uint32_t j;
-  ixs_node *A, *m, *ci_times_m, *expected_floor;
+  mod_term_parts mod;
+  ixs_node *ci_outer, *ci_outer_times_m, *expected_floor;
   int64_t ci_p, ci_q;
 
-  if (!terms[i].term || terms[i].term->tag != IXS_MOD)
+  if (!terms[i].term || !mod_parts_from_addterm(ctx, &terms[i], &mod))
     return 0;
 
-  A = terms[i].term->u.binary.lhs;
-  m = terms[i].term->u.binary.rhs;
   ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
 
-  ci_times_m = simp_mul(ctx, terms[i].coeff, m);
-  if (!ci_times_m || ixs_node_is_sentinel(ci_times_m))
+  ci_outer = simp_mul(ctx, terms[i].coeff, mod.outer);
+  ci_outer_times_m = ci_outer ? simp_mul(ctx, ci_outer, mod.modulus) : NULL;
+  if (!ci_outer_times_m || ixs_node_is_sentinel(ci_outer_times_m))
     return 0;
 
-  expected_floor = simp_floor(ctx, simp_div(ctx, A, m));
+  expected_floor = simp_floor(ctx, simp_div(ctx, mod.arg, mod.modulus));
   if (!expected_floor || ixs_node_is_sentinel(expected_floor))
     expected_floor = NULL;
 
   for (j = 0; j < nterms; j++) {
     floor_term_parts parts;
+    ixs_node *replacement;
     if (j == i || !terms[j].term)
       continue;
+    if (*inspected >= FLOOR_MOD_PAIR_LIMIT)
+      return 0;
+    (*inspected)++;
     if (!floor_parts_from_addterm(ctx, &terms[j], &parts))
       continue;
-    if (!floor_mul_matches(ctx, parts.mul, ci_times_m))
+    if (!floor_mul_matches(ctx, parts.mul, ci_outer_times_m))
       continue;
-    if (!floor_pair_matches(ctx, expected_floor, &parts, m, A))
+    if (!floor_pair_matches(ctx, expected_floor, &parts, mod.modulus, mod.arg))
       continue;
+    replacement = simp_mul(ctx, mod.outer, mod.arg);
+    if (!replacement)
+      return -1;
+    if (ixs_node_is_sentinel(replacement))
+      return 0;
     terms[i].term = NULL;
-    terms[j].term = A;
+    terms[j].term = replacement;
     terms[j].coeff = make_const(ctx, ci_p, ci_q);
     return terms[j].coeff ? 1 : -1;
   }
   return 0;
 }
 
-/*
- * Cancel floor/Mod pairs in an ADD using the identity:
- *   m * floor(E/m) + Mod(E, m) = E
- *
- * For each Mod(A, m) term with coefficient ci, searches for a
- * floor-containing term whose total multiplier equals ci*m.  Two
- * verification strategies are tried:
- *
- * 1. floor(A/m) == floor_node  (via simp_floor/simp_div).  Robust
- *    against eager floor rewrites like round_pull_in_denom collapsing
- *    floor(floor(x/3)/2) -> floor(x/6), because the same rules fire
- *    during both construction and verification.
- *
- * 2. m * floor_arg == A  (via distribute_mul_decompose).  Handles
- *    symbolic moduli with compound bases, e.g. K * (K/2)^{-1} -> 2,
- *    where plain simp_mul treats the inverse base as opaque.
- */
+/* Cancellation probes never own user-visible diagnostics. */
+static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
+                               uint32_t nterms, uint32_t i, size_t *inspected,
+                               bool allow_wide) {
+  ixs_node *term = terms[i].term;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
+  int result;
+
+  if (!term || (term->tag != IXS_MOD && nterms > 2u && !allow_wide) ||
+      (term->tag != IXS_MOD &&
+       (term->tag != IXS_MUL || find_pow1_factor(term, IXS_MOD) < 0)))
+    return 0;
+  diag_mark = ixs_arena_save(&ctx->diag);
+  saved_errors = ctx->errors;
+  saved_nerrors = ctx->nerrors;
+  saved_errors_cap = ctx->errors_cap;
+  result = cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected);
+
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  return result;
+}
+
+/* O(total ADD structure + FLOOR_MOD_PAIR_LIMIT pair probes).
+ * c*o*m*floor(E/m) + c*o*Mod(E,m) -> c*o*E. */
 static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                         uint32_t nterms, int64_t const_p,
-                                        int64_t const_q) {
+                                        int64_t const_q, bool allow_wide) {
   bool found = false;
   uint32_t i;
+  size_t inspected = 0;
 
   for (i = 0; i < nterms; i++) {
-    int rc = cancel_floor_mod_at(ctx, terms, nterms, i);
+    int rc = cancel_floor_mod_at(ctx, terms, nterms, i, &inspected, allow_wide);
     if (rc < 0)
       return NULL;
     if (rc > 0)
       found = true;
+    if (inspected >= FLOOR_MOD_PAIR_LIMIT)
+      break;
   }
 
   if (!found)
@@ -14137,6 +14350,39 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
 
   IXS_STAT_HIT(ctx);
   return rebuild_add_from_terms(ctx, terms, nterms, const_p, const_q);
+}
+
+/* Wide nested-factor scans run once per completed rewrite, not per term added.
+ */
+static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
+  ixs_arena_mark mark;
+  ixs_addterm *terms;
+  ixs_node *result;
+  int64_t const_p, const_q;
+  uint32_t i;
+
+  if (!add || add->tag != IXS_ADD || add->u.add.nterms <= 2u)
+    return add;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    ixs_node *term = add->u.add.terms[i].term;
+    if (term->tag == IXS_MUL && find_pow1_factor(term, IXS_MOD) >= 0)
+      break;
+  }
+  if (i == add->u.add.nterms)
+    return add;
+  mark = ixs_arena_save(&ctx->scratch);
+  terms = ixs_arena_alloc(&ctx->scratch, add->u.add.nterms * sizeof(*terms),
+                          sizeof(void *));
+  if (!terms) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return add;
+  }
+  memcpy(terms, add->u.add.terms, add->u.add.nterms * sizeof(*terms));
+  ixs_node_get_rat(add->u.add.coeff, &const_p, &const_q);
+  result = cancel_floor_mod_pairs(ctx, terms, add->u.add.nterms, const_p,
+                                  const_q, true);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result ? result : add;
 }
 
 static bool split_const_offset(ixs_node *expr, ixs_node **base,
@@ -17828,6 +18074,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       return NULL;
   }
   result = cancel_congruent_mod_difference(ctx, bnds, result);
+  result = cancel_wide_floor_mod_node(ctx, result);
   if (!result || floor_candidates < 2u)
     return result;
   return cancel_equal_floor_difference(ctx, bnds, result);
@@ -17835,16 +18082,8 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,
                                     ixs_node *base, int32_t exp) {
-  if (ixs_node_is_const(base) && exp == 1) {
-    return simp_mul(ctx, result, base);
-  } else {
-    ixs_mulfactor f;
-    ixs_node *pw;
-    f.base = base;
-    f.exp = exp;
-    pw = ixs_node_mul(ctx, ixs_node_int(ctx, 1), 1, &f);
-    return pw ? simp_mul(ctx, result, pw) : NULL;
-  }
+  return mul_power_or_raw(ctx, result, base, exp,
+                          ixs_node_is_const(base) && exp != 0);
 }
 
 static ixs_node *cancel_scaled_mod_quotient(ixs_ctx *ctx, ixs_bounds *bnds,

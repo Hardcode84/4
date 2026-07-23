@@ -1890,6 +1890,24 @@ def test_cancel_floor_mod_pairs_targeted(
     assume(checked > 0)
 
 
+def test_cancel_floor_mod_pairs_shared_outer() -> None:
+    ctx = ixsimpl.Context()
+    x, k, outer, unrelated = (
+        ctx.sym("outer_x"),
+        ctx.sym("outer_k"),
+        ctx.sym("outer_scale"),
+        ctx.sym("outer_unrelated"),
+    )
+    floor_term = 3 * outer * k * ixsimpl.floor(x / k)
+    mod_term = 3 * outer * (x % k)
+    expected = 3 * outer * x
+
+    assert ixsimpl.same_node(floor_term + mod_term, expected)
+
+    wide = unrelated + floor_term + mod_term
+    assert ixsimpl.same_node(wide.simplify(), unrelated + expected)
+
+
 @given(
     other_sym=st.sampled_from(_VARS),
     c=st.integers(min_value=1, max_value=15),
@@ -2512,6 +2530,27 @@ def test_fact_backed_exact_divide() -> None:
         ctx.try_exact_divide(expr, 0, facts)
 
 
+def test_fact_backed_exact_divide_piecewise() -> None:
+    ctx = ixsimpl.Context()
+    item, slot = ctx.sym("exact_pw_item"), ctx.sym("exact_pw_slot")
+    value = 32 * (2 * item + slot)
+    piecewise = ixsimpl.pw((value, item < 64))
+    expected = 8 * item + 4 * slot
+
+    active = ctx.facts()
+    active.assume_many([item >= 0, item <= 63])
+    status, quotient = ctx.try_exact_divide(piecewise, 8, active)
+    assert status == "proven"
+    assert quotient is not None
+    assert ixsimpl.same_node(quotient, expected)
+
+    assert ctx.try_exact_divide(piecewise, 8, ctx.facts()) == ("unknown", None)
+
+    inactive = ctx.facts()
+    inactive.assume(item >= 64)
+    assert ctx.try_exact_divide(piecewise, 8, inactive) == ("unknown", None)
+
+
 def test_exact_divide_binding_rejects_cross_context_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -2997,6 +3036,15 @@ def test_facts_assume_many_is_atomic() -> None:
     with pytest.raises(ValueError, match="OR predicates"):
         rejected.assume_many([y >= 5, ixsimpl.or_(x >= 0, x <= 10)])
     assert ctx.range(x, facts=rejected) is None
+
+
+def test_facts_assume_many_uses_prefix_closure() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("batch_closure_x"), ctx.sym("batch_closure_y")
+    facts = ctx.facts()
+
+    facts.assume_many([ctx.eq(x, 0), x + y >= 0])
+    assert ctx.check(y >= 0, facts=facts) is True
 
 
 def test_compound_assumption_ingestion_parity() -> None:

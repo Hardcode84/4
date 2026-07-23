@@ -968,8 +968,22 @@ static void extract_bitfacts(ixs_bounds *b, ixs_node *a) {
   }
 }
 
+static ixs_node *bounds_simplify_fact_free(ixs_ctx *ctx, ixs_node *expr) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_bounds empty;
+  ixs_node *result = NULL;
+  if (ixs_bounds_init_ctx(&empty, ctx, &ctx->scratch)) {
+    result = simp_simplify_bounds(ctx, expr, &empty);
+    if (empty.oom)
+      result = NULL;
+    ixs_bounds_destroy(&empty);
+  }
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
-  ixs_node *expanded;
+  ixs_node *cached, *canonical, *expanded;
   ixs_arena_mark diag_mark;
   const char **saved_errors;
   size_t saved_nerrors, saved_errors_cap;
@@ -978,13 +992,20 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   if (expr->tag == IXS_INT || expr->tag == IXS_RAT || expr->tag == IXS_SYM)
     return expr;
 
-  /* Canonical aliases are optional.  Expansion failures must not become
-   * user-visible diagnostics for otherwise successful bounds queries. */
+  cached = ixs_node_transform_cache_lookup(b->ctx, expr,
+                                           IXS_NODE_TRANSFORM_BOUNDS_CANONICAL);
+  if (cached)
+    return cached;
+
+  /* Alias diagnostics must not leak into otherwise valid range queries. */
   diag_mark = ixs_arena_save(&b->ctx->diag);
   saved_errors = b->ctx->errors;
   saved_nerrors = b->ctx->nerrors;
   saved_errors_cap = b->ctx->errors_cap;
   expanded = expand_impl(b->ctx, expr);
+  canonical = expanded && !ixs_node_is_sentinel(expanded)
+                  ? bounds_simplify_fact_free(b->ctx, expanded)
+                  : expanded;
   ixs_arena_restore(&b->ctx->diag, diag_mark);
   b->ctx->errors = saved_errors;
   b->ctx->nerrors = saved_nerrors;
@@ -996,7 +1017,15 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   }
   if (ixs_node_is_sentinel(expanded))
     return expr;
-  return expanded;
+  if (!canonical) {
+    b->oom = true;
+    return expr;
+  }
+  if (ixs_node_is_sentinel(canonical))
+    return expanded;
+  ixs_node_transform_cache_store(
+      b->ctx, expr, IXS_NODE_TRANSFORM_BOUNDS_CANONICAL, canonical);
+  return canonical;
 }
 
 static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
@@ -3845,8 +3874,20 @@ static bool assumption_cmp_op_valid(ixs_cmp_op op) {
   return false;
 }
 
-static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
-                                                       ixs_node *pred) {
+static void bounds_ingest_validated_leaf(ixs_bounds *b, ixs_node *pred,
+                                         bool ingest) {
+  if (!ingest)
+    return;
+  if (pred == b->ctx->node_false) {
+    bounds_mark_contradiction(b);
+    bounds_cache_clear(b);
+    return;
+  }
+  (void)ixs_bounds_add_assumption(b, pred);
+}
+
+static ixs_bounds_build_status
+bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   ixs_node *stack[ASSUMPTION_NODE_LIMIT];
   size_t nstack = 0;
   size_t visited = 0;
@@ -3871,8 +3912,7 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
     if (cur == b->ctx->node_true)
       continue;
     if (cur == b->ctx->node_false) {
-      bounds_mark_contradiction(b);
-      bounds_cache_clear(b);
+      bounds_ingest_validated_leaf(b, cur, ingest);
       continue;
     }
 
@@ -3886,7 +3926,8 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
                                   "CMP child belongs to a different context");
       if (ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
         return assumption_invalid(b, "sentinel CMP children are not accepted");
-      if (!ixs_bounds_add_assumption(b, cur))
+      bounds_ingest_validated_leaf(b, cur, ingest);
+      if (b->oom)
         return IXS_BOUNDS_BUILD_OOM;
       continue;
     }
@@ -3909,6 +3950,32 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
         b, "expected a CMP, AND, or boolean constant predicate");
   }
 
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static ixs_bounds_build_status bounds_validate_predicate(ixs_bounds *b,
+                                                         ixs_node *pred) {
+  return bounds_process_predicate(b, pred, false);
+}
+
+static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
+                                                       ixs_node *pred) {
+  return bounds_process_predicate(b, pred, true);
+}
+
+static ixs_bounds_build_status
+bounds_validate_predicates(ixs_bounds *b, ixs_node *const *predicates,
+                           size_t n_predicates) {
+  size_t i;
+  ixs_bounds_build_status status;
+
+  if (n_predicates > 0 && !predicates)
+    return assumption_invalid(b, "NULL array with nonzero count");
+  for (i = 0; i < n_predicates; i++) {
+    status = bounds_validate_predicate(b, predicates[i]);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
   return IXS_BOUNDS_BUILD_OK;
 }
 
@@ -4297,7 +4364,19 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
     ixs_session_unbind(&binding);
     return false;
   }
-  status = bounds_ingest_predicates(&candidate, predicates, n_predicates);
+  status = bounds_validate_predicates(&candidate, predicates, n_predicates);
+  if (status == IXS_BOUNDS_BUILD_OK) {
+    size_t i;
+    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
+      ixs_node *simplified =
+          simp_simplify_bounds(ctx, predicates[i], &candidate);
+      if (!simplified || candidate.oom) {
+        status = IXS_BOUNDS_BUILD_OOM;
+        break;
+      }
+      status = bounds_ingest_predicate(&candidate, simplified);
+    }
+  }
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {
@@ -6016,6 +6095,29 @@ static ixs_exact_divide_result exact_divide_error(ixs_ctx *ctx,
   return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
 }
 
+static ixs_node *exact_divide_simplify_facts(ixs_facts *facts, ixs_ctx *ctx,
+                                             ixs_node *expr, bool *oom) {
+  /* Fact simplification is a proof probe; discard scratch and diagnostics. */
+  ixs_arena_mark scratch_mark = ixs_arena_save(&ctx->scratch);
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  bool old_oom = facts->bounds.oom;
+  ixs_node *result = simp_simplify_bounds(ctx, expr, &facts->bounds);
+
+  *oom = !result || (!old_oom && facts->bounds.oom);
+  if (*oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, scratch_mark);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  return result && !ixs_node_is_sentinel(result) ? result : expr;
+}
+
 ixs_exact_divide_result
 ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_session_binding binding;
@@ -6023,6 +6125,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_node *divisor_node;
   ixs_node *quotient;
   ixs_ctx *ctx;
+  bool oom;
 
   if (!facts_bind(facts, &binding, &ctx))
     return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
@@ -6056,6 +6159,12 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
     return result;
   }
 
+  expr = exact_divide_simplify_facts(facts, ctx, expr, &oom);
+  if (oom) {
+    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+    ixs_session_unbind(&binding);
+    return result;
+  }
   proof = ixs_bounds_check_divisible(&facts->bounds, expr, divisor);
   if (facts->bounds.oom) {
     ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");

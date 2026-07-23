@@ -164,11 +164,15 @@ recursively. `ixs_subs` uses a 256-slot direct-mapped memo cache (4 KB on the
 stack) keyed by node pointer to avoid exponential re-traversal of shared
 subexpressions; collisions only cause redundant work, never incorrect results.
 Successful deterministic node transforms use a context-local open-addressed
-cache keyed by source-node identity. Current slots memoize top-level expansion
-and removal of an ADD constant for shifted bounds. Arena-backed storage stays
-at or below 75% load, so hits and inserts are expected O(1). Successful results
-survive session reset; failures and sentinels are not cached. Statistics reset
-clears the cache so rule-hit counters remain observable.
+cache keyed by source-node identity. Current slots memoize top-level expansion,
+removal of an ADD constant for shifted bounds, and bounds-canonical aliases.
+Arena-backed storage stays at or below 75% load, so hits and inserts are
+expected O(1). A bounds-canonical miss costs expansion plus bounded-iteration,
+fact-free simplification of the expanded DAG; later queries hit the cache.
+Successful results survive session reset; failures and sentinels are not
+cached. Cache-allocation failure leaves the result uncached without failing
+the query. Statistics reset clears the cache so rule-hit counters remain
+observable.
 For expressions built from the corpus (max depth 11) this is safe.
 Deliberately constructing extremely deep trees (depth > ~10,000) via the API
 may cause stack overflow. This is considered acceptable for the target domain.
@@ -920,7 +924,7 @@ c*E - c*D*floor(E/D)                    → c*Mod(E, D)     (D symbolic)
 c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
-ci*m*floor(E/m) + ci*Mod(E, m)          → ci*E
+ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
 
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
@@ -953,7 +957,12 @@ instead of a structural leading coefficient.  If every non-constant dividend
 coefficient is divisible by `g` and bounds prove `g` divides the symbolic
 modulus, `Mod(g*x + r, modulus)` uses the same extraction for `0 <= r < g`.
 
-The forward cancellation uses two verification strategies:
+Forward cancellation inspects at most 256 ADD-term pairs per simplification,
+so unrelated large sums retain their original form rather than turning the
+hot construction path into an unbounded quadratic scan. Nested-factor pairs in
+two-term ADDs cancel during construction. Wider ADDs use one candidate-gated
+pass during explicit simplification, avoiding repeated scans while the sum is
+built term by term. The rule uses two verification strategies:
 
 1. **floor(A/m) == floor_node** — reconstructs the expected floor via
    `simp_floor(simp_div(A, m))` and checks hash-consed pointer equality.
@@ -1129,8 +1138,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 - **Expression range facts**: explicit or derived facts of the form
   `range(expr) = [lo, hi]` are stored in the same bounds context as
   symbol intervals.  They are keyed by hash-consed expression node and by an
-  expanded canonical alias, so `2*(A + 8*B)` and `2*A + 16*B` can prove the
-  same range when both normalize to the same expanded form.  Comparison
+  expanded, fact-free-simplified canonical alias, so
+  `2*(A + 8*B)` and `2*A + 16*B` can prove the same range when both normalize
+  to the same form.  Comparison
   assumptions over integer-valued expressions also materialize expression
   range facts; for example `-C + expr <= 0` records `expr <= C`. ADD queries
   also recover a stored range for their constant-free base and shift both
@@ -1209,7 +1219,9 @@ nodes from another context are rejected with an `assumptions:` diagnostic.
 Legacy array ingestion discards the whole temporary bound context when any
 entry is rejected or fails; it never queries a partially ingested prefix.
 `ixs_facts_assume_preds` applies the whole array to one fork and commits only
-after every tree succeeds; `ixs_facts_assume_pred` is its one-element form.
+after every tree succeeds. It validates the full array, then simplifies and
+ingests each predicate in input order so later predicates see earlier facts.
+`ixs_facts_assume_pred` is its one-element form.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
 Rejection or OOM leaves the stored payload unchanged but poisons the fact set,
 so no caller can continue proving from a partial or silently weaker context.
@@ -1240,7 +1252,13 @@ This enables rules like:
   interval `[c, c]` (from `sym == c` assumption, or derived via
   `sym >= c` ∧ `sym <= c`), the rewriter replaces the symbol with integer
   `c` throughout the expression tree. This cascades through constant
-  folding, collapsing `ceiling(M/256)` to `1` when `M == 256`, etc.
+  folding, collapsing `ceiling(M/256)` to `1` when `M == 256`, etc. Constant
+  powers created by substitution fold into the product coefficient, so
+  `floor(x/d)` with `d == 128` contains rational coefficient `1/128`, not a
+  constant-base factor that only prints like the same rational. If the folded
+  rational is not representable, simplification keeps the structural power
+  without emitting an error. A zero base with negative exponent remains a
+  domain error.
 - `Mod(x, 32)` where `0 <= x < 32` → `x`
 - `floor(x/64)` where `0 <= x < 64` → `0`
 - `floor(x)` → constant when `floor(lo) == floor(hi)` (same for ceiling)
@@ -1483,13 +1501,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   magnitude, including the `2^63` magnitude of `INT64_MIN`, so normalization
   cannot overflow.
 - **Exact quotient construction** (`ixs_try_exact_divide_facts`, Python
-  `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): reuses the same
-  divisibility proof and returns a canonical expanded quotient only after that
-  proof succeeds. Its result separates `PROVEN`, proven `NOT_EXACT`,
-  insufficient or contradictory `UNKNOWN`, and domain/OOM `ERROR`. Only
-  `PROVEN` carries a quotient. Negative divisors preserve quotient sign;
-  `INT64_MIN` is handled without taking its signed magnitude. Every `ERROR`
-  reached through a valid fact set appends a session diagnostic.
+  `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): first simplifies
+  the expression in the supplied fact domain, then reuses the same divisibility
+  proof and returns a canonical expanded quotient only after that proof
+  succeeds. Fact-proven `Piecewise` branches therefore expose their quotient;
+  uncovered or undefined partitions remain conservative. Its result separates
+  `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, and
+  domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
+  preserve quotient sign; `INT64_MIN` is handled without taking its signed
+  magnitude. Every `ERROR` reached through a valid fact set appends a session
+  diagnostic.
 - **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
   proof contexts for callers that carry facts through IR rewrites instead of
   re-encoding everything as predicates.  A fact set accepts predicate facts,
