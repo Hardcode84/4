@@ -11,6 +11,7 @@
 #include "bounds.h"
 #include "interval.h"
 #include "node.h"
+#include "simplify.h"
 
 #include "test_check.h"
 #include <ixsimpl.h>
@@ -3499,6 +3500,50 @@ static void test_fact_simplify_session_lifetime_and_oom(void) {
   }
 }
 
+static void test_batch_rewrite_cache_oom_is_atomic(void) {
+  enum { NROOTS = 260 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *single = ixs_sym(ctx, "batch_cache_initial_oom");
+  ixs_node *single_batch[1] = {single};
+  ixs_node *growth_batch[NROOTS];
+  ixs_session_binding binding;
+  ixs_bounds bnds;
+  ixs_arena_mark mark;
+  size_t i;
+
+  for (i = 0; i < NROOTS; i++) {
+    char name[40];
+    snprintf(name, sizeof(name), "batch_cache_growth_oom_%zu", i);
+    growth_batch[i] = ixs_sym(ctx, name);
+  }
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+
+  mark = ixs_arena_save(&ctx->scratch);
+  CHECK(ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch));
+  ixs_arena_set_fail_after(&ctx->scratch, 0);
+  CHECK(!simp_simplify_batch_bounds(ctx, single_batch, 1, &bnds));
+  CHECK(single_batch[0] == NULL);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_restore(&ctx->scratch, mark);
+
+  mark = ixs_arena_save(&ctx->scratch);
+  CHECK(ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch));
+  /*
+   * The first allocation creates the 256-slot table. Unique roots then fill
+   * it to 75 percent; the second allocation is the deferred table growth.
+   */
+  ixs_arena_set_fail_after(&ctx->scratch, 1);
+  CHECK(!simp_simplify_batch_bounds(ctx, growth_batch, NROOTS, &bnds));
+  for (i = 0; i < NROOTS; i++)
+    CHECK(growth_batch[i] == NULL);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_restore(&ctx->scratch, mark);
+
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
@@ -3641,6 +3686,7 @@ int main(void) {
   test_public_defined_facts_and_invalid();
   test_public_defined_traversal_bounds_and_sharing();
   test_fact_simplify_session_lifetime_and_oom();
+  test_batch_rewrite_cache_oom_is_atomic();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

@@ -215,6 +215,8 @@ The test suite includes:
   use `--torture` for 50,000)
 
 Reproduce the SymPy benchmark: `python bench/bench_sympy.py`
+Compare C API modes with `build/bench_corpus` and
+`build/bench_corpus --batch`.
 
 ## Project Structure
 

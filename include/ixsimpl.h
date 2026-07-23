@@ -407,7 +407,8 @@ ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions);
 
 /* Simplify exprs[0..n-1] in place under the shared assumption contract,
- * sharing the same assumption set.
+ * sharing the same assumption set and rewritten-subtree cache.  Both are
+ * scoped to this call and fact context.
  * Each element is replaced by its simplified form.  On OOM, all
  * elements are set to NULL.  NULL or sentinel entries are skipped.
  * Bounds are parsed from assumptions once and reused across all elements. */

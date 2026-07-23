@@ -86,6 +86,17 @@ static ixs_ctx *get_ctx(void) {
   return g_ctx;
 }
 
+static uint64_t stat_count(ixs_ctx *ctx, const char *wanted) {
+  size_t i;
+  for (i = 0; i < ixs_ctx_nstats(ctx); i++) {
+    const char *name;
+    uint64_t count = ixs_ctx_stat(ctx, i, &name);
+    if (name && strcmp(name, wanted) == 0)
+      return count;
+  }
+  return 0;
+}
+
 static void test_add_canonicalize(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1785,6 +1796,112 @@ static void test_simplify_batch(void) {
   CHECK(exprs[0] == x);
   CHECK(exprs[1] == x);
   CHECK(exprs[2] == ixs_int(ctx, 7));
+
+  {
+    ixs_node *y = ixs_sym(ctx, "batch_shared_y");
+    ixs_node *shared = ixs_mod(ctx, x, ixs_int(ctx, 16));
+    ixs_node *roots[] = {ixs_add(ctx, shared, y),
+                         ixs_mul(ctx, ixs_int(ctx, 3), shared)};
+    ixs_node *bounds[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8)),
+    };
+    uint64_t before = stat_count(ctx, "mod_bounds_elim");
+    ixs_simplify_batch(ctx, roots, 2, bounds, 2);
+    CHECK(roots[0] == ixs_add(ctx, x, y));
+    CHECK(roots[1] == ixs_mul(ctx, ixs_int(ctx, 3), x));
+    CHECK(stat_count(ctx, "mod_bounds_elim") == before + 1);
+    CHECK(ixs_simplify(ctx, shared, NULL, 0) == shared);
+  }
+
+  {
+    enum { NROOTS = 260 };
+    ixs_node *roots[NROOTS];
+    ixs_node *expected[NROOTS];
+    ixs_node *shared = ixs_mod(ctx, x, ixs_int(ctx, 32));
+    ixs_node *bounds[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16)),
+    };
+    uint64_t before;
+    size_t i;
+    for (i = 0; i < NROOTS; i++) {
+      char name[32];
+      ixs_node *symbol;
+      snprintf(name, sizeof(name), "batch_growth_%zu", i);
+      symbol = ixs_sym(ctx, name);
+      roots[i] = ixs_add(ctx, shared, symbol);
+      expected[i] = ixs_simplify(ctx, roots[i], bounds, 2);
+    }
+    before = stat_count(ctx, "mod_bounds_elim");
+    ixs_simplify_batch(ctx, roots, NROOTS, bounds, 2);
+    for (i = 0; i < NROOTS; i++)
+      CHECK(roots[i] == expected[i]);
+    CHECK(stat_count(ctx, "mod_bounds_elim") == before + 1);
+  }
+
+  {
+    enum { NCASES = 100 };
+    ixs_node *values[NCASES];
+    ixs_node *conditions[NCASES];
+    ixs_node *roots[2];
+    ixs_node *expected[2];
+    ixs_node *shared = ixs_mod(ctx, x, ixs_int(ctx, 64));
+    ixs_node *bounds[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 32)),
+    };
+    size_t i;
+    for (i = 0; i + 1u < NCASES; i++) {
+      char name[40];
+      snprintf(name, sizeof(name), "batch_nested_growth_%zu", i);
+      values[i] = ixs_add(ctx, shared, ixs_int(ctx, (int64_t)i));
+      conditions[i] =
+          ixs_cmp(ctx, ixs_sym(ctx, name), IXS_CMP_GE, ixs_int(ctx, 0));
+    }
+    values[NCASES - 1u] = shared;
+    conditions[NCASES - 1u] = ixs_true(ctx);
+    roots[0] = ixs_pw(ctx, NCASES, values, conditions);
+    roots[1] = ixs_add(ctx, shared, ixs_int(ctx, 101));
+    expected[0] = ixs_simplify(ctx, roots[0], bounds, 2);
+    expected[1] = ixs_simplify(ctx, roots[1], bounds, 2);
+    ixs_simplify_batch(ctx, roots, 2, bounds, 2);
+    CHECK(roots[0] == expected[0]);
+    CHECK(roots[1] == expected[1]);
+  }
+
+  {
+    ixs_node *shared = ixs_mod(ctx, x, ixs_int(ctx, 16));
+    ixs_node *parent = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *values[] = {shared, shared};
+    ixs_node *conditions[] = {ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8)),
+                              ixs_true(ctx)};
+    ixs_node *roots[] = {ixs_pw(ctx, 2, values, conditions), shared};
+    ixs_node *expected[] = {ixs_simplify(ctx, roots[0], &parent, 1),
+                            ixs_simplify(ctx, roots[1], &parent, 1)};
+    ixs_simplify_batch(ctx, roots, 2, &parent, 1);
+    CHECK(roots[0] == expected[0]);
+    CHECK(roots[1] == expected[1]);
+    CHECK(roots[1] == shared);
+  }
+
+  {
+    ixs_node *shared = ixs_mod(ctx, x, ixs_int(ctx, 16));
+    ixs_node *lo = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *hi = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
+    ixs_facts *bounded = ixs_facts_create(ctx);
+    ixs_facts *empty = ixs_facts_create(ctx);
+    ixs_node *bounded_batch[] = {ixs_add(ctx, shared, ixs_int(ctx, 1)),
+                                 ixs_mul(ctx, ixs_int(ctx, 2), shared)};
+    ixs_node *empty_batch[] = {shared};
+    CHECK(ixs_facts_assume_pred(bounded, lo));
+    CHECK(ixs_facts_assume_pred(bounded, hi));
+    ixs_simplify_batch_facts(bounded, bounded_batch, 2);
+    CHECK(bounded_batch[0] == ixs_add(ctx, x, ixs_int(ctx, 1)));
+    CHECK(bounded_batch[1] == ixs_mul(ctx, ixs_int(ctx, 2), x));
+    ixs_simplify_batch_facts(empty, empty_batch, 1);
+    CHECK(empty_batch[0] == shared);
+  }
 }
 
 static void test_fact_backed_simplification(void) {

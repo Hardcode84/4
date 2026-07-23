@@ -37,6 +37,9 @@ IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
                                           ixs_bounds *bounds);
 
+IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
+                                           size_t n, ixs_bounds *bounds);
+
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    ixs_node *const *assumptions,
                                    size_t n_assumptions);

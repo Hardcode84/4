@@ -4431,15 +4431,10 @@ void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n) {
 
   mark = ixs_arena_save(&ctx->scratch);
   old_oom = facts->bounds.oom;
-  for (i = 0; i < n; i++) {
-    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
-      continue;
-    exprs[i] = simp_simplify_bounds(ctx, exprs[i], &facts->bounds);
-    if (!exprs[i] || (!old_oom && facts->bounds.oom)) {
-      facts_fill_batch(exprs, n, NULL);
-      bounds_cache_clear(&facts->bounds);
-      break;
-    }
+  if (!simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds) ||
+      (!old_oom && facts->bounds.oom)) {
+    facts_fill_batch(exprs, n, NULL);
+    bounds_cache_clear(&facts->bounds);
   }
   facts->bounds.oom = old_oom;
   ixs_arena_restore(&ctx->scratch, mark);

@@ -4661,15 +4661,10 @@ void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n) {
 
   mark = ixs_arena_save(&ctx->scratch);
   old_oom = facts->bounds.oom;
-  for (i = 0; i < n; i++) {
-    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
-      continue;
-    exprs[i] = simp_simplify_bounds(ctx, exprs[i], &facts->bounds);
-    if (!exprs[i] || (!old_oom && facts->bounds.oom)) {
-      facts_fill_batch(exprs, n, NULL);
-      bounds_cache_clear(&facts->bounds);
-      break;
-    }
+  if (!simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds) ||
+      (!old_oom && facts->bounds.oom)) {
+    facts_fill_batch(exprs, n, NULL);
+    bounds_cache_clear(&facts->bounds);
   }
   facts->bounds.oom = old_oom;
   ixs_arena_restore(&ctx->scratch, mark);
@@ -16548,6 +16543,79 @@ typedef struct {
   ixs_node *val;
 } rewrite_memo_slot;
 
+typedef struct {
+  rewrite_memo_slot *slots;
+  size_t cap;
+  size_t used;
+  ixs_arena *arena;
+  bool grow_pending;
+} rewrite_shared_cache;
+
+/* Rehash is O(nodes seen in this batch); lookup/store stay amortized O(1). */
+static bool rewrite_shared_cache_grow(rewrite_shared_cache *cache) {
+  size_t new_cap = cache->cap ? cache->cap * 2u : REWRITE_MEMO_SIZE;
+  rewrite_memo_slot *slots;
+  size_t i;
+  if (new_cap < cache->cap || new_cap > (size_t)-1 / sizeof(*slots))
+    return false;
+  slots =
+      ixs_arena_alloc(cache->arena, new_cap * sizeof(*slots), sizeof(void *));
+  if (!slots)
+    return false;
+  memset(slots, 0, new_cap * sizeof(*slots));
+  for (i = 0; i < cache->cap; i++) {
+    if (cache->slots[i].key) {
+      size_t slot = cache->slots[i].key->hash & (new_cap - 1u);
+      while (slots[slot].key)
+        slot = (slot + 1u) & (new_cap - 1u);
+      slots[slot] = cache->slots[i];
+    }
+  }
+  cache->slots = slots;
+  cache->cap = new_cap;
+  return true;
+}
+
+static ixs_node *rewrite_shared_cache_lookup(rewrite_shared_cache *cache,
+                                             ixs_node *key) {
+  size_t slot, probes;
+  if (!cache || !cache->cap)
+    return NULL;
+  slot = key->hash & (cache->cap - 1u);
+  for (probes = 0; probes < cache->cap; probes++) {
+    if (!cache->slots[slot].key)
+      return NULL;
+    if (cache->slots[slot].key == key)
+      return cache->slots[slot].val;
+    slot = (slot + 1u) & (cache->cap - 1u);
+  }
+  return NULL;
+}
+
+static bool rewrite_shared_cache_store(rewrite_shared_cache *cache,
+                                       ixs_node *key, ixs_node *value) {
+  size_t slot;
+  if (!cache)
+    return true;
+  if (!cache->cap && !rewrite_shared_cache_grow(cache))
+    return false;
+  /*
+   * A Piecewise rewrite may hold scratch marks newer than this table.
+   * Defer growth until the root iteration returns outside those marks.
+   */
+  if (cache->used >= cache->cap - cache->cap / 4u) {
+    cache->grow_pending = true;
+    return true;
+  }
+  slot = key->hash & (cache->cap - 1u);
+  while (cache->slots[slot].key)
+    slot = (slot + 1u) & (cache->cap - 1u);
+  cache->slots[slot].key = key;
+  cache->slots[slot].val = value;
+  cache->used++;
+  return true;
+}
+
 /*
  * If a MUL expression is pinned to zero (LE bound intersects propagated
  * GE to give [0,0]) and all but one factor are strictly nonzero, store
@@ -16654,16 +16722,28 @@ static void add_cond_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cond) {
 }
 
 static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                              rewrite_memo_slot *memo);
+                              rewrite_memo_slot *memo,
+                              rewrite_shared_cache *shared);
 
 static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                         rewrite_memo_slot *memo) {
+                         rewrite_memo_slot *memo,
+                         rewrite_shared_cache *shared) {
+  ixs_node *result;
+  uint32_t slot;
   if (!n || ixs_node_is_sentinel(n))
     return n;
-  uint32_t slot = n->hash & REWRITE_MEMO_MASK;
+  slot = n->hash & REWRITE_MEMO_MASK;
   if (memo[slot].key == n)
     return memo[slot].val;
-  ixs_node *result = rewrite_impl(ctx, n, bnds, memo);
+  result = rewrite_shared_cache_lookup(shared, n);
+  if (result) {
+    memo[slot].key = n;
+    memo[slot].val = result;
+    return result;
+  }
+  result = rewrite_impl(ctx, n, bnds, memo, shared);
+  if (result && !rewrite_shared_cache_store(shared, n, result))
+    return NULL;
   memo[slot].key = n;
   memo[slot].val = result;
   return result;
@@ -16769,9 +16849,10 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
 }
 
 static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                rewrite_memo_slot *memo) {
-  ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo);
-  ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo);
+                                rewrite_memo_slot *memo,
+                                rewrite_shared_cache *shared) {
+  ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo, shared);
+  ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo, shared);
   if (!l || !r)
     return NULL;
   switch (n->tag) {
@@ -16791,7 +16872,8 @@ static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 }
 
 static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                   rewrite_memo_slot *memo) {
+                                   rewrite_memo_slot *memo,
+                                   rewrite_shared_cache *shared) {
   uint32_t i, nc = n->u.pw.ncases;
   ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
   ixs_node **vals =
@@ -16803,7 +16885,7 @@ static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     return NULL;
   }
   for (i = 0; i < nc; i++) {
-    cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo);
+    cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo, shared);
     if (!cds[i]) {
       ixs_arena_restore(&ctx->scratch, sm);
       return NULL;
@@ -16822,16 +16904,18 @@ static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
         if (bmemo) {
           add_cond_to_bounds(ctx, &bbnds, cds[i]);
           memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
-          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo);
+          /* Forked facts are branch-local and cannot populate the batch cache.
+           */
+          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo, NULL);
         } else {
-          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared);
         }
       } else {
-        vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+        vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared);
       }
       ixs_arena_restore(&ctx->scratch, bm);
     } else {
-      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo);
+      vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared);
     }
     if (!vals[i]) {
       ixs_arena_restore(&ctx->scratch, sm);
@@ -16853,13 +16937,14 @@ static ixs_node *rewrite_symbol(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
 }
 
 static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo) {
+                                  rewrite_memo_slot *memo,
+                                  rewrite_shared_cache *shared) {
   uint32_t i;
-  ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo);
+  ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared);
   if (!result)
     return NULL;
   for (i = 0; i < n->u.add.nterms; i++) {
-    ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds, memo);
+    ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds, memo, shared);
     ixs_node *c = n->u.add.terms[i].coeff;
     if (!t)
       return NULL;
@@ -16885,13 +16970,14 @@ static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,
 }
 
 static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo) {
+                                  rewrite_memo_slot *memo,
+                                  rewrite_shared_cache *shared) {
   uint32_t i;
-  ixs_node *result = rewrite(ctx, n->u.mul.coeff, bnds, memo);
+  ixs_node *result = rewrite(ctx, n->u.mul.coeff, bnds, memo, shared);
   if (!result)
     return NULL;
   for (i = 0; i < n->u.mul.nfactors; i++) {
-    ixs_node *base = rewrite(ctx, n->u.mul.factors[i].base, bnds, memo);
+    ixs_node *base = rewrite(ctx, n->u.mul.factors[i].base, bnds, memo, shared);
     if (!base)
       return NULL;
     result = rewrite_mul_factor(ctx, result, base, n->u.mul.factors[i].exp);
@@ -16902,8 +16988,10 @@ static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 }
 
 static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                    rewrite_memo_slot *memo, bool is_ceil) {
-  ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo);
+                                    rewrite_memo_slot *memo,
+                                    rewrite_shared_cache *shared,
+                                    bool is_ceil) {
+  ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo, shared);
   if (!arg)
     return NULL;
   return is_ceil ? simp_ceil_bnds(ctx, bnds, arg)
@@ -16911,16 +16999,17 @@ static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 }
 
 static ixs_node *rewrite_logic_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                    rewrite_memo_slot *memo) {
+                                    rewrite_memo_slot *memo,
+                                    rewrite_shared_cache *shared) {
   uint32_t i;
   ixs_node *result;
   if (n->u.logic.nargs == 0)
     return n;
-  result = rewrite(ctx, n->u.logic.args[0], bnds, memo);
+  result = rewrite(ctx, n->u.logic.args[0], bnds, memo, shared);
   if (!result)
     return NULL;
   for (i = 1; i < n->u.logic.nargs; i++) {
-    ixs_node *arg = rewrite(ctx, n->u.logic.args[i], bnds, memo);
+    ixs_node *arg = rewrite(ctx, n->u.logic.args[i], bnds, memo, shared);
     if (!arg)
       return NULL;
     result = n->tag == IXS_AND ? simp_and(ctx, result, arg)
@@ -16932,13 +17021,15 @@ static ixs_node *rewrite_logic_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 }
 
 static ixs_node *rewrite_not_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo) {
-  ixs_node *arg = rewrite(ctx, n->u.unary_bool.arg, bnds, memo);
+                                  rewrite_memo_slot *memo,
+                                  rewrite_shared_cache *shared) {
+  ixs_node *arg = rewrite(ctx, n->u.unary_bool.arg, bnds, memo, shared);
   return arg ? simp_not(ctx, arg) : NULL;
 }
 
 static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                              rewrite_memo_slot *memo) {
+                              rewrite_memo_slot *memo,
+                              rewrite_shared_cache *shared) {
   switch (n->tag) {
   case IXS_INT:
   case IXS_RAT:
@@ -16949,32 +17040,33 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   case IXS_SYM:
     return rewrite_symbol(ctx, n, bnds);
   case IXS_ADD:
-    return rewrite_add_node(ctx, n, bnds, memo);
+    return rewrite_add_node(ctx, n, bnds, memo, shared);
   case IXS_MUL:
-    return rewrite_mul_node(ctx, n, bnds, memo);
+    return rewrite_mul_node(ctx, n, bnds, memo, shared);
   case IXS_FLOOR:
-    return rewrite_round_node(ctx, n, bnds, memo, false);
+    return rewrite_round_node(ctx, n, bnds, memo, shared, false);
   case IXS_CEIL:
-    return rewrite_round_node(ctx, n, bnds, memo, true);
+    return rewrite_round_node(ctx, n, bnds, memo, shared, true);
   case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
   case IXS_CMP:
-    return rewrite_binary(ctx, n, bnds, memo);
+    return rewrite_binary(ctx, n, bnds, memo, shared);
   case IXS_PIECEWISE:
-    return rewrite_piecewise(ctx, n, bnds, memo);
+    return rewrite_piecewise(ctx, n, bnds, memo, shared);
   case IXS_AND:
   case IXS_OR:
-    return rewrite_logic_node(ctx, n, bnds, memo);
+    return rewrite_logic_node(ctx, n, bnds, memo, shared);
   case IXS_NOT:
-    return rewrite_not_node(ctx, n, bnds, memo);
+    return rewrite_not_node(ctx, n, bnds, memo, shared);
   }
   return n;
 }
 
-IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
-                                          ixs_bounds *bnds) {
+static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
+                                             ixs_bounds *bnds,
+                                             rewrite_shared_cache *shared) {
   int iter;
   rewrite_memo_slot memo[REWRITE_MEMO_SIZE];
 
@@ -16986,9 +17078,14 @@ IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
   for (iter = 0; iter < SIMPLIFY_ITER_LIMIT; iter++) {
     ixs_node *prev = expr;
     memset(memo, 0, sizeof(memo));
-    expr = rewrite(ctx, expr, bnds, memo);
+    expr = rewrite(ctx, expr, bnds, memo, shared);
     if (!expr)
       return NULL;
+    if (shared && shared->grow_pending) {
+      shared->grow_pending = false;
+      if (!rewrite_shared_cache_grow(shared))
+        return NULL;
+    }
     if (expr == prev)
       break;
   }
@@ -16997,6 +17094,37 @@ IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
     ixs_ctx_push_error(ctx, "simplify: iteration limit reached");
 
   return expr;
+}
+
+IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                          ixs_bounds *bnds) {
+  return simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+}
+
+IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
+                                           size_t n, ixs_bounds *bnds) {
+  rewrite_shared_cache shared;
+  size_t i;
+  shared.slots = NULL;
+  shared.cap = 0;
+  shared.used = 0;
+  shared.arena = &ctx->scratch;
+  shared.grow_pending = false;
+  if (n > 0 && !rewrite_shared_cache_grow(&shared))
+    goto failed;
+  for (i = 0; i < n; i++) {
+    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
+      continue;
+    exprs[i] = simp_simplify_bounds_cached(ctx, exprs[i], bnds, &shared);
+    if (!exprs[i])
+      goto failed;
+  }
+  return true;
+
+failed:
+  for (i = 0; i < n; i++)
+    exprs[i] = NULL;
+  return false;
 }
 
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
@@ -17032,19 +17160,7 @@ IXS_STATIC void simp_simplify_batch(ixs_ctx *ctx, ixs_node **exprs, size_t n,
     ixs_arena_restore(&ctx->scratch, m);
     return;
   }
-  for (i = 0; i < n; i++) {
-    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
-      continue;
-    exprs[i] = simp_simplify_bounds(ctx, exprs[i], &bnds);
-    if (!exprs[i]) {
-      size_t j;
-      for (j = 0; j < n; j++)
-        exprs[j] = NULL;
-      ixs_bounds_destroy(&bnds);
-      ixs_arena_restore(&ctx->scratch, m);
-      return;
-    }
-  }
+  (void)simp_simplify_batch_bounds(ctx, exprs, n, &bnds);
   ixs_bounds_destroy(&bnds);
   ixs_arena_restore(&ctx->scratch, m);
 }

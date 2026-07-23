@@ -703,6 +703,16 @@ regardless. If the limit is reached without convergence, the current best
 result is returned and an error is appended to the error list (not sentinel —
 the result is still valid, just possibly not fully simplified).
 
+Batch simplification adds a batch-local open-addressed cache above the
+per-walk direct-mapped memo. It keys rewritten subtrees by interned node
+identity and grows at 75% occupancy, giving expected O(1) lookup across roots
+and fixed-point iterations. One cache serves one immutable fact context only.
+Piecewise branch forks use independent local memos, so branch facts cannot
+escape into siblings or later roots. Cache allocation failure preserves the
+batch API's atomic OOM contract: every output becomes NULL.
+Growth is deferred until a root rewrite returns, outside nested scratch-arena
+marks; rule-local restores cannot invalidate cache storage.
+
 #### 4.1 Constant Folding
 
 Any operation on constants is immediately evaluated:
@@ -1729,7 +1739,8 @@ size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize);  // SymPy
 size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize); // C code
 
 // Batch: simplify multiple expressions **in place**, sharing the same
-// assumption-derived bounds (parsed once, reused for every element).
+// assumption-derived bounds and rewritten-subtree cache. Both are scoped to
+// this call and fact context.
 // Each exprs[i] is overwritten with its simplified form.
 // NULL/sentinel entries in exprs are left unchanged. Assumptions use the
 // shared compound-predicate contract above. Rejection sets every entry to
@@ -2286,7 +2297,7 @@ ixsimpl/
 │   ├── corpus_expected.txt
 │   └── corpus_assumptions.txt # shared assumption set for corpus tests
 ├── bench/
-│   └── bench_corpus.c       # benchmark: time all 615 expressions
+│   └── bench_corpus.c       # benchmark: individual or batch corpus simplify
 ├── scripts/
 │   ├── amalgamate.py        # generate ixsimpl_amalg.c
 │   ├── check_exports.py     # verify public symbol surface
@@ -3266,6 +3277,8 @@ met (< 50ms total).
    - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
 5. **Fuzz testing**: Hypothesis-based (see below).
 6. **Benchmark**: Time all 615 expressions, compare against SymPy baseline.
+   `bench_corpus --batch` measures shared-cache batch simplification;
+   no argument measures independent calls.
    Track regressions in CI.  `bench/bench_sympy.py` runs ixsimpl vs
    `sympy.simplify` and `sympy.cancel` on the full corpus.  Typical
    results: ixsimpl ~23 ms total vs sympy.cancel ~25 s (~1000x) and

@@ -3,8 +3,8 @@
  */
 /*
  * Corpus benchmark: time parse + simplify of all expressions from
- * test/corpus.txt. Uses clock() for portable C99 timing. Runs 3 iterations,
- * reports best.
+ * test/corpus.txt. Pass --batch to simplify all roots in one call. Uses
+ * clock() for portable C99 timing. Runs 3 iterations, reports best.
  */
 
 #include <ixsimpl.h>
@@ -127,7 +127,15 @@ static size_t load_corpus(const char **exprs, size_t max_n, char *storage,
   return n;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  bool batch = false;
+  if (argc == 2 && strcmp(argv[1], "--batch") == 0)
+    batch = true;
+  else if (argc != 1) {
+    fprintf(stderr, "usage: bench_corpus [--batch]\n");
+    return 1;
+  }
+
   char *storage = malloc(MAX_EXPRESSIONS * MAX_LINE);
   if (!storage) {
     fprintf(stderr, "bench_corpus: out of memory\n");
@@ -179,10 +187,13 @@ int main(void) {
     clock_t t1 = clock();
 
     clock_t t2 = clock();
-    for (size_t i = 0; i < n_exprs; i++) {
-      if (parsed[i])
-        ixs_simplify(&session, parsed[i], assumptions, n_assumptions);
-    }
+    if (batch)
+      ixs_simplify_batch(&session, parsed, n_exprs, assumptions, n_assumptions);
+    else
+      for (size_t i = 0; i < n_exprs; i++) {
+        if (parsed[i])
+          ixs_simplify(&session, parsed[i], assumptions, n_assumptions);
+      }
     clock_t t3 = clock();
 
     double parse_ms = 1000.0 * (double)(t1 - t0) / CLOCKS_PER_SEC;
@@ -198,7 +209,8 @@ int main(void) {
   double expr_per_sec = (n_exprs > 0) ? (1000.0 * n_exprs / total_ms) : 0;
   double avg_us = (n_exprs > 0) ? (1000.0 * total_ms / n_exprs) : 0;
 
-  printf("bench_corpus: %zu expressions", n_exprs);
+  printf("bench_corpus: %zu expressions, %s mode", n_exprs,
+         batch ? "batch" : "individual");
   if (n_assumptions > 0)
     printf(", %zu assumptions", n_assumptions);
   printf("\n");
