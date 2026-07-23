@@ -707,13 +707,14 @@ regardless. If the limit is reached without convergence, the current best
 result is returned and an error is appended to the error list (not sentinel —
 the result is still valid, just possibly not fully simplified).
 
-Batch simplification adds a batch-local open-addressed cache above the
-per-walk direct-mapped memo. It keys rewritten subtrees by interned node
-identity and grows at 75% occupancy, giving expected O(1) lookup across roots
-and fixed-point iterations. One cache serves one immutable fact context only.
+Scalar and batch simplification add an open-addressed cache above the per-walk
+direct-mapped memo. It keys rewritten subtrees by interned node identity and
+grows at 75% occupancy. Scalar caches span one root's fixed-point iterations;
+batch caches also span roots. One cache serves one immutable fact context only.
 Piecewise branch forks use independent local memos, so branch facts cannot
-escape into siblings or later roots. Cache allocation failure preserves the
-batch API's atomic OOM contract: every output becomes NULL.
+escape into siblings or later roots. Initial scalar-cache OOM falls back to the
+direct memo. Batch-cache OOM preserves the atomic contract: every output
+becomes NULL.
 Growth is deferred until a root rewrite returns, outside nested scratch-arena
 marks; rule-local restores cannot invalidate cache storage.
 

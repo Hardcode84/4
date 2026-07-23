@@ -17595,7 +17595,8 @@ typedef struct {
   bool grow_pending;
 } rewrite_shared_cache;
 
-/* Rehash is O(nodes seen in this batch); lookup/store stay amortized O(1). */
+/* Rehash is O(nodes seen in this cache lifetime); operations are amortized
+ * O(1). */
 static bool rewrite_shared_cache_grow(rewrite_shared_cache *cache) {
   size_t new_cap = cache->cap ? cache->cap * 2u : REWRITE_MEMO_SIZE;
   rewrite_memo_slot *slots;
@@ -18195,8 +18196,8 @@ static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
         if (bmemo) {
           add_cond_to_bounds(ctx, &bbnds, cds[i]);
           memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
-          /* Forked facts are branch-local and cannot populate the batch cache.
-           */
+          /* Forked facts are branch-local and cannot populate the parent-fact
+           * cache. */
           vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo, NULL);
         } else {
           vals[i] = rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared);
@@ -18416,7 +18417,24 @@ static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
 
 IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
                                           ixs_bounds *bnds) {
-  return simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+  ixs_arena_mark mark;
+  rewrite_shared_cache shared;
+  ixs_node *result;
+  if (!expr || ixs_node_is_sentinel(expr))
+    return expr;
+  mark = ixs_arena_save(&ctx->scratch);
+  shared.slots = NULL;
+  shared.cap = 0;
+  shared.used = 0;
+  shared.arena = &ctx->scratch;
+  shared.grow_pending = false;
+  if (!rewrite_shared_cache_grow(&shared)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+  }
+  result = simp_simplify_bounds_cached(ctx, expr, bnds, &shared);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
 }
 
 IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,

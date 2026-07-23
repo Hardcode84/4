@@ -4314,9 +4314,16 @@ static void test_fact_simplify_session_lifetime_and_oom(void) {
   ixs_facts *facts = ixs_facts_create(ctx);
   ixs_facts *poisoned;
   ixs_node *batch[2];
+  size_t errors;
 
   CHECK(ixs_facts_assume_pred(facts, lo));
   CHECK(ixs_facts_assume_pred(facts, hi));
+
+  errors = ixs_ctx_nerrors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_simplify_facts(facts, x) == x);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
 
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
   CHECK(ixs_simplify_facts(facts, piecewise) == NULL);
