@@ -429,6 +429,71 @@ static void test_null_ctx_destroy(void) {
   CHECK(1);
 }
 
+static void test_many_expression_ranges(void) {
+  enum { EXPR_COUNT = 64 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *conflicting = ixs_facts_create(ctx);
+  ixs_facts *substituted = ixs_facts_create(ctx);
+  ixs_node *exprs[EXPR_COUNT];
+  ixs_node *conflict = ixs_sym(ctx, "many_ranges_conflict");
+  ixs_node *replacement = ixs_sym(ctx, "many_ranges_replacement");
+  ixs_range_result input;
+  ixs_range_result result;
+  size_t i;
+
+  CHECK(facts != NULL);
+  CHECK(conflicting != NULL);
+  CHECK(substituted != NULL);
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_q = 1;
+  input.upper_q = 1;
+  for (i = 0; i < EXPR_COUNT; i++) {
+    char name[32];
+    snprintf(name, sizeof(name), "many_ranges_%zu", i);
+    exprs[i] = ixs_sym(ctx, name);
+    input.lower_p = (int64_t)i;
+    input.upper_p = (int64_t)i + 100;
+    CHECK(ixs_facts_assume_range(facts, exprs[i], &input));
+  }
+
+  for (i = EXPR_COUNT; i > 0; i--) {
+    size_t index = i - 1u;
+    CHECK(ixs_range_facts(facts, exprs[index], &result));
+    CHECK(result.has_lower && result.lower_p == (int64_t)index &&
+          result.lower_q == 1);
+    CHECK(result.has_upper && result.upper_p == (int64_t)index + 100 &&
+          result.upper_q == 1);
+  }
+
+  input.lower_p = 20;
+  input.upper_p = 80;
+  CHECK(ixs_facts_assume_range(facts, exprs[0], &input));
+  CHECK(ixs_range_facts(facts, exprs[0], &result));
+  CHECK(result.has_lower && result.lower_p == 20 && result.lower_q == 1);
+  CHECK(result.has_upper && result.upper_p == 80 && result.upper_q == 1);
+
+  input.lower_p = 0;
+  input.upper_p = 0;
+  CHECK(ixs_facts_assume_range(conflicting, conflict, &input));
+  input.lower_p = 1;
+  input.upper_p = 1;
+  CHECK(ixs_facts_assume_range(conflicting, conflict, &input));
+  input.lower_p = 0;
+  input.upper_p = 0;
+  CHECK(ixs_facts_assume_range(conflicting, conflict, &input));
+  CHECK(!ixs_range_facts(conflicting, conflict, &result));
+
+  input.lower_p = 7;
+  input.upper_p = 7;
+  CHECK(ixs_facts_assume_range(substituted, replacement, &input));
+  CHECK(ixs_facts_substitute(substituted, conflicting, conflict, replacement));
+  CHECK(!ixs_range_facts(substituted, replacement, &result));
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_integer_overflow();
   test_division_by_zero();
@@ -442,6 +507,7 @@ int main(void) {
   test_symbol_edge_cases();
   test_print_buffer();
   test_null_ctx_destroy();
+  test_many_expression_ranges();
 
   printf("test_edge_cases: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

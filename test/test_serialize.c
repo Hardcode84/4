@@ -832,7 +832,7 @@ static void test_facts_assume_preds_duplicate_skip(void) {
   CHECK(oom_facts != NULL);
   CHECK(ixs_facts_assume_pred(oom_facts, prefix));
   before = oom_facts->bounds;
-  fork_allocations = 1u + (before.nexprs != 0u) + (before.nnonzero != 0u);
+  fork_allocations = 1u + 2u * (before.nexprs != 0u) + (before.nnonzero != 0u);
   ixs_session_clear_errors(&test_session);
   before_oom = arena_test_mark(test_scratch);
   test_scratch->fail_after = fork_allocations;
@@ -846,6 +846,8 @@ static void test_facts_assume_preds_duplicate_skip(void) {
   CHECK(oom_facts->bounds.nvars == before.nvars);
   CHECK(oom_facts->bounds.exprs == before.exprs);
   CHECK(oom_facts->bounds.nexprs == before.nexprs);
+  CHECK(oom_facts->bounds.expr_index == before.expr_index);
+  CHECK(oom_facts->bounds.expr_index_cap == before.expr_index_cap);
   CHECK(oom_facts->bounds.nonzero == before.nonzero);
   CHECK(oom_facts->bounds.nnonzero == before.nnonzero);
 

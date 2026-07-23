@@ -1137,8 +1137,11 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   extracts interval bounds from comparison assumptions automatically
 - **Expression range facts**: explicit or derived facts of the form
   `range(expr) = [lo, hi]` are stored in the same bounds context as
-  symbol intervals.  They are keyed by hash-consed expression node and by an
-  expanded, fact-free-simplified canonical alias, so
+  symbol intervals. A dense unique-expression array retains iteration order;
+  an open-addressed pointer index provides expected O(1) lookup and insertion.
+  Repeated facts intersect into the existing entry, and an empty intersection
+  remains contradictory. Facts are keyed by hash-consed expression node and by
+  an expanded, fact-free-simplified canonical alias, so
   `2*(A + 8*B)` and `2*A + 16*B` can prove the same range when both normalize
   to the same form.  Comparison
   assumptions over integer-valued expressions also materialize expression
@@ -1153,7 +1156,7 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   detected contradiction.
 - **Contradiction cache**: the detected-empty result is cached until any bound,
   congruence, bit, nonzero, or expression-range mutation. Query hits are O(1);
-  a miss performs the full variable, expression-pair, and exclusion scan.
+  a miss scans unique variables, expressions, and exclusions once.
 - **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
@@ -1247,12 +1250,12 @@ conjunctions retain the existing unknown/no-result behavior.
 
 **Conflicting assumptions**: User-assumption validation and error reporting are
 **best-effort**. Direct contradictions are detected where the local domains can
-see them: empty interval intersections, duplicate expression bounds that
-intersect to empty, and future bitfact conflicts such as a bit known both zero
-and one. Query APIs treat detected contradictions as unknown/no-result rather
-than manufacturing a concrete answer. Simplification may return `IXS_ERROR` and
-append a diagnostic when the reporting path has enough context, but callers must
-not rely on every contradictory assumption set producing an error string.
+see them: empty interval intersections, eagerly merged expression bounds, and
+future bitfact conflicts such as a bit known both zero and one. Query APIs treat
+detected contradictions as unknown/no-result rather than manufacturing a
+concrete answer. Simplification may return `IXS_ERROR` and append a diagnostic
+when the reporting path has enough context, but callers must not rely on every
+contradictory assumption set producing an error string.
 
 Not all contradictions are detectable. Cross-variable constraints like
 `x >= y, y >= x + 1` require relational constraint solving, which is out of

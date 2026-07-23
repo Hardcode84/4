@@ -238,6 +238,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #include <string.h>
 
 #define BOUNDS_INIT_CAP 16
+#define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
@@ -313,6 +314,8 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nexprs = 0;
   b->expr_cap = 0;
   b->exprs = NULL;
+  b->expr_index = NULL;
+  b->expr_index_cap = 0;
   b->nonzero = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
@@ -356,6 +359,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->nexprs = src->nexprs;
   dst->expr_cap = src->nexprs ? src->nexprs : 0;
   dst->exprs = NULL;
+  dst->expr_index = NULL;
+  dst->expr_index_cap = src->nexprs ? src->expr_index_cap : 0;
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
@@ -373,6 +378,16 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
     if (!dst->exprs)
       return false;
     memcpy(dst->exprs, src->exprs, src->nexprs * sizeof(*src->exprs));
+    if (!src->expr_index || !src->expr_index_cap ||
+        src->expr_index_cap > SIZE_MAX / sizeof(*dst->expr_index))
+      return false;
+    dst->expr_index = ixs_arena_alloc(
+        dst->scratch, dst->expr_index_cap * sizeof(*dst->expr_index),
+        sizeof(void *));
+    if (!dst->expr_index)
+      return false;
+    memcpy(dst->expr_index, src->expr_index,
+           src->expr_index_cap * sizeof(*src->expr_index));
   }
   if (src->nnonzero) {
     dst->nonzero = ixs_arena_alloc(
@@ -1258,27 +1273,126 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   return canonical;
 }
 
+/* Pointer hashing and bounded linear probing keep range lookup expected O(1).
+ */
+static size_t bounds_expr_hash_ptr(const ixs_node *expr) {
+  uint64_t x = (uint64_t)(uintptr_t)expr;
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+static size_t bounds_expr_index_slot(const size_t *index, size_t capacity,
+                                     const ixs_expr_bound *exprs,
+                                     const ixs_node *expr) {
+  size_t slot = bounds_expr_hash_ptr(expr) & (capacity - 1u);
+  while (index[slot] && exprs[index[slot] - 1u].expr != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+/*
+ * Rebuilds only at 75% load. Growth is amortized O(1), and publication stays
+ * with the caller so a later dense-array allocation cannot split the index.
+ */
+static bool bounds_prepare_expr_index(ixs_bounds *b, size_t count,
+                                      size_t **prepared,
+                                      size_t *prepared_capacity) {
+  size_t capacity = b->expr_index_cap;
+  size_t *index;
+  size_t i;
+
+  if (capacity && count <= capacity - capacity / 4u) {
+    *prepared = b->expr_index;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = BOUNDS_EXPR_INDEX_INIT_CAP;
+  while (count > capacity - capacity / 4u) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (capacity > SIZE_MAX / sizeof(*index))
+    return false;
+  index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  if (!index)
+    return false;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->nexprs; i++) {
+    size_t slot =
+        bounds_expr_index_slot(index, capacity, b->exprs, b->exprs[i].expr);
+    index[slot] = i + 1u;
+  }
+  *prepared = index;
+  *prepared_capacity = capacity;
+  return true;
+}
+
 static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
                                 ixs_interval iv) {
-  ixs_expr_bound *eb;
-  if (!b || !expr || !iv.valid)
+  ixs_expr_bound *exprs;
+  size_t *index;
+  size_t expr_capacity;
+  size_t index_capacity;
+  size_t slot;
+
+  if (!b || !expr || !iv.valid || b->oom)
     return;
-  if (b->nexprs >= b->expr_cap) {
-    size_t new_cap = b->expr_cap ? b->expr_cap * 2 : 4;
-    ixs_expr_bound *new_arr =
-        ixs_arena_alloc(b->scratch, new_cap * sizeof(*new_arr), sizeof(void *));
-    if (!new_arr) {
+
+  if (b->expr_index_cap) {
+    slot = bounds_expr_index_slot(b->expr_index, b->expr_index_cap, b->exprs,
+                                  expr);
+    if (b->expr_index[slot]) {
+      ixs_expr_bound *bound = &b->exprs[b->expr_index[slot] - 1u];
+      if (bound->iv.valid)
+        bound->iv = iv_intersect(bound->iv, iv);
+      bounds_cache_clear(b);
+      return;
+    }
+  }
+
+  if (b->nexprs == SIZE_MAX ||
+      !bounds_prepare_expr_index(b, b->nexprs + 1u, &index, &index_capacity)) {
+    b->oom = true;
+    return;
+  }
+
+  exprs = b->exprs;
+  expr_capacity = b->expr_cap;
+  if (b->nexprs >= expr_capacity) {
+    if (expr_capacity > SIZE_MAX / 2u) {
+      b->oom = true;
+      return;
+    }
+    expr_capacity = expr_capacity ? expr_capacity * 2u : 4u;
+    if (expr_capacity > SIZE_MAX / sizeof(*exprs)) {
+      b->oom = true;
+      return;
+    }
+    exprs = ixs_arena_alloc(b->scratch, expr_capacity * sizeof(*exprs),
+                            sizeof(void *));
+    if (!exprs) {
       b->oom = true;
       return;
     }
     if (b->nexprs)
-      memcpy(new_arr, b->exprs, b->nexprs * sizeof(*b->exprs));
-    b->exprs = new_arr;
-    b->expr_cap = new_cap;
+      memcpy(exprs, b->exprs, b->nexprs * sizeof(*exprs));
   }
-  eb = &b->exprs[b->nexprs++];
-  eb->expr = expr;
-  eb->iv = iv;
+
+  b->exprs = exprs;
+  b->expr_cap = expr_capacity;
+  b->expr_index = index;
+  b->expr_index_cap = index_capacity;
+  slot =
+      bounds_expr_index_slot(b->expr_index, b->expr_index_cap, b->exprs, expr);
+  b->exprs[b->nexprs].expr = expr;
+  b->exprs[b->nexprs].iv = iv;
+  b->expr_index[slot] = b->nexprs + 1u;
+  b->nexprs++;
   bounds_cache_clear(b);
 }
 
@@ -2923,15 +3037,14 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
 }
 
 static ixs_interval bounds_get_expr_overrides(ixs_bounds *b, ixs_node *expr) {
-  ixs_interval iv = ixs_interval_unknown();
-  size_t j;
-  if (!b || !expr)
-    return iv;
-  for (j = 0; j < b->nexprs; j++) {
-    if (b->exprs[j].expr == expr)
-      iv = iv_intersect(iv, b->exprs[j].iv);
-  }
-  return iv;
+  size_t slot;
+  if (!b || !expr || !b->expr_index || !b->expr_index_cap)
+    return ixs_interval_unknown();
+  slot =
+      bounds_expr_index_slot(b->expr_index, b->expr_index_cap, b->exprs, expr);
+  if (!b->expr_index[slot])
+    return ixs_interval_unknown();
+  return b->exprs[b->expr_index[slot] - 1u].iv;
 }
 
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
@@ -2983,9 +3096,9 @@ static bool bounds_cache_empty_result(ixs_bounds *b, bool result) {
   return result;
 }
 
-/* Cache hit is O(1); miss scans variables, expression pairs, and exclusions. */
+/* Cache hit is O(1); miss scans variables, expressions, and exclusions. */
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
-  size_t i, j;
+  size_t i;
 
   if (b->empty_cache_valid)
     return b->empty_cache_value;
@@ -3003,13 +3116,8 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
   for (i = 0; i < b->nexprs; i++) {
     ixs_interval iv = b->exprs[i].iv;
     ixs_var_bound *var = NULL;
-    for (j = i + 1; j < b->nexprs; j++) {
-      if (b->exprs[j].expr == b->exprs[i].expr) {
-        iv = iv_intersect(iv, b->exprs[j].iv);
-        if (!iv.valid || ixs_interval_is_empty(iv))
-          return bounds_cache_empty_result(b, true);
-      }
-    }
+    if (!iv.valid || ixs_interval_is_empty(iv))
+      return bounds_cache_empty_result(b, true);
     if (b->exprs[i].expr->tag == IXS_SYM)
       var = find_var(b, b->exprs[i].expr->u.name);
     if (var) {
@@ -4782,6 +4890,10 @@ static bool bounds_transfer_substituted_exprs(ixs_bounds *dst,
                                               ixs_node *const *replacements) {
   size_t i;
   for (i = 0; i < src->nexprs; i++) {
+    if (!src->exprs[i].iv.valid) {
+      bounds_mark_contradiction(dst);
+      continue;
+    }
     ixs_node *subst =
         simp_subs_multi(ctx, src->exprs[i].expr, nsubs, targets, replacements);
     if (!subst || ixs_node_is_sentinel(subst))

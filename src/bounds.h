@@ -52,8 +52,10 @@ typedef struct {
   size_t nvars;
   size_t cap;
   ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
+  size_t *expr_index;    /* open-addressed dense-index table */
   size_t nexprs;
   size_t expr_cap;
+  size_t expr_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;

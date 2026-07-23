@@ -573,6 +573,47 @@ static void test_bounds_fork(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_expr_index_fork(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds parent;
+  ixs_bounds child;
+  ixs_interval parent_iv;
+  ixs_interval child_iv;
+  ixs_node *expr = ixs_sym(ctx, "expr_index_fork");
+  ixs_node *extra = ixs_sym(ctx, "expr_index_fork_extra");
+  size_t parent_count;
+
+  CHECK(ixs_bounds_init(&parent, ixs_test_scratch(ctx)));
+  ixs_bounds_add_expr(&parent, expr, ixs_interval_range(0, 1, 100, 1));
+  CHECK(!parent.oom);
+  CHECK(parent.expr_index != NULL);
+  parent_count = parent.nexprs;
+
+  CHECK(ixs_bounds_fork(&child, &parent));
+  CHECK(child.expr_index != parent.expr_index);
+  CHECK(child.expr_index_cap == parent.expr_index_cap);
+
+  ixs_bounds_add_expr(&child, expr, ixs_interval_range(10, 1, 20, 1));
+  ixs_bounds_add_expr(&child, extra, ixs_interval_exact(7, 1));
+  CHECK(!child.oom);
+  CHECK(child.nexprs == parent_count + 1u);
+
+  child_iv = ixs_bounds_get(&child, expr);
+  CHECK(child_iv.valid);
+  CHECK(child_iv.lo_p == 10 && child_iv.lo_q == 1);
+  CHECK(child_iv.hi_p == 20 && child_iv.hi_q == 1);
+  parent_iv = ixs_bounds_get(&parent, expr);
+  CHECK(parent_iv.valid);
+  CHECK(parent_iv.lo_p == 0 && parent_iv.lo_q == 1);
+  CHECK(parent_iv.hi_p == 100 && parent_iv.hi_q == 1);
+  CHECK(!ixs_bounds_get(&parent, extra).valid);
+  CHECK(parent.nexprs == parent_count);
+
+  ixs_bounds_destroy(&child);
+  ixs_bounds_destroy(&parent);
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Bounds: modular congruence                                        */
 /* ------------------------------------------------------------------ */
@@ -846,6 +887,194 @@ static void test_bounds_expr_override_invalidates_cache(void) {
   CHECK(iv.hi_p == 7 && iv.hi_q == 1);
 
   ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
+static size_t test_expr_index_bucket(const ixs_node *expr, size_t capacity) {
+  uint64_t x = (uint64_t)(uintptr_t)expr;
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x & (capacity - 1u);
+}
+
+static void test_bounds_expr_index_collision(void) {
+  enum { INDEX_CAPACITY = 8, CANDIDATE_COUNT = INDEX_CAPACITY + 1 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_node *buckets[INDEX_CAPACITY] = {0};
+  ixs_node *first = NULL;
+  ixs_node *second = NULL;
+  size_t bucket = 0;
+  size_t i;
+
+  for (i = 0; i < CANDIDATE_COUNT; i++) {
+    char name[32];
+    ixs_node *candidate;
+    size_t candidate_bucket;
+    snprintf(name, sizeof(name), "expr_collision_%zu", i);
+    candidate = ixs_sym(ctx, name);
+    candidate_bucket = test_expr_index_bucket(candidate, INDEX_CAPACITY);
+    if (buckets[candidate_bucket]) {
+      first = buckets[candidate_bucket];
+      second = candidate;
+      bucket = candidate_bucket;
+      break;
+    }
+    buckets[candidate_bucket] = candidate;
+  }
+
+  CHECK(first != NULL);
+  CHECK(second != NULL);
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  ixs_bounds_add_expr(&b, first, ixs_interval_exact(11, 1));
+  ixs_bounds_add_expr(&b, second, ixs_interval_exact(22, 1));
+  CHECK(!b.oom);
+  CHECK(b.nexprs == 2);
+  CHECK(b.exprs[0].expr == first);
+  CHECK(b.exprs[1].expr == second);
+  CHECK(b.expr_index_cap == INDEX_CAPACITY);
+  CHECK(b.expr_index[bucket] == 1u);
+  CHECK(b.expr_index[(bucket + 1u) & (INDEX_CAPACITY - 1u)] == 2u);
+  CHECK(ixs_bounds_get(&b, first).lo_p == 11);
+  CHECK(ixs_bounds_get(&b, second).lo_p == 22);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_expr_index_growth_and_merge(void) {
+  enum { EXPR_COUNT = 64 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_bounds conflicting;
+  ixs_node *exprs[EXPR_COUNT];
+  ixs_node *conflict = ixs_sym(ctx, "expr_index_conflict");
+  ixs_interval iv;
+  size_t count;
+  size_t i;
+
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  for (i = 0; i < EXPR_COUNT; i++) {
+    char name[32];
+    snprintf(name, sizeof(name), "expr_index_%zu", i);
+    exprs[i] = ixs_sym(ctx, name);
+    ixs_bounds_add_expr(&b, exprs[i],
+                        ixs_interval_range((int64_t)i, 1, (int64_t)i + 100, 1));
+  }
+  CHECK(!b.oom);
+  CHECK(b.nexprs == EXPR_COUNT);
+  CHECK(b.expr_index_cap != 0);
+  CHECK((b.expr_index_cap & (b.expr_index_cap - 1u)) == 0);
+  CHECK(b.nexprs <= b.expr_index_cap - b.expr_index_cap / 4u);
+
+  for (i = EXPR_COUNT; i > 0; i--) {
+    size_t index = i - 1u;
+    iv = ixs_bounds_get(&b, exprs[index]);
+    CHECK(iv.valid);
+    CHECK(iv.lo_p == (int64_t)index && iv.lo_q == 1);
+    CHECK(iv.hi_p == (int64_t)index + 100 && iv.hi_q == 1);
+  }
+
+  count = b.nexprs;
+  ixs_bounds_add_expr(&b, exprs[0], ixs_interval_range(20, 1, 80, 1));
+  CHECK(b.nexprs == count);
+  iv = ixs_bounds_get(&b, exprs[0]);
+  CHECK(iv.valid);
+  CHECK(iv.lo_p == 20 && iv.lo_q == 1);
+  CHECK(iv.hi_p == 80 && iv.hi_q == 1);
+
+  CHECK(ixs_bounds_init(&conflicting, ixs_test_scratch(ctx)));
+  ixs_bounds_add_expr(&conflicting, conflict, ixs_interval_exact(0, 1));
+  ixs_bounds_add_expr(&conflicting, conflict, ixs_interval_exact(1, 1));
+  CHECK(conflicting.nexprs == 1);
+  CHECK(!conflicting.exprs[0].iv.valid);
+  CHECK(ixs_bounds_has_empty(&conflicting));
+  ixs_bounds_add_expr(&conflicting, conflict, ixs_interval_exact(0, 1));
+  CHECK(!conflicting.empty_cache_valid);
+  CHECK(conflicting.nexprs == 1);
+  CHECK(!conflicting.exprs[0].iv.valid);
+  CHECK(ixs_bounds_has_empty(&conflicting));
+
+  ixs_bounds_destroy(&conflicting);
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_expr_index_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_arena_mark mark;
+  ixs_bounds lazy;
+  ixs_bounds atomic;
+  ixs_bounds growth;
+  ixs_bounds parent;
+  ixs_bounds child;
+  ixs_node *expr = ixs_sym(ctx, "expr_index_oom");
+  ixs_node *growth_exprs[7];
+  size_t *saved_index;
+  ixs_expr_bound *saved_exprs;
+  size_t saved_index_cap;
+  size_t i;
+
+  CHECK(ixs_bounds_init(&lazy, scratch));
+  ixs_arena_set_fail_after(scratch, 0);
+  ixs_bounds_add_expr(&lazy, expr, ixs_interval_exact(0, 1));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(lazy.oom);
+  CHECK(lazy.nexprs == 0);
+  CHECK(lazy.exprs == NULL);
+  CHECK(lazy.expr_index == NULL);
+
+  CHECK(ixs_bounds_init(&atomic, scratch));
+  ixs_arena_set_fail_after(scratch, 1);
+  ixs_bounds_add_expr(&atomic, expr, ixs_interval_exact(0, 1));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(atomic.oom);
+  CHECK(atomic.nexprs == 0);
+  CHECK(atomic.exprs == NULL);
+  CHECK(atomic.expr_index == NULL);
+
+  CHECK(ixs_bounds_init(&growth, scratch));
+  for (i = 0; i < 7; i++) {
+    char name[32];
+    snprintf(name, sizeof(name), "expr_index_grow_oom_%zu", i);
+    growth_exprs[i] = ixs_sym(ctx, name);
+  }
+  for (i = 0; i < 6; i++)
+    ixs_bounds_add_expr(&growth, growth_exprs[i],
+                        ixs_interval_exact((int64_t)i, 1));
+  CHECK(!growth.oom);
+  CHECK(growth.nexprs == 6);
+  saved_index = growth.expr_index;
+  saved_exprs = growth.exprs;
+  saved_index_cap = growth.expr_index_cap;
+  ixs_arena_set_fail_after(scratch, 0);
+  ixs_bounds_add_expr(&growth, growth_exprs[6], ixs_interval_exact(6, 1));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(growth.oom);
+  CHECK(growth.nexprs == 6);
+  CHECK(growth.expr_index == saved_index);
+  CHECK(growth.expr_index_cap == saved_index_cap);
+  CHECK(growth.exprs == saved_exprs);
+
+  CHECK(ixs_bounds_init(&parent, scratch));
+  ixs_bounds_add_expr(&parent, expr, ixs_interval_exact(0, 1));
+  CHECK(!parent.oom);
+  saved_index = parent.expr_index;
+  mark = ixs_arena_save(scratch);
+  ixs_arena_set_fail_after(scratch, 2);
+  CHECK(!ixs_bounds_fork(&child, &parent));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_restore(scratch, mark);
+  CHECK(parent.expr_index == saved_index);
+  CHECK(parent.nexprs == 1);
+  CHECK(ixs_bounds_get(&parent, expr).valid);
+
+  ixs_bounds_destroy(&parent);
+  ixs_bounds_destroy(&growth);
+  ixs_bounds_destroy(&atomic);
+  ixs_bounds_destroy(&lazy);
   ixs_ctx_destroy(ctx);
 }
 
@@ -2077,6 +2306,8 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
   CHECK(failed->bounds.exprs == before.exprs);
   CHECK(failed->bounds.nexprs == before.nexprs);
   CHECK(failed->bounds.expr_cap == before.expr_cap);
+  CHECK(failed->bounds.expr_index == before.expr_index);
+  CHECK(failed->bounds.expr_index_cap == before.expr_index_cap);
   CHECK(failed->bounds.nonzero == before.nonzero);
   CHECK(failed->bounds.nnonzero == before.nnonzero);
   CHECK(failed->bounds.nonzero_cap == before.nonzero_cap);
@@ -4299,6 +4530,7 @@ int main(void) {
 
   /* Bounds: fork */
   test_bounds_fork();
+  test_bounds_expr_index_fork();
 
   /* Bounds: modular congruence */
   test_bounds_modrem();
@@ -4317,6 +4549,9 @@ int main(void) {
   /* Bounds: expression overrides */
   test_bounds_expr_override();
   test_bounds_expr_override_invalidates_cache();
+  test_bounds_expr_index_collision();
+  test_bounds_expr_index_growth_and_merge();
+  test_bounds_expr_index_oom();
   test_bounds_expr_le();
 
   /* Bounds: entailment check */
