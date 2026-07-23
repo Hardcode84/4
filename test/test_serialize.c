@@ -3,7 +3,7 @@
  */
 #include <ixsimpl.h>
 
-#include "node.h"
+#include "bounds.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -692,6 +692,173 @@ static void test_facts_create_preds_public(void) {
   destroy_session(ctx, &s);
 }
 
+static void test_facts_assume_preds_order_and_identity(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *raw;
+  ixs_node *canonical;
+  ixs_node *divisor;
+  ixs_node *divisor_eight;
+  ixs_node *fallback;
+  ixs_node *conditions[2];
+  ixs_node *raw_values[2];
+  ixs_node *canonical_values[2];
+  ixs_node *raw_predicate;
+  ixs_node *canonical_predicate;
+  ixs_node *query;
+  ixs_node *repeated[3];
+  ixs_node *distinct[3];
+  ixs_facts *first_position;
+  ixs_facts *distinct_inputs;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  build_bounds_alias_blob(&buf);
+  raw = deserialize_from_buffer(&s, &buf);
+  canonical = ixs_mul(&s, ixs_sym(&s, "outer"), ixs_sym(&s, "x"));
+  divisor = ixs_sym(&s, "duplicate_identity_divisor");
+  divisor_eight = ixs_cmp(&s, divisor, IXS_CMP_EQ, ixs_int(&s, 8));
+  fallback = ixs_sym(&s, "duplicate_identity_fallback");
+  conditions[0] = divisor_eight;
+  conditions[1] = ixs_true(&s);
+  raw_values[0] = raw;
+  raw_values[1] = fallback;
+  canonical_values[0] = canonical;
+  canonical_values[1] = fallback;
+  raw_predicate = ixs_cmp(&s, ixs_pw(&s, 2, raw_values, conditions), IXS_CMP_GE,
+                          ixs_int(&s, 0));
+  canonical_predicate = ixs_cmp(&s, ixs_pw(&s, 2, canonical_values, conditions),
+                                IXS_CMP_GE, ixs_int(&s, 0));
+  query = ixs_cmp(&s, canonical, IXS_CMP_GE, ixs_int(&s, 0));
+
+  CHECK(raw != NULL);
+  CHECK(!ixs_is_error(raw));
+  CHECK(!ixs_same_node(raw, canonical));
+  CHECK(ixs_same_node(ixs_simplify(&s, raw, NULL, 0), canonical));
+  CHECK(!ixs_same_node(raw_predicate, canonical_predicate));
+
+  repeated[0] = canonical_predicate;
+  repeated[1] = divisor_eight;
+  repeated[2] = canonical_predicate;
+  first_position = ixs_facts_create(&s);
+  CHECK(first_position != NULL);
+  CHECK(ixs_facts_assume_preds(first_position, repeated, 3));
+  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_UNKNOWN);
+
+  distinct[0] = raw_predicate;
+  distinct[1] = divisor_eight;
+  distinct[2] = canonical_predicate;
+  distinct_inputs = ixs_facts_create(&s);
+  CHECK(distinct_inputs != NULL);
+  CHECK(ixs_facts_assume_preds(distinct_inputs, distinct, 3));
+  CHECK(ixs_check_facts(distinct_inputs, query) == IXS_CHECK_TRUE);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
+static ixs_node *build_duplicate_expensive_predicate(ixs_session *s) {
+  ixs_node *x = ixs_sym(s, "duplicate_expensive_x");
+  ixs_node *selector = ixs_sym(s, "duplicate_expensive_selector");
+  ixs_node *values[2] = {x, ixs_sub(s, ixs_int(s, 0), x)};
+  ixs_node *conditions[2] = {ixs_cmp(s, selector, IXS_CMP_GT, ixs_int(s, 0)),
+                             ixs_true(s)};
+  ixs_node *piecewise = ixs_pw(s, 2, values, conditions);
+  return ixs_cmp(s, piecewise, IXS_CMP_GE, ixs_int(s, 0));
+}
+
+static void test_facts_assume_preds_duplicate_skip(void) {
+  enum { DUPLICATE_COUNT = 300 };
+  const size_t budget = 1024;
+  ixs_ctx *measure_ctx = NULL;
+  ixs_ctx *test_ctx = NULL;
+  ixs_session measure_session;
+  ixs_session test_session;
+  ixs_node *measure_predicate;
+  ixs_node *test_predicate;
+  ixs_node *duplicates[DUPLICATE_COUNT];
+  ixs_node *prefix;
+  ixs_arena *test_scratch;
+  ixs_arena_mark before_batch;
+  ixs_arena_mark before_oom;
+  ixs_arena_mark base_mark;
+  ixs_facts *measure_facts;
+  ixs_facts *test_facts;
+  ixs_facts *oom_facts;
+  ixs_bounds before;
+  size_t allocations;
+  size_t fork_allocations;
+  size_t i;
+
+  if (!init_session(&measure_ctx, &measure_session))
+    return;
+  if (!init_session(&test_ctx, &test_session)) {
+    destroy_session(measure_ctx, &measure_session);
+    return;
+  }
+
+  measure_predicate = build_duplicate_expensive_predicate(&measure_session);
+  test_predicate = build_duplicate_expensive_predicate(&test_session);
+  measure_facts = ixs_facts_create(&measure_session);
+  test_facts = ixs_facts_create(&test_session);
+  CHECK(measure_facts != NULL);
+  CHECK(test_facts != NULL);
+
+  ixs_session_get(&measure_session)->scratch.fail_after = budget;
+  CHECK(ixs_facts_assume_pred(measure_facts, measure_predicate));
+  allocations = budget - ixs_session_get(&measure_session)->scratch.fail_after;
+  ixs_session_get(&measure_session)->scratch.fail_after =
+      IXS_ARENA_FAILURE_DISABLED;
+  CHECK(allocations > 0);
+
+  for (i = 0; i < DUPLICATE_COUNT; i++)
+    duplicates[i] = test_predicate;
+  test_scratch = &ixs_session_get(&test_session)->scratch;
+  before_batch = arena_test_mark(test_scratch);
+  test_scratch->fail_after = allocations + 1u;
+  CHECK(ixs_facts_assume_preds(test_facts, duplicates, DUPLICATE_COUNT));
+  CHECK(test_scratch->fail_after == 0);
+  test_scratch->fail_after = IXS_ARENA_FAILURE_DISABLED;
+  CHECK(!arena_is_at_mark(test_scratch, before_batch));
+  CHECK(ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_TRUE);
+
+  prefix =
+      ixs_cmp(&test_session, ixs_sym(&test_session, "duplicate_set_oom_prefix"),
+              IXS_CMP_GE, ixs_int(&test_session, 0));
+  oom_facts = ixs_facts_create(&test_session);
+  CHECK(oom_facts != NULL);
+  CHECK(ixs_facts_assume_pred(oom_facts, prefix));
+  before = oom_facts->bounds;
+  fork_allocations = 1u + (before.nexprs != 0u) + (before.nnonzero != 0u);
+  ixs_session_clear_errors(&test_session);
+  before_oom = arena_test_mark(test_scratch);
+  test_scratch->fail_after = fork_allocations;
+  CHECK(!ixs_facts_assume_preds(oom_facts, duplicates, DUPLICATE_COUNT));
+  CHECK(test_scratch->fail_after == 0);
+  test_scratch->fail_after = IXS_ARENA_FAILURE_DISABLED;
+  CHECK(arena_is_at_mark(test_scratch, before_oom));
+  CHECK(ixs_session_nerrors(&test_session) == 0);
+  CHECK(!oom_facts->usable);
+  CHECK(oom_facts->bounds.vars == before.vars);
+  CHECK(oom_facts->bounds.nvars == before.nvars);
+  CHECK(oom_facts->bounds.exprs == before.exprs);
+  CHECK(oom_facts->bounds.nexprs == before.nexprs);
+  CHECK(oom_facts->bounds.nonzero == before.nonzero);
+  CHECK(oom_facts->bounds.nnonzero == before.nnonzero);
+
+  base_mark = ixs_session_get(&test_session)->base_mark;
+  ixs_session_reset(&test_session);
+  test_scratch = &ixs_session_get(&test_session)->scratch;
+  CHECK(arena_is_at_mark(test_scratch, base_mark));
+  CHECK(ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_UNKNOWN);
+
+  destroy_session(test_ctx, &test_session);
+  destroy_session(measure_ctx, &measure_session);
+}
+
 static void test_malformed_root_rejected_without_pollution(void) {
   ixs_ctx *src_ctx = NULL;
   ixs_ctx *dst_ctx = NULL;
@@ -889,6 +1056,8 @@ int main(void) {
   test_writer_failure_no_diagnostics();
   test_bounds_canonical_alias_public();
   test_facts_create_preds_public();
+  test_facts_assume_preds_order_and_identity();
+  test_facts_assume_preds_duplicate_skip();
   test_malformed_root_rejected_without_pollution();
 #ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();

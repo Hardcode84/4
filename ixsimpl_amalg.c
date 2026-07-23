@@ -4539,6 +4539,45 @@ static void bounds_transfer_var_fact(ixs_bounds *dst, const ixs_var_bound *src,
   }
 }
 
+/* Build a fixed-capacity table at no more than half load. Initialization is
+ * O(count); predicate processing never grows the table. */
+static bool facts_predicate_set_init(ixs_arena *arena, size_t count,
+                                     ixs_node ***slots, size_t *capacity) {
+  size_t needed;
+  *slots = NULL;
+  *capacity = 0;
+  if (count < 2)
+    return true;
+  if (count > SIZE_MAX / 2u)
+    return false;
+  needed = count * 2u;
+  *capacity = 2u;
+  while (*capacity < needed) {
+    if (*capacity > SIZE_MAX / 2u)
+      return false;
+    *capacity *= 2u;
+  }
+  if (*capacity > SIZE_MAX / sizeof(**slots))
+    return false;
+  *slots = ixs_arena_alloc(arena, *capacity * sizeof(**slots), sizeof(void *));
+  if (!*slots)
+    return false;
+  memset(*slots, 0, *capacity * sizeof(**slots));
+  return true;
+}
+
+/* Expected O(1) at the fixed half-load bound; collisions probe linearly. */
+static bool facts_predicate_seen_or_insert(ixs_node **slots, size_t capacity,
+                                           ixs_node *predicate) {
+  size_t index = predicate->hash & (capacity - 1u);
+  while (slots[index] && slots[index] != predicate)
+    index = (index + 1u) & (capacity - 1u);
+  if (slots[index])
+    return true;
+  slots[index] = predicate;
+  return false;
+}
+
 ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
                                   size_t n_predicates) {
   ixs_session_binding binding;
@@ -4584,6 +4623,8 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_bounds_build_status status;
+  ixs_node **seen;
+  size_t seen_capacity;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts)) {
@@ -4608,9 +4649,16 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
     return false;
   }
   status = bounds_validate_predicates(&candidate, predicates, n_predicates);
+  if (status == IXS_BOUNDS_BUILD_OK &&
+      !facts_predicate_set_init(&ctx->scratch, n_predicates, &seen,
+                                &seen_capacity))
+    status = IXS_BOUNDS_BUILD_OOM;
   if (status == IXS_BOUNDS_BUILD_OK) {
     size_t i;
     for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
+      if (seen &&
+          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
+        continue;
       ixs_node *simplified =
           simp_simplify_bounds(ctx, predicates[i], &candidate);
       if (!simplified || candidate.oom) {

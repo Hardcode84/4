@@ -1227,6 +1227,14 @@ offering two constructors whose predicates have different meanings.
 `ixs_facts_assume_preds` applies the whole array to one fork and commits only
 after every tree succeeds. It validates the full array, then simplifies and
 ingests each predicate in input order so later predicates see earlier facts.
+An arena-backed open-addressed pointer set filters pointer-identical repeats in
+expected O(n), preserving each first input position. The table is sized once at
+no more than half load and does not grow during ingestion. Allocation failure
+fails the transaction. Successful commits retain the set storage with the
+monotonic scratch segment; session reset reclaims it with the bounds payload.
+Store hash-consing makes structurally equal live nodes pointer-identical.
+Distinct pointers, including noncanonical predicates that later normalize to
+the same node, remain separate inputs and preserve sequential closure.
 `ixs_facts_assume_pred` is its one-element form.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
 Rejection or OOM leaves the stored payload unchanged but poisons the fact set,
