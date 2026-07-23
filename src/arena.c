@@ -73,6 +73,8 @@ IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
   a->fail_after = IXS_ARENA_FAILURE_DISABLED;
 }
 
+/* Frees every chunk on the list; cost is linear in live chunks. */
+/* scan: arena */
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
   ixs_arena_chunk *c = a->current;
   while (c) {
@@ -167,6 +169,9 @@ IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a) {
   return m;
 }
 
+/* Not a scan: the chunk walk spans only allocations made since the mark,
+ * i.e. cost is proportional to the work being rolled back, not to total
+ * arena state. */
 IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
   while (a->current != m.chunk) {
     if (!a->current)

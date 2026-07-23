@@ -2138,6 +2138,42 @@ in batch mode (the primary use case):
 - Error list, symbol table: negligible
 - **Total: < 8 MB per context**
 
+### Performance invariants
+
+Hot paths — node construction, interning, simplification, ownership
+validation, fact/proof queries, walker callbacks — must not execute work
+linear in total arena/ctx state. Two size axes matter: `n`, the size of
+the expression being processed (any bound in `n` is acceptable), and `A`,
+the total allocated state of the context (hot paths must not depend on it).
+
+A function whose cost grows with `A` is a *scan* and carries a tag in a
+comment immediately above its definition:
+
+```c
+/* scan: arena */
+```
+
+Amortized O(1) mechanisms are not scans: hash-table growth rehashes, and
+`ixs_arena_restore`, whose chunk walk is proportional to the work being
+rolled back rather than to `A`.
+
+`scripts/check_hotpaths.py` enforces the invariant. It builds the static
+call graph of `src/*.[ch]` with tree-sitter-c, propagates scan-taint
+backward from tagged functions, and fails with a witness call path when a
+hot function transitively reaches a scan. Public API functions are hot
+roots by default; the lifecycle and bulk-IO exceptions are listed in the
+script. A `/* hot */` tag pins the contract on an internal helper. The
+check runs in pre-commit and as the ctest target `check_hotpaths` (the
+ctest instance skips silently when the tree-sitter Python modules are not
+installed; pinned versions live in `scripts/requirements-check.txt`).
+
+Known blind spots, by design: calls through function pointers and calls
+to external (libc) functions are assumed scan-free, so walker callbacks
+must honor the hot contract on their own. Tags are human classification;
+the checker only propagates it. The empirical backstop is scaling
+benchmarks over the corpus, which catch data-dependent blowups that no
+static classification can see.
+
 ## Build and CI
 
 **CMake options**:
