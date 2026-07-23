@@ -12,8 +12,8 @@ call path.
 
 Tags are C comments placed immediately above a function definition:
 
-  /* scan: arena */   Cost grows with total allocated arena state.
-  /* scan: ctx */     Cost grows with ctx-wide table state.
+  /* scan: <type> */  Cost grows with a context-wide resource.  The
+                      type must be registered in SCAN_TYPES below.
   /* hot */           Hot-path contract: must not reach a scan.
 
 Public API functions from include/ixsimpl.h are hot roots by default;
@@ -22,6 +22,10 @@ O(1) mechanisms (hash-table growth rehash, arena rollback proportional
 to the rolled-back work) are not scans and stay untagged.  Calls through
 function pointers and calls to external (libc) functions are assumed
 scan-free; see DESIGN.md for the full threat model.
+
+Adding a scan type: one line in SCAN_TYPES, the tag above the function,
+and a DESIGN.md update in the same commit.  Tags with unregistered
+types are rejected, so a typo cannot silently pass.
 
 Exits 0 when clean, 1 on violations or graph inconsistencies.
 """
@@ -73,7 +77,15 @@ API_TYPE_NAMES = frozenset(
     {"ixs_ctx", "ixs_node", "ixs_visit_fn", "ixs_session", "ixs_facts", "ixs_reader", "ixs_writer"}
 )
 
-TAG_RE = re.compile(r"/\*\s*(hot|scan)(?:\s*:\s*([a-z][a-z0-9 ]*?))?\s*\*/")
+# Registry of scan types: axis -> one-line description.  A '/* scan: x */'
+# tag with an unregistered x is an error — adding a type is deliberately
+# one line here plus the tag plus a DESIGN.md update, same commit.
+SCAN_TYPES = {
+    "arena": "cost grows with total live arena chunks/bytes",
+    "ctx": "cost grows with ctx-wide table state",
+}
+
+TAG_RE = re.compile(r"/\*\s*(hot|scan)(?:\s*:\s*([a-z][a-z0-9_]*))?\s*\*/")
 
 # Near-miss detector: a comment that looks like a tag but does not parse.
 # Silent tag loss would turn the whole check into theater.
@@ -194,10 +206,22 @@ def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCa
         for m in TAG_RE.finditer(content):
             tag_starts.add(m.start())
             kind, axis = m.group(1), m.group(2)
+            line_no = content[: m.start()].count(chr(10)) + 1
+            if kind == "hot" and axis is not None:
+                warnings.append(f"{rel}:{line_no}: '/* hot */' takes no axis")
+                continue
+            if kind == "scan" and (axis is None or axis not in SCAN_TYPES):
+                known = ", ".join(sorted(SCAN_TYPES))
+                warnings.append(
+                    f"{rel}:{line_no}: unknown scan type {axis or '<missing>'!r}; "
+                    f"known types: {known}; register new ones in SCAN_TYPES "
+                    f"in scripts/check_hotpaths.py"
+                )
+                continue
             following = [f for f in file_defs if f.start_byte > m.end()]
             if not following:
                 warnings.append(
-                    f"{rel}:{content[: m.start()].count(chr(10)) + 1}: "
+                    f"{rel}:{line_no}: "
                     f"dangling '/* {kind} */' tag with no following function definition"
                 )
                 continue
@@ -325,9 +349,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         path = witness_path(root_fn, edges, tainted)
         sink = path[-1]
-        print(f"error: hot path reaches 'scan: {sink.scan_axis}': {root_fn.name} ({root_fn.loc()})")
+        axis = sink.scan_axis or "?"
+        print(f"error: hot path reaches 'scan: {axis}': {root_fn.name} ({root_fn.loc()})")
         hops = " -> ".join(f"{f.name} ({f.loc()})" for f in path)
-        print(f"  path: {hops} [scan: {sink.scan_axis}]")
+        print(f"  path: {hops} [scan: {axis}: {SCAN_TYPES.get(axis, 'unregistered')}]")
         errors += 1
 
     for w in warnings:
@@ -338,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         unresolved = sorted({u for f in defs for u in f.unresolved})
         print(f"graph: {len(defs)} functions, {len(raw_calls)} call sites, {n_edges} edges")
         print(f"roots: {len(hot_roots)} hot, sources: {len(sources)} scan, tainted: {len(tainted)}")
+        for s in sorted(sources, key=lambda f: (f.scan_axis or "", f.name)):
+            print(f"scan source: {s.name} ({s.loc()}) [scan: {s.scan_axis}]")
         if unresolved:
             print(f"unresolved callees (assumed scan-free): {', '.join(unresolved)}")
 

@@ -2153,6 +2153,15 @@ comment immediately above its definition:
 /* scan: arena */
 ```
 
+Registered scan types (in `SCAN_TYPES` in `scripts/check_hotpaths.py`):
+
+- `arena`: cost grows with total live arena chunks/bytes.
+- `ctx`: cost grows with ctx-wide table state. Reserved; no instances yet.
+
+Adding a scan type is one line in `SCAN_TYPES` plus the tag above the
+function plus an update to this list, same commit. Tags with unregistered
+types fail the check, so a typo cannot silently pass.
+
 Amortized O(1) mechanisms are not scans: hash-table growth rehashes, and
 `ixs_arena_restore`, whose chunk walk is proportional to the work being
 rolled back rather than to `A`.

@@ -23,7 +23,7 @@ used in index computation, memory addressing, and loop bound calculation.
 - Treat node construction, interning, simplification, ownership validation, fact/proof queries, and walker callbacks as hot paths.
 - Do not put arena walks, context-wide table scans, or other work linear in total allocated state inside those paths. Membership and ownership checks must be expected O(1).
 - Document the expected complexity of non-obvious hot-path helpers. Any worse bound needs an explicit justification and a performance regression test or benchmark.
-- Enforcement: `scripts/check_hotpaths.py` propagates `/* scan: arena */` taint through the static call graph and fails if a hot path reaches a scan. It runs in pre-commit and ctest. See DESIGN.md "Performance invariants" for the classification rules.
+- Enforcement: `scripts/check_hotpaths.py` propagates `/* scan: <type> */` taint through the static call graph and fails if a hot path reaches a scan (pre-commit + ctest). If you write a function whose cost grows with any context-wide resource, tag it. If no registered scan type fits, add one: one line in `SCAN_TYPES` in the script, the tag, and the DESIGN.md "Performance invariants" list — same commit. Unregistered types are rejected, so register rather than improvise.
 
 ## Amalgamation
 
