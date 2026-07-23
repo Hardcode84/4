@@ -1206,9 +1206,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 **Compound assumption ingestion**: All predicate-bearing entry points use one
 bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
 `ixs_check_integer_valued`, `ixs_check_defined`, `ixs_get_pow2_fact`,
-`ixs_range`, `ixs_facts_assume_pred`, and `ixs_facts_assume_preds`. Each
-predicate root may be a CMP, a canonical true/false node, or an AND tree whose
-leaves have those forms. True
+`ixs_range`, `ixs_facts_create_preds`, `ixs_facts_assume_pred`, and
+`ixs_facts_assume_preds`. Each predicate root may be a CMP, a canonical
+true/false node, or an AND tree whose leaves have those forms. True
 contributes no fact; false marks the bounds as contradictory. Supporting these
 constants preserves predicates that simplify before ingestion, such as
 `(x & 0) == 0`. The walker visits at most 1024 nodes per root and therefore does
@@ -1218,6 +1218,12 @@ OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
 Legacy array ingestion discards the whole temporary bound context when any
 entry is rejected or fails; it never queries a partially ingested prefix.
+`ixs_facts_create_preds` uses the same direct one-shot builder. It imports one
+exact assumption domain without simplifying predicates against earlier
+entries. Invalid input or OOM returns NULL without exposing a partial fact set.
+This compatibility surface is intentionally C-only: C++ and Python `Facts`
+keep the sequential closure semantics of their mutation APIs instead of
+offering two constructors whose predicates have different meanings.
 `ixs_facts_assume_preds` applies the whole array to one fork and commits only
 after every tree succeeds. It validates the full array, then simplifies and
 ingests each predicate in input order so later predicates see earlier facts.
@@ -1889,6 +1895,8 @@ bool ixs_range(ixs_session *s, ixs_node *expr,
 // Failed mutation poisons the set, and later queries fail conservatively.
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
+ixs_facts *ixs_facts_create_preds(ixs_session *s,
+                                  ixs_node *const *preds, size_t n_preds);
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
                             const ixs_range_result *range);
@@ -2958,6 +2966,8 @@ bool ixs_range(ixs_session *s, ixs_node *expr,
 
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
+ixs_facts *ixs_facts_create_preds(ixs_session *s,
+                                  ixs_node *const *preds, size_t n_preds);
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
                             const ixs_range_result *range);

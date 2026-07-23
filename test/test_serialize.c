@@ -535,6 +535,163 @@ static void test_bounds_canonical_alias_public(void) {
   destroy_session(ctx, &s);
 }
 
+static bool arena_is_at_mark(const ixs_arena *arena, ixs_arena_mark mark) {
+  return arena->current == mark.chunk &&
+         (!arena->current || arena->current->used == mark.used);
+}
+
+static ixs_arena_mark arena_test_mark(const ixs_arena *arena) {
+  ixs_arena_mark mark;
+  mark.chunk = arena->current;
+  mark.used = arena->current ? arena->current->used : 0;
+  return mark;
+}
+
+static void test_facts_create_preds_public(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_ctx *other_ctx = NULL;
+  ixs_session s;
+  ixs_session other_s;
+  byte_buffer buf = {0};
+  ixs_node *base;
+  ixs_node *lane;
+  ixs_node *divisor;
+  ixs_node *divisor_eight;
+  ixs_node *quotient;
+  ixs_node *projected;
+  ixs_node *query;
+  ixs_node *domain;
+  ixs_node *decoded_domain;
+  ixs_node *other_divisor;
+  ixs_node *other_divisor_eight;
+  ixs_node *other_query;
+  ixs_node *predicates[2];
+  ixs_node *invalid[2];
+  ixs_node *wrong_context[2];
+  ixs_node *contradiction;
+  ixs_arena *scratch;
+  ixs_arena_mark mark;
+  ixs_facts *raw;
+  ixs_facts *closed;
+  ixs_facts *empty;
+  ixs_facts *contradictory;
+  ixs_facts *serialized;
+  ixs_facts *fresh;
+
+  buf.fail_after = (size_t)-1;
+  CHECK(ixs_facts_create_preds(NULL, NULL, 0) == NULL);
+  if (!init_session(&ctx, &s))
+    return;
+  if (!init_session(&other_ctx, &other_s)) {
+    destroy_session(ctx, &s);
+    return;
+  }
+  scratch = &ixs_session_get(&s)->scratch;
+
+  base = ixs_sym(&s, "create_preds_base");
+  lane = ixs_sym(&s, "create_preds_lane");
+  divisor = ixs_sym(&s, "create_preds_divisor");
+  divisor_eight = ixs_cmp(&s, divisor, IXS_CMP_EQ, ixs_int(&s, 8));
+  quotient =
+      ixs_floor(&s, ixs_div(&s, ixs_mod(&s, lane, ixs_int(&s, 8)), divisor));
+  projected =
+      ixs_cmp(&s, ixs_add(&s, base, quotient), IXS_CMP_GE, ixs_int(&s, 0));
+  query = ixs_cmp(&s, base, IXS_CMP_GE, ixs_int(&s, 0));
+  predicates[0] = divisor_eight;
+  predicates[1] = projected;
+
+  raw = ixs_facts_create_preds(&s, predicates, 2);
+  CHECK(raw != NULL);
+  CHECK(ixs_check(&s, query, predicates, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
+
+  closed = ixs_facts_create(&s);
+  CHECK(closed != NULL);
+  CHECK(ixs_facts_assume_preds(closed, predicates, 2));
+  CHECK(ixs_check_facts(closed, query) == IXS_CHECK_TRUE);
+
+  empty = ixs_facts_create_preds(&s, NULL, 0);
+  CHECK(empty != NULL);
+  CHECK(ixs_check_facts(empty, query) == IXS_CHECK_UNKNOWN);
+
+  contradiction = ixs_false(&s);
+  contradictory = ixs_facts_create_preds(&s, &contradiction, 1);
+  CHECK(contradictory != NULL);
+  CHECK(ixs_check_facts(contradictory, query) == IXS_CHECK_UNKNOWN);
+
+  domain = ixs_and(&s, divisor_eight, projected);
+  CHECK(serialize_to_buffer(&s, domain, &buf));
+  decoded_domain = deserialize_from_buffer(&other_s, &buf);
+  CHECK(decoded_domain != NULL);
+  CHECK(!ixs_is_error(decoded_domain));
+  serialized = ixs_facts_create_preds(&other_s, &decoded_domain, 1);
+  CHECK(serialized != NULL);
+  other_divisor = ixs_sym(&other_s, "create_preds_divisor");
+  other_divisor_eight =
+      ixs_cmp(&other_s, other_divisor, IXS_CMP_EQ, ixs_int(&other_s, 8));
+  other_query = ixs_cmp(&other_s, ixs_sym(&other_s, "create_preds_base"),
+                        IXS_CMP_GE, ixs_int(&other_s, 0));
+  CHECK(ixs_check_facts(serialized, other_divisor_eight) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(serialized, other_query) == IXS_CHECK_UNKNOWN);
+
+  invalid[0] = divisor_eight;
+  invalid[1] = ixs_or(&s, divisor_eight, projected);
+  ixs_session_clear_errors(&s);
+  mark = arena_test_mark(scratch);
+  CHECK(ixs_facts_create_preds(&s, invalid, 2) == NULL);
+  CHECK(arena_is_at_mark(scratch, mark));
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "assumptions: OR") != NULL);
+  CHECK(ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
+
+  ixs_session_clear_errors(&s);
+  mark = arena_test_mark(scratch);
+  CHECK(ixs_facts_create_preds(&s, NULL, 1) == NULL);
+  CHECK(arena_is_at_mark(scratch, mark));
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "NULL array") != NULL);
+
+  wrong_context[0] = divisor_eight;
+  wrong_context[1] = decoded_domain;
+  ixs_session_clear_errors(&s);
+  mark = arena_test_mark(scratch);
+  CHECK(ixs_facts_create_preds(&s, wrong_context, 2) == NULL);
+  CHECK(arena_is_at_mark(scratch, mark));
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "different context") != NULL);
+
+  ixs_session_clear_errors(&s);
+  mark = arena_test_mark(scratch);
+  scratch->fail_after = 1;
+  CHECK(ixs_facts_create_preds(&s, predicates, 2) == NULL);
+  scratch->fail_after = IXS_ARENA_FAILURE_DISABLED;
+  CHECK(arena_is_at_mark(scratch, mark));
+  CHECK(ixs_session_nerrors(&s) == 0);
+
+  mark = arena_test_mark(scratch);
+  ctx->arena.fail_after = 0;
+  CHECK(ixs_facts_create_preds(&s, predicates, 2) == NULL);
+  ctx->arena.fail_after = IXS_ARENA_FAILURE_DISABLED;
+  CHECK(arena_is_at_mark(scratch, mark));
+  CHECK(ixs_session_nerrors(&s) == 0);
+
+  fresh = ixs_facts_create_preds(&s, predicates, 2);
+  CHECK(fresh != NULL);
+  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_TRUE);
+  ixs_session_reset(&s);
+  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
+
+  fresh = ixs_facts_create_preds(&s, predicates, 2);
+  CHECK(fresh != NULL);
+  ixs_session_destroy(&s);
+  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
+  ixs_session_init(&s, ctx);
+
+  buffer_destroy(&buf);
+  destroy_session(other_ctx, &other_s);
+  destroy_session(ctx, &s);
+}
+
 static void test_malformed_root_rejected_without_pollution(void) {
   ixs_ctx *src_ctx = NULL;
   ixs_ctx *dst_ctx = NULL;
@@ -731,6 +888,7 @@ int main(void) {
   test_singletons_and_sentinels();
   test_writer_failure_no_diagnostics();
   test_bounds_canonical_alias_public();
+  test_facts_create_preds_public();
   test_malformed_root_rejected_without_pollution();
 #ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();

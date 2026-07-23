@@ -4309,29 +4309,42 @@ static void bounds_transfer_var_fact(ixs_bounds *dst, const ixs_var_bound *src,
   }
 }
 
-ixs_facts *ixs_facts_create(ixs_session *s) {
+ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
+                                  size_t n_predicates) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  ixs_bounds bounds;
+  ixs_bounds_build_status status;
   ixs_facts *facts;
   if (!s)
     return NULL;
   ctx = ixs_session_bind(&binding, s);
+  mark = ixs_arena_save(&ctx->scratch);
+  status = ixs_bounds_build_ctx(&bounds, ctx, &ctx->scratch, predicates,
+                                n_predicates);
+  if (status != IXS_BOUNDS_BUILD_OK)
+    goto failed;
   facts = ixs_arena_alloc(&ctx->arena, sizeof(*facts), sizeof(void *));
-  if (!facts) {
-    ixs_session_unbind(&binding);
-    return NULL;
-  }
+  if (!facts)
+    goto failed;
   memset(facts, 0, sizeof(*facts));
   facts->impl = binding.impl;
   facts->ctx = ctx;
   facts->epoch = binding.impl->epoch;
-  if (!ixs_bounds_init_ctx(&facts->bounds, ctx, &ctx->scratch)) {
-    ixs_session_unbind(&binding);
-    return NULL;
-  }
+  facts->bounds = bounds;
   facts->usable = true;
   ixs_session_unbind(&binding);
   return facts;
+
+failed:
+  ixs_arena_restore(&ctx->scratch, mark);
+  ixs_session_unbind(&binding);
+  return NULL;
+}
+
+ixs_facts *ixs_facts_create(ixs_session *s) {
+  return ixs_facts_create_preds(s, NULL, 0);
 }
 
 bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,

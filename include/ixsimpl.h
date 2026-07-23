@@ -280,6 +280,14 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
  * Fact sets are mutable and bound to the session/context that created them. */
 ixs_facts *ixs_facts_create(ixs_session *s);
 
+/* Create a fact set by directly ingesting one exact assumption domain.
+ * Predicates do not simplify against earlier predicates. n_preds == 0 accepts
+ * a NULL array. Invalid input or OOM returns NULL without exposing a partial
+ * fact set. This low-level compatibility constructor is intentionally C-only;
+ * C++ and Python Facts retain their sequential mutation contract. */
+ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *preds,
+                                  size_t n_preds);
+
 /* Every mutator returns false on rejection or failure and makes facts
  * unusable for subsequent proof queries.  The stored payload is committed
  * only after a complete successful mutation, so no partial weaker context is
