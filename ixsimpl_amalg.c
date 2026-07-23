@@ -197,20 +197,6 @@ IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m) {
     a->current->used = m.used;
 }
 
-IXS_STATIC bool ixs_arena_contains(const ixs_arena *a, const void *ptr) {
-  const char *p = (const char *)ptr;
-  const ixs_arena_chunk *chunk;
-
-  if (!ptr)
-    return false;
-
-  for (chunk = a->current; chunk; chunk = chunk->next) {
-    if (p >= chunk->base && p < chunk->base + chunk->used)
-      return true;
-  }
-  return false;
-}
-
 IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
                                 size_t new_size, size_t align) {
   if (!ptr)
@@ -6879,11 +6865,6 @@ import_map_direct(ixs_ctx *dst_ctx, const ixs_node *src, ixs_node **out) {
     return IMPORT_DIRECT_READY;
   default:
     break;
-  }
-
-  if (ixs_ctx_owns_node(dst_ctx, src)) {
-    *out = (ixs_node *)src;
-    return IMPORT_DIRECT_READY;
   }
 
   switch (src->tag) {

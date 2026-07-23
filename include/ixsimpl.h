@@ -437,9 +437,10 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
 
 /* --- Structural import ------------------------------------------------- */
 
-/* Import src into the store bound to s.  If src already belongs to that store,
- * it is returned directly.  Sentinels are mapped to the destination store's
- * sentinels.  Returns NULL on OOM or if src is NULL. */
+/* Import src structurally into the store bound to s.  Destination hash-consing
+ * may reuse existing nodes, including for same-store input, but import always
+ * follows the structural path.  Sentinels are mapped to the destination
+ * store's sentinels.  Returns NULL on OOM or if src is NULL. */
 ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
 
 /* Import src[0..count-1] into the store bound to s.  count == 0 is a no-op

@@ -1571,15 +1571,28 @@ static void test_public_facts_assume_conjunction(void) {
 
 static ixs_node *raw_logic_node(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
                                 ixs_node **args) {
-  ixs_node *node = ixs_arena_alloc(&ctx->arena, sizeof(*node), sizeof(void *));
+  ixs_node *node = ixs_node_logic(ctx, tag, nargs, args);
   CHECK(node != NULL);
-  if (!node)
-    return NULL;
-  memset(node, 0, sizeof(*node));
-  node->tag = tag;
-  node->u.logic.nargs = nargs;
-  node->u.logic.args = args;
   return node;
+}
+
+static void test_ctx_node_ownership_uses_intern_table(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "owned_x");
+  ixs_node *foreign = ixs_sym(other, "owned_x");
+  ixs_node *raw = ixs_arena_alloc(&ctx->arena, sizeof(*raw), sizeof(void *));
+
+  CHECK(raw != NULL);
+  if (raw)
+    memcpy(raw, x, sizeof(*raw));
+  CHECK(ixs_ctx_owns_node(ctx, x));
+  CHECK(!ixs_ctx_owns_node(ctx, foreign));
+  if (raw)
+    CHECK(!ixs_ctx_owns_node(ctx, raw));
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
 }
 
 static void test_compound_assumption_legacy_fact_parity(void) {
@@ -3453,6 +3466,7 @@ int main(void) {
   test_public_range_piecewise();
   test_failed_expand_is_not_expression_fact_alias();
   test_public_facts_assume_conjunction();
+  test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();
   test_compound_assumption_rejection_is_atomic();

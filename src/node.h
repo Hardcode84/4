@@ -240,12 +240,29 @@ static inline const ixs_ctx *ixs_session_cctx(const ixs_session *s) {
   return ixs_session_cget(s)->ctx;
 }
 
-/*
- * Fast-path same-store imports by arena membership. The caller still owns the
- * responsibility of passing a valid ixs_node pointer.
- */
+/* All valid store nodes are interned.  Probe by the node's stored hash and
+ * compare pointer identity, which is defined across allocations and expected
+ * O(1) at the hash table's bounded load factor.  The caller still owns the
+ * responsibility of passing a live ixs_node pointer. */
 static inline bool ixs_ctx_owns_node(const ixs_ctx *ctx, const ixs_node *node) {
-  return ctx && node && ixs_arena_contains(&ctx->arena, node);
+  size_t index;
+  size_t mask;
+  size_t probes;
+
+  if (!ctx || !node || !ctx->htab || ctx->htab_cap == 0)
+    return false;
+
+  mask = ctx->htab_cap - 1u;
+  index = node->hash & mask;
+  for (probes = 0; probes < ctx->htab_cap; probes++) {
+    ixs_node *candidate = ctx->htab[index];
+    if (!candidate)
+      return false;
+    if (candidate == node)
+      return true;
+    index = (index + 1u) & mask;
+  }
+  return false;
 }
 
 typedef struct {

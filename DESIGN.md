@@ -152,6 +152,10 @@ Passing a node from one store to a different store is **undefined behavior**
 (dangling arena pointer, wrong hash table). Structural import is the only
 supported cross-store bridge.
 
+Runtime entry points that reject wrong-store nodes test pointer identity in the
+destination store's intern table. The check is expected O(1) and never orders
+or subtracts pointers from unrelated allocations.
+
 **Depth limit**: The parser enforces a recursion depth limit (default 256) for
 nested grammar recursion. Long chains of unary `-` and predicate `~` prefixes
 are consumed iteratively. Trees built programmatically via the API have no
@@ -2974,8 +2978,10 @@ Semantics:
 
 - if `src` is a sentinel, return the matching sentinel in the store bound to
   `s`
-- if `src` already belongs to the store bound to `s`, reuse it directly
-- otherwise rebuild it structurally into that store
+- rebuild every non-sentinel `src` structurally into the store bound to `s`;
+  import is a boundary operation, not a hot-path ownership shortcut
+- let destination hash-consing reuse existing nodes as an incidental result,
+  including for same-store input, without guaranteeing a no-allocation path
 - use a session-local memo table keyed by source pointer
 - import through the canonical constructors so the destination store interns
   and normalizes the result

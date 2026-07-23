@@ -58,9 +58,6 @@ IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a);
  * Marks are invalidated by any ixs_arena_restore that rewinds past them. */
 IXS_STATIC void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m);
 
-/* True if ptr points into live allocated bytes of a. */
-IXS_STATIC bool ixs_arena_contains(const ixs_arena *a, const void *ptr);
-
 /*
  * Grow an existing allocation from old_size to new_size bytes.
  * Fast path extends in-place if ptr is at the tip of the current chunk.

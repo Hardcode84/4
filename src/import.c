@@ -154,11 +154,6 @@ import_map_direct(ixs_ctx *dst_ctx, const ixs_node *src, ixs_node **out) {
     break;
   }
 
-  if (ixs_ctx_owns_node(dst_ctx, src)) {
-    *out = (ixs_node *)src;
-    return IMPORT_DIRECT_READY;
-  }
-
   switch (src->tag) {
   case IXS_INT:
     dst = ixs_node_int(dst_ctx, src->u.ival);

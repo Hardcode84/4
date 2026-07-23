@@ -50,7 +50,7 @@ static void check_same_print(ixs_node *src, ixs_node *dst) {
   CHECK(strcmp(src_buf, dst_buf) == 0);
 }
 
-static void test_same_store_reuse(void) {
+static void test_same_store_structural_import(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
   ixs_node *x;
@@ -63,7 +63,17 @@ static void test_same_store_reuse(void) {
   x = ixs_sym(&s, "x");
   expr = ixs_add(&s, x, ixs_int(&s, 1));
   imported = ixs_import_node(&s, expr);
-  CHECK(imported == expr);
+  CHECK(imported != NULL);
+  check_same_print(expr, imported);
+
+#ifndef IXS_TEST_AMALGAMATION
+  /* Same-store input still takes the structural path.  Import is a boundary
+   * operation, so it may fail when its scratch memo cannot be allocated. */
+  ixs_arena_set_fail_after(&ixs_session_get(&s)->scratch, 0);
+  CHECK(ixs_import_node(&s, expr) == NULL);
+  ixs_arena_set_fail_after(&ixs_session_get(&s)->scratch,
+                           IXS_ARENA_FAILURE_DISABLED);
+#endif
 
   destroy_session(ctx, &s);
 }
@@ -358,7 +368,7 @@ static void test_import_many(void) {
 }
 
 int main(void) {
-  test_same_store_reuse();
+  test_same_store_structural_import();
   test_cross_store_import();
   test_cross_store_tag_smoke();
   test_sentinel_mapping();
