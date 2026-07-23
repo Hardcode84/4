@@ -30,7 +30,13 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "symbol_congruence",
         "try_exact_divide",
     }
-    facts_methods = {"assume", "assume_range", "derive_affine", "subs"}
+    facts_methods = {
+        "assume",
+        "assume_many",
+        "assume_range",
+        "derive_affine",
+        "subs",
+    }
     expr_members = {"expand", "is_integer_valued", "simplify", "subs"}
 
     assert context_methods <= set(dir(ixsimpl.Context))
@@ -49,6 +55,7 @@ def _typecheck_package_surface(
     exact = ctx.try_exact_divide(expr, 1, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
+    facts.assume_many(batch)
     transferred: ixsimpl.Facts = facts.subs({expr: expr})
     _ = tri, equivalent, difference, exact, transferred
 
@@ -60,4 +67,5 @@ def _typecheck_extension_surface(
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
+    facts.assume_many(batch)
     _ = tri, equivalent

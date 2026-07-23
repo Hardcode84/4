@@ -3737,24 +3737,32 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
   return IXS_BOUNDS_BUILD_OK;
 }
 
-IXS_STATIC ixs_bounds_build_status
-ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
-                     ixs_node *const *assumptions, size_t n_assumptions) {
+static ixs_bounds_build_status
+bounds_ingest_predicates(ixs_bounds *b, ixs_node *const *predicates,
+                         size_t n_predicates) {
   size_t i;
   ixs_bounds_build_status status;
 
+  if (n_predicates > 0 && !predicates)
+    return assumption_invalid(b, "NULL array with nonzero count");
+  for (i = 0; i < n_predicates; i++) {
+    status = bounds_ingest_predicate(b, predicates[i]);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+IXS_STATIC ixs_bounds_build_status
+ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
+                     ixs_node *const *assumptions, size_t n_assumptions) {
   if (n_assumptions > 0 && !assumptions) {
     ixs_ctx_push_error(ctx, "assumptions: NULL array with nonzero count");
     return IXS_BOUNDS_BUILD_INVALID;
   }
   if (!ixs_bounds_init_ctx(b, ctx, scratch))
     return IXS_BOUNDS_BUILD_OOM;
-  for (i = 0; i < n_assumptions; i++) {
-    status = bounds_ingest_predicate(b, assumptions[i]);
-    if (status != IXS_BOUNDS_BUILD_OK)
-      return status;
-  }
-  return IXS_BOUNDS_BUILD_OK;
+  return bounds_ingest_predicates(b, assumptions, n_assumptions);
 }
 
 static bool range_result_to_interval(const ixs_range_result *range,
@@ -4082,7 +4090,8 @@ ixs_facts *ixs_facts_create(ixs_session *s) {
   return facts;
 }
 
-bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
+bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
+                            size_t n_predicates) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
   ixs_arena_mark mark;
@@ -4094,6 +4103,16 @@ bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
     ixs_session_unbind(&binding);
     return false;
   }
+  if (n_predicates == 0) {
+    ixs_session_unbind(&binding);
+    return true;
+  }
+  if (!predicates) {
+    (void)assumption_invalid(&facts->bounds, "NULL array with nonzero count");
+    facts_poison(facts);
+    ixs_session_unbind(&binding);
+    return false;
+  }
   mark = ixs_arena_save(&ctx->scratch);
   if (!ixs_bounds_fork(&candidate, &facts->bounds)) {
     ixs_arena_restore(&ctx->scratch, mark);
@@ -4101,7 +4120,7 @@ bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
     ixs_session_unbind(&binding);
     return false;
   }
-  status = bounds_ingest_predicate(&candidate, pred);
+  status = bounds_ingest_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {
@@ -4110,6 +4129,10 @@ bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
   }
   ixs_session_unbind(&binding);
   return status == IXS_BOUNDS_BUILD_OK;
+}
+
+bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
+  return ixs_facts_assume_preds(facts, &pred, 1);
 }
 
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,

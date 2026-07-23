@@ -37,7 +37,8 @@ int main() {
   ixs::Facts facts = ctx.facts();
   ixs_range_result explicit_range = {true, true, 0, 1, 63, 1};
   ixs::Expr twice_x = x * ixs::Expr::integer(ctx, 2);
-  if (!facts.assume(nonnegative) || !facts.assume(congruent) ||
+  std::vector<ixs::Expr> fact_predicates = {nonnegative, congruent};
+  if (!facts.assume_many(fact_predicates) ||
       !facts.assume_range(x, explicit_range) ||
       !facts.derive_affine(x, 2, 0, twice_x))
     return 3;

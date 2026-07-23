@@ -1126,6 +1126,47 @@ static PyObject *Facts_assume(FactsObject *self, PyObject *arg) {
   Py_RETURN_NONE;
 }
 
+static PyObject *Facts_assume_many(FactsObject *self, PyObject *arg) {
+  PyObject *sequence =
+      PySequence_Fast(arg, "predicates must be an iterable of Expr");
+  ixs_node **predicates = NULL;
+  ixs_session *session = Context_session(self->ctx_obj);
+  Py_ssize_t i, n;
+  size_t errors_before;
+
+  if (!sequence)
+    return NULL;
+  n = PySequence_Fast_GET_SIZE(sequence);
+  if (n > 0) {
+    predicates = PyMem_Malloc((size_t)n * sizeof(*predicates));
+    if (!predicates) {
+      Py_DECREF(sequence);
+      return PyErr_NoMemory();
+    }
+    for (i = 0; i < n; i++) {
+      predicates[i] = facts_expr_arg(
+          self, PySequence_Fast_GET_ITEM(sequence, i), "predicate");
+      if (!predicates[i]) {
+        PyMem_Free(predicates);
+        Py_DECREF(sequence);
+        return NULL;
+      }
+    }
+  }
+  errors_before = ixs_session_nerrors(session);
+  if (!ixs_facts_assume_preds(self->facts, predicates, (size_t)n)) {
+    PyMem_Free(predicates);
+    Py_DECREF(sequence);
+    if (raise_new_assumption_error(session, errors_before) < 0)
+      return NULL;
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid fact predicates");
+    return NULL;
+  }
+  PyMem_Free(predicates);
+  Py_DECREF(sequence);
+  Py_RETURN_NONE;
+}
+
 static PyObject *Facts_assume_range(FactsObject *self, PyObject *args,
                                     PyObject *kwargs) {
   static char *kwlist[] = {"expr", "lower", "upper", NULL};
@@ -1284,6 +1325,8 @@ static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
 static PyMethodDef Facts_methods[] = {
     {"assume", (PyCFunction)Facts_assume, METH_O,
      "Atomically add a CMP/boolean or AND predicate fact."},
+    {"assume_many", (PyCFunction)Facts_assume_many, METH_O,
+     "Atomically add predicate facts."},
     {"assume_range", (PyCFunction)Facts_assume_range,
      METH_VARARGS | METH_KEYWORDS, "Add an explicit expression range fact."},
     {"derive_affine", (PyCFunction)Facts_derive_affine,

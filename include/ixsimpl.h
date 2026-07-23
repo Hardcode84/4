@@ -285,7 +285,11 @@ ixs_facts *ixs_facts_create(ixs_session *s);
  * only after a complete successful mutation, so no partial weaker context is
  * observable. */
 
-/* Import a predicate under the shared assumption contract above. */
+/* Import predicates under one transaction. n == 0 accepts a NULL array. */
+bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *preds,
+                            size_t n_preds);
+
+/* Single-predicate form of ixs_facts_assume_preds. */
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;

@@ -262,6 +262,13 @@ public:
   bool assume(const Expr &pred) {
     return ixs_facts_assume_pred(facts_, pred.raw());
   }
+  bool assume_many(const std::vector<Expr> &predicates) {
+    std::vector<ixs_node *> raw;
+    raw.reserve(predicates.size());
+    for (const Expr &predicate : predicates)
+      raw.push_back(predicate.raw());
+    return ixs_facts_assume_preds(facts_, raw.data(), raw.size());
+  }
   bool assume_range(const Expr &expr, const ixs_range_result &range) {
     return ixs_facts_assume_range(facts_, expr.raw(), &range);
   }

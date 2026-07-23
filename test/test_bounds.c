@@ -1611,6 +1611,94 @@ static void test_public_facts_assume_conjunction(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_facts_assume_batch(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "batch_x");
+  ixs_node *y = ixs_sym(ctx, "batch_y");
+  ixs_node *other_x = ixs_sym(other, "batch_x");
+  ixs_node *predicates[3];
+  ixs_node *invalid[2];
+  ixs_node *wrong_context_predicates[2];
+  ixs_node *oom_predicates[2];
+  ixs_facts *batch = ixs_facts_create(ctx);
+  ixs_facts *sequential = ixs_facts_create(ctx);
+  ixs_facts *noop = ixs_facts_create(ctx);
+  ixs_facts *failed = ixs_facts_create(ctx);
+  ixs_facts *null_array = ixs_facts_create(ctx);
+  ixs_facts *wrong_context = ixs_facts_create(ctx);
+  ixs_facts *oom = ixs_facts_create(ctx);
+  ixs_range_result batch_range;
+  ixs_range_result sequential_range;
+  size_t before_vars;
+  size_t i;
+  bool before_hi_inf;
+
+  predicates[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  predicates[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 10));
+  predicates[2] = ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_int(ctx, 3));
+
+  CHECK(ixs_facts_assume_preds(batch, predicates, 3));
+  for (i = 0; i < 3; i++)
+    CHECK(ixs_facts_assume_pred(sequential, predicates[i]));
+  CHECK(ixs_range_facts(batch, x, &batch_range));
+  CHECK(ixs_range_facts(sequential, x, &sequential_range));
+  CHECK(batch_range.has_lower == sequential_range.has_lower);
+  CHECK(batch_range.has_upper == sequential_range.has_upper);
+  CHECK(batch_range.lower_p == sequential_range.lower_p);
+  CHECK(batch_range.lower_q == sequential_range.lower_q);
+  CHECK(batch_range.upper_p == sequential_range.upper_p);
+  CHECK(batch_range.upper_q == sequential_range.upper_q);
+  CHECK(ixs_check_facts(batch, predicates[2]) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(noop, predicates[0]));
+  CHECK(ixs_facts_assume_preds(noop, NULL, 0));
+  CHECK(ixs_check_facts(noop, predicates[0]) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(failed, predicates[0]));
+  before_vars = failed->bounds.nvars;
+  invalid[0] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 5));
+  invalid[1] = ixs_or(ctx, predicates[0], predicates[1]);
+  CHECK(!ixs_facts_assume_preds(failed, invalid, 2));
+  CHECK(failed->bounds.nvars == before_vars);
+  CHECK(!failed->usable);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(null_array, NULL, 1));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NULL array") != NULL);
+  CHECK(!null_array->usable);
+
+  CHECK(ixs_facts_assume_pred(wrong_context, predicates[0]));
+  before_vars = wrong_context->bounds.nvars;
+  before_hi_inf = wrong_context->bounds.vars[0].iv.hi_inf;
+  wrong_context_predicates[0] = predicates[1];
+  wrong_context_predicates[1] =
+      ixs_cmp(other, other_x, IXS_CMP_GE, ixs_int(other, 0));
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(wrong_context, wrong_context_predicates, 2));
+  CHECK(wrong_context->bounds.nvars == before_vars);
+  CHECK(wrong_context->bounds.vars[0].iv.hi_inf == before_hi_inf);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  CHECK(!wrong_context->usable);
+
+  CHECK(ixs_facts_assume_pred(oom, predicates[0]));
+  before_vars = oom->bounds.nvars;
+  before_hi_inf = oom->bounds.vars[0].iv.hi_inf;
+  oom_predicates[0] = predicates[1];
+  oom_predicates[1] = invalid[0];
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 1);
+  CHECK(!ixs_facts_assume_preds(oom, oom_predicates, 2));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(oom->bounds.nvars == before_vars);
+  CHECK(oom->bounds.vars[0].iv.hi_inf == before_hi_inf);
+  CHECK(!oom->usable);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static ixs_node *raw_logic_node(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
                                 ixs_node **args) {
   ixs_node *node = ixs_node_logic(ctx, tag, nargs, args);
@@ -3516,6 +3604,7 @@ int main(void) {
   test_public_range_piecewise();
   test_failed_expand_is_not_expression_fact_alias();
   test_public_facts_assume_conjunction();
+  test_public_facts_assume_batch();
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();

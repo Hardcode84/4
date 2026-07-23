@@ -2736,6 +2736,36 @@ def test_facts_assume_decomposes_conjunction() -> None:
         facts.assume(ixsimpl.or_(x >= 0, x <= 10))
 
 
+def test_facts_assume_many_is_atomic() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("batch_x"), ctx.sym("batch_y")
+    facts = ctx.facts()
+
+    facts.assume_many([x >= 0, x <= 10])
+    facts.assume_many([])
+    assert ctx.range(x, facts=facts) == (0, 10)
+
+    wrong_type = ctx.facts()
+    wrong_type.assume(x >= 0)
+    with pytest.raises(TypeError):
+        wrong_type.assume_many([y >= 5, 1])
+    assert ctx.range(x, facts=wrong_type) == (0, None)
+
+    other = ixsimpl.Context()
+    foreign = other.sym("batch_x")
+    wrong_context = ctx.facts()
+    wrong_context.assume(x >= 0)
+    with pytest.raises(ValueError, match="different context"):
+        wrong_context.assume_many([x <= 10, foreign >= 0])
+    assert ctx.range(x, facts=wrong_context) == (0, None)
+
+    rejected = ctx.facts()
+    rejected.assume(x >= 0)
+    with pytest.raises(ValueError, match="OR predicates"):
+        rejected.assume_many([y >= 5, ixsimpl.or_(x >= 0, x <= 10)])
+    assert ctx.range(x, facts=rejected) is None
+
+
 def test_compound_assumption_ingestion_parity() -> None:
     ctx = ixsimpl.Context()
     x, d = ctx.sym("x"), ctx.sym("d")

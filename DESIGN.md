@@ -1150,8 +1150,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 **Compound assumption ingestion**: All predicate-bearing entry points use one
 bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
 `ixs_check_integer_valued`, `ixs_check_defined`, `ixs_get_pow2_fact`,
-`ixs_range`, and `ixs_facts_assume_pred`. Each predicate root may be a CMP, a
-canonical true/false node, or an AND tree whose leaves have those forms. True
+`ixs_range`, `ixs_facts_assume_pred`, and `ixs_facts_assume_preds`. Each
+predicate root may be a CMP, a canonical true/false node, or an AND tree whose
+leaves have those forms. True
 contributes no fact; false marks the bounds as contradictory. Supporting these
 constants preserves predicates that simplify before ingestion, such as
 `(x & 0) == 0`. The walker visits at most 1024 nodes per root and therefore does
@@ -1161,13 +1162,15 @@ OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
 Legacy array ingestion discards the whole temporary bound context when any
 entry is rejected or fails; it never queries a partially ingested prefix.
-`ixs_facts_assume_pred` applies the predicate to a fork and commits only after
-the entire tree succeeds. Rejection or OOM leaves the stored payload unchanged
-but poisons the fact set, so no caller can continue proving from a partial or
-silently weaker context. Every fact mutator follows this rule. Rejection
+`ixs_facts_assume_preds` applies the whole array to one fork and commits only
+after every tree succeeds; `ixs_facts_assume_pred` is its one-element form.
+Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
+Rejection or OOM leaves the stored payload unchanged but poisons the fact set,
+so no caller can continue proving from a partial or silently weaker context.
+Every fact mutator follows this rule. Rejection
 returns the domain-error sentinel from `ixs_simplify`, fills an entire batch
 with that sentinel, returns unknown/no-result from the query APIs, and returns
-false from `ixs_facts_assume_pred`. Structurally valid but contradictory
+false from either fact assumption API. Structurally valid but contradictory
 conjunctions retain the existing unknown/no-result behavior.
 
 **Conflicting assumptions**: User-assumption validation and error reporting are

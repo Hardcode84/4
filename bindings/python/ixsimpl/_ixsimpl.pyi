@@ -124,6 +124,7 @@ _BatchExpr = TypeVar("_BatchExpr", bound=_Expr)
 
 class Facts:
     def assume(self, pred: _Expr) -> None: ...
+    def assume_many(self, predicates: Sequence[_Expr]) -> None: ...
     def assume_range(
         self,
         expr: _Expr,
