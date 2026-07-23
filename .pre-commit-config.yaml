@@ -16,7 +16,9 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c, c++]
-        exclude: ixsimpl_amalg\.c
+        # Fixtures intentionally contain non-canonical formatting
+        # (e.g. a declaration split before the parenthesis).
+        exclude: (ixsimpl_amalg\.c|test/fixtures/)
 
   - repo: https://github.com/fsfe/reuse-tool
     rev: v5.1.1

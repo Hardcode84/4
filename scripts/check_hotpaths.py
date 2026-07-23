@@ -10,16 +10,25 @@ tagged '/* scan: <axis> */' backward to their callers, and reports any
 hot function that transitively reaches a scan function, with a witness
 call path.
 
-Tags are C comments placed immediately above a function definition:
+Tags are standalone C comments placed immediately above a function
+definition (only comments and whitespace, no blank line, between):
 
   /* scan: <type> */  Cost grows with a context-wide resource.  The
                       type must be registered in SCAN_TYPES below.
   /* hot */           Hot-path contract: must not reach a scan.
 
-Public API functions from include/ixsimpl.h are hot roots by default;
-NONHOT_API below lists the lifecycle and bulk-IO exceptions.  Amortized
-O(1) mechanisms (hash-table growth rehash, arena rollback proportional
-to the rolled-back work) are not scans and stay untagged.  Calls through
+Tags are read only from AST comment nodes, so a tag-shaped string
+literal or doc prose is inert.  Function-like macros are modeled as
+pseudo-functions: their replacement text is parsed for calls, so a scan
+reached through a macro is caught.  Macro bodies are parsed as isolated
+fragments, and same-name macro variants (conditional compilation) union
+their edges — a sound over-approximation.
+
+Public API functions are parsed out of include/ixsimpl.h with
+tree-sitter (no line regexes) and are hot roots by default; NONHOT_API
+below lists the lifecycle and bulk-IO exceptions.  Amortized O(1)
+mechanisms (hash-table growth rehash, arena rollback proportional to
+the rolled-back work) are not scans and stay untagged.  Calls through
 function pointers and calls to external (libc) functions are assumed
 scan-free; see DESIGN.md for the full threat model.
 
@@ -71,12 +80,6 @@ NONHOT_API = frozenset(
     }
 )
 
-# Type names from ixsimpl.h that the API regex would otherwise mistake
-# for functions (function-pointer typedefs, struct names).
-API_TYPE_NAMES = frozenset(
-    {"ixs_ctx", "ixs_node", "ixs_visit_fn", "ixs_session", "ixs_facts", "ixs_reader", "ixs_writer"}
-)
-
 # Registry of scan types: axis -> one-line description.  A '/* scan: x */'
 # tag with an unregistered x is an error — adding a type is deliberately
 # one line here plus the tag plus a DESIGN.md update, same commit.
@@ -85,13 +88,14 @@ SCAN_TYPES = {
     "ctx": "cost grows with ctx-wide table state",
 }
 
-TAG_RE = re.compile(r"/\*\s*(hot|scan)(?:\s*:\s*([a-z][a-z0-9_]*))?\s*\*/")
+# A tag is the entire comment, not a substring of one.
+TAG_BLOCK_RE = re.compile(r"/\*\s*(hot|scan)(?:\s*:\s*([a-z][a-z0-9_]*))?\s*\*/")
+TAG_LINE_RE = re.compile(r"//\s*(hot|scan)(?:\s*:\s*([a-z][a-z0-9_]*))?\s*")
 
-# Near-miss detector: a comment that looks like a tag but does not parse.
-# Silent tag loss would turn the whole check into theater.
-TAG_LIKE_RE = re.compile(r"/\*\s*(hot|scan)\b[^*]*\*/")
-
-API_NAME_RE = re.compile(r"\b(ixs_\w+)\s*\(")
+# Near-miss detector: a comment that opens like a tag and carries a
+# colon but does not parse as one.  Silent tag loss would turn the
+# whole check into theater.
+TAG_LIKE_RE = re.compile(r"\s*(?:/\*|//)\s*(?:hot|scan)\b[^*]*:", re.IGNORECASE)
 
 # Macros used in storage-specifier position that the C grammar cannot
 # know.  Replaced by same-length text before parsing so byte offsets
@@ -100,27 +104,37 @@ SPECIFIER_MACROS = (b"IXS_STATIC",)
 
 
 def sanitize(text: bytes) -> bytes:
-    """Neutralize specifier macros without shifting any byte offsets."""
+    """Neutralize specifier macros and C++ linkage guards, byte-exactly."""
     out = []
+    prev = b""
     for line in text.split(b"\n"):
-        if not line.lstrip().startswith(b"#"):
-            for macro in SPECIFIER_MACROS:
-                line = line.replace(macro, b"static".ljust(len(macro)))
-        out.append(line)
+        stripped = line.strip()
+        if stripped == b'extern "C" {':
+            # C++-only syntax inside '#ifdef __cplusplus'; the C grammar
+            # chokes on it.  Blank it, preserving length.
+            out.append(b" " * len(line))
+        elif stripped == b"}" and prev.strip() == b"#ifdef __cplusplus":
+            out.append(b" " * len(line))
+        else:
+            if not line.lstrip().startswith(b"#"):
+                for macro in SPECIFIER_MACROS:
+                    line = line.replace(macro, b"static".ljust(len(macro)))
+            out.append(line)
+        prev = line
     return b"\n".join(out)
 
 
 @dataclass(eq=False)
 class FuncDef:
-    """A function definition plus everything the checker knows about it."""
+    """A function (or macro pseudo-function) definition plus check state."""
 
     name: str
     file: Path
     line: int
     start_byte: int
+    is_macro: bool = False
     tag: str | None = None
     scan_axis: str | None = None
-    callees: dict[FuncDef, int] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
 
     def loc(self) -> str:
@@ -136,19 +150,6 @@ class RawCall:
     line: int
 
 
-def parse_public_api(header: Path) -> set[str]:
-    """Extract public function names declared in the header."""
-    names: set[str] = set()
-    for line in header.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("typedef") or line.startswith("#") or line.startswith("/*"):
-            continue
-        m = API_NAME_RE.search(line)
-        if m and m.group(1) not in API_TYPE_NAMES:
-            names.add(m.group(1))
-    return names
-
-
 def declarator_name(node: Node) -> str | None:
     """Descend declarator nesting to the function name identifier."""
     decl = node.child_by_field_name("declarator")
@@ -159,26 +160,72 @@ def declarator_name(node: Node) -> str | None:
     return None
 
 
-def collect_calls(func: FuncDef, def_node: Node, raw_calls: list[RawCall]) -> None:
-    """Walk a function body, recording direct call names and indirect lines."""
-    stack = [def_node]
+def has_function_declarator(node: Node) -> bool:
+    """True if the declaration subtree contains a function_declarator."""
+    decl = node.child_by_field_name("declarator")
+    stack = [decl] if decl is not None else []
+    while stack:
+        inner = stack.pop()
+        if inner.type == "function_declarator":
+            return True
+        stack.extend(inner.children)
+    return False
+
+
+def parse_public_api(root: Path, parser: Parser) -> tuple[set[str], list[str]]:
+    """Extract public function names from the header via the C grammar."""
+    header = root / "include" / "ixsimpl.h"
+    warnings: list[str] = []
+    tree = parser.parse(sanitize(header.read_bytes()))
+    if tree.root_node.has_error:
+        warnings.append(f"{header.relative_to(root)}: tree-sitter failed to parse; no API roots")
+        return set(), warnings
+    names: set[str] = set()
+    stack = [tree.root_node]
     while stack:
         node = stack.pop()
-        if node.type == "call_expression":
-            fn = node.child_by_field_name("function")
-            if fn is not None and fn.type == "identifier" and fn.text:
-                raw_calls.append(RawCall(func, fn.text.decode(), node.start_point.row + 1))
-            else:
-                func.unresolved.append(f"<indirect> line {node.start_point.row + 1}")
+        if node.type == "function_definition":
+            name = declarator_name(node)
+            if name is not None:
+                names.add(name)
+        elif node.type == "declaration":
+            is_typedef = any(
+                c.type == "storage_class_specifier" and c.text == b"typedef" for c in node.children
+            )
+            if not is_typedef and has_function_declarator(node):
+                name = declarator_name(node)
+                if name is not None:
+                    names.add(name)
         stack.extend(node.children)
+    return names, warnings
+
+
+def walk_calls(owner: FuncDef, node: Node, raw_calls: list[RawCall], line_offset: int = 0) -> None:
+    """Walk a subtree, recording direct call names and indirect lines."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            fn = current.child_by_field_name("function")
+            line = line_offset + current.start_point.row + 1
+            if fn is not None and fn.type == "identifier" and fn.text:
+                raw_calls.append(RawCall(owner, fn.text.decode(), line))
+            else:
+                owner.unresolved.append(f"<indirect> line {line}")
+        stack.extend(current.children)
+
+
+def match_tag(comment: str) -> re.Match[str] | None:
+    """A tag is a standalone comment: the whole comment must be the tag."""
+    return TAG_BLOCK_RE.fullmatch(comment) or TAG_LINE_RE.fullmatch(comment)
 
 
 def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCall], list[str]]:
-    """Parse all C sources; return function defs, raw calls, and warnings."""
+    """Parse all C sources; return function/macro defs, raw calls, warnings."""
     defs: list[FuncDef] = []
     raw_calls: list[RawCall] = []
     warnings: list[str] = []
-    sources = sorted(root.glob("src/*.[ch]"))
+    sources = [*sorted(root.glob("src/*.[ch]")), root / "include" / "ixsimpl.h"]
     for src in sources:
         text = sanitize(src.read_bytes())
         rel = src.relative_to(root)
@@ -188,6 +235,7 @@ def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCa
             warnings.append(f"{rel}: tree-sitter failed to parse cleanly; file skipped")
             continue
         file_defs: list[FuncDef] = []
+        file_comments: list[Node] = []
 
         stack = [tree.root_node]
         while stack:
@@ -197,16 +245,37 @@ def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCa
                 if name is not None:
                     func = FuncDef(name, rel, node.start_point.row + 1, node.start_byte)
                     file_defs.append(func)
-                    collect_calls(func, node, raw_calls)
+                    walk_calls(func, node, raw_calls)
+            elif node.type == "comment":
+                file_comments.append(node)
+            elif node.type in ("preproc_function_def", "preproc_def"):
+                name_node = node.child_by_field_name("name")
+                value = node.child_by_field_name("value")
+                if name_node is not None and name_node.text and value is not None and value.text:
+                    mdef = FuncDef(
+                        name_node.text.decode(),
+                        rel,
+                        node.start_point.row + 1,
+                        node.start_byte,
+                        is_macro=True,
+                    )
+                    # The replacement text is a flat token blob in the
+                    # grammar; re-parse it as a fragment to find its calls.
+                    mini = parser.parse(value.text)
+                    walk_calls(mdef, mini.root_node, raw_calls, line_offset=mdef.line - 1)
+                    file_defs.append(mdef)
             stack.extend(node.children)
         defs.extend(file_defs)
 
-        content = text.decode()
-        tag_starts: set[int] = set()
-        for m in TAG_RE.finditer(content):
-            tag_starts.add(m.start())
+        for c in sorted(file_comments, key=lambda n: n.start_byte):
+            ctext = c.text.decode() if c.text else ""
+            m = match_tag(ctext)
+            if m is None:
+                if TAG_LIKE_RE.match(ctext):
+                    warnings.append(f"{rel}:{c.start_point.row + 1}: malformed tag {ctext!r}")
+                continue
             kind, axis = m.group(1), m.group(2)
-            line_no = content[: m.start()].count(chr(10)) + 1
+            line_no = c.start_point.row + 1
             if kind == "hot" and axis is not None:
                 warnings.append(f"{rel}:{line_no}: '/* hot */' takes no axis")
                 continue
@@ -218,7 +287,7 @@ def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCa
                     f"in scripts/check_hotpaths.py"
                 )
                 continue
-            following = [f for f in file_defs if f.start_byte > m.end()]
+            following = [f for f in file_defs if f.start_byte > c.end_byte]
             if not following:
                 warnings.append(
                     f"{rel}:{line_no}: "
@@ -226,15 +295,33 @@ def parse_sources(root: Path, parser: Parser) -> tuple[list[FuncDef], list[RawCa
                 )
                 continue
             target = min(following, key=lambda f: f.start_byte)
+            if target.is_macro:
+                warnings.append(
+                    f"{rel}:{line_no}: tag must annotate a function definition, "
+                    f"not macro '{target.name}'"
+                )
+                continue
+            # Adjacency: only comments and whitespace, no blank line,
+            # may separate the tag from its function.
+            gap = bytearray(text[c.end_byte : target.start_byte])
+            base = c.end_byte
+            for c2 in file_comments:
+                if base <= c2.start_byte and c2.end_byte <= target.start_byte:
+                    gap[c2.start_byte - base : c2.end_byte - base] = b" " * (
+                        c2.end_byte - c2.start_byte
+                    )
+            gap_bytes = bytes(gap)
+            if gap_bytes.strip() or b"\n\n" in gap_bytes:
+                warnings.append(
+                    f"{rel}:{line_no}: '/* {kind} */' tag must sit immediately above "
+                    f"'{target.name}' (only comments and whitespace between)"
+                )
+                continue
             if target.tag is not None:
                 warnings.append(f"{target.loc()}: conflicting tags on '{target.name}'")
                 continue
             target.tag = kind
             target.scan_axis = axis
-        for m in TAG_LIKE_RE.finditer(content):
-            if m.start() not in tag_starts:
-                line_no = content[: m.start()].count(chr(10)) + 1
-                warnings.append(f"{rel}:{line_no}: malformed tag {m.group(0)!r}")
     return defs, raw_calls, warnings
 
 
@@ -247,28 +334,36 @@ def resolve_calls(
         by_name.setdefault(f.name, []).append(f)
 
     warnings: list[str] = []
-    callers: dict[FuncDef, set[FuncDef]] = {}
+    edges: dict[FuncDef, set[FuncDef]] = {}
     for call in raw_calls:
         candidates = by_name.get(call.callee_name, [])
-        target: FuncDef | None = None
+        targets: set[FuncDef] = set()
         if len(candidates) == 1:
-            target = candidates[0]
-        elif len(candidates) > 1:
+            targets = {candidates[0]}
+        elif candidates:
             local = [c for c in candidates if c.file == call.caller.file]
+            functions = [c for c in candidates if not c.is_macro]
             if len(local) == 1:
-                target = local[0]
+                targets = {local[0]}
+            elif len(local) > 1:
+                targets = set(local)
+            elif len(functions) == 1:
+                targets = {functions[0]}
             else:
-                warnings.append(
-                    f"{call.caller.loc()}: ambiguous callee '{call.callee_name}' "
-                    f"({len(candidates)} definitions); edge dropped"
-                )
-        if target is None:
-            if not candidates and call.callee_name not in call.caller.unresolved:
-                call.caller.unresolved.append(call.callee_name)
-        elif target is not call.caller:
-            # Self-recursion cannot introduce new taint.
-            callers.setdefault(call.caller, set()).add(target)
-    return callers, warnings
+                # Sound over-approximation: keep every candidate's edge.
+                # All-macro ambiguity is normal conditional compilation
+                # and stays silent; function ambiguity is suspicious.
+                targets = set(candidates)
+                if not all(c.is_macro for c in candidates):
+                    warnings.append(
+                        f"{call.caller.loc()}: ambiguous callee '{call.callee_name}' "
+                        f"({len(candidates)} definitions); all edges kept"
+                    )
+        targets.discard(call.caller)  # Self-recursion adds no new taint.
+        if not targets and not candidates and call.callee_name not in call.caller.unresolved:
+            call.caller.unresolved.append(call.callee_name)
+        edges.setdefault(call.caller, set()).update(targets)
+    return edges, warnings
 
 
 def propagate_taint(edges: dict[FuncDef, set[FuncDef]], sources: set[FuncDef]) -> set[FuncDef]:
@@ -323,14 +418,19 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root: Path = args.root.resolve()
 
-    header = root / "include" / "ixsimpl.h"
     parser = Parser(Language(tree_sitter_c.language()))
     defs, raw_calls, warnings = parse_sources(root, parser)
     edges, resolve_warnings = resolve_calls(defs, raw_calls)
     warnings.extend(resolve_warnings)
+    public_api, api_warnings = parse_public_api(root, parser)
+    warnings.extend(api_warnings)
 
-    by_name = {f.name: f for f in defs}
-    public_api = parse_public_api(header)
+    # A function shadows a same-named macro for root/self-check purposes.
+    by_name: dict[str, FuncDef] = {}
+    for f in defs:
+        if f.name not in by_name or by_name[f.name].is_macro:
+            by_name[f.name] = f
+    header = root / "include" / "ixsimpl.h"
     missing = sorted(n for n in public_api if n not in by_name)
     for name in missing:
         warnings.append(f"{header.relative_to(root)}: public API '{name}' has no definition")
@@ -340,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         | {f for f in defs if f.tag == "hot"},
         key=lambda f: f.name,
     )
+    if not hot_roots:
+        # A checker with no roots passes anything; that is not success.
+        warnings.append("no hot roots found; the check would be vacuous")
     sources = {f for f in defs if f.tag == "scan"}
     tainted = propagate_taint(edges, sources)
 

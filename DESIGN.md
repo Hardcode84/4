@@ -2153,6 +2153,10 @@ comment immediately above its definition:
 /* scan: arena */
 ```
 
+The tag must be a standalone comment immediately above the definition —
+only comments and whitespace, no blank line, between. Tags are read from
+AST comment nodes, so tag-shaped string literals and prose are inert.
+
 Registered scan types (in `SCAN_TYPES` in `scripts/check_hotpaths.py`):
 
 - `arena`: cost grows with total live arena chunks/bytes.
@@ -2178,10 +2182,13 @@ installed; pinned versions live in `scripts/requirements-check.txt`).
 
 Known blind spots, by design: calls through function pointers and calls
 to external (libc) functions are assumed scan-free, so walker callbacks
-must honor the hot contract on their own. Tags are human classification;
-the checker only propagates it. The empirical backstop is scaling
-benchmarks over the corpus, which catch data-dependent blowups that no
-static classification can see.
+must honor the hot contract on their own. Function-like macros are
+modeled as pseudo-functions — their bodies are re-parsed for calls, so
+scans reached through a macro are caught; same-name macro variants
+(conditional compilation) union their edges, a sound over-approximation.
+Tags are human classification; the checker only propagates it. The
+empirical backstop is scaling benchmarks over the corpus, which catch
+data-dependent blowups that no static classification can see.
 
 ## Build and CI
 
