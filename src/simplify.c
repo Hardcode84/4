@@ -453,8 +453,8 @@ static uint32_t compact_addterms(ixs_addterm *terms, uint32_t nterms) {
   return w;
 }
 
-static bool addterm_coeffs_cancel(ixs_addterm *terms, uint32_t i, uint32_t j,
-                                  int64_t *ci_p, int64_t *ci_q) {
+static bool addterm_coeffs_cancel(const ixs_addterm *terms, uint32_t i,
+                                  uint32_t j, int64_t *ci_p, int64_t *ci_q) {
   int64_t cj_p, cj_q, sp, sq;
   ixs_node_get_rat(terms[i].coeff, ci_p, ci_q);
   ixs_node_get_rat(terms[j].coeff, &cj_p, &cj_q);
@@ -2065,7 +2065,8 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_bounds *bnds,
                   : simp_ceil_bnds(ctx, bnds, expanded);
 }
 
-static int64_t floor_term_effective_denom(ixs_bounds *bnds, ixs_addterm *term) {
+static int64_t floor_term_effective_denom(ixs_bounds *bnds,
+                                          const ixs_addterm *term) {
   int64_t tp, tq, atp, eff_num, g;
   ixs_node_get_rat(term->coeff, &tp, &tq);
   if (tq <= 0)
@@ -2843,7 +2844,8 @@ static ixs_node *mod_build_symbolic_reduced(ixs_ctx *ctx, ixs_node *a,
   }
 }
 
-static bool mod_addend_divides(ixs_ctx *ctx, ixs_node *b, ixs_addterm *term) {
+static bool mod_addend_divides(ixs_ctx *ctx, ixs_node *b,
+                               const ixs_addterm *term) {
   ixs_node *addend = simp_mul(ctx, term->coeff, term->term);
   ixs_node *quotient = addend ? simp_div(ctx, addend, b) : NULL;
   return quotient && !ixs_node_is_sentinel(quotient) &&
@@ -3865,8 +3867,8 @@ static int pw_merge_previous(ixs_ctx *ctx, ixs_pwcase *cases, uint32_t ncases,
   return ixs_node_is_known_true(cases[ncases - 1].cond) ? 2 : 1;
 }
 
-static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                              ixs_node **conds) {
+static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
+                              ixs_node *const *conds) {
   size_t cap = n > 16 ? n : 16;
   ixs_pwcase *cases =
       ixs_arena_alloc(&ctx->scratch, cap * sizeof(*cases), sizeof(void *));
@@ -3934,8 +3936,8 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
   return ixs_node_pw(ctx, ncases, cases);
 }
 
-IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                             ixs_node **conds) {
+IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
+                             ixs_node *const *conds) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_node *result = simp_pw_impl(ctx, n, values, conds);
   ixs_arena_restore(&ctx->scratch, m);

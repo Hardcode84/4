@@ -39,7 +39,7 @@ typedef struct ContextObject {
 /* ------------------------------------------------------------------ */
 
 typedef struct ExprObject {
-  PyObject_HEAD ixs_node *node;
+  PyObject_HEAD const ixs_node *node;
   ContextObject *ctx_obj;
 } ExprObject;
 
@@ -48,7 +48,7 @@ typedef struct FactsObject {
   ContextObject *ctx_obj;
 } FactsObject;
 
-static ExprObject *Expr_wrap(ContextObject *ctx_obj, ixs_node *node) {
+static ExprObject *Expr_wrap(ContextObject *ctx_obj, const ixs_node *node) {
   ExprObject *self;
   if (!node) {
     PyErr_SetString(PyExc_MemoryError, "ixsimpl: out of memory");
@@ -152,7 +152,7 @@ static PyObject *raise_exact_divide_error(ixs_session *session, size_t before) {
 }
 
 static PyObject *exact_divide_pair(ContextObject *ctx_obj, const char *status,
-                                   ixs_node *quotient) {
+                                   const ixs_node *quotient) {
   PyObject *pair;
   PyObject *quotient_obj;
   PyObject *status_obj = PyUnicode_FromString(status);
@@ -246,7 +246,7 @@ static void Facts_dealloc(FactsObject *self) {
 }
 
 /* Coerce a Python object to an ixs_node, extracting ctx from peer Expr. */
-static ixs_node *coerce_arg(ContextObject *ctx_obj, PyObject *obj) {
+static const ixs_node *coerce_arg(ContextObject *ctx_obj, PyObject *obj) {
   if (PyObject_TypeCheck(obj, &_ExprType)) {
     ExprObject *e = (ExprObject *)obj;
     if (e->ctx_obj != ctx_obj) {
@@ -330,10 +330,10 @@ static Py_hash_t Expr_hash(ExprObject *self) {
 
 static PyObject *Expr_richcompare(ExprObject *self, PyObject *other, int op) {
   ContextObject *ctx_obj = self->ctx_obj;
-  ixs_node *a = self->node;
-  ixs_node *b;
+  const ixs_node *a = self->node;
+  const ixs_node *b;
   ixs_cmp_op cmp;
-  ixs_node *result;
+  const ixs_node *result;
 
   if (op == Py_EQ) {
     if (PyObject_TypeCheck(other, &_ExprType)) {
@@ -398,7 +398,7 @@ static int Expr_bool(ExprObject *self) {
 
 static PyObject *Expr_add(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -413,7 +413,7 @@ static PyObject *Expr_add(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_sub(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -428,7 +428,7 @@ static PyObject *Expr_sub(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_mul(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -443,7 +443,7 @@ static PyObject *Expr_mul(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_truediv(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -458,7 +458,7 @@ static PyObject *Expr_truediv(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_mod(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -473,7 +473,7 @@ static PyObject *Expr_mod(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_and(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -488,7 +488,7 @@ static PyObject *Expr_and(PyObject *a, PyObject *b) {
 
 static PyObject *Expr_or(PyObject *a, PyObject *b) {
   ContextObject *ctx_obj = binop_ctx(a, b);
-  ixs_node *na, *nb, *result;
+  const ixs_node *na, *nb, *result;
   if (!ctx_obj)
     Py_RETURN_NOTIMPLEMENTED;
   na = coerce_arg(ctx_obj, a);
@@ -502,7 +502,7 @@ static PyObject *Expr_or(PyObject *a, PyObject *b) {
 }
 
 static PyObject *Expr_neg(ExprObject *self) {
-  ixs_node *result = ixs_neg(Context_session(self->ctx_obj), self->node);
+  const ixs_node *result = ixs_neg(Context_session(self->ctx_obj), self->node);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -525,11 +525,11 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
                                PyObject *kwargs) {
   static char *kwlist[] = {"assumptions", "facts", NULL};
   PyObject *assumptions_obj = NULL, *facts_obj = NULL;
-  ixs_node **assumptions = NULL;
+  const ixs_node **assumptions = NULL;
   size_t n_assumptions = 0;
   size_t errors_before;
   ixs_session *session = Context_session(self->ctx_obj);
-  ixs_node *result;
+  const ixs_node *result;
   Py_ssize_t i, n;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO", kwlist,
@@ -563,7 +563,7 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
     if (n < 0)
       return NULL;
     if (n > 0) {
-      assumptions = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+      assumptions = PyMem_Malloc((size_t)n * sizeof(const ixs_node *));
       if (!assumptions)
         return PyErr_NoMemory();
       for (i = 0; i < n; i++) {
@@ -600,7 +600,8 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
 }
 
 static PyObject *Expr_expand(ExprObject *self, PyObject *Py_UNUSED(args)) {
-  ixs_node *result = ixs_expand(Context_session(self->ctx_obj), self->node);
+  const ixs_node *result =
+      ixs_expand(Context_session(self->ctx_obj), self->node);
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -611,7 +612,8 @@ static PyObject *Expr_to_c(ExprObject *self, PyObject *Py_UNUSED(args)) {
 }
 
 /* Coerce a subs key (str or Expr) to ixs_node. */
-static ixs_node *coerce_subs_target(ContextObject *ctx_obj, PyObject *obj) {
+static const ixs_node *coerce_subs_target(ContextObject *ctx_obj,
+                                          PyObject *obj) {
   if (PyUnicode_Check(obj)) {
     const char *name = PyUnicode_AsUTF8(obj);
     if (!name)
@@ -628,8 +630,8 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
   if (nargs == 1 && PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
     PyObject *dict = PyTuple_GET_ITEM(args, 0);
     Py_ssize_t n = PyDict_Size(dict);
-    ixs_node **targets, **repls;
-    ixs_node *result;
+    const ixs_node **targets, **repls;
+    const ixs_node *result;
     Py_ssize_t pos = 0;
     PyObject *key, *val;
     uint32_t i = 0;
@@ -637,8 +639,10 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
     if (n == 0)
       return (PyObject *)Expr_wrap(self->ctx_obj, self->node);
 
-    targets = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(ixs_node *));
-    repls = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+    targets =
+        (const ixs_node **)PyMem_Malloc((size_t)n * sizeof(const ixs_node *));
+    repls =
+        (const ixs_node **)PyMem_Malloc((size_t)n * sizeof(const ixs_node *));
     if (!targets || !repls) {
       PyMem_Free(targets);
       PyMem_Free(repls);
@@ -677,7 +681,7 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
   /* Pair form: expr.subs(target, replacement) */
   {
     PyObject *target_obj, *repl_obj;
-    ixs_node *target, *repl, *result;
+    const ixs_node *target, *repl, *result;
 
     if (!PyArg_ParseTuple(args, "OO", &target_obj, &repl_obj))
       return NULL;
@@ -698,7 +702,7 @@ static PyObject *Expr_subs(ExprObject *self, PyObject *args) {
 static PyObject *Expr_child(ExprObject *self, PyObject *args) {
   unsigned int i;
   uint32_t n;
-  ixs_node *ch;
+  const ixs_node *ch;
   if (!PyArg_ParseTuple(args, "I", &i))
     return NULL;
   n = ixs_node_nchildren(self->node);
@@ -1096,8 +1100,8 @@ static bool range_endpoint_from_py(PyObject *obj, bool *has_endpoint,
   return true;
 }
 
-static ixs_node *facts_expr_arg(FactsObject *self, PyObject *obj,
-                                const char *what) {
+static const ixs_node *facts_expr_arg(FactsObject *self, PyObject *obj,
+                                      const char *what) {
   if (!PyObject_TypeCheck(obj, &_ExprType)) {
     PyErr_Format(PyExc_TypeError, "%s must be an Expr", what);
     return NULL;
@@ -1111,7 +1115,7 @@ static ixs_node *facts_expr_arg(FactsObject *self, PyObject *obj,
 }
 
 static PyObject *Facts_assume(FactsObject *self, PyObject *arg) {
-  ixs_node *pred = facts_expr_arg(self, arg, "predicate");
+  const ixs_node *pred = facts_expr_arg(self, arg, "predicate");
   ixs_session *session = Context_session(self->ctx_obj);
   size_t errors_before;
   if (!pred)
@@ -1129,7 +1133,7 @@ static PyObject *Facts_assume(FactsObject *self, PyObject *arg) {
 static PyObject *Facts_assume_many(FactsObject *self, PyObject *arg) {
   PyObject *sequence =
       PySequence_Fast(arg, "predicates must be an iterable of Expr");
-  ixs_node **predicates = NULL;
+  const ixs_node **predicates = NULL;
   ixs_session *session = Context_session(self->ctx_obj);
   Py_ssize_t i, n;
   size_t errors_before;
@@ -1171,7 +1175,7 @@ static PyObject *Facts_assume_range(FactsObject *self, PyObject *args,
                                     PyObject *kwargs) {
   static char *kwlist[] = {"expr", "lower", "upper", NULL};
   PyObject *expr_obj, *lower_obj = Py_None, *upper_obj = Py_None;
-  ixs_node *expr;
+  const ixs_node *expr;
   ixs_range_result r;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
@@ -1198,7 +1202,7 @@ static PyObject *Facts_derive_affine(FactsObject *self, PyObject *args,
                                      PyObject *kwargs) {
   static char *kwlist[] = {"base", "scale", "offset", "derived", NULL};
   PyObject *base_obj, *scale_obj, *offset_obj, *derived_obj;
-  ixs_node *base, *derived;
+  const ixs_node *base, *derived;
   int64_t scale, offset;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &base_obj,
@@ -1224,8 +1228,8 @@ static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
   if (nargs == 1 && PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
     PyObject *dict = PyTuple_GET_ITEM(args, 0);
     Py_ssize_t n = PyDict_Size(dict);
-    ixs_node **targets = NULL;
-    ixs_node **replacements = NULL;
+    const ixs_node **targets = NULL;
+    const ixs_node **replacements = NULL;
     ixs_facts *new_facts;
     FactsObject *wrapped;
     Py_ssize_t pos = 0;
@@ -1237,9 +1241,9 @@ static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
       return NULL;
     }
     if (n != 0) {
-      targets = (ixs_node **)PyMem_Malloc((size_t)n * sizeof(*targets));
+      targets = (const ixs_node **)PyMem_Malloc((size_t)n * sizeof(*targets));
       replacements =
-          (ixs_node **)PyMem_Malloc((size_t)n * sizeof(*replacements));
+          (const ixs_node **)PyMem_Malloc((size_t)n * sizeof(*replacements));
       if (!targets || !replacements) {
         PyMem_Free(targets);
         PyMem_Free(replacements);
@@ -1296,7 +1300,7 @@ static PyObject *Facts_subs(FactsObject *self, PyObject *args) {
 
   {
     PyObject *target_obj, *replacement_obj;
-    ixs_node *target, *replacement;
+    const ixs_node *target, *replacement;
     ixs_facts *new_facts;
     FactsObject *wrapped;
 
@@ -1377,20 +1381,21 @@ static void Context_dealloc(ContextObject *self) {
 
 static PyObject *Context_sym(ContextObject *self, PyObject *args) {
   const char *name;
-  ixs_node *node;
+  const ixs_node *node;
   if (!PyArg_ParseTuple(args, "s", &name))
     return NULL;
   node = ixs_sym(Context_session(self), name);
   return (PyObject *)Expr_wrap(self, node);
 }
 
-typedef ixs_node *(*Context_parse_fn)(ixs_session *, const char *, size_t);
+typedef const ixs_node *(*Context_parse_fn)(ixs_session *, const char *,
+                                            size_t);
 
 static PyObject *Context_parse_with(ContextObject *self, PyObject *args,
                                     Context_parse_fn parse_fn) {
   const char *input;
   Py_ssize_t len;
-  ixs_node *node;
+  const ixs_node *node;
 
   if (!PyArg_ParseTuple(args, "s#", &input, &len))
     return NULL;
@@ -1412,7 +1417,7 @@ static PyObject *Context_parse_pred(ContextObject *self, PyObject *args) {
 
 static PyObject *Context_int_(ContextObject *self, PyObject *args) {
   long long val;
-  ixs_node *node;
+  const ixs_node *node;
   if (!PyArg_ParseTuple(args, "L", &val))
     return NULL;
   node = ixs_int(Context_session(self), (int64_t)val);
@@ -1421,7 +1426,7 @@ static PyObject *Context_int_(ContextObject *self, PyObject *args) {
 
 static PyObject *Context_rat(ContextObject *self, PyObject *args) {
   long long p, q;
-  ixs_node *node;
+  const ixs_node *node;
   if (!PyArg_ParseTuple(args, "LL", &p, &q))
     return NULL;
   node = ixs_rat(Context_session(self), (int64_t)p, (int64_t)q);
@@ -1439,7 +1444,7 @@ static PyObject *Context_false_(ContextObject *self,
 
 static PyObject *Context_import_(ContextObject *self, PyObject *arg) {
   ExprObject *expr;
-  ixs_node *node;
+  const ixs_node *node;
 
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
@@ -1461,7 +1466,7 @@ static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
   PyObject *tmp;
   PyObject *result;
   BytesWriterState state;
-  ixs_writer writer;
+  const ixs_writer writer = {BytesWriter_write, &state};
 
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
@@ -1476,8 +1481,6 @@ static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
     return NULL;
 
   state.buf_obj = tmp;
-  writer.write = BytesWriter_write;
-  writer.userdata = &state;
   if (!ixs_serialize_node(session, expr->node, &writer)) {
     after_nerrors = ixs_session_nerrors(session);
     Py_DECREF(tmp);
@@ -1500,8 +1503,8 @@ static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
 static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
   Py_buffer view;
   BytesReaderState state;
-  ixs_reader reader;
-  ixs_node *node;
+  const ixs_reader reader = {BytesReader_read, BytesReader_remaining, &state};
+  const ixs_node *node;
 
   if (PyObject_GetBuffer(arg, &view, PyBUF_CONTIG_RO) < 0)
     return NULL;
@@ -1509,9 +1512,6 @@ static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
   state.data = (const unsigned char *)view.buf;
   state.len = view.len;
   state.pos = 0;
-  reader.read = BytesReader_read;
-  reader.remaining = BytesReader_remaining;
-  reader.userdata = &state;
   node = ixs_deserialize_node(Context_session(self), &reader);
   PyBuffer_Release(&view);
   if (!node)
@@ -1521,7 +1521,7 @@ static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
 
 static PyObject *Context_eq(ContextObject *self, PyObject *args) {
   PyObject *a_obj, *b_obj;
-  ixs_node *a, *b, *result;
+  const ixs_node *a, *b, *result;
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
     return NULL;
   a = coerce_arg(self, a_obj);
@@ -1536,7 +1536,7 @@ static PyObject *Context_eq(ContextObject *self, PyObject *args) {
 
 static PyObject *Context_ne(ContextObject *self, PyObject *args) {
   PyObject *a_obj, *b_obj;
-  ixs_node *a, *b, *result;
+  const ixs_node *a, *b, *result;
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
     return NULL;
   a = coerce_arg(self, a_obj);
@@ -1554,10 +1554,11 @@ static PyObject *Context_facts(ContextObject *self, PyObject *Py_UNUSED(args)) {
 }
 
 typedef ixs_check_result (*Context_assumption_check_fn)(ixs_session *,
-                                                        ixs_node *,
-                                                        ixs_node *const *,
+                                                        const ixs_node *,
+                                                        const ixs_node *const *,
                                                         size_t);
-typedef ixs_check_result (*Context_facts_check_fn)(ixs_facts *, ixs_node *);
+typedef ixs_check_result (*Context_facts_check_fn)(ixs_facts *,
+                                                   const ixs_node *);
 
 static PyObject *Context_check_with(ContextObject *self, PyObject *args,
                                     PyObject *kwargs,
@@ -1566,7 +1567,7 @@ static PyObject *Context_check_with(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
-  ixs_node *expr, **assumptions = NULL;
+  const ixs_node *expr, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
   ixs_check_result r;
@@ -1614,7 +1615,8 @@ static PyObject *Context_check_with(ContextObject *self, PyObject *args,
     if (n_assumptions < 0)
       return NULL;
     if (n_assumptions > 0) {
-      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      assumptions =
+          PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
       if (!assumptions)
         return PyErr_NoMemory();
       for (i = 0; i < n_assumptions; i++) {
@@ -1677,7 +1679,7 @@ static PyObject *check_result_to_py(ixs_check_result result) {
 }
 
 static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
-                                     PyObject *facts_obj, ixs_node **expr,
+                                     PyObject *facts_obj, const ixs_node **expr,
                                      ixs_facts **facts);
 
 static PyObject *Context_check_predicate(ContextObject *self, PyObject *args,
@@ -1686,7 +1688,7 @@ static PyObject *Context_check_predicate(ContextObject *self, PyObject *args,
   PyObject *predicate_obj;
   PyObject *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_node *predicate;
+  const ixs_node *predicate;
   ixs_facts *facts;
   ixs_check_result result;
   size_t errors_before;
@@ -1819,7 +1821,7 @@ static PyObject *known_bits_to_py(const ixs_known_bits *bits) {
 }
 
 static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
-                                     PyObject *facts_obj, ixs_node **expr,
+                                     PyObject *facts_obj, const ixs_node **expr,
                                      ixs_facts **facts) {
   if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
@@ -1846,7 +1848,8 @@ static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
 static bool context_query_exprs_facts(ContextObject *self,
                                       PyObject *const *expr_objs,
                                       const char *const *names, size_t nexprs,
-                                      PyObject *facts_obj, ixs_node **exprs,
+                                      PyObject *facts_obj,
+                                      const ixs_node **exprs,
                                       ixs_facts **facts) {
   size_t i;
   for (i = 0; i < nexprs; i++) {
@@ -1873,8 +1876,8 @@ static bool context_query_exprs_facts(ContextObject *self,
   return true;
 }
 
-static PyObject *context_expr_pair(ContextObject *self, ixs_node *first,
-                                   ixs_node *second) {
+static PyObject *context_expr_pair(ContextObject *self, const ixs_node *first,
+                                   const ixs_node *second) {
   PyObject *pair = PyTuple_New(2);
   PyObject *first_obj;
   PyObject *second_obj;
@@ -1893,8 +1896,8 @@ static PyObject *context_expr_pair(ContextObject *self, ixs_node *first,
   return pair;
 }
 
-static PyObject *context_expr_int_pair(ContextObject *self, ixs_node *expr,
-                                       int64_t value) {
+static PyObject *context_expr_int_pair(ContextObject *self,
+                                       const ixs_node *expr, int64_t value) {
   PyObject *pair = PyTuple_New(2);
   PyObject *expr_obj;
   PyObject *value_obj;
@@ -1919,7 +1922,7 @@ static PyObject *Context_constant_difference(ContextObject *self,
   static const char *names[] = {"lhs", "rhs"};
   PyObject *expr_objs[2];
   PyObject *facts_obj;
-  ixs_node *exprs[2];
+  const ixs_node *exprs[2];
   ixs_facts *facts;
   int64_t delta;
   size_t errors_before;
@@ -1946,9 +1949,9 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
   static const char *names[] = {"expr", "symbol"};
   PyObject *expr_objs[2];
   PyObject *facts_obj;
-  ixs_node *exprs[2];
-  ixs_node *coefficient;
-  ixs_node *residual;
+  const ixs_node *exprs[2];
+  const ixs_node *coefficient;
+  const ixs_node *residual;
   ixs_facts *facts;
   size_t errors_before;
   bool ok;
@@ -1975,8 +1978,8 @@ static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
   static const char *names[] = {"expr", "symbol", "step"};
   PyObject *expr_objs[3];
   PyObject *facts_obj;
-  ixs_node *exprs[3];
-  ixs_node *difference;
+  const ixs_node *exprs[3];
+  const ixs_node *difference;
   ixs_facts *facts;
   size_t errors_before;
   bool ok;
@@ -2003,8 +2006,8 @@ static PyObject *Context_split_additive_constant(ContextObject *self,
   static char *kwlist[] = {"expr", "facts", NULL};
   PyObject *expr_obj;
   PyObject *facts_obj;
-  ixs_node *expr;
-  ixs_node *residual;
+  const ixs_node *expr;
+  const ixs_node *residual;
   ixs_facts *facts;
   int64_t constant;
   size_t errors_before;
@@ -2029,7 +2032,7 @@ static PyObject *Context_known_bits(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "facts", NULL};
   PyObject *expr_obj, *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_node *expr;
+  const ixs_node *expr;
   ixs_facts *facts;
   ixs_known_bits bits;
   size_t errors_before;
@@ -2053,7 +2056,7 @@ static PyObject *Context_symbol_congruence(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"symbol", "facts", NULL};
   PyObject *symbol_obj, *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_node *symbol;
+  const ixs_node *symbol;
   ixs_facts *facts;
   int64_t modulus;
   int64_t residue;
@@ -2079,7 +2082,7 @@ static PyObject *Context_congruent(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "modulus", "residue", "facts", NULL};
   PyObject *expr_obj, *modulus_obj, *residue_obj, *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_node *expr;
+  const ixs_node *expr;
   ixs_facts *facts;
   ixs_check_result result;
   int64_t modulus;
@@ -2164,7 +2167,7 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
-  ixs_node *expr, **assumptions = NULL;
+  const ixs_node *expr, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
   ixs_pow2_fact r;
@@ -2212,7 +2215,8 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
     if (n_assumptions < 0)
       return NULL;
     if (n_assumptions > 0) {
-      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      assumptions =
+          PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
       if (!assumptions)
         return PyErr_NoMemory();
       for (i = 0; i < n_assumptions; i++) {
@@ -2285,7 +2289,7 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
   PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_assumptions = 0;
-  ixs_node *expr, **assumptions = NULL;
+  const ixs_node *expr, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
   ixs_range_result r;
@@ -2343,7 +2347,8 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
     if (n_assumptions < 0)
       return NULL;
     if (n_assumptions > 0) {
-      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      assumptions =
+          PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
       if (!assumptions)
         return PyErr_NoMemory();
       for (i = 0; i < n_assumptions; i++) {
@@ -2394,7 +2399,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"exprs", "assumptions", "facts", NULL};
   PyObject *exprs_obj, *assumptions_obj = NULL, *facts_obj = NULL;
   Py_ssize_t i, n_exprs, n_assumptions = 0;
-  ixs_node **exprs = NULL, **assumptions = NULL;
+  const ixs_node **exprs = NULL, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
 
@@ -2424,7 +2429,7 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
     return NULL;
   }
   n_exprs = PyList_Size(exprs_obj);
-  exprs = PyMem_Malloc((size_t)n_exprs * sizeof(ixs_node *));
+  exprs = PyMem_Malloc((size_t)n_exprs * sizeof(const ixs_node *));
   if (!exprs)
     return PyErr_NoMemory();
 
@@ -2451,7 +2456,8 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
       return NULL;
     }
     if (n_assumptions > 0) {
-      assumptions = PyMem_Malloc((size_t)n_assumptions * sizeof(ixs_node *));
+      assumptions =
+          PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
       if (!assumptions) {
         PyMem_Free(exprs);
         return PyErr_NoMemory();
@@ -2683,7 +2689,7 @@ static PyTypeObject ContextType = {
 
 static PyObject *mod_floor(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
-  ixs_node *result;
+  const ixs_node *result;
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.floor() requires an Expr");
     return NULL;
@@ -2695,7 +2701,7 @@ static PyObject *mod_floor(PyObject *Py_UNUSED(module), PyObject *arg) {
 
 static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
-  ixs_node *result;
+  const ixs_node *result;
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.ceil() requires an Expr");
     return NULL;
@@ -2706,12 +2712,13 @@ static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
 }
 
 static PyObject *mod_binary_op(PyObject *args,
-                               ixs_node *(*op)(ixs_session *, ixs_node *,
-                                               ixs_node *),
+                               const ixs_node *(*op)(ixs_session *,
+                                                     const ixs_node *,
+                                                     const ixs_node *),
                                const char *name) {
   PyObject *a_obj, *b_obj;
   ExprObject *ae;
-  ixs_node *a, *b, *result;
+  const ixs_node *a, *b, *result;
 
   if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
     return NULL;
@@ -2756,7 +2763,7 @@ static PyObject *mod_or_(PyObject *Py_UNUSED(module), PyObject *args) {
 
 static PyObject *mod_not_(PyObject *Py_UNUSED(module), PyObject *arg) {
   ExprObject *e;
-  ixs_node *result;
+  const ixs_node *result;
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "ixsimpl.not_() requires an Expr");
     return NULL;
@@ -2770,8 +2777,8 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
   Py_ssize_t n = PyTuple_Size(args);
   Py_ssize_t i;
   ContextObject *ctx_obj;
-  ixs_node **values, **conds;
-  ixs_node *result;
+  const ixs_node **values, **conds;
+  const ixs_node *result;
 
   if (n < 1) {
     PyErr_SetString(PyExc_TypeError,
@@ -2783,8 +2790,8 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
     return NULL;
   }
 
-  values = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
-  conds = PyMem_Malloc((size_t)n * sizeof(ixs_node *));
+  values = PyMem_Malloc((size_t)n * sizeof(const ixs_node *));
+  conds = PyMem_Malloc((size_t)n * sizeof(const ixs_node *));
   if (!values || !conds) {
     PyMem_Free(values);
     PyMem_Free(conds);

@@ -133,7 +133,7 @@ typedef struct {
 } decode_node;
 
 typedef struct {
-  ixs_reader *reader;
+  const ixs_reader *reader;
   size_t offset;
 } decode_input;
 
@@ -455,7 +455,7 @@ static bool serial_collect(ixs_ctx *ctx, const ixs_node *root,
   return true;
 }
 
-static bool writer_write(ixs_writer *w, const void *buf, size_t len) {
+static bool writer_write(const ixs_writer *w, const void *buf, size_t len) {
   if (!w || !w->write)
     return false;
   if (len == 0)
@@ -463,11 +463,11 @@ static bool writer_write(ixs_writer *w, const void *buf, size_t len) {
   return w->write(w->userdata, buf, len);
 }
 
-static bool writer_u8(ixs_writer *w, uint8_t v) {
+static bool writer_u8(const ixs_writer *w, uint8_t v) {
   return writer_write(w, &v, 1u);
 }
 
-static bool writer_u32(ixs_writer *w, uint32_t v) {
+static bool writer_u32(const ixs_writer *w, uint32_t v) {
   unsigned char buf[4];
   buf[0] = (unsigned char)(v & 0xffu);
   buf[1] = (unsigned char)((v >> 8) & 0xffu);
@@ -476,7 +476,7 @@ static bool writer_u32(ixs_writer *w, uint32_t v) {
   return writer_write(w, buf, sizeof(buf));
 }
 
-static bool writer_i64(ixs_writer *w, int64_t v) {
+static bool writer_i64(const ixs_writer *w, int64_t v) {
   unsigned char buf[8];
   uint64_t u = (uint64_t)v;
   size_t i;
@@ -526,8 +526,8 @@ static bool serial_lookup_index(serial_state *state, const ixs_node *node,
   return true;
 }
 
-static bool serial_write_ref(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_ref(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t index;
 
   if (!serial_lookup_index(state, node, &index))
@@ -535,7 +535,7 @@ static bool serial_write_ref(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return writer_u32(w, index);
 }
 
-static bool serial_write_symbol(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_symbol(ixs_ctx *ctx, const ixs_writer *w,
                                 const ixs_node *node) {
   size_t len = strlen(node->u.name);
 
@@ -545,8 +545,8 @@ static bool serial_write_symbol(ixs_ctx *ctx, ixs_writer *w,
          writer_write(w, node->u.name, len);
 }
 
-static bool serial_write_add(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_add(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t i;
 
   if (!writer_u8(w, WIRE_ADD) || !writer_u32(w, node->u.add.nterms) ||
@@ -560,8 +560,8 @@ static bool serial_write_add(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_mul(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_mul(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t i;
 
   if (!writer_u8(w, WIRE_MUL) || !writer_u32(w, node->u.mul.nfactors) ||
@@ -578,20 +578,21 @@ static bool serial_write_mul(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_unary(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                               uint8_t tag, const ixs_node *arg) {
+static bool serial_write_unary(ixs_ctx *ctx, const ixs_writer *w,
+                               serial_state *state, uint8_t tag,
+                               const ixs_node *arg) {
   return writer_u8(w, tag) && serial_write_ref(ctx, w, state, arg);
 }
 
-static bool serial_write_binary(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_binary(ixs_ctx *ctx, const ixs_writer *w,
                                 serial_state *state, uint8_t tag,
                                 const ixs_node *lhs, const ixs_node *rhs) {
   return writer_u8(w, tag) && serial_write_ref(ctx, w, state, lhs) &&
          serial_write_ref(ctx, w, state, rhs);
 }
 
-static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_mod(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   ixs_mod_divisor_class divisor =
       ixs_node_classify_mod_divisor(node->u.binary.rhs);
   if (divisor == IXS_MOD_DIVISOR_ZERO)
@@ -602,7 +603,7 @@ static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
                              node->u.binary.rhs);
 }
 
-static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_piecewise(ixs_ctx *ctx, const ixs_writer *w,
                                    serial_state *state, const ixs_node *node) {
   uint32_t i;
 
@@ -616,8 +617,8 @@ static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
   return true;
 }
 
-static bool serial_write_cmp(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_cmp(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   wire_cmp_op op;
 
   if (!ixs_cmp_to_wire(node->u.binary.cmp_op, &op))
@@ -627,8 +628,8 @@ static bool serial_write_cmp(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
          serial_write_ref(ctx, w, state, node->u.binary.rhs);
 }
 
-static bool serial_write_logic(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                               const ixs_node *node) {
+static bool serial_write_logic(ixs_ctx *ctx, const ixs_writer *w,
+                               serial_state *state, const ixs_node *node) {
   wire_tag tag = node->tag == IXS_AND ? WIRE_AND : WIRE_OR;
   uint32_t i;
 
@@ -641,8 +642,8 @@ static bool serial_write_logic(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                              const ixs_node *node) {
+static bool serial_write_node(ixs_ctx *ctx, const ixs_writer *w,
+                              serial_state *state, const ixs_node *node) {
   switch (node->tag) {
   case IXS_INT:
     return writer_u8(w, WIRE_INT) && writer_i64(w, node->u.ival);
@@ -1400,7 +1401,7 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
 }
 
 static bool serialize_stream(ixs_ctx *ctx, const ixs_node *root,
-                             ixs_writer *w) {
+                             const ixs_writer *w) {
   serial_state state;
   uint32_t root_index = 0;
   size_t i;
@@ -1535,7 +1536,8 @@ static decode_status decode_stream(ixs_ctx *ctx, decode_input *in,
   return DECODE_OK;
 }
 
-bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w) {
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root,
+                        const ixs_writer *w) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
@@ -1546,7 +1548,7 @@ bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w) {
   return ok;
 }
 
-ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r) {
+ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);

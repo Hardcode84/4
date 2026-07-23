@@ -6,6 +6,10 @@
 
 #include "test_check.h"
 
+/* Compatible redeclarations only when ixs_node is const-qualified. */
+void ixs_test_node_typedef_is_const(ixs_node **nodes);
+void ixs_test_node_typedef_is_const(const struct ixs_node_impl **nodes);
+
 static void test_rat_accessors(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *r = ixs_rat(ctx, 3, 7);
@@ -309,7 +313,7 @@ typedef struct {
   uint32_t cap;
 } tag_log;
 
-static ixs_walk_action log_tags(ixs_node *node, void *ud) {
+static ixs_walk_action log_tags(const ixs_node *node, void *ud) {
   tag_log *log = (tag_log *)ud;
   if (log->count < log->cap)
     log->tags[log->count] = ixs_node_tag(node);
@@ -352,7 +356,7 @@ static void test_walk_post_order(void) {
   printf("  walk_post_order: OK\n");
 }
 
-static ixs_walk_action stop_on_sym(ixs_node *node, void *ud) {
+static ixs_walk_action stop_on_sym(const ixs_node *node, void *ud) {
   (void)ud;
   if (ixs_node_tag(node) == IXS_SYM)
     return IXS_WALK_STOP;
@@ -374,7 +378,7 @@ static void test_walk_stop(void) {
   printf("  walk_stop: OK\n");
 }
 
-static ixs_walk_action skip_add(ixs_node *node, void *ud) {
+static ixs_walk_action skip_add(const ixs_node *node, void *ud) {
   tag_log *log = (tag_log *)ud;
   if (log->count < log->cap)
     log->tags[log->count] = ixs_node_tag(node);
@@ -461,7 +465,7 @@ static ixs_node *build_deep_max_chain(ixs_ctx *ctx, uint32_t depth) {
   return expr;
 }
 
-static ixs_walk_action count_nodes(ixs_node *node, void *ud) {
+static ixs_walk_action count_nodes(const ixs_node *node, void *ud) {
   size_t *count = (size_t *)ud;
   (void)node;
   (*count)++;
@@ -474,7 +478,7 @@ typedef struct {
   bool reentered;
 } reentrant_walk_state;
 
-static ixs_walk_action reenter_same_session(ixs_node *node, void *ud) {
+static ixs_walk_action reenter_same_session(const ixs_node *node, void *ud) {
   reentrant_walk_state *state = (reentrant_walk_state *)ud;
   state->count++;
   if (!state->reentered && ixs_node_tag(node) == IXS_ADD) {
@@ -544,66 +548,58 @@ static void test_walk_deep_chain(void) {
   printf("  walk_deep_chain: OK\n");
 }
 
-static void test_const_read_api(void) {
+static void test_immutable_node_api(void) {
   ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *x = ixs_sym(ctx, "x");
-  ixs_node *y = ixs_sym(ctx, "y");
-  ixs_node *rat = ixs_rat(ctx, 3, 5);
-  ixs_node *sum = ixs_add(ctx, x, ixs_int(ctx, 2));
-  ixs_node *product = ixs_mul(ctx, x, y);
-  ixs_node *rounded = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
-  ixs_node *cmp = ixs_cmp(ctx, x, IXS_CMP_LT, y);
-  ixs_node *cmp2 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
-  ixs_node *logic = ixs_and(ctx, cmp, cmp2);
-  ixs_node *values[2] = {x, y};
-  ixs_node *conds[2] = {cmp, ixs_true(ctx)};
-  ixs_node *piecewise = ixs_pw(ctx, 2, values, conds);
-  const ixs_node *const_x = x;
-  const ixs_node *const_rat = rat;
-  const ixs_node *const_sum = sum;
-  const ixs_node *const_product = product;
-  const ixs_node *const_rounded = rounded;
-  const ixs_node *const_cmp = cmp;
-  const ixs_node *const_logic = logic;
-  const ixs_node *const_piecewise = piecewise;
+  const ixs_node *x = ixs_sym(ctx, "x");
+  const ixs_node *y = ixs_sym(ctx, "y");
+  const ixs_node *rat = ixs_rat(ctx, 3, 5);
+  const ixs_node *sum = ixs_add(ctx, x, ixs_int(ctx, 2));
+  const ixs_node *product = ixs_mul(ctx, x, y);
+  const ixs_node *rounded = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  const ixs_node *cmp = ixs_cmp(ctx, x, IXS_CMP_LT, y);
+  const ixs_node *cmp2 = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  const ixs_node *logic = ixs_and(ctx, cmp, cmp2);
+  const ixs_node *values[2] = {x, y};
+  const ixs_node *conds[2] = {cmp, ixs_true(ctx)};
+  const ixs_node *piecewise = ixs_pw(ctx, 2, values, conds);
   const ixs_node *parse_error = ixs_parse(ctx, "?", 1);
-  ixs_node *mutable_child;
+  const ixs_node *child;
   char buf[64];
 
-  CHECK(ixs_node_tag(const_x) == IXS_SYM);
-  CHECK(strcmp(ixs_node_sym_name(const_x), "x") == 0);
-  CHECK(ixs_node_hash(const_x) == ixs_node_hash(x));
-  CHECK(ixs_node_rat_num(const_rat) == 3);
-  CHECK(ixs_node_rat_den(const_rat) == 5);
-  CHECK(ixs_node_add_nterms(const_sum) == 1);
-  CHECK(ixs_node_int_val(ixs_node_add_coeff(const_sum)) == 2);
-  CHECK(ixs_same_node(ixs_node_add_term(const_sum, 0), x));
-  CHECK(ixs_node_int_val(ixs_node_add_term_coeff(const_sum, 0)) == 1);
-  CHECK(ixs_node_mul_nfactors(const_product) == 2);
-  CHECK(ixs_node_int_val(ixs_node_mul_coeff(const_product)) == 1);
-  CHECK(ixs_node_mul_factor_base(const_product, 0) != NULL);
-  CHECK(ixs_node_mul_factor_exp(const_product, 0) == 1);
-  CHECK(ixs_node_unary_arg(const_rounded) != NULL);
-  CHECK(ixs_node_binary_lhs(const_cmp) != NULL);
-  CHECK(ixs_node_int_val(ixs_node_binary_rhs(const_cmp)) == 0);
-  CHECK(ixs_node_cmp_op(const_cmp) == IXS_CMP_LT);
-  CHECK(ixs_node_logic_nargs(const_logic) == 2);
-  CHECK(ixs_node_logic_arg(const_logic, 0) != NULL);
-  CHECK(ixs_node_pw_ncases(const_piecewise) == 2);
-  CHECK(ixs_same_node(ixs_node_pw_value(const_piecewise, 0), x));
-  CHECK(ixs_same_node(ixs_node_pw_cond(const_piecewise, 1), ixs_true(ctx)));
-  CHECK(ixs_node_nchildren(const_sum) == 3);
-  mutable_child = ixs_node_child(const_sum, 0);
-  CHECK(mutable_child != NULL);
-  CHECK(ixs_print(const_sum, buf, sizeof(buf)) > 0);
-  CHECK(ixs_print_c(const_sum, buf, sizeof(buf)) > 0);
-  CHECK(!ixs_is_error(const_x));
+  CHECK(ixs_node_tag(x) == IXS_SYM);
+  CHECK(strcmp(ixs_node_sym_name(x), "x") == 0);
+  CHECK(ixs_node_hash(x) == ixs_node_hash(x));
+  CHECK(ixs_node_rat_num(rat) == 3);
+  CHECK(ixs_node_rat_den(rat) == 5);
+  CHECK(ixs_node_add_nterms(sum) == 1);
+  CHECK(ixs_node_int_val(ixs_node_add_coeff(sum)) == 2);
+  CHECK(ixs_same_node(ixs_node_add_term(sum, 0), x));
+  CHECK(ixs_node_int_val(ixs_node_add_term_coeff(sum, 0)) == 1);
+  CHECK(ixs_node_mul_nfactors(product) == 2);
+  CHECK(ixs_node_int_val(ixs_node_mul_coeff(product)) == 1);
+  CHECK(ixs_node_mul_factor_base(product, 0) != NULL);
+  CHECK(ixs_node_mul_factor_exp(product, 0) == 1);
+  CHECK(ixs_node_unary_arg(rounded) != NULL);
+  CHECK(ixs_node_binary_lhs(cmp) != NULL);
+  CHECK(ixs_node_int_val(ixs_node_binary_rhs(cmp)) == 0);
+  CHECK(ixs_node_cmp_op(cmp) == IXS_CMP_LT);
+  CHECK(ixs_node_logic_nargs(logic) == 2);
+  CHECK(ixs_node_logic_arg(logic, 0) != NULL);
+  CHECK(ixs_node_pw_ncases(piecewise) == 2);
+  CHECK(ixs_same_node(ixs_node_pw_value(piecewise, 0), x));
+  CHECK(ixs_same_node(ixs_node_pw_cond(piecewise, 1), ixs_true(ctx)));
+  CHECK(ixs_node_nchildren(sum) == 3);
+  child = ixs_node_child(sum, 0);
+  CHECK(child != NULL);
+  CHECK(ixs_print(sum, buf, sizeof(buf)) > 0);
+  CHECK(ixs_print_c(sum, buf, sizeof(buf)) > 0);
+  CHECK(!ixs_is_error(x));
   CHECK(ixs_is_error(parse_error));
   CHECK(ixs_is_parse_error(parse_error));
   CHECK(!ixs_is_domain_error(parse_error));
 
   ixs_ctx_destroy(ctx);
-  printf("  const_read_api: OK\n");
+  printf("  immutable_node_api: OK\n");
 }
 
 int main(void) {
@@ -632,7 +628,7 @@ int main(void) {
   test_walk_sentinel();
   test_walk_same_session_reentry();
   test_walk_deep_chain();
-  test_const_read_api();
+  test_immutable_node_api();
   printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
 }

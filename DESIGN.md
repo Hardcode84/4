@@ -241,7 +241,7 @@ typedef struct {
   size_t used;
 } ixs_arena_mark;
 
-ixs_arena_mark ixs_arena_save(ixs_arena *a);
+ixs_arena_mark ixs_arena_save(const ixs_arena *a);
 void ixs_arena_restore(ixs_arena *a, ixs_arena_mark m);
 ```
 
@@ -467,10 +467,14 @@ typedef enum {
 } ixs_cmp_op;
 ```
 
-Each node is a small struct:
+The public node name is intrinsically const-qualified. The implementation tag
+is used directly only while a node is being assembled before interning, or for
+short-lived stack probes that are never published:
 
 ```c
-typedef struct ixs_node {
+typedef const struct ixs_node_impl ixs_node;
+
+struct ixs_node_impl {
     ixs_tag tag;
     uint32_t hash;        // precomputed, used for hash-consing
     union ixs_node_data {
@@ -478,37 +482,43 @@ typedef struct ixs_node {
         struct { int64_t p, q; } rat;     // IXS_RAT
         const char *name;                 // IXS_SYM (interned in arena)
         struct {                          // IXS_ADD
-            struct ixs_node *coeff;       //   rational constant term
+            ixs_node *coeff;              //   rational constant term
             uint32_t nterms;
-            struct ixs_addterm *terms;    //   sorted array (see below)
+            const struct ixs_addterm *terms; // sorted array (see below)
         } add;
         struct {                          // IXS_MUL
-            struct ixs_node *coeff;       //   rational constant factor
+            ixs_node *coeff;              //   rational constant factor
             uint32_t nfactors;
-            struct ixs_mulfactor *factors; //  sorted array (see below)
+            const struct ixs_mulfactor *factors; // sorted array (see below)
         } mul;
         struct {                          // IXS_FLOOR, IXS_CEIL
-            struct ixs_node *arg;
+            ixs_node *arg;
         } unary;
         struct {                          // IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP
-            struct ixs_node *lhs;
-            struct ixs_node *rhs;
+            ixs_node *lhs;
+            ixs_node *rhs;
             ixs_cmp_op cmp_op;           // used only for IXS_CMP; value ignored for other binary types
         } binary;
         struct {                          // IXS_PIECEWISE
             uint32_t ncases;
-            struct ixs_pwcase *cases;     //  array of {value, condition}
+            const struct ixs_pwcase *cases; // array of {value, condition}
         } pw;
         struct {                          // IXS_AND, IXS_OR
             uint32_t nargs;
-            struct ixs_node **args;       // new nodes use exactly 2 args
+            ixs_node *const *args;        // new nodes use exactly 2 args
         } logic;
         struct {                          // IXS_NOT
-            struct ixs_node *arg;
+            ixs_node *arg;
         } unary_bool;
     } u;
-} ixs_node;
+};
 ```
+
+Because `ixs_node` aliases a const-qualified implementation struct,
+`ixs_node *` always means "pointer to immutable interned node." The owned ADD,
+MUL, Piecewise, and logic child arrays are const after publication as well.
+This makes mutation through a node handle a compile-time error in both C and
+C++; it is not merely an API convention.
 
 `ixs_true(s)` returns the interned integer `1`, and `ixs_false(s)` returns the
 interned integer `0`. The v1 binary format still accepts legacy true/false wire
@@ -528,18 +538,18 @@ Helper structs for compound nodes:
 
 ```c
 typedef struct ixs_addterm {
-    struct ixs_node *term;    // the non-constant subexpression
-    struct ixs_node *coeff;   // rational coefficient (IXS_INT or IXS_RAT, nonzero)
+    ixs_node *term;    // the non-constant subexpression
+    ixs_node *coeff;   // rational coefficient (IXS_INT or IXS_RAT, nonzero)
 } ixs_addterm;
 
 typedef struct ixs_mulfactor {
-    struct ixs_node *base;    // the non-constant base
+    ixs_node *base;    // the non-constant base
     int32_t exp;              // nonzero integer exponent
 } ixs_mulfactor;
 
 typedef struct ixs_pwcase {
-    struct ixs_node *value;   // branch value
-    struct ixs_node *cond;    // branch condition (boolean expression)
+    ixs_node *value;   // branch value
+    ixs_node *cond;    // branch condition (boolean expression)
 } ixs_pwcase;
 ```
 
@@ -553,11 +563,12 @@ frees the original input string.
 with linear probing and rehashes at 70% load.
 
 **Probe-before-allocate**: Each node constructor builds a stack-local
-`ixs_node tmp`, populates its fields and hash, and probes the hash table
-via `htab_lookup`. On hit (full structural comparison confirms match), the
-existing pointer is returned with zero arena allocation. On miss, the
-constructor arena-allocates the node, copies `tmp` into it, and inserts it
-into the table. This avoids wasting arena memory on duplicate nodes.
+`struct ixs_node_impl tmp`, populates its fields and hash, and probes the hash
+table via `htab_lookup`. On hit (full structural comparison confirms match),
+the existing immutable pointer is returned with zero arena allocation. On
+miss, the constructor arena-allocates a mutable implementation object, copies
+`tmp` into it, interns it, and exposes only the const-qualified handle. This
+avoids wasting arena memory on duplicate nodes.
 
 **Canonical ordering**: Children of `IXS_ADD` and `IXS_MUL` are sorted by a
 total order on nodes (by tag, then by content). This ensures `a + b` and
@@ -1667,8 +1678,8 @@ propagation rules remain the same; the mutable diagnostic list now lives on
 ```c
 // Query errors accumulated since last clear.
 // ixs_session_error returns NULL if index >= ixs_session_nerrors(s).
-size_t      ixs_session_nerrors(ixs_session *s);
-const char *ixs_session_error(ixs_session *s, size_t index);
+size_t      ixs_session_nerrors(const ixs_session *s);
+const char *ixs_session_error(const ixs_session *s, size_t index);
 void        ixs_session_clear_errors(ixs_session *s);
 
 // Check sentinel kind
@@ -1723,7 +1734,10 @@ structural import, and structural serialization APIs.
 ```c
 // Long-lived store: owns interned nodes, hash-consing, and singletons.
 typedef struct ixs_ctx ixs_ctx;
-typedef struct ixs_node ixs_node;
+typedef const struct ixs_node_impl ixs_node;
+
+// Every ixs_node * below is an immutable handle because the typedef itself is
+// const-qualified.
 
 // Reusable workspace: owns scratch and diagnostics. The public object is a
 // fixed-size 4 KB blob so callers can stack-allocate it.
@@ -1741,8 +1755,8 @@ void ixs_session_reset(ixs_session *s);
 void ixs_session_destroy(ixs_session *s);
 
 // Diagnostics and sentinel checks.
-size_t ixs_session_nerrors(ixs_session *s);
-const char *ixs_session_error(ixs_session *s, size_t index);
+size_t ixs_session_nerrors(const ixs_session *s);
+const char *ixs_session_error(const ixs_session *s, size_t index);
 void ixs_session_clear_errors(ixs_session *s);
 bool ixs_is_error(const ixs_node *node);        // true for either sentinel
 bool ixs_is_parse_error(const ixs_node *node);  // true only for IXS_PARSE_ERROR
@@ -1770,8 +1784,8 @@ ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
-                 ixs_node **conds);
+ixs_node *ixs_pw(ixs_session *s, uint32_t n,
+                 ixs_node *const *values, ixs_node *const *conds);
 ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
@@ -1968,8 +1982,8 @@ ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 // Rule-hit statistics (requires -DIXS_STATS at compile time).
 // When disabled, nstats returns 0, stat returns 0/NULL, reset is a no-op.
 // Stats are per-context and not thread-safe for a shared context.
-size_t   ixs_ctx_nstats(ixs_ctx *ctx);      // distinct rules that fired
-uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
+size_t   ixs_ctx_nstats(const ixs_ctx *ctx); // distinct rules that fired
+uint64_t ixs_ctx_stat(const ixs_ctx *ctx, size_t index, const char **name);
 void     ixs_ctx_stats_reset(ixs_ctx *ctx);  // zero all counters
 size_t   ixs_nrules(void);                   // total registered rule names
 const char *ixs_rule_name(size_t index);     // NULL if out of range
@@ -2037,17 +2051,16 @@ ixs_ctx_destroy(ctx);  // frees everything
 
 ### Node Introspection API
 
-Nodes are opaque — `struct ixs_node` is internal. The public C API exposes
+Nodes are opaque — `struct ixs_node_impl` is internal. The public C API exposes
 structural introspection through `ixs_node_tag`, type-specific field
 accessors, generic child access, and scratch-backed tree walks.
 
-Interned node payloads are immutable. Sentinel checks, pointer equality,
-printers, and every structural accessor therefore accept `const ixs_node *`.
-Child accessors still return `ixs_node *`: changing that return type would
-break source compatibility and would prevent direct composition with the
-constructor, transform, proof-query, walk, and pointer-array APIs, whose
-historic handle types remain mutable. The mutable spelling is only a handle
-compatibility contract; opaque node payloads are never caller-mutable.
+Interned node payloads are immutable. `ixs_node` is a typedef of
+`const struct ixs_node_impl`, so every `ixs_node *` parameter, result, callback
+argument, pointer-array element, and child accessor result is const-qualified.
+The occasional explicit `const ixs_node *` spelling is equivalent but
+redundant. Constructors and transforms compose directly with child accessors
+without offering a mutable escape hatch.
 
 **Representation mismatch with sympy**: sympy's `Add(a, 2*b, 3)` has
 `args = [a, 2*b, 3]` — flat list of sub-expressions. ixsimpl's ADD is
@@ -2152,7 +2165,7 @@ typedef enum {
 
 /* Callback must return exactly one of the three values above.
  * Any other return value is undefined behavior. */
-typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
+typedef ixs_walk_action (*ixs_visit_fn)(const ixs_node *node, void *userdata);
 
 /* Pre-order: visit node, then recurse into children.
  * Returns root on completion, the stopping node on STOP, NULL if root
@@ -2161,13 +2174,13 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
-ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root,
+const ixs_node *ixs_walk_pre(ixs_session *s, const ixs_node *root,
                        ixs_visit_fn fn, void *userdata);
 
 /* Post-order: recurse into children, then visit node.
  * Same return/NULL/sentinel semantics as ixs_walk_pre.
  * SKIP is a no-op in post-order (children already visited). */
-ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root,
+const ixs_node *ixs_walk_post(ixs_session *s, const ixs_node *root,
                         ixs_visit_fn fn, void *userdata);
 ```
 
@@ -2456,9 +2469,9 @@ public:
 class Expr {
     ixs_ctx *ctx_;
     ixs_session *session_;
-    ixs_node *node_;
+    const ixs_node *node_;
 public:
-    Expr(ixs_ctx *ctx, ixs_session *session, ixs_node *node)
+    Expr(ixs_ctx *ctx, ixs_session *session, const ixs_node *node)
         : ctx_(ctx), session_(session), node_(node) {}
 
     static Expr parse(Context &ctx, std::string_view input) {
@@ -2481,7 +2494,7 @@ public:
     }
 
     Expr simplify(const Expr *assumptions, size_t n_assumptions) const {
-        std::vector<ixs_node*> raw(n_assumptions);
+        std::vector<const ixs_node*> raw(n_assumptions);
         for (size_t i = 0; i < n_assumptions; i++)
             raw[i] = assumptions[i].raw();
         return {ctx_, session_,
@@ -2499,7 +2512,8 @@ public:
         return {ctx_, session_, ixs_add(session_, node_, rhs.node_)};
     }
     Expr operator-(Expr rhs) const {
-        ixs_node *neg = ixs_mul(session_, ixs_int(session_, -1), rhs.node_);
+        const ixs_node *neg =
+            ixs_mul(session_, ixs_int(session_, -1), rhs.node_);
         return {ctx_, session_, ixs_add(session_, node_, neg)};
     }
     Expr operator*(Expr rhs) const {
@@ -2531,7 +2545,7 @@ public:
     }
     explicit operator bool() const { return node_ && !ixs_is_error(node_); }
 
-    ixs_node *raw() const { return node_; }
+    const ixs_node *raw() const { return node_; }
     ixs_ctx *raw_ctx() const { return ctx_; }
     ixs_session *raw_session() const { return session_; }
 };
@@ -2572,9 +2586,8 @@ Key properties:
   `Facts::constant_difference()`, `affine_decompose()`,
   `finite_difference()`, and `split_additive_constant()` mirror the narrow
   fact-backed C helpers and fill their output references only on success.
-- `Expr::raw_const()` supplies a const-qualified node view for inspection and
-  serialization. `raw()` remains mutable-typed for source compatibility with
-  older consumers and node-producing C APIs; neither permits payload mutation.
+- `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
+  compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
 - No heap allocations in expression construction or simplification beyond
   what the C library does internally. (`str()` allocates a `std::string`.)
@@ -2871,8 +2884,8 @@ exception. The change is only where diagnostics live.
 Diagnostics move from `ixs_ctx` to `ixs_session`:
 
 ```c
-size_t ixs_session_nerrors(ixs_session *s);
-const char *ixs_session_error(ixs_session *s, size_t index);
+size_t ixs_session_nerrors(const ixs_session *s);
+const char *ixs_session_error(const ixs_session *s, size_t index);
 void ixs_session_clear_errors(ixs_session *s);
 ```
 
@@ -2917,8 +2930,8 @@ ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_not(ixs_session *s, ixs_node *a);
-ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
-                 ixs_node **conds);
+ixs_node *ixs_pw(ixs_session *s, uint32_t n,
+                 ixs_node *const *values, ixs_node *const *conds);
 
 ixs_node *ixs_true(ixs_session *s);
 ixs_node *ixs_false(ixs_session *s);
@@ -3042,20 +3055,27 @@ ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root,
                         ixs_visit_fn fn, void *userdata);
 ```
 
-Node-only APIs do not take a session. Pure inspection is const-qualified:
+Node-only APIs do not take a session. The opaque node typedef is
+const-qualified across the entire surface, including:
 
 - sentinel checks
 - pointer equality
 - printers
 - node introspection accessors
-
-Their child accessors retain mutable-typed return handles for compatibility.
-Transforms, proof queries, walks, and node pointer arrays retain their historic
-mutable-typed inputs for the same source-compatibility reason; node payloads
-remain immutable.
+- constructors and transform results
+- proof-query inputs
+- walk roots, callbacks, and stopping-node results
+- child accessors and node pointer arrays
 
 Store inspection APIs that do not create nodes stay on `ixs_ctx`. That
 includes rule-hit statistics and any future store-level counters.
+
+Fact-backed queries retain `ixs_facts *`, not `const ixs_facts *`: they bind
+the owning session, populate and clear proof caches, and record OOM or invalid
+state. Their node inputs are immutable, but the fact-set workspace is
+logically mutable. Likewise, writer and reader `userdata` remains `void *`
+because callbacks normally advance a cursor or grow a sink; only the codec
+descriptor itself is const-qualified.
 
 Kind predicates are needed for callers that distinguish arbitrary numeric
 expressions from 0/1 predicate values:
@@ -3199,9 +3219,14 @@ typedef struct {
   void *userdata;
 } ixs_reader;
 
-bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
-ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root,
+                        const ixs_writer *w);
+ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r);
 ```
+
+The codec descriptors are read-only. Their callbacks may still mutate the
+object referenced by `userdata`, as required for advancing a reader or
+growing a writer sink.
 
 Bindings expose the same codec as `Context.serialize()` / `Context.deserialize()`
 in Python and `Context::serialize_expr()` / `Context::deserialize_expr()` in

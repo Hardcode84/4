@@ -169,8 +169,8 @@ static void test_cross_store_tag_smoke(void) {
   roots[7] = ixs_pw(&src_s, 2, pw_vals, pw_conds);
   roots[8] = ixs_not(&src_s, gt0);
 
-  CHECK(ixs_import_many(&dst_s, (const ixs_node *const *)roots,
-                        sizeof(roots) / sizeof(roots[0]), imported));
+  CHECK(ixs_import_many(&dst_s, roots, sizeof(roots) / sizeof(roots[0]),
+                        imported));
   for (i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
     CHECK(ixs_node_tag(imported[i]) == ixs_node_tag(roots[i]));
     check_same_print(roots[i], imported[i]);
@@ -289,7 +289,7 @@ static void test_import_null_inputs(void) {
 
   CHECK(ixs_import_node(&dst_s, NULL) == NULL);
   CHECK(!ixs_import_many(&dst_s, NULL, 1, dst));
-  CHECK(!ixs_import_many(&dst_s, (const ixs_node *const *)src, 1, NULL));
+  CHECK(!ixs_import_many(&dst_s, src, 1, NULL));
   CHECK(dst[0] == ixs_false(&dst_s));
 
   destroy_session(dst_ctx, &dst_s);
@@ -322,7 +322,7 @@ static void test_import_many_failure_preserves_out(void) {
   old0 = dst[0];
   old1 = dst[1];
 
-  CHECK(!ixs_import_many(&dst_s, (const ixs_node *const *)src, 2, dst));
+  CHECK(!ixs_import_many(&dst_s, src, 2, dst));
   CHECK(dst[0] == old0);
   CHECK(dst[1] == old1);
   CHECK(ixs_import_node(&dst_s, src[0]) != NULL);
@@ -354,7 +354,7 @@ static void test_import_many(void) {
   dst[0] = ixs_false(&dst_s);
   dst[1] = ixs_true(&dst_s);
 
-  ok = ixs_import_many(&dst_s, (const ixs_node *const *)src, 2, dst);
+  ok = ixs_import_many(&dst_s, src, 2, dst);
   CHECK(ok);
   CHECK(dst[0] && ixs_node_tag(dst[0]) == IXS_ADD);
   CHECK(dst[1] && ixs_node_tag(dst[1]) == IXS_ADD);

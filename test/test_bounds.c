@@ -2347,11 +2347,12 @@ static void test_ctx_node_ownership_uses_intern_table(void) {
   ixs_node *middle = NULL;
   ixs_node *post_rehash = NULL;
   ixs_node *last = NULL;
-  ixs_node *raw = ixs_arena_alloc(&ctx->arena, sizeof(*raw), sizeof(void *));
+  struct ixs_node_impl *raw =
+      ixs_arena_alloc(&ctx->arena, sizeof(*raw), sizeof(void *));
   unsigned char *storage =
       ixs_arena_alloc(&ctx->arena, 2 * sizeof(*raw), sizeof(void *));
-  ixs_node *interior =
-      storage ? (ixs_node *)(void *)(storage + sizeof(*raw)) : NULL;
+  struct ixs_node_impl *interior =
+      storage ? (struct ixs_node_impl *)(void *)(storage + sizeof(*raw)) : NULL;
   size_t initial_cap = ctx->htab_cap;
   int i;
 

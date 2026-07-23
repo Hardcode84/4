@@ -18,12 +18,10 @@
  * Check with ixs_is_error / ixs_is_parse_error / ixs_is_domain_error.
  * Human-readable messages accumulate in the session error list.
  *
- * Node payloads are immutable after interning.  Pure inspection APIs accept
- * const ixs_node pointers.  Constructors, transforms, proof queries, walks,
- * and pointer-array APIs retain mutable-typed handles for source compatibility
- * with the original API and with their mutable-typed node results; callers
- * still must not modify the opaque payload.  Structural child accessors also
- * return mutable-typed handles for that compatibility reason.
+ * Node payloads are immutable after interning.  The ixs_node typedef is
+ * const-qualified, so every ixs_node pointer is an immutable handle, including
+ * constructor results, structural children, transform results, callbacks, and
+ * pointer-array elements.
  */
 
 #ifndef IXSIMPL_H
@@ -38,7 +36,7 @@ extern "C" {
 #endif
 
 typedef struct ixs_ctx ixs_ctx;
-typedef struct ixs_node ixs_node;
+typedef const struct ixs_node_impl ixs_node;
 typedef struct ixs_facts ixs_facts;
 
 #define IXS_SESSION_BYTES 4096u
@@ -87,11 +85,11 @@ void ixs_session_destroy(ixs_session *s);
 /* --- Error list -------------------------------------------------------- */
 
 /* Number of accumulated error messages. */
-size_t ixs_session_nerrors(ixs_session *s);
+size_t ixs_session_nerrors(const ixs_session *s);
 
 /* Retrieve the i-th error message (0-based).  Pointer valid until next
  * mutating call on s. */
-const char *ixs_session_error(ixs_session *s, size_t index);
+const char *ixs_session_error(const ixs_session *s, size_t index);
 
 /* Discard all accumulated errors. */
 void ixs_session_clear_errors(ixs_session *s);
@@ -113,12 +111,12 @@ bool ixs_is_domain_error(const ixs_node *node);
  * input must be NUL-terminated at or before input[len].
  * Legacy convenience wrapper for ixs_parse_expr. Returns the simplified AST,
  * PARSE_ERROR on bad syntax, NULL on OOM. */
-ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
+const ixs_node *ixs_parse(ixs_session *s, const char *input, size_t len);
 
 /* Kind-aware parse entry points. Wrong top-level kind returns PARSE_ERROR and
  * appends a diagnostic. */
-ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len);
-ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
+const ixs_node *ixs_parse_expr(ixs_session *s, const char *input, size_t len);
+const ixs_node *ixs_parse_pred(ixs_session *s, const char *input, size_t len);
 
 /* Expression/predicate classification for callers that distinguish the two.
  * Sentinels are neither. */
@@ -133,43 +131,45 @@ bool ixs_node_is_integer_valued(const ixs_node *expr);
 /* All constructors return NULL on OOM.  Node arguments must belong to the
  * context bound to s. */
 
-ixs_node *ixs_int(ixs_session *s, int64_t val);
-ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q);
-ixs_node *ixs_sym(ixs_session *s, const char *name);
+const ixs_node *ixs_int(ixs_session *s, int64_t val);
+const ixs_node *ixs_rat(ixs_session *s, int64_t p, int64_t q);
+const ixs_node *ixs_sym(ixs_session *s, const char *name);
 
-ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_neg(ixs_session *s, ixs_node *a);
-ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b);
+const ixs_node *ixs_add(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_mul(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_neg(ixs_session *s, const ixs_node *a);
+const ixs_node *ixs_sub(ixs_session *s, const ixs_node *a, const ixs_node *b);
 
 /* Exact rational division: a/b where b != 0.  Returns ERROR on b == 0. */
-ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
+const ixs_node *ixs_div(ixs_session *s, const ixs_node *a, const ixs_node *b);
 
-ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
-ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
+const ixs_node *ixs_floor(ixs_session *s, const ixs_node *x);
+const ixs_node *ixs_ceil(ixs_session *s, const ixs_node *x);
 
 /* Floored modulo a - b*floor(a/b), defined only for b > 0.
  * Returns ERROR when b is a known nonpositive constant.  A symbolic divisor
  * may be constructed without a positivity proof; assumption-aware
  * simplification returns ERROR when the supplied facts prove b <= 0. */
-ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
+const ixs_node *ixs_mod(ixs_session *s, const ixs_node *a, const ixs_node *b);
 
-ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
+const ixs_node *ixs_max(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_min(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_xor(ixs_session *s, const ixs_node *a, const ixs_node *b);
 
 /* Piecewise: n branches.  values[i] is returned when conds[i] is true;
  * last branch is the default (conds[n-1] should be ixs_true). */
-ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
-                 ixs_node **conds);
+const ixs_node *ixs_pw(ixs_session *s, uint32_t n,
+                       const ixs_node *const *values,
+                       const ixs_node *const *conds);
 
-ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
-ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
-ixs_node *ixs_not(ixs_session *s, ixs_node *a);
+const ixs_node *ixs_cmp(ixs_session *s, const ixs_node *a, ixs_cmp_op op,
+                        const ixs_node *b);
+const ixs_node *ixs_and(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_or(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_not(ixs_session *s, const ixs_node *a);
 /* Convenience names for integer 1 and 0. */
-ixs_node *ixs_true(ixs_session *s);
-ixs_node *ixs_false(ixs_session *s);
+const ixs_node *ixs_true(ixs_session *s);
+const ixs_node *ixs_false(ixs_session *s);
 
 /* --- Entailment checking ----------------------------------------------- */
 
@@ -188,7 +188,7 @@ typedef enum {
 
 typedef struct {
   ixs_exact_divide_status status;
-  ixs_node *quotient;
+  const ixs_node *quotient;
 } ixs_exact_divide_result;
 
 typedef enum {
@@ -234,14 +234,15 @@ typedef struct {
  * UNKNOWN when bounds are insufficient, when expr has another form, or on
  * OOM.  Lighter than ixs_simplify: no rewriting, just bounds setup and
  * entailment checks. */
-ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
-                           ixs_node *const *assumptions, size_t n_assumptions);
+ixs_check_result ixs_check(ixs_session *s, const ixs_node *expr,
+                           const ixs_node *const *assumptions,
+                           size_t n_assumptions);
 
 /* Prove whether expr is integer-valued under assumptions.  TRUE and FALSE are
  * returned only for universal proofs; insufficient information, invalid input,
  * contradictory assumptions, and OOM return UNKNOWN. */
-ixs_check_result ixs_check_integer_valued(ixs_session *s, ixs_node *expr,
-                                          ixs_node *const *assumptions,
+ixs_check_result ixs_check_integer_valued(ixs_session *s, const ixs_node *expr,
+                                          const ixs_node *const *assumptions,
                                           size_t n_assumptions);
 
 /* Prove whether expr is defined over the full domain admitted by assumptions.
@@ -251,16 +252,16 @@ ixs_check_result ixs_check_integer_valued(ixs_session *s, ixs_node *expr,
  * necessarily undefined; mixed domains, insufficient facts, invalid input,
  * contradictory assumptions, bounded-traversal limits, and OOM return
  * UNKNOWN. */
-ixs_check_result ixs_check_defined(ixs_session *s, ixs_node *expr,
-                                   ixs_node *const *assumptions,
+ixs_check_result ixs_check_defined(ixs_session *s, const ixs_node *expr,
+                                   const ixs_node *const *assumptions,
                                    size_t n_assumptions);
 
 /* Return the strongest known power-of-two fact for expr under assumptions.
  * POSITIVE means expr > 0 and exactly one bit is set.  OR_ZERO additionally
  * permits expr == 0.  UNKNOWN is returned when the fact is not provable, on
  * OOM, for NULL/sentinel expr, or for detected contradictory assumptions. */
-ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
-                                ixs_node *const *assumptions,
+ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, const ixs_node *expr,
+                                const ixs_node *const *assumptions,
                                 size_t n_assumptions);
 
 /* Infer an inclusive rational range for expr under assumptions. Propagation
@@ -269,8 +270,9 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
  * Returns false when the interval engine cannot derive a range, on OOM,
  * for NULL/sentinel expr, or when out is NULL.  Unbounded sides are reported
  * with has_lower/has_upper false; finite endpoints are exact p/q rationals. */
-bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
-               size_t n_assumptions, ixs_range_result *out);
+bool ixs_range(ixs_session *s, const ixs_node *expr,
+               const ixs_node *const *assumptions, size_t n_assumptions,
+               ixs_range_result *out);
 
 /* --- Fact sets --------------------------------------------------------- */
 
@@ -285,7 +287,7 @@ ixs_facts *ixs_facts_create(ixs_session *s);
  * a NULL array. Invalid input or OOM returns NULL without exposing a partial
  * fact set. This low-level compatibility constructor is intentionally C-only;
  * C++ and Python Facts retain their sequential mutation contract. */
-ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *preds,
+ixs_facts *ixs_facts_create_preds(ixs_session *s, const ixs_node *const *preds,
                                   size_t n_preds);
 
 /* Every mutator returns false on rejection or failure and makes facts
@@ -294,28 +296,29 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *preds,
  * observable. */
 
 /* Import predicates under one transaction. n == 0 accepts a NULL array. */
-bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *preds,
+bool ixs_facts_assume_preds(ixs_facts *facts, const ixs_node *const *preds,
                             size_t n_preds);
 
 /* Single-predicate form of ixs_facts_assume_preds. */
-bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
+bool ixs_facts_assume_pred(ixs_facts *facts, const ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;
  * finite endpoints are exact rationals from ixs_range_result. */
-bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+bool ixs_facts_assume_range(ixs_facts *facts, const ixs_node *expr,
                             const ixs_range_result *range);
 
 /* Derive range(derived) from range(base) using derived = scale*base + offset.
  * The caller supplies the already-built derived expression node. */
-bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
-                             int64_t offset, ixs_node *derived);
+bool ixs_facts_derive_affine(ixs_facts *facts, const ixs_node *base,
+                             int64_t scale, int64_t offset,
+                             const ixs_node *derived);
 
 /* Merge facts from src into dst after one simultaneous substitution.  Facts
  * unrelated to target are preserved; facts about target are transferred only
  * when justified by replacement.  Both sets must belong to the same live
  * session. */
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
-                          ixs_node *target, ixs_node *replacement);
+                          const ixs_node *target, const ixs_node *replacement);
 
 /* Multi-target form of ixs_facts_substitute.  Substitution is simultaneous:
  * replacements are not recursively substituted.  When a target occurs more
@@ -325,94 +328,103 @@ bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
  * facts are added.  Any failure leaves dst's prior facts intact but marks dst
  * unusable, so callers can never observe a partially transferred set. */
 bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
-                                uint32_t nsubs, ixs_node *const *targets,
-                                ixs_node *const *replacements);
+                                uint32_t nsubs, const ixs_node *const *targets,
+                                const ixs_node *const *replacements);
 
 /* Simplify directly against an existing fact set without rebuilding bounds.
  * NULL reports OOM or an expired/reset session.  Sentinel input propagates;
  * invalid live input returns the fact set context's domain-error sentinel.
  * Detected contradictory facts return expr unchanged. */
-ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
+const ixs_node *ixs_simplify_facts(ixs_facts *facts, const ixs_node *expr);
 
 /* Fact-backed batch simplification.  On OOM or an expired/reset session all
  * entries become NULL.  Invalid live input replaces the entire batch with the
  * domain-error sentinel.  NULL and sentinel entries otherwise propagate;
  * detected contradictory facts leave every entry unchanged. */
-void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
+void ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs,
+                              size_t n);
 
 /* Reusable-fact form of ixs_check with the same CMP or canonical
  * true/false input contract. */
-ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
+ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
 /* Check a predicate tree against an existing fact set.  AND, OR, and NOT use
  * conservative three-valued logic.  Numeric bitwise AND/OR expressions are
  * rejected because they are not predicate trees. */
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
-                                           ixs_node *predicate);
+                                           const ixs_node *predicate);
 /* Prove total equivalence over the full domain admitted by facts.  TRUE is
  * returned only after both operands are proved defined everywhere.  FALSE is
  * returned only for a universal proof of different values; insufficient
  * facts, contradictory facts, invalid input, and resource limits return
  * UNKNOWN. */
-ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
-                                      ixs_node *rhs);
+ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
+                                      const ixs_node *rhs);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
-bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
-                                   ixs_node *rhs, int64_t *delta);
+bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
+                                   const ixs_node *rhs, int64_t *delta);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an
  * exact rational constant and residual does not reference symbol. */
-bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
-                                ixs_node *symbol, ixs_node **coefficient,
-                                ixs_node **residual);
+bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
+                                const ixs_node *symbol,
+                                const ixs_node **coefficient,
+                                const ixs_node **residual);
 /* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
  * still reference symbol; callers decide whether it is loop invariant. */
-bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
-                                 ixs_node *symbol, ixs_node *step,
-                                 ixs_node **difference);
+bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
+                                 const ixs_node *symbol, const ixs_node *step,
+                                 const ixs_node **difference);
 /* Split expr into residual + constant with an exactly representable integer
  * constant. */
-bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
-                                       ixs_node **residual, int64_t *constant);
+bool ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr,
+                                       const ixs_node **residual,
+                                       int64_t *constant);
 ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
-                                                ixs_node *expr);
-ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
+                                                const ixs_node *expr);
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts,
+                                         const ixs_node *expr);
 /* Check divisibility by a nonzero signed modulus.  Negative moduli are
  * normalized by magnitude without overflowing INT64_MIN.  Modulus zero emits
  * a session diagnostic and returns UNKNOWN. */
-ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                           const ixs_node *expr,
                                            int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
  * nondivisibility; UNKNOWN means facts are insufficient or contradictory.
  * Invalid input, divisor zero, unrepresentable results, and OOM return ERROR
  * and append a diagnostic to the fact set's session when one is available. */
-ixs_exact_divide_result
-ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor);
-ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
+ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
+                                                   const ixs_node *expr,
+                                                   int64_t divisor);
+ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, const ixs_node *expr);
 /* Return sound low-64-bit facts.  True with zero masks means that the query
  * was valid but proved no bits.  Invalid input, contradictory facts, and OOM
  * return false and leave out initialized to the no-information value. */
-bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
+bool ixs_get_known_bits_facts(ixs_facts *facts, const ixs_node *expr,
                               ixs_known_bits *out);
 /* Export the stored congruence record for a symbol.  Output pointers must be
  * non-NULL and distinct.  This deliberately does not synthesize a strongest
  * congruence for arbitrary expressions. */
-bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol,
                                      int64_t *modulus, int64_t *residue);
 /* Prove expr == residue (mod modulus).  Negative moduli are normalized by
  * magnitude without overflowing INT64_MIN.  Modulus zero emits a diagnostic
  * and returns UNKNOWN. */
-ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                           const ixs_node *expr,
                                            int64_t modulus, int64_t residue);
-bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out);
+bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
+                     ixs_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 
 /* Simplify expr under the shared assumption contract above.  Pass NULL/0 for
  * no assumptions.  Returns the simplified node, NULL on OOM, or the
  * domain-error sentinel for rejected assumptions. */
-ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
-                       ixs_node *const *assumptions, size_t n_assumptions);
+const ixs_node *ixs_simplify(ixs_session *s, const ixs_node *expr,
+                             const ixs_node *const *assumptions,
+                             size_t n_assumptions);
 
 /* Simplify exprs[0..n-1] in place under the shared assumption contract,
  * sharing the same assumption set and rewritten-subtree cache.  Both are
@@ -420,14 +432,15 @@ ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
  * Each element is replaced by its simplified form.  On OOM, all
  * elements are set to NULL.  NULL or sentinel entries are skipped.
  * Bounds are parsed from assumptions once and reused across all elements. */
-void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
-                        ixs_node *const *assumptions, size_t n_assumptions);
+void ixs_simplify_batch(ixs_session *s, const ixs_node **exprs, size_t n,
+                        const ixs_node *const *assumptions,
+                        size_t n_assumptions);
 
 /* Distribute MUL over ADD (expand products of sums into sums of products).
  * Recurses into subexpressions (floor args, piecewise branches, etc.).
  * Powers are expanded by repeated multiplication (capped at exponent 64).
  * NULL-safe. */
-ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
+const ixs_node *ixs_expand(ixs_session *s, const ixs_node *expr);
 
 /* --- Comparison and substitution --------------------------------------- */
 
@@ -437,16 +450,16 @@ bool ixs_same_node(const ixs_node *a, const ixs_node *b);
 /* Return expr with all occurrences of target replaced by replacement.
  * target can be any node (symbol, subexpression, constant, etc.).
  * Uses pointer equality (hash-consed), so matching is O(1) per node. */
-ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
-                   ixs_node *replacement);
+const ixs_node *ixs_subs(ixs_session *s, const ixs_node *expr,
+                         const ixs_node *target, const ixs_node *replacement);
 
 /* Simultaneous multi-target substitution.  Replaces targets[i] with
  * replacements[i] in a single pass.  No replacement is recursed into,
  * so {A->B, B->C} applied to A+B yields B+C, not C+C.
  * Duplicate targets: first matching entry wins. */
-ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
-                         ixs_node *const *targets,
-                         ixs_node *const *replacements);
+const ixs_node *ixs_subs_multi(ixs_session *s, const ixs_node *expr,
+                               uint32_t nsubs, const ixs_node *const *targets,
+                               const ixs_node *const *replacements);
 
 /* --- Structural import ------------------------------------------------- */
 
@@ -454,7 +467,7 @@ ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
  * may reuse existing nodes, including for same-store input, but import always
  * follows the structural path.  Sentinels are mapped to the destination
  * store's sentinels.  Returns NULL on OOM or if src is NULL. */
-ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
+const ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
 
 /* Import src[0..count-1] into the store bound to s.  count == 0 is a no-op
  * that returns true and permits src == NULL and out == NULL.  Otherwise NULL
@@ -462,7 +475,7 @@ ixs_node *ixs_import_node(ixs_session *s, const ixs_node *src);
  * unchanged, but nodes interned before the failure may remain in the
  * destination store. */
 bool ixs_import_many(ixs_session *s, const ixs_node *const *src, size_t count,
-                     ixs_node **out);
+                     const ixs_node **out);
 
 /* --- Structural serialization ----------------------------------------- */
 
@@ -489,7 +502,8 @@ typedef struct {
  * failure, OOM, or codec validation failure (for example NULL root or an
  * unencodable internal payload).  Validation failures append session
  * diagnostics; writer failure and OOM leave diagnostics unchanged. */
-bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root,
+                        const ixs_writer *w);
 
 /* Deserialize one node from r into the store bound to s.  r->remaining must
  * report the exact unread byte count.  Returns the node on success,
@@ -499,7 +513,7 @@ bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w);
  * session scratch, and does not intern garbage into the destination store.
  * OOM leaves diagnostics unchanged but may occur after some validated nodes
  * have already been interned. */
-ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r);
+const ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r);
 
 /* --- Output ------------------------------------------------------------ */
 
@@ -533,9 +547,7 @@ typedef enum {
   IXS_PARSE_ERROR
 } ixs_tag;
 
-/* All introspection functions require a non-NULL node.  Returned child handles
- * remain mutable-typed for source compatibility, but node payloads are
- * immutable and may only be consumed by public APIs. */
+/* All introspection functions require a non-NULL node. */
 
 ixs_tag ixs_node_tag(const ixs_node *node);
 
@@ -555,38 +567,38 @@ const char *ixs_node_sym_name(const ixs_node *node);
 
 /* Only valid when tag is IXS_ADD.  i must be < nterms.
  * ADD = coeff + sum(term_coeff[i] * term[i]). */
-ixs_node *ixs_node_add_coeff(const ixs_node *node);
+const ixs_node *ixs_node_add_coeff(const ixs_node *node);
 uint32_t ixs_node_add_nterms(const ixs_node *node);
-ixs_node *ixs_node_add_term(const ixs_node *node, uint32_t i);
-ixs_node *ixs_node_add_term_coeff(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_add_term(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_add_term_coeff(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_MUL.  i must be < nfactors.
  * MUL = coeff * product(base[i] ^ exp[i]). */
-ixs_node *ixs_node_mul_coeff(const ixs_node *node);
+const ixs_node *ixs_node_mul_coeff(const ixs_node *node);
 uint32_t ixs_node_mul_nfactors(const ixs_node *node);
-ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
 int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
-ixs_node *ixs_node_unary_arg(const ixs_node *node);
+const ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
 /* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
  * IXS_XOR, or IXS_CMP. */
-ixs_node *ixs_node_binary_lhs(const ixs_node *node);
-ixs_node *ixs_node_binary_rhs(const ixs_node *node);
+const ixs_node *ixs_node_binary_lhs(const ixs_node *node);
+const ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
 /* Only valid when tag is IXS_CMP. */
 ixs_cmp_op ixs_node_cmp_op(const ixs_node *node);
 
 /* Only valid when tag is IXS_PIECEWISE.  i must be < ncases. */
 uint32_t ixs_node_pw_ncases(const ixs_node *node);
-ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
-ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
 /* Only valid when tag is IXS_AND or IXS_OR.  New nodes are binary, but
  * deserialized legacy nodes may have more children. i must be < nargs. */
 uint32_t ixs_node_logic_nargs(const ixs_node *node);
-ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
 
 /* --- Generic child access ----------------------------------------------- */
 
@@ -601,18 +613,18 @@ uint32_t ixs_node_nchildren(const ixs_node *node);
  *   unary: arg
  *   PW:  (value[0], cond[0]), (value[1], cond[1]), ...
  *   AND/OR: arg[0], arg[1], ... */
-ixs_node *ixs_node_child(const ixs_node *node, uint32_t i);
+const ixs_node *ixs_node_child(const ixs_node *node, uint32_t i);
 
 /* --- Rule-hit statistics (requires -DIXS_STATS at compile time) -------- */
 
 /* Number of distinct rules that have fired.  Returns 0 if compiled
  * without IXS_STATS. */
-size_t ixs_ctx_nstats(ixs_ctx *ctx);
+size_t ixs_ctx_nstats(const ixs_ctx *ctx);
 
 /* Retrieve the i-th stat entry (arbitrary order, 0-based).
  * Sets *name to the rule name and returns the hit count.
  * Returns 0 with *name = NULL for out-of-range indices. */
-uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name);
+uint64_t ixs_ctx_stat(const ixs_ctx *ctx, size_t index, const char **name);
 
 /* Reset all counters to zero. */
 void ixs_ctx_stats_reset(ixs_ctx *ctx);
@@ -634,7 +646,7 @@ typedef enum {
 
 /* Callback must return exactly one of the three values above.
  * Any other return value is undefined behavior. */
-typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
+typedef ixs_walk_action (*ixs_visit_fn)(const ixs_node *node, void *userdata);
 
 /* Pre-order: visit node, then recurse into children.
  * Returns root on completion, the stopping node on STOP, NULL if root
@@ -643,14 +655,14 @@ typedef ixs_walk_action (*ixs_visit_fn)(ixs_node *node, void *userdata);
  * Sentinels (ERROR, PARSE_ERROR) are visited as leaves; the callback
  * must check ixs_node_tag before using type-specific accessors.
  * SKIP prevents descent into children. */
-ixs_node *ixs_walk_pre(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
-                       void *userdata);
+const ixs_node *ixs_walk_pre(ixs_session *s, const ixs_node *root,
+                             ixs_visit_fn fn, void *userdata);
 
 /* Post-order: recurse into children, then visit node.
  * Same return/NULL/sentinel semantics as ixs_walk_pre.
  * SKIP is a no-op in post-order (children already visited). */
-ixs_node *ixs_walk_post(ixs_session *s, ixs_node *root, ixs_visit_fn fn,
-                        void *userdata);
+const ixs_node *ixs_walk_post(ixs_session *s, const ixs_node *root,
+                              ixs_visit_fn fn, void *userdata);
 
 #ifdef __cplusplus
 }

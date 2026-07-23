@@ -162,7 +162,7 @@ IXS_STATIC char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
   return p;
 }
 
-IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a) {
+IXS_STATIC ixs_arena_mark ixs_arena_save(const ixs_arena *a) {
   ixs_arena_mark m;
   m.chunk = a->current;
   m.used = a->current ? a->current->used : 0;

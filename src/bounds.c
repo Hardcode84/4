@@ -816,7 +816,7 @@ static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
 
 static bool extract_add_node_equality(ixs_node *n, ixs_node **a, ixs_node **b) {
   int64_t kp, kq;
-  ixs_addterm *t0, *t1;
+  const ixs_addterm *t0, *t1;
   if (!n || n->tag != IXS_ADD || n->u.add.nterms != 2)
     return false;
   ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
@@ -2619,7 +2619,8 @@ static ixs_cmp_op bounds_negate_cmp_op(ixs_cmp_op op) {
 }
 
 static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
-                                             bool value, ixs_node *storage) {
+                                             bool value,
+                                             struct ixs_node_impl *storage) {
   if (!b->ctx)
     return NULL;
   memset(storage, 0, sizeof(*storage));
@@ -2639,7 +2640,7 @@ static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
 }
 
 static ixs_check_result bounds_condition_truth(ixs_bounds *b, ixs_node *cond) {
-  ixs_node cmp;
+  struct ixs_node_impl cmp;
   if (ixs_node_is_known_false(cond))
     return IXS_CHECK_FALSE;
   if (ixs_node_is_known_true(cond))
@@ -2654,7 +2655,7 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
                                     ixs_interval *result, bool *have_result) {
   ixs_arena_mark mark = ixs_arena_save(owner->scratch);
   ixs_bounds active;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
   ixs_interval branch;
   bool ok = false;
 
@@ -2720,7 +2721,7 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     ixs_node *cond = expr->u.pw.cases[i].cond;
     ixs_node *value = expr->u.pw.cases[i].value;
     ixs_check_result truth;
-    ixs_node assumption;
+    struct ixs_node_impl assumption;
 
     if (!cond || !value || remaining.oom) {
       failed = true;
@@ -3007,7 +3008,7 @@ static ixs_check_result check_equal_result(ixs_cmp_op op, bool equal) {
 static ixs_check_result bounds_check_pow2_query(ixs_bounds *b, ixs_node *cmp,
                                                 ixs_node *expr, int64_t value) {
   const char *name;
-  ixs_node sym_tmp;
+  struct ixs_node_impl sym_tmp;
   if (!extract_pow2_and(expr, &name))
     return IXS_CHECK_UNKNOWN;
   memset(&sym_tmp, 0, sizeof(sym_tmp));
@@ -3025,7 +3026,7 @@ static ixs_check_result bounds_check_and_mask_query(ixs_bounds *b,
   const char *name;
   int64_t mask;
   uint64_t mask_bits, value_bits, known;
-  ixs_node sym_tmp;
+  struct ixs_node_impl sym_tmp;
   ixs_bitfacts bits;
   bool equal;
 
@@ -3571,7 +3572,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
 
 static ixs_node *defined_condition_assumption(defined_state *state,
                                               ixs_node *cond, bool value,
-                                              ixs_node *storage) {
+                                              struct ixs_node_impl *storage) {
   memset(storage, 0, sizeof(*storage));
   storage->tag = IXS_CMP;
   storage->u.binary.rhs = state->ctx->node_zero;
@@ -3642,7 +3643,7 @@ static bool defined_piecewise_active(defined_state *state,
                                      unsigned *partitions) {
   ixs_arena_mark mark = ixs_arena_save(remaining->scratch);
   ixs_bounds active;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
   if (!ixs_bounds_fork(&active, remaining)) {
     state->oom = true;
     ixs_arena_restore(remaining->scratch, mark);
@@ -3672,7 +3673,7 @@ static defined_pw_step defined_piecewise_case(defined_state *state,
   ixs_check_result cond_defined =
       defined_eval(state, remaining, cond, pw_depth);
   ixs_check_result truth;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
 
   if (state->oom || state->limited)
     return DEFINED_PW_FAILED;
@@ -5347,7 +5348,7 @@ static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
 
 static bool equivalence_proves_zero_cmp(equivalence_state *state, ixs_node *lhs,
                                         ixs_cmp_op op) {
-  ixs_node cmp;
+  struct ixs_node_impl cmp;
   bool result;
   memset(&cmp, 0, sizeof(cmp));
   cmp.tag = IXS_CMP;

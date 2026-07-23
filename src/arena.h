@@ -51,7 +51,7 @@ IXS_STATIC void *ixs_arena_alloc(ixs_arena *a, size_t size, size_t align);
 IXS_STATIC char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len);
 
 /* Snapshot current position. Pairs with ixs_arena_restore (LIFO). */
-IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a);
+IXS_STATIC ixs_arena_mark ixs_arena_save(const ixs_arena *a);
 
 /* Rewind to mark, freeing any chunks allocated after it.
  * mark must have come from ixs_arena_save on the same arena.

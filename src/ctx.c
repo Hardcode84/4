@@ -72,7 +72,8 @@ static ixs_node *ctx_err(ixs_ctx *ctx, const char *msg) {
 /* ------------------------------------------------------------------ */
 
 static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
-  ixs_node *n = ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
   if (!n)
     return NULL;
   memset(n, 0, sizeof(*n));
@@ -190,15 +191,19 @@ void ixs_session_destroy(ixs_session *s) {
 /*  Error list                                                        */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_session_nerrors(ixs_session *s) {
-  ixs_session_impl *impl = ixs_session_get(s);
-  return *session_nerrors(impl);
+size_t ixs_session_nerrors(const ixs_session *s) {
+  const ixs_session_impl *impl = ixs_session_cget(s);
+  if (ixs_session_is_active(impl))
+    return impl->ctx->nerrors;
+  return impl->nerrors;
 }
 
-const char *ixs_session_error(ixs_session *s, size_t index) {
-  ixs_session_impl *impl = ixs_session_get(s);
-  const char **errors = *session_errors(impl);
-  size_t nerrors = *session_nerrors(impl);
+const char *ixs_session_error(const ixs_session *s, size_t index) {
+  const ixs_session_impl *impl = ixs_session_cget(s);
+  const char *const *errors =
+      ixs_session_is_active(impl) ? impl->ctx->errors : impl->errors;
+  size_t nerrors =
+      ixs_session_is_active(impl) ? impl->ctx->nerrors : impl->nerrors;
   if (index >= nerrors)
     return NULL;
   return errors[index];
@@ -212,7 +217,7 @@ void ixs_session_clear_errors(ixs_session *s) {
 /*  Rule-hit statistics                                                */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_ctx_nstats(ixs_ctx *ctx) {
+size_t ixs_ctx_nstats(const ixs_ctx *ctx) {
 #ifdef IXS_STATS
   size_t n = 0;
   size_t i;
@@ -227,7 +232,7 @@ size_t ixs_ctx_nstats(ixs_ctx *ctx) {
 #endif
 }
 
-uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name) {
+uint64_t ixs_ctx_stat(const ixs_ctx *ctx, size_t index, const char **name) {
 #ifdef IXS_STATS
   size_t seen = 0;
   size_t i;
@@ -401,8 +406,8 @@ ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b) {
   return result;
 }
 
-ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
-                 ixs_node **conds) {
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node *const *values,
+                 ixs_node *const *conds) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_node *result = simp_pw(ctx, n, values, conds);

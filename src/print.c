@@ -118,7 +118,7 @@ static void print_add(printbuf *pb, const ixs_node *n) {
         if (np == 1 && nq == 1) {
           print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
         } else {
-          ixs_node tmp;
+          struct ixs_node_impl tmp;
           memset(&tmp, 0, sizeof(tmp));
           if (nq == 1) {
             tmp.tag = IXS_INT;
@@ -148,7 +148,7 @@ static void print_add(printbuf *pb, const ixs_node *n) {
         if (np == 1 && nq == 1) {
           print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
         } else {
-          ixs_node tmp;
+          struct ixs_node_impl tmp;
           memset(&tmp, 0, sizeof(tmp));
           if (nq == 1) {
             tmp.tag = IXS_INT;

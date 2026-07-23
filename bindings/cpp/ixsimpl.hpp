@@ -41,12 +41,8 @@ public:
   ixs_session *session() { return &session_; }
   const ixs_session *session() const { return &session_; }
 
-  size_t nerrors() const {
-    return ixs_session_nerrors(const_cast<ixs_session *>(&session_));
-  }
-  const char *error(size_t i) const {
-    return ixs_session_error(const_cast<ixs_session *>(&session_), i);
-  }
+  size_t nerrors() const { return ixs_session_nerrors(&session_); }
+  const char *error(size_t i) const { return ixs_session_error(&session_, i); }
   void clear_errors() { ixs_session_clear_errors(&session_); }
   Expr import_expr(const Expr &expr);
   /* Throws invalid_argument for null expr, rethrows sink write exceptions,
@@ -62,10 +58,10 @@ public:
 class Expr {
   ixs_ctx *ctx_;
   ixs_session *session_;
-  ixs_node *node_;
+  const ixs_node *node_;
 
 public:
-  Expr(ixs_ctx *ctx, ixs_session *session, ixs_node *node)
+  Expr(ixs_ctx *ctx, ixs_session *session, const ixs_node *node)
       : ctx_(ctx), session_(session), node_(node) {}
 
   static Expr parse(Context &ctx, std::string_view input) {
@@ -93,7 +89,7 @@ public:
   /* Assumptions must be CMP/boolean roots or AND trees with those leaves.
    * Unsupported shapes produce an error Expr and a session diagnostic. */
   Expr simplify(const Expr *assumptions, size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return Expr(session_ctx(), session_,
@@ -105,7 +101,7 @@ public:
   }
   Expr simplify(const Facts &facts) const;
   ixs_check_result check(const Expr *assumptions, size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return ixs_check(session_, node_, raw.data(), n);
@@ -115,7 +111,7 @@ public:
   }
   ixs_check_result check_integer_valued(const Expr *assumptions,
                                         size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return ixs_check_integer_valued(session_, node_, raw.data(), n);
@@ -124,7 +120,7 @@ public:
     return ixs_check_integer_valued(session_, node_, nullptr, 0);
   }
   ixs_check_result check_defined(const Expr *assumptions, size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return ixs_check_defined(session_, node_, raw.data(), n);
@@ -133,7 +129,7 @@ public:
     return ixs_check_defined(session_, node_, nullptr, 0);
   }
   ixs_pow2_fact get_pow2_fact(const Expr *assumptions, size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return ixs_get_pow2_fact(session_, node_, raw.data(), n);
@@ -142,7 +138,7 @@ public:
     return ixs_get_pow2_fact(session_, node_, nullptr, 0);
   }
   bool range(ixs_range_result &out, const Expr *assumptions, size_t n) const {
-    std::vector<ixs_node *> raw(n);
+    std::vector<const ixs_node *> raw(n);
     for (size_t i = 0; i < n; ++i)
       raw[i] = assumptions[i].raw();
     return ixs_range(session_, node_, raw.data(), n, &out);
@@ -158,7 +154,7 @@ public:
                 ixs_subs(session_, node_, target.node_, repl.node_));
   }
   Expr subs_multi(uint32_t n, const Expr *targets, const Expr *repls) const {
-    std::vector<ixs_node *> t(n), r(n);
+    std::vector<const ixs_node *> t(n), r(n);
     for (uint32_t i = 0; i < n; i++) {
       t[i] = targets[i].node_;
       r[i] = repls[i].node_;
@@ -174,7 +170,7 @@ public:
     return Expr(session_ctx(), session_, ixs_mul(session_, node_, rhs.node_));
   }
   Expr operator-(Expr rhs) const {
-    ixs_node *neg = ixs_mul(session_, ixs_int(session_, -1), rhs.node_);
+    const ixs_node *neg = ixs_mul(session_, ixs_int(session_, -1), rhs.node_);
     return Expr(session_ctx(), session_, ixs_add(session_, node_, neg));
   }
   Expr operator-() const {
@@ -232,7 +228,7 @@ public:
     return node_ != nullptr && !ixs_is_error(node_);
   }
 
-  ixs_node *raw() const { return node_; }
+  const ixs_node *raw() const { return node_; }
   const ixs_node *raw_const() const { return node_; }
   ixs_ctx *raw_ctx() const { return ctx_; }
   ixs_session *raw_session() const { return session_; }
@@ -263,7 +259,7 @@ public:
     return ixs_facts_assume_pred(facts_, pred.raw());
   }
   bool assume_many(const std::vector<Expr> &predicates) {
-    std::vector<ixs_node *> raw;
+    std::vector<const ixs_node *> raw;
     raw.reserve(predicates.size());
     for (const Expr &predicate : predicates)
       raw.push_back(predicate.raw());
@@ -281,7 +277,7 @@ public:
     return Expr(ctx_, session_, ixs_simplify_facts(facts_, expr.raw()));
   }
   void simplify_batch(std::vector<Expr> &exprs) const {
-    std::vector<ixs_node *> raw;
+    std::vector<const ixs_node *> raw;
     raw.reserve(exprs.size());
     for (const Expr &expr : exprs)
       raw.push_back(expr.raw());
@@ -310,8 +306,8 @@ public:
   }
   bool affine_decompose(const Expr &expr, const Expr &symbol, Expr &coefficient,
                         Expr &residual) const {
-    ixs_node *raw_coefficient = nullptr;
-    ixs_node *raw_residual = nullptr;
+    const ixs_node *raw_coefficient = nullptr;
+    const ixs_node *raw_residual = nullptr;
     if (!ixs_affine_decompose_facts(facts_, expr.raw(), symbol.raw(),
                                     &raw_coefficient, &raw_residual))
       return false;
@@ -321,7 +317,7 @@ public:
   }
   bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
                          Expr &difference) const {
-    ixs_node *raw_difference = nullptr;
+    const ixs_node *raw_difference = nullptr;
     if (!ixs_finite_difference_facts(facts_, expr.raw(), symbol.raw(),
                                      step.raw(), &raw_difference))
       return false;
@@ -330,7 +326,7 @@ public:
   }
   bool split_additive_constant(const Expr &expr, Expr &residual,
                                int64_t &constant) const {
-    ixs_node *raw_residual = nullptr;
+    const ixs_node *raw_residual = nullptr;
     if (!ixs_split_additive_constant_facts(facts_, expr.raw(), &raw_residual,
                                            &constant))
       return false;
@@ -365,8 +361,8 @@ public:
   }
   bool substitute_multi(const Facts &source, const std::vector<Expr> &targets,
                         const std::vector<Expr> &replacements) {
-    std::vector<ixs_node *> raw_targets;
-    std::vector<ixs_node *> raw_replacements;
+    std::vector<const ixs_node *> raw_targets;
+    std::vector<const ixs_node *> raw_replacements;
     size_t i;
     if (targets.size() != replacements.size() ||
         targets.size() > static_cast<size_t>(UINT32_MAX))
@@ -400,7 +396,7 @@ inline Facts Context::facts() { return Facts(*this); }
 inline Expr Context::import_expr(const Expr &expr) {
   if (!expr.raw())
     throw std::invalid_argument("ixsimpl: null expression");
-  ixs_node *node = ixs_import_node(session(), expr.raw_const());
+  const ixs_node *node = ixs_import_node(session(), expr.raw());
   if (!node)
     throw std::bad_alloc();
   return Expr(raw(), session(), node);
@@ -430,8 +426,8 @@ inline std::string Context::serialize_expr(const Expr &expr) {
 
   before_nerrors = nerrors();
   StringWriter sink;
-  ixs_writer writer = {&StringWriter::write, &sink};
-  if (!ixs_serialize_node(session(), expr.raw_const(), &writer)) {
+  const ixs_writer writer = {&StringWriter::write, &sink};
+  if (!ixs_serialize_node(session(), expr.raw(), &writer)) {
     if (sink.failure)
       std::rethrow_exception(sink.failure);
     after_nerrors = nerrors();
@@ -468,8 +464,9 @@ inline Expr Context::deserialize_expr(std::string_view data) {
   };
 
   StringReader source = {data.data(), data.size(), 0};
-  ixs_reader reader = {&StringReader::read, &StringReader::remaining, &source};
-  ixs_node *node = ixs_deserialize_node(session(), &reader);
+  const ixs_reader reader = {&StringReader::read, &StringReader::remaining,
+                             &source};
+  const ixs_node *node = ixs_deserialize_node(session(), &reader);
   if (!node)
     throw std::bad_alloc();
   return Expr(raw(), session(), node);
@@ -503,7 +500,7 @@ inline Expr pw(std::initializer_list<std::pair<Expr, Expr>> branches) {
   if (branches.size() == 0)
     throw std::invalid_argument("pw requires at least one branch");
   ixs_ctx *ctx = branches.begin()->first.raw_ctx();
-  std::vector<ixs_node *> vals, conds;
+  std::vector<const ixs_node *> vals, conds;
   vals.reserve(branches.size());
   conds.reserve(branches.size());
   for (auto &b : branches) {

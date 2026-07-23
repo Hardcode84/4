@@ -4,7 +4,11 @@
 #include <ixsimpl.hpp>
 
 #include <cstdint>
+#include <type_traits>
 #include <vector>
+
+static_assert(std::is_const<ixs_node>::value,
+              "ixs_node must be an immutable handle type");
 
 int main() {
   ixs::Context ctx;
@@ -27,8 +31,8 @@ int main() {
     return 1;
 
   const ixs::Expr &const_expr = x + one;
-  const ixs_node *const_node = const_expr.raw_const();
-  ixs_node *child = ixs_node_child(const_node, 0);
+  const ixs_node *const_node = const_expr.raw();
+  const ixs_node *child = ixs_node_child(const_node, 0);
   char text[64];
   if (ixs_node_tag(const_node) != IXS_ADD || !child ||
       ixs_print(const_node, text, sizeof(text)) == 0)

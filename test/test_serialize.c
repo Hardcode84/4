@@ -118,24 +118,19 @@ static size_t reader_remaining(void *userdata) {
 
 static bool serialize_to_buffer(ixs_session *s, const ixs_node *node,
                                 byte_buffer *buf) {
-  ixs_writer writer;
+  const ixs_writer writer = {buffer_write, buf};
   buffer_reset(buf);
-  writer.write = buffer_write;
-  writer.userdata = buf;
   return ixs_serialize_node(s, node, &writer);
 }
 
 static ixs_node *deserialize_from_buffer(ixs_session *s,
                                          const byte_buffer *buf) {
   byte_reader reader_state;
-  ixs_reader reader;
+  const ixs_reader reader = {reader_read, reader_remaining, &reader_state};
 
   reader_state.data = buf->data;
   reader_state.len = buf->len;
   reader_state.pos = 0;
-  reader.read = reader_read;
-  reader.remaining = reader_remaining;
-  reader.userdata = &reader_state;
   return ixs_deserialize_node(s, &reader);
 }
 

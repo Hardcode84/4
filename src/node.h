@@ -14,18 +14,18 @@
 /* --- Internal node struct --- */
 
 typedef struct ixs_addterm {
-  struct ixs_node *term;
-  struct ixs_node *coeff; /* IXS_INT or IXS_RAT, nonzero */
+  ixs_node *term;
+  ixs_node *coeff; /* IXS_INT or IXS_RAT, nonzero */
 } ixs_addterm;
 
 typedef struct ixs_mulfactor {
-  struct ixs_node *base;
+  ixs_node *base;
   int32_t exp; /* nonzero */
 } ixs_mulfactor;
 
 typedef struct ixs_pwcase {
-  struct ixs_node *value;
-  struct ixs_node *cond;
+  ixs_node *value;
+  ixs_node *cond;
 } ixs_pwcase;
 
 typedef struct ixs_session_impl {
@@ -47,11 +47,12 @@ typedef enum {
 } ixs_node_transform_kind;
 
 typedef struct {
-  struct ixs_node *source;
-  struct ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
+  ixs_node *source;
+  ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
 } ixs_node_transform_cache_entry;
 
-struct ixs_node {
+/* Only pre-intern builders and unpublished stack probes spell this tag. */
+struct ixs_node_impl {
   ixs_tag tag;
   uint32_t hash;
   union ixs_node_data {
@@ -61,33 +62,33 @@ struct ixs_node {
     } rat;            /* IXS_RAT */
     const char *name; /* IXS_SYM */
     struct {          /* IXS_ADD */
-      struct ixs_node *coeff;
+      ixs_node *coeff;
       uint32_t nterms;
-      ixs_addterm *terms;
+      const ixs_addterm *terms;
     } add;
     struct { /* IXS_MUL */
-      struct ixs_node *coeff;
+      ixs_node *coeff;
       uint32_t nfactors;
-      ixs_mulfactor *factors;
+      const ixs_mulfactor *factors;
     } mul;
     struct { /* IXS_FLOOR, IXS_CEIL */
-      struct ixs_node *arg;
+      ixs_node *arg;
     } unary;
     struct { /* IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP */
-      struct ixs_node *lhs;
-      struct ixs_node *rhs;
+      ixs_node *lhs;
+      ixs_node *rhs;
       ixs_cmp_op cmp_op;
     } binary;
     struct { /* IXS_PIECEWISE */
       uint32_t ncases;
-      ixs_pwcase *cases;
+      const ixs_pwcase *cases;
     } pw;
     struct { /* IXS_AND, IXS_OR */
       uint32_t nargs;
-      struct ixs_node **args;
+      ixs_node *const *args;
     } logic;
     struct { /* IXS_NOT */
-      struct ixs_node *arg;
+      ixs_node *arg;
     } unary_bool;
   } u;
 };
@@ -174,7 +175,7 @@ IXS_STATIC void ixs_htab_destroy(ixs_ctx *ctx);
 
 /* Context-local memo for deterministic transforms of immutable nodes. */
 IXS_STATIC ixs_node *
-ixs_node_transform_cache_lookup(ixs_ctx *ctx, const ixs_node *source,
+ixs_node_transform_cache_lookup(const ixs_ctx *ctx, const ixs_node *source,
                                 ixs_node_transform_kind kind);
 IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
                                                ixs_node_transform_kind kind,
@@ -194,17 +195,18 @@ IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val);
 IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q);
 IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len);
 IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nterms, ixs_addterm *terms);
+                                  uint32_t nterms, const ixs_addterm *terms);
 IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nfactors, ixs_mulfactor *factors);
+                                  uint32_t nfactors,
+                                  const ixs_mulfactor *factors);
 IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg);
 IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg);
 IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op);
 IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
-                                 ixs_pwcase *cases);
+                                 const ixs_pwcase *cases);
 IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
-                                    ixs_node **args);
+                                    ixs_node *const *args);
 IXS_STATIC ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg);
 
 /* --- Node comparison (total order for canonical sorting) --- */

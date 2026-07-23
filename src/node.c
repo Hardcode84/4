@@ -353,14 +353,14 @@ static size_t node_transform_hash_ptr(const void *ptr) {
 }
 
 /* Load stays at or below 75%, so lookup and insertion are expected O(1). */
-static ixs_node_transform_cache_entry *
-node_transform_cache_slot(ixs_node_transform_cache_entry *entries, size_t cap,
-                          const ixs_node *source) {
+static size_t
+node_transform_cache_index(const ixs_node_transform_cache_entry *entries,
+                           size_t cap, const ixs_node *source) {
   size_t mask = cap - 1u;
   size_t index = node_transform_hash_ptr(source) & mask;
   while (entries[index].source && entries[index].source != source)
     index = (index + 1u) & mask;
-  return &entries[index];
+  return index;
 }
 
 static bool node_transform_cache_grow(ixs_ctx *ctx) {
@@ -380,8 +380,9 @@ static bool node_transform_cache_grow(ixs_ctx *ctx) {
 
   for (i = 0; i < ctx->transform_cache_cap; i++) {
     if (ctx->transform_cache[i].source) {
-      ixs_node_transform_cache_entry *slot = node_transform_cache_slot(
-          entries, new_cap, ctx->transform_cache[i].source);
+      ixs_node_transform_cache_entry *slot =
+          &entries[node_transform_cache_index(entries, new_cap,
+                                              ctx->transform_cache[i].source)];
       *slot = ctx->transform_cache[i];
     }
   }
@@ -391,14 +392,14 @@ static bool node_transform_cache_grow(ixs_ctx *ctx) {
 }
 
 IXS_STATIC ixs_node *
-ixs_node_transform_cache_lookup(ixs_ctx *ctx, const ixs_node *source,
+ixs_node_transform_cache_lookup(const ixs_ctx *ctx, const ixs_node *source,
                                 ixs_node_transform_kind kind) {
-  ixs_node_transform_cache_entry *slot;
+  const ixs_node_transform_cache_entry *slot;
   if (!ctx || !source || (unsigned)kind >= IXS_NODE_TRANSFORM_COUNT ||
       !ctx->transform_cache_cap)
     return NULL;
-  slot = node_transform_cache_slot(ctx->transform_cache,
-                                   ctx->transform_cache_cap, source);
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
   return slot->source ? slot->results[kind] : NULL;
 }
 
@@ -414,8 +415,8 @@ IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
     return;
   if (!ctx->transform_cache_cap && !node_transform_cache_grow(ctx))
     return;
-  slot = node_transform_cache_slot(ctx->transform_cache,
-                                   ctx->transform_cache_cap, source);
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
   if (slot->source) {
     if (!slot->results[kind])
       slot->results[kind] = result;
@@ -425,8 +426,8 @@ IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
       ctx->transform_cache_cap - ctx->transform_cache_cap / 4u) {
     if (!node_transform_cache_grow(ctx))
       return;
-    slot = node_transform_cache_slot(ctx->transform_cache,
-                                     ctx->transform_cache_cap, source);
+    slot = &ctx->transform_cache[node_transform_cache_index(
+        ctx->transform_cache, ctx->transform_cache_cap, source)];
   }
   slot->source = source;
   slot->results[kind] = result;
@@ -487,7 +488,7 @@ static bool htab_rehash(ixs_ctx *ctx) {
 /* Single probe loop shared by lookup and intern.  Returns the index of
  * either the matching slot or the first empty slot.  Sets *found to the
  * matching node, or NULL if the slot is empty. */
-static size_t htab_find_slot(ixs_ctx *ctx, const ixs_node *probe,
+static size_t htab_find_slot(const ixs_ctx *ctx, const ixs_node *probe,
                              ixs_node **found) {
   size_t mask = ctx->htab_cap - 1;
   size_t idx = probe->hash & mask;
@@ -505,7 +506,7 @@ static size_t htab_find_slot(ixs_ctx *ctx, const ixs_node *probe,
   }
 }
 
-static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
+static ixs_node *htab_lookup(const ixs_ctx *ctx, const ixs_node *probe) {
   ixs_node *found;
   htab_find_slot(ctx, probe, &found);
   return found;
@@ -529,8 +530,9 @@ IXS_STATIC ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
 /*  Arena allocation helpers                                          */
 /* ------------------------------------------------------------------ */
 
-static ixs_node *alloc_node(ixs_ctx *ctx) {
-  ixs_node *n = ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
+static struct ixs_node_impl *alloc_node(ixs_ctx *ctx) {
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
   if (n)
     memset(n, 0, sizeof(*n));
   return n;
@@ -541,8 +543,9 @@ static ixs_node *alloc_node(ixs_ctx *ctx) {
 /* ------------------------------------------------------------------ */
 
 IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_INT;
   tmp.u.ival = val;
@@ -560,8 +563,9 @@ IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
 }
 
 IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   if (q == 1)
     return ixs_node_int(ctx, p);
 
@@ -586,7 +590,7 @@ IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
  * ixs_node_equal uses strcmp, so we probe with memcmp directly. */
 IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   uint32_t sym_hash;
-  ixs_node *n;
+  struct ixs_node_impl *n;
   char *interned;
 
   /* Compute hash from the bounded slice — name may not be NUL-terminated. */
@@ -621,9 +625,10 @@ IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
 }
 
 IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nterms, ixs_addterm *terms) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                  uint32_t nterms, const ixs_addterm *terms) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_addterm *a;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_ADD;
@@ -656,9 +661,11 @@ IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
 }
 
 IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nfactors, ixs_mulfactor *factors) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                  uint32_t nfactors,
+                                  const ixs_mulfactor *factors) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_mulfactor *f;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_MUL;
@@ -691,8 +698,9 @@ IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
 }
 
 IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_FLOOR;
   tmp.u.unary.arg = arg;
@@ -710,8 +718,9 @@ IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
 }
 
 IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_CEIL;
   tmp.u.unary.arg = arg;
@@ -730,8 +739,9 @@ IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
 
 IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = tag;
   tmp.u.binary.lhs = lhs;
@@ -751,9 +761,10 @@ IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
 }
 
 IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
-                                 ixs_pwcase *cases) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                 const ixs_pwcase *cases) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_pwcase *c;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_PIECEWISE;
@@ -785,9 +796,10 @@ IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
 }
 
 IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
-                                    ixs_node **args) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                    ixs_node *const *args) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_node **a;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = tag;
@@ -819,8 +831,9 @@ IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
 }
 
 IXS_STATIC ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_NOT;
   tmp.u.unary_bool.arg = arg;

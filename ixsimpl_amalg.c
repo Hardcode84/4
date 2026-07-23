@@ -172,7 +172,7 @@ IXS_STATIC char *ixs_arena_strdup(ixs_arena *a, const char *s, size_t len) {
   return p;
 }
 
-IXS_STATIC ixs_arena_mark ixs_arena_save(ixs_arena *a) {
+IXS_STATIC ixs_arena_mark ixs_arena_save(const ixs_arena *a) {
   ixs_arena_mark m;
   m.chunk = a->current;
   m.used = a->current ? a->current->used : 0;
@@ -1046,7 +1046,7 @@ static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
 
 static bool extract_add_node_equality(ixs_node *n, ixs_node **a, ixs_node **b) {
   int64_t kp, kq;
-  ixs_addterm *t0, *t1;
+  const ixs_addterm *t0, *t1;
   if (!n || n->tag != IXS_ADD || n->u.add.nterms != 2)
     return false;
   ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
@@ -2849,7 +2849,8 @@ static ixs_cmp_op bounds_negate_cmp_op(ixs_cmp_op op) {
 }
 
 static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
-                                             bool value, ixs_node *storage) {
+                                             bool value,
+                                             struct ixs_node_impl *storage) {
   if (!b->ctx)
     return NULL;
   memset(storage, 0, sizeof(*storage));
@@ -2869,7 +2870,7 @@ static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
 }
 
 static ixs_check_result bounds_condition_truth(ixs_bounds *b, ixs_node *cond) {
-  ixs_node cmp;
+  struct ixs_node_impl cmp;
   if (ixs_node_is_known_false(cond))
     return IXS_CHECK_FALSE;
   if (ixs_node_is_known_true(cond))
@@ -2884,7 +2885,7 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
                                     ixs_interval *result, bool *have_result) {
   ixs_arena_mark mark = ixs_arena_save(owner->scratch);
   ixs_bounds active;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
   ixs_interval branch;
   bool ok = false;
 
@@ -2950,7 +2951,7 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     ixs_node *cond = expr->u.pw.cases[i].cond;
     ixs_node *value = expr->u.pw.cases[i].value;
     ixs_check_result truth;
-    ixs_node assumption;
+    struct ixs_node_impl assumption;
 
     if (!cond || !value || remaining.oom) {
       failed = true;
@@ -3237,7 +3238,7 @@ static ixs_check_result check_equal_result(ixs_cmp_op op, bool equal) {
 static ixs_check_result bounds_check_pow2_query(ixs_bounds *b, ixs_node *cmp,
                                                 ixs_node *expr, int64_t value) {
   const char *name;
-  ixs_node sym_tmp;
+  struct ixs_node_impl sym_tmp;
   if (!extract_pow2_and(expr, &name))
     return IXS_CHECK_UNKNOWN;
   memset(&sym_tmp, 0, sizeof(sym_tmp));
@@ -3255,7 +3256,7 @@ static ixs_check_result bounds_check_and_mask_query(ixs_bounds *b,
   const char *name;
   int64_t mask;
   uint64_t mask_bits, value_bits, known;
-  ixs_node sym_tmp;
+  struct ixs_node_impl sym_tmp;
   ixs_bitfacts bits;
   bool equal;
 
@@ -3801,7 +3802,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
 
 static ixs_node *defined_condition_assumption(defined_state *state,
                                               ixs_node *cond, bool value,
-                                              ixs_node *storage) {
+                                              struct ixs_node_impl *storage) {
   memset(storage, 0, sizeof(*storage));
   storage->tag = IXS_CMP;
   storage->u.binary.rhs = state->ctx->node_zero;
@@ -3872,7 +3873,7 @@ static bool defined_piecewise_active(defined_state *state,
                                      unsigned *partitions) {
   ixs_arena_mark mark = ixs_arena_save(remaining->scratch);
   ixs_bounds active;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
   if (!ixs_bounds_fork(&active, remaining)) {
     state->oom = true;
     ixs_arena_restore(remaining->scratch, mark);
@@ -3902,7 +3903,7 @@ static defined_pw_step defined_piecewise_case(defined_state *state,
   ixs_check_result cond_defined =
       defined_eval(state, remaining, cond, pw_depth);
   ixs_check_result truth;
-  ixs_node assumption;
+  struct ixs_node_impl assumption;
 
   if (state->oom || state->limited)
     return DEFINED_PW_FAILED;
@@ -5577,7 +5578,7 @@ static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
 
 static bool equivalence_proves_zero_cmp(equivalence_state *state, ixs_node *lhs,
                                         ixs_cmp_op op) {
-  ixs_node cmp;
+  struct ixs_node_impl cmp;
   bool result;
   memset(&cmp, 0, sizeof(cmp));
   cmp.tag = IXS_CMP;
@@ -6885,7 +6886,8 @@ static ixs_node *ctx_err(ixs_ctx *ctx, const char *msg) {
 /* ------------------------------------------------------------------ */
 
 static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
-  ixs_node *n = ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
   if (!n)
     return NULL;
   memset(n, 0, sizeof(*n));
@@ -7003,15 +7005,19 @@ void ixs_session_destroy(ixs_session *s) {
 /*  Error list                                                        */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_session_nerrors(ixs_session *s) {
-  ixs_session_impl *impl = ixs_session_get(s);
-  return *session_nerrors(impl);
+size_t ixs_session_nerrors(const ixs_session *s) {
+  const ixs_session_impl *impl = ixs_session_cget(s);
+  if (ixs_session_is_active(impl))
+    return impl->ctx->nerrors;
+  return impl->nerrors;
 }
 
-const char *ixs_session_error(ixs_session *s, size_t index) {
-  ixs_session_impl *impl = ixs_session_get(s);
-  const char **errors = *session_errors(impl);
-  size_t nerrors = *session_nerrors(impl);
+const char *ixs_session_error(const ixs_session *s, size_t index) {
+  const ixs_session_impl *impl = ixs_session_cget(s);
+  const char *const *errors =
+      ixs_session_is_active(impl) ? impl->ctx->errors : impl->errors;
+  size_t nerrors =
+      ixs_session_is_active(impl) ? impl->ctx->nerrors : impl->nerrors;
   if (index >= nerrors)
     return NULL;
   return errors[index];
@@ -7025,7 +7031,7 @@ void ixs_session_clear_errors(ixs_session *s) {
 /*  Rule-hit statistics                                                */
 /* ------------------------------------------------------------------ */
 
-size_t ixs_ctx_nstats(ixs_ctx *ctx) {
+size_t ixs_ctx_nstats(const ixs_ctx *ctx) {
 #ifdef IXS_STATS
   size_t n = 0;
   size_t i;
@@ -7040,7 +7046,7 @@ size_t ixs_ctx_nstats(ixs_ctx *ctx) {
 #endif
 }
 
-uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name) {
+uint64_t ixs_ctx_stat(const ixs_ctx *ctx, size_t index, const char **name) {
 #ifdef IXS_STATS
   size_t seen = 0;
   size_t i;
@@ -7214,8 +7220,8 @@ ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b) {
   return result;
 }
 
-ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node **values,
-                 ixs_node **conds) {
+ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node *const *values,
+                 ixs_node *const *conds) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_node *result = simp_pw(ctx, n, values, conds);
@@ -9045,14 +9051,14 @@ static size_t node_transform_hash_ptr(const void *ptr) {
 }
 
 /* Load stays at or below 75%, so lookup and insertion are expected O(1). */
-static ixs_node_transform_cache_entry *
-node_transform_cache_slot(ixs_node_transform_cache_entry *entries, size_t cap,
-                          const ixs_node *source) {
+static size_t
+node_transform_cache_index(const ixs_node_transform_cache_entry *entries,
+                           size_t cap, const ixs_node *source) {
   size_t mask = cap - 1u;
   size_t index = node_transform_hash_ptr(source) & mask;
   while (entries[index].source && entries[index].source != source)
     index = (index + 1u) & mask;
-  return &entries[index];
+  return index;
 }
 
 static bool node_transform_cache_grow(ixs_ctx *ctx) {
@@ -9072,8 +9078,9 @@ static bool node_transform_cache_grow(ixs_ctx *ctx) {
 
   for (i = 0; i < ctx->transform_cache_cap; i++) {
     if (ctx->transform_cache[i].source) {
-      ixs_node_transform_cache_entry *slot = node_transform_cache_slot(
-          entries, new_cap, ctx->transform_cache[i].source);
+      ixs_node_transform_cache_entry *slot =
+          &entries[node_transform_cache_index(entries, new_cap,
+                                              ctx->transform_cache[i].source)];
       *slot = ctx->transform_cache[i];
     }
   }
@@ -9083,14 +9090,14 @@ static bool node_transform_cache_grow(ixs_ctx *ctx) {
 }
 
 IXS_STATIC ixs_node *
-ixs_node_transform_cache_lookup(ixs_ctx *ctx, const ixs_node *source,
+ixs_node_transform_cache_lookup(const ixs_ctx *ctx, const ixs_node *source,
                                 ixs_node_transform_kind kind) {
-  ixs_node_transform_cache_entry *slot;
+  const ixs_node_transform_cache_entry *slot;
   if (!ctx || !source || (unsigned)kind >= IXS_NODE_TRANSFORM_COUNT ||
       !ctx->transform_cache_cap)
     return NULL;
-  slot = node_transform_cache_slot(ctx->transform_cache,
-                                   ctx->transform_cache_cap, source);
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
   return slot->source ? slot->results[kind] : NULL;
 }
 
@@ -9106,8 +9113,8 @@ IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
     return;
   if (!ctx->transform_cache_cap && !node_transform_cache_grow(ctx))
     return;
-  slot = node_transform_cache_slot(ctx->transform_cache,
-                                   ctx->transform_cache_cap, source);
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
   if (slot->source) {
     if (!slot->results[kind])
       slot->results[kind] = result;
@@ -9117,8 +9124,8 @@ IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
       ctx->transform_cache_cap - ctx->transform_cache_cap / 4u) {
     if (!node_transform_cache_grow(ctx))
       return;
-    slot = node_transform_cache_slot(ctx->transform_cache,
-                                     ctx->transform_cache_cap, source);
+    slot = &ctx->transform_cache[node_transform_cache_index(
+        ctx->transform_cache, ctx->transform_cache_cap, source)];
   }
   slot->source = source;
   slot->results[kind] = result;
@@ -9179,7 +9186,7 @@ static bool htab_rehash(ixs_ctx *ctx) {
 /* Single probe loop shared by lookup and intern.  Returns the index of
  * either the matching slot or the first empty slot.  Sets *found to the
  * matching node, or NULL if the slot is empty. */
-static size_t htab_find_slot(ixs_ctx *ctx, const ixs_node *probe,
+static size_t htab_find_slot(const ixs_ctx *ctx, const ixs_node *probe,
                              ixs_node **found) {
   size_t mask = ctx->htab_cap - 1;
   size_t idx = probe->hash & mask;
@@ -9197,7 +9204,7 @@ static size_t htab_find_slot(ixs_ctx *ctx, const ixs_node *probe,
   }
 }
 
-static ixs_node *htab_lookup(ixs_ctx *ctx, const ixs_node *probe) {
+static ixs_node *htab_lookup(const ixs_ctx *ctx, const ixs_node *probe) {
   ixs_node *found;
   htab_find_slot(ctx, probe, &found);
   return found;
@@ -9221,8 +9228,9 @@ IXS_STATIC ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node) {
 /*  Arena allocation helpers                                          */
 /* ------------------------------------------------------------------ */
 
-static ixs_node *alloc_node(ixs_ctx *ctx) {
-  ixs_node *n = ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
+static struct ixs_node_impl *alloc_node(ixs_ctx *ctx) {
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(ixs_node), sizeof(void *));
   if (n)
     memset(n, 0, sizeof(*n));
   return n;
@@ -9233,8 +9241,9 @@ static ixs_node *alloc_node(ixs_ctx *ctx) {
 /* ------------------------------------------------------------------ */
 
 IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_INT;
   tmp.u.ival = val;
@@ -9252,8 +9261,9 @@ IXS_STATIC ixs_node *ixs_node_int(ixs_ctx *ctx, int64_t val) {
 }
 
 IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   if (q == 1)
     return ixs_node_int(ctx, p);
 
@@ -9278,7 +9288,7 @@ IXS_STATIC ixs_node *ixs_node_rat(ixs_ctx *ctx, int64_t p, int64_t q) {
  * ixs_node_equal uses strcmp, so we probe with memcmp directly. */
 IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   uint32_t sym_hash;
-  ixs_node *n;
+  struct ixs_node_impl *n;
   char *interned;
 
   /* Compute hash from the bounded slice — name may not be NUL-terminated. */
@@ -9313,9 +9323,10 @@ IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
 }
 
 IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nterms, ixs_addterm *terms) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                  uint32_t nterms, const ixs_addterm *terms) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_addterm *a;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_ADD;
@@ -9348,9 +9359,11 @@ IXS_STATIC ixs_node *ixs_node_add(ixs_ctx *ctx, ixs_node *coeff,
 }
 
 IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
-                                  uint32_t nfactors, ixs_mulfactor *factors) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                  uint32_t nfactors,
+                                  const ixs_mulfactor *factors) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_mulfactor *f;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_MUL;
@@ -9383,8 +9396,9 @@ IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
 }
 
 IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_FLOOR;
   tmp.u.unary.arg = arg;
@@ -9402,8 +9416,9 @@ IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg) {
 }
 
 IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_CEIL;
   tmp.u.unary.arg = arg;
@@ -9422,8 +9437,9 @@ IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
 
 IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = tag;
   tmp.u.binary.lhs = lhs;
@@ -9443,9 +9459,10 @@ IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
 }
 
 IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
-                                 ixs_pwcase *cases) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                 const ixs_pwcase *cases) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_pwcase *c;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_PIECEWISE;
@@ -9477,9 +9494,10 @@ IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
 }
 
 IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
-                                    ixs_node **args) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+                                    ixs_node *const *args) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   ixs_node **a;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = tag;
@@ -9511,8 +9529,9 @@ IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
 }
 
 IXS_STATIC ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg) {
-  ixs_node tmp;
-  ixs_node *found, *n;
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
   memset(&tmp, 0, sizeof(tmp));
   tmp.tag = IXS_NOT;
   tmp.u.unary_bool.arg = arg;
@@ -10974,7 +10993,7 @@ static void print_add(printbuf *pb, const ixs_node *n) {
         if (np == 1 && nq == 1) {
           print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
         } else {
-          ixs_node tmp;
+          struct ixs_node_impl tmp;
           memset(&tmp, 0, sizeof(tmp));
           if (nq == 1) {
             tmp.tag = IXS_INT;
@@ -11004,7 +11023,7 @@ static void print_add(printbuf *pb, const ixs_node *n) {
         if (np == 1 && nq == 1) {
           print_wrapped(pb, n->u.add.terms[i].term, PREC_MUL);
         } else {
-          ixs_node tmp;
+          struct ixs_node_impl tmp;
           memset(&tmp, 0, sizeof(tmp));
           if (nq == 1) {
             tmp.tag = IXS_INT;
@@ -11873,7 +11892,7 @@ typedef struct {
 } decode_node;
 
 typedef struct {
-  ixs_reader *reader;
+  const ixs_reader *reader;
   size_t offset;
 } decode_input;
 
@@ -12195,7 +12214,7 @@ static bool serial_collect(ixs_ctx *ctx, const ixs_node *root,
   return true;
 }
 
-static bool writer_write(ixs_writer *w, const void *buf, size_t len) {
+static bool writer_write(const ixs_writer *w, const void *buf, size_t len) {
   if (!w || !w->write)
     return false;
   if (len == 0)
@@ -12203,11 +12222,11 @@ static bool writer_write(ixs_writer *w, const void *buf, size_t len) {
   return w->write(w->userdata, buf, len);
 }
 
-static bool writer_u8(ixs_writer *w, uint8_t v) {
+static bool writer_u8(const ixs_writer *w, uint8_t v) {
   return writer_write(w, &v, 1u);
 }
 
-static bool writer_u32(ixs_writer *w, uint32_t v) {
+static bool writer_u32(const ixs_writer *w, uint32_t v) {
   unsigned char buf[4];
   buf[0] = (unsigned char)(v & 0xffu);
   buf[1] = (unsigned char)((v >> 8) & 0xffu);
@@ -12216,7 +12235,7 @@ static bool writer_u32(ixs_writer *w, uint32_t v) {
   return writer_write(w, buf, sizeof(buf));
 }
 
-static bool writer_i64(ixs_writer *w, int64_t v) {
+static bool writer_i64(const ixs_writer *w, int64_t v) {
   unsigned char buf[8];
   uint64_t u = (uint64_t)v;
   size_t i;
@@ -12266,8 +12285,8 @@ static bool serial_lookup_index(serial_state *state, const ixs_node *node,
   return true;
 }
 
-static bool serial_write_ref(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_ref(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t index;
 
   if (!serial_lookup_index(state, node, &index))
@@ -12275,7 +12294,7 @@ static bool serial_write_ref(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return writer_u32(w, index);
 }
 
-static bool serial_write_symbol(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_symbol(ixs_ctx *ctx, const ixs_writer *w,
                                 const ixs_node *node) {
   size_t len = strlen(node->u.name);
 
@@ -12285,8 +12304,8 @@ static bool serial_write_symbol(ixs_ctx *ctx, ixs_writer *w,
          writer_write(w, node->u.name, len);
 }
 
-static bool serial_write_add(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_add(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t i;
 
   if (!writer_u8(w, WIRE_ADD) || !writer_u32(w, node->u.add.nterms) ||
@@ -12300,8 +12319,8 @@ static bool serial_write_add(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_mul(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_mul(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   uint32_t i;
 
   if (!writer_u8(w, WIRE_MUL) || !writer_u32(w, node->u.mul.nfactors) ||
@@ -12318,20 +12337,21 @@ static bool serial_write_mul(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_unary(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                               uint8_t tag, const ixs_node *arg) {
+static bool serial_write_unary(ixs_ctx *ctx, const ixs_writer *w,
+                               serial_state *state, uint8_t tag,
+                               const ixs_node *arg) {
   return writer_u8(w, tag) && serial_write_ref(ctx, w, state, arg);
 }
 
-static bool serial_write_binary(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_binary(ixs_ctx *ctx, const ixs_writer *w,
                                 serial_state *state, uint8_t tag,
                                 const ixs_node *lhs, const ixs_node *rhs) {
   return writer_u8(w, tag) && serial_write_ref(ctx, w, state, lhs) &&
          serial_write_ref(ctx, w, state, rhs);
 }
 
-static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_mod(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   ixs_mod_divisor_class divisor =
       ixs_node_classify_mod_divisor(node->u.binary.rhs);
   if (divisor == IXS_MOD_DIVISOR_ZERO)
@@ -12342,7 +12362,7 @@ static bool serial_write_mod(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
                              node->u.binary.rhs);
 }
 
-static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
+static bool serial_write_piecewise(ixs_ctx *ctx, const ixs_writer *w,
                                    serial_state *state, const ixs_node *node) {
   uint32_t i;
 
@@ -12356,8 +12376,8 @@ static bool serial_write_piecewise(ixs_ctx *ctx, ixs_writer *w,
   return true;
 }
 
-static bool serial_write_cmp(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                             const ixs_node *node) {
+static bool serial_write_cmp(ixs_ctx *ctx, const ixs_writer *w,
+                             serial_state *state, const ixs_node *node) {
   wire_cmp_op op;
 
   if (!ixs_cmp_to_wire(node->u.binary.cmp_op, &op))
@@ -12367,8 +12387,8 @@ static bool serial_write_cmp(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
          serial_write_ref(ctx, w, state, node->u.binary.rhs);
 }
 
-static bool serial_write_logic(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                               const ixs_node *node) {
+static bool serial_write_logic(ixs_ctx *ctx, const ixs_writer *w,
+                               serial_state *state, const ixs_node *node) {
   wire_tag tag = node->tag == IXS_AND ? WIRE_AND : WIRE_OR;
   uint32_t i;
 
@@ -12381,8 +12401,8 @@ static bool serial_write_logic(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
   return true;
 }
 
-static bool serial_write_node(ixs_ctx *ctx, ixs_writer *w, serial_state *state,
-                              const ixs_node *node) {
+static bool serial_write_node(ixs_ctx *ctx, const ixs_writer *w,
+                              serial_state *state, const ixs_node *node) {
   switch (node->tag) {
   case IXS_INT:
     return writer_u8(w, WIRE_INT) && writer_i64(w, node->u.ival);
@@ -13140,7 +13160,7 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
 }
 
 static bool serialize_stream(ixs_ctx *ctx, const ixs_node *root,
-                             ixs_writer *w) {
+                             const ixs_writer *w) {
   serial_state state;
   uint32_t root_index = 0;
   size_t i;
@@ -13275,7 +13295,8 @@ static decode_status decode_stream(ixs_ctx *ctx, decode_input *in,
   return DECODE_OK;
 }
 
-bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w) {
+bool ixs_serialize_node(ixs_session *s, const ixs_node *root,
+                        const ixs_writer *w) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
@@ -13286,7 +13307,7 @@ bool ixs_serialize_node(ixs_session *s, const ixs_node *root, ixs_writer *w) {
   return ok;
 }
 
-ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r) {
+ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
@@ -13766,8 +13787,8 @@ static uint32_t compact_addterms(ixs_addterm *terms, uint32_t nterms) {
   return w;
 }
 
-static bool addterm_coeffs_cancel(ixs_addterm *terms, uint32_t i, uint32_t j,
-                                  int64_t *ci_p, int64_t *ci_q) {
+static bool addterm_coeffs_cancel(const ixs_addterm *terms, uint32_t i,
+                                  uint32_t j, int64_t *ci_p, int64_t *ci_q) {
   int64_t cj_p, cj_q, sp, sq;
   ixs_node_get_rat(terms[i].coeff, ci_p, ci_q);
   ixs_node_get_rat(terms[j].coeff, &cj_p, &cj_q);
@@ -15378,7 +15399,8 @@ static ixs_node *round_extract_mul_add(ixs_ctx *ctx, ixs_bounds *bnds,
                   : simp_ceil_bnds(ctx, bnds, expanded);
 }
 
-static int64_t floor_term_effective_denom(ixs_bounds *bnds, ixs_addterm *term) {
+static int64_t floor_term_effective_denom(ixs_bounds *bnds,
+                                          const ixs_addterm *term) {
   int64_t tp, tq, atp, eff_num, g;
   ixs_node_get_rat(term->coeff, &tp, &tq);
   if (tq <= 0)
@@ -16156,7 +16178,8 @@ static ixs_node *mod_build_symbolic_reduced(ixs_ctx *ctx, ixs_node *a,
   }
 }
 
-static bool mod_addend_divides(ixs_ctx *ctx, ixs_node *b, ixs_addterm *term) {
+static bool mod_addend_divides(ixs_ctx *ctx, ixs_node *b,
+                               const ixs_addterm *term) {
   ixs_node *addend = simp_mul(ctx, term->coeff, term->term);
   ixs_node *quotient = addend ? simp_div(ctx, addend, b) : NULL;
   return quotient && !ixs_node_is_sentinel(quotient) &&
@@ -17178,8 +17201,8 @@ static int pw_merge_previous(ixs_ctx *ctx, ixs_pwcase *cases, uint32_t ncases,
   return ixs_node_is_known_true(cases[ncases - 1].cond) ? 2 : 1;
 }
 
-static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                              ixs_node **conds) {
+static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
+                              ixs_node *const *conds) {
   size_t cap = n > 16 ? n : 16;
   ixs_pwcase *cases =
       ixs_arena_alloc(&ctx->scratch, cap * sizeof(*cases), sizeof(void *));
@@ -17247,8 +17270,8 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node **values,
   return ixs_node_pw(ctx, ncases, cases);
 }
 
-IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node **values,
-                             ixs_node **conds) {
+IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
+                             ixs_node *const *conds) {
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_node *result = simp_pw_impl(ctx, n, values, conds);
   ixs_arena_restore(&ctx->scratch, m);
