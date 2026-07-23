@@ -165,6 +165,24 @@ if(NOT USE_AMALGAMATION)
     add_test(NAME test_bounds COMMAND test_bounds)
 endif()
 
+# --- Static hot-path complexity check ---
+
+# Skipped silently when the tree-sitter Python modules are absent; the
+# pre-commit hook (which pins its own environment) is the enforcing gate.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import tree_sitter, tree_sitter_c"
+    RESULT_VARIABLE IXS_TREE_SITTER_OK
+    OUTPUT_QUIET ERROR_QUIET)
+  if(IXS_TREE_SITTER_OK EQUAL 0)
+    add_test(NAME check_hotpaths
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_hotpaths.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  endif()
+endif()
+
 # --- Benchmark ---
 
 add_executable(bench_corpus bench/bench_corpus.c)

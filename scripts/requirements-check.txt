@@ -1,0 +1,5 @@
+# Pinned: tree-sitter 0.26.0 segfaults on coordinate access in large
+# parsed files (src/bounds.c).  0.25.x runtime + 0.23.x C grammar is the
+# known-good combination.
+tree-sitter==0.25.2
+tree-sitter-c==0.23.4

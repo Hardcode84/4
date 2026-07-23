@@ -7,6 +7,7 @@ path = [
     ".gitignore",
     "ixsimpl_amalg.c",
     "test/corpus*.txt",
+    "scripts/requirements-check.txt",
     "scripts/requirements-gen.txt",
 ]
 SPDX-FileCopyrightText = "2026 ixsimpl contributors"
