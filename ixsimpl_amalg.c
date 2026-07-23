@@ -828,6 +828,7 @@ static ixs_interval interval_from_sym_cmp_const(ixs_cmp_op op, int64_t cp,
   return iv;
 }
 
+/* Cache hits are expected O(1); a miss rebuilds the n immediate ADD terms. */
 static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
   ixs_node *cached;
   ixs_node *result;
@@ -1519,6 +1520,69 @@ static void bitfacts_apply_xor(ixs_bitfacts *out, const ixs_bitfacts *a,
   out->pow2 = IXS_POW2_UNKNOWN;
 }
 
+static bool bitfacts_scale_nonnegative_pow2(ixs_bounds *b, ixs_node *term,
+                                            int64_t coeff, ixs_bitfacts *out,
+                                            unsigned depth) {
+  ixs_bitfacts base;
+  ixs_interval iv;
+  uint64_t scale;
+  unsigned shift;
+
+  if (!int64_is_positive_pow2(coeff) || !ixs_node_is_integer_valued(term))
+    return false;
+
+  iv = ixs_bounds_get(b, term);
+  scale = (uint64_t)coeff;
+  if (!interval_lower_at_least(&iv, 0, 1) || iv.hi_inf || iv.hi_q != 1 ||
+      iv.hi_p < 0 || (uint64_t)iv.hi_p > (uint64_t)INT64_MAX / scale ||
+      !bounds_get_bitfacts_depth(b, term, &base, depth))
+    return false;
+
+  shift = bit_ctz64(scale);
+  bitfacts_unknown(out);
+  out->known_zero = (base.known_zero << shift) | low_mask(shift);
+  out->known_one = base.known_one << shift;
+  return true;
+}
+
+/* One bounded pass over normalized addends. Pairwise-disjoint possible-one
+ * masks prove that integer addition cannot carry between addends. */
+static void bitfacts_apply_carry_free_add(ixs_bounds *b, ixs_node *expr,
+                                          ixs_bitfacts *out, unsigned depth) {
+  ixs_bitfacts addend;
+  uint64_t known_one, possible;
+  int64_t cp, cq;
+  uint32_t i;
+
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1 || cp < 0)
+    return;
+
+  bitfacts_unknown(&addend);
+  bitfacts_apply_exact(&addend, cp);
+  possible = ~addend.known_zero;
+  known_one = addend.known_one;
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    uint64_t term_possible;
+    int64_t tp, tq;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+    if (tq != 1 || !bitfacts_scale_nonnegative_pow2(
+                       b, expr->u.add.terms[i].term, tp, &addend, depth))
+      return;
+
+    term_possible = ~addend.known_zero;
+    if ((possible & term_possible) != 0)
+      return;
+    possible |= term_possible;
+    known_one |= addend.known_one;
+  }
+
+  out->known_zero |= ~possible;
+  out->known_one |= known_one;
+}
+
 static bool bitfacts_apply_add(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
                                unsigned depth) {
   unsigned nbits;
@@ -1527,6 +1591,8 @@ static bool bitfacts_apply_add(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
   ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
   if (cq != 1)
     return true;
+
+  bitfacts_apply_carry_free_add(b, expr, out, depth - 1u);
 
   for (nbits = 1; nbits <= 64u; nbits++) {
     uint64_t mask = low_mask(nbits);
@@ -2368,6 +2434,14 @@ static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
     scaled = iv_mul_const(ti, cp, cq);
     result = iv_add(result, scaled);
+  }
+  if (!b->oom && b->nexprs != 0 && !ixs_node_is_zero(expr->u.add.coeff)) {
+    ixs_node *base = bounds_expr_without_add_const(b, expr);
+    if (base && base != expr) {
+      ixs_interval base_iv = ixs_bounds_get(b, base);
+      ixs_interval offset = ixs_bounds_get(b, expr->u.add.coeff);
+      result = iv_intersect(result, iv_add(base_iv, offset));
+    }
   }
   return result;
 }
@@ -4974,6 +5048,384 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   return IXS_CHECK_UNKNOWN;
 }
 
+static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
+                                      ixs_node *rhs, int64_t *delta) {
+  ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
+  int64_t p, q;
+  if (!difference) {
+    state->oom = true;
+    return false;
+  }
+  difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
+  if (!difference) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(difference))
+    return false;
+  if (!ixs_node_is_const(difference)) {
+    difference = expand_impl(state->ctx, difference);
+    if (!difference) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(difference))
+      return false;
+    difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
+    if (!difference) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(difference))
+      return false;
+  }
+  if (!ixs_node_is_const(difference))
+    return false;
+  ixs_node_get_rat(difference, &p, &q);
+  if (q != 1)
+    return false;
+  *delta = p;
+  return true;
+}
+
+static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
+  uint64_t magnitude = bounds_int64_magnitude(coefficient);
+  if (stride == 0 || magnitude == 0)
+    return 0;
+  if (magnitude <= (uint64_t)INT64_MAX / stride)
+    return magnitude * stride;
+  return stride;
+}
+
+static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
+                                     uint64_t *stride, unsigned depth);
+
+static bool equivalence_add_stride(equivalence_state *state, ixs_node *expr,
+                                   uint64_t *stride, unsigned depth) {
+  uint64_t result = 0;
+  int64_t cp, cq;
+  uint32_t i;
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  (void)cp;
+  if (cq != 1)
+    return false;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    uint64_t term_stride;
+    int64_t p, q;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    if (q != 1 || !equivalence_known_stride(state, expr->u.add.terms[i].term,
+                                            &term_stride, depth - 1u))
+      return false;
+    term_stride = equivalence_scale_stride(term_stride, p);
+    result = bounds_u64_gcd(result, term_stride);
+  }
+  *stride = result;
+  return true;
+}
+
+static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
+                                   uint64_t *stride, unsigned depth) {
+  uint64_t result;
+  int64_t p, q;
+  uint32_t i;
+  ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+  if (q != 1)
+    return false;
+  if (p == 0) {
+    *stride = 0;
+    return true;
+  }
+  if (expr->u.mul.nfactors == 1 && expr->u.mul.factors[0].exp == 1) {
+    if (!equivalence_known_stride(state, expr->u.mul.factors[0].base, &result,
+                                  depth - 1u))
+      return false;
+    *stride = equivalence_scale_stride(result, p);
+    return true;
+  }
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    if (expr->u.mul.factors[i].exp <= 0 ||
+        !ixs_node_is_integer_valued(expr->u.mul.factors[i].base)) {
+      *stride = 1;
+      return true;
+    }
+  }
+  result = bounds_int64_magnitude(p);
+  *stride = result <= (uint64_t)INT64_MAX ? result : 1;
+  return true;
+}
+
+/* Stride inference is bounded by CONGRUENCE_DEPTH_LIMIT. Each ADD or MUL
+ * level scans only its normalized immediate operands, so one proof is O(n)
+ * in the visited expression rather than restarting integrality walks. */
+static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
+                                     uint64_t *stride, unsigned depth) {
+  if (!expr || !stride || depth == 0 || state->oom || state->limited)
+    return false;
+  switch (expr->tag) {
+  case IXS_INT:
+    *stride = 0;
+    return true;
+  case IXS_RAT:
+    *stride = expr->u.rat.q == 1 ? 0 : 1;
+    return expr->u.rat.q == 1;
+  case IXS_SYM: {
+    int64_t modulus, remainder;
+    if (ixs_bounds_get_modrem(state->bounds, expr->u.name, &modulus,
+                              &remainder)) {
+      (void)remainder;
+      *stride = (uint64_t)modulus;
+    } else {
+      *stride = 1;
+    }
+    if (state->bounds->oom) {
+      state->oom = true;
+      return false;
+    }
+    return true;
+  }
+  case IXS_ADD:
+    return equivalence_add_stride(state, expr, stride, depth);
+  case IXS_MUL:
+    return equivalence_mul_stride(state, expr, stride, depth);
+  case IXS_MOD:
+    if (expr->u.binary.rhs->tag == IXS_INT && expr->u.binary.rhs->u.ival > 0 &&
+        equivalence_known_stride(state, expr->u.binary.lhs, stride,
+                                 depth - 1u)) {
+      *stride = bounds_u64_gcd(*stride, (uint64_t)expr->u.binary.rhs->u.ival);
+      return true;
+    }
+    *stride = 1;
+    return true;
+  default:
+    if (ixs_node_is_integer_valued(expr)) {
+      *stride = 1;
+      return true;
+    }
+    return false;
+  }
+}
+
+static bool equivalence_no_reachable_integer(equivalence_state *state,
+                                             ixs_node *expr, int64_t lo,
+                                             int64_t hi) {
+  ixs_interval region;
+  ixs_interval known;
+  uint64_t stride;
+  uint64_t residue;
+  if (lo > hi)
+    return true;
+  region = ixs_interval_range(lo, 1, hi, 1);
+  known = ixs_bounds_get(state->bounds, expr);
+  if (state->bounds->oom) {
+    state->oom = true;
+    return false;
+  }
+  if (known.valid) {
+    region = iv_intersect(region, known);
+    if (!region.valid)
+      return true;
+  }
+  if (!equivalence_known_stride(state, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
+      stride <= 1u || stride > (uint64_t)INT64_MAX ||
+      !bounds_known_residue_depth(state->bounds, expr, stride, &residue,
+                                  CONGRUENCE_DEPTH_LIMIT)) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  return !interval_has_congruent_integer(&region, (int64_t)stride,
+                                         (int64_t)residue);
+}
+
+static bool equivalence_ordered_cut(ixs_cmp_op op, bool *lower,
+                                    int64_t *threshold) {
+  switch (op) {
+  case IXS_CMP_LT:
+    *lower = false;
+    *threshold = -1;
+    return true;
+  case IXS_CMP_LE:
+    *lower = false;
+    *threshold = 0;
+    return true;
+  case IXS_CMP_GT:
+    *lower = true;
+    *threshold = 1;
+    return true;
+  case IXS_CMP_GE:
+    *lower = true;
+    *threshold = 0;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static ixs_check_result
+equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
+                                ixs_node *rhs) {
+  bool left_lower, right_lower;
+  int64_t left_threshold, right_threshold, delta, mapped_threshold;
+  int64_t lo, hi;
+  if (!lhs || !rhs || lhs->tag != IXS_CMP || rhs->tag != IXS_CMP ||
+      !ixs_node_is_zero(lhs->u.binary.rhs) ||
+      !ixs_node_is_zero(rhs->u.binary.rhs) ||
+      !equivalence_ordered_cut(lhs->u.binary.cmp_op, &left_lower,
+                               &left_threshold) ||
+      !equivalence_ordered_cut(rhs->u.binary.cmp_op, &right_lower,
+                               &right_threshold) ||
+      left_lower != right_lower ||
+      ixs_bounds_check_integer_valued(state->bounds, lhs->u.binary.lhs) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(state->bounds, rhs->u.binary.lhs) !=
+          IXS_CHECK_TRUE ||
+      !equivalence_integer_delta(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
+                                 &delta) ||
+      !ixs_safe_add(right_threshold, delta, &mapped_threshold))
+    return IXS_CHECK_UNKNOWN;
+  if (left_threshold == mapped_threshold)
+    return IXS_CHECK_TRUE;
+  lo = left_threshold < mapped_threshold ? left_threshold : mapped_threshold;
+  hi = left_threshold < mapped_threshold ? mapped_threshold : left_threshold;
+  if (left_lower) {
+    if (!ixs_safe_sub(hi, 1, &hi))
+      return IXS_CHECK_UNKNOWN;
+  } else {
+    if (!ixs_safe_add(lo, 1, &lo))
+      return IXS_CHECK_UNKNOWN;
+  }
+  return equivalence_no_reachable_integer(state, lhs->u.binary.lhs, lo, hi)
+             ? IXS_CHECK_TRUE
+             : IXS_CHECK_UNKNOWN;
+}
+
+static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
+                                        ixs_node **denominator,
+                                        int64_t *offset) {
+  ixs_node *mod;
+  int64_t cp, cq, kp, kq;
+  if (expr->tag == IXS_MOD) {
+    mod = expr;
+    *offset = 0;
+  } else if (expr->tag == IXS_ADD && expr->u.add.nterms == 1u &&
+             expr->u.add.terms[0].term->tag == IXS_MOD) {
+    ixs_node_get_rat(expr->u.add.terms[0].coeff, &cp, &cq);
+    ixs_node_get_rat(expr->u.add.coeff, &kp, &kq);
+    if (cp != 1 || cq != 1 || kq != 1)
+      return false;
+    mod = expr->u.add.terms[0].term;
+    *offset = kp;
+  } else {
+    return false;
+  }
+  *dividend = mod->u.binary.lhs;
+  *denominator = mod->u.binary.rhs;
+  return true;
+}
+
+static bool equivalence_proves_zero_cmp(equivalence_state *state, ixs_node *lhs,
+                                        ixs_cmp_op op) {
+  ixs_node cmp;
+  bool result;
+  memset(&cmp, 0, sizeof(cmp));
+  cmp.tag = IXS_CMP;
+  cmp.u.binary.lhs = lhs;
+  cmp.u.binary.rhs = state->ctx->node_zero;
+  cmp.u.binary.cmp_op = op;
+  result = ixs_bounds_check(state->bounds, &cmp) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return result;
+}
+
+static bool equivalence_mod_sum_in_range(equivalence_state *state,
+                                         ixs_node *sum, ixs_node *denominator) {
+  ixs_node *upper;
+  if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT))
+    return false;
+  upper = simp_sub(state->ctx, sum, denominator);
+  if (!upper) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(upper))
+    return false;
+  return equivalence_proves_zero_cmp(state, sum, IXS_CMP_GE) &&
+         equivalence_proves_zero_cmp(state, upper, IXS_CMP_LT);
+}
+
+static bool equivalence_residue_shift_in_range(uint64_t residue,
+                                               uint64_t modulus,
+                                               int64_t shift) {
+  uint64_t magnitude;
+  if (shift >= 0) {
+    uint64_t positive = (uint64_t)shift;
+    return positive < modulus && residue < modulus - positive;
+  }
+  magnitude = bounds_int64_magnitude(shift);
+  return magnitude <= residue;
+}
+
+static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
+                                                ixs_node *dividend,
+                                                ixs_node *denominator,
+                                                int64_t shift) {
+  uint64_t modulus;
+  uint64_t residue;
+  if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
+      !equivalence_known_stride(state, dividend, &modulus,
+                                CONGRUENCE_DEPTH_LIMIT) ||
+      modulus <= 1u || modulus > (uint64_t)INT64_MAX ||
+      !bounds_known_residue_depth(state->bounds, dividend, modulus, &residue,
+                                  CONGRUENCE_DEPTH_LIMIT) ||
+      ixs_bounds_check_divisible(state->bounds, denominator,
+                                 (int64_t)modulus) != IXS_CHECK_TRUE) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  return equivalence_residue_shift_in_range(residue, modulus, shift);
+}
+
+static ixs_check_result
+equivalence_mod_shift_direction(equivalence_state *state, ixs_node *shifted,
+                                ixs_node *sum) {
+  ixs_node *shifted_dividend;
+  ixs_node *shifted_denominator;
+  ixs_node *base_dividend;
+  ixs_node *base_denominator;
+  int64_t sum_offset;
+  int64_t dividend_shift;
+  if (shifted->tag != IXS_MOD ||
+      !equivalence_extract_mod_sum(shifted, &shifted_dividend,
+                                   &shifted_denominator, &dividend_shift) ||
+      dividend_shift != 0 ||
+      !equivalence_extract_mod_sum(sum, &base_dividend, &base_denominator,
+                                   &sum_offset) ||
+      shifted_denominator != base_denominator ||
+      !equivalence_integer_delta(state, shifted_dividend, base_dividend,
+                                 &dividend_shift) ||
+      dividend_shift != sum_offset ||
+      ixs_bounds_check_integer_valued(state->bounds, base_dividend) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(state->bounds, base_denominator) !=
+          IXS_CHECK_TRUE)
+    return IXS_CHECK_UNKNOWN;
+  if (equivalence_mod_sum_in_range(state, sum, base_denominator) ||
+      equivalence_mod_shift_by_congruence(state, base_dividend,
+                                          base_denominator, sum_offset))
+    return IXS_CHECK_TRUE;
+  return IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result equivalence_mod_shifts(equivalence_state *state,
+                                               ixs_node *lhs, ixs_node *rhs) {
+  ixs_check_result result = equivalence_mod_shift_direction(state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  return equivalence_mod_shift_direction(state, rhs, lhs);
+}
+
 static bool equivalence_extract_mod_cmp(ixs_node *cmp,
                                         equivalence_mod_cmp *out) {
   ixs_node *residual;
@@ -5148,8 +5600,47 @@ static ixs_check_result equivalence_predicate_shapes(equivalence_state *state,
   if (lhs->tag == IXS_NOT && rhs->tag == IXS_NOT)
     return equivalence_core(state, lhs->u.unary_bool.arg, rhs->u.unary_bool.arg,
                             depth + 1u);
-  if (lhs->tag == IXS_CMP && rhs->tag == IXS_CMP)
-    return equivalence_mod_comparisons(state, lhs, rhs);
+  if (lhs->tag == IXS_CMP && rhs->tag == IXS_CMP) {
+    ixs_check_result result = equivalence_mod_comparisons(state, lhs, rhs);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+    return equivalence_ordered_comparisons(state, lhs, rhs);
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result equivalence_expanded(equivalence_state *state,
+                                             ixs_node *lhs, ixs_node *rhs,
+                                             unsigned depth) {
+  ixs_node *expanded_lhs = expand_impl(state->ctx, lhs);
+  ixs_node *expanded_rhs = expand_impl(state->ctx, rhs);
+  ixs_check_result result;
+  if (!expanded_lhs || !expanded_rhs) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(expanded_lhs) || ixs_node_is_sentinel(expanded_rhs))
+    return IXS_CHECK_UNKNOWN;
+  expanded_lhs = simp_simplify_bounds(state->ctx, expanded_lhs, state->bounds);
+  expanded_rhs = simp_simplify_bounds(state->ctx, expanded_rhs, state->bounds);
+  if (!expanded_lhs || !expanded_rhs) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(expanded_lhs) || ixs_node_is_sentinel(expanded_rhs))
+    return IXS_CHECK_UNKNOWN;
+  if (expanded_lhs == expanded_rhs)
+    return IXS_CHECK_TRUE;
+  result = equivalence_difference(state, expanded_lhs, expanded_rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_mod_shifts(state, expanded_lhs, expanded_rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  if (ixs_node_is_bool_valued(expanded_lhs) &&
+      ixs_node_is_bool_valued(expanded_rhs))
+    return equivalence_predicate_shapes(state, expanded_lhs, expanded_rhs,
+                                        depth);
   return IXS_CHECK_UNKNOWN;
 }
 
@@ -5158,8 +5649,6 @@ static ixs_check_result equivalence_core(equivalence_state *state,
                                          unsigned depth) {
   ixs_node *simplified_lhs;
   ixs_node *simplified_rhs;
-  ixs_node *expanded_lhs;
-  ixs_node *expanded_rhs;
   ixs_check_result left_truth;
   ixs_check_result right_truth;
   ixs_check_result result;
@@ -5198,32 +5687,10 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-
-  expanded_lhs = expand_impl(state->ctx, simplified_lhs);
-  expanded_rhs = expand_impl(state->ctx, simplified_rhs);
-  if (!expanded_lhs || !expanded_rhs) {
-    state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
-  if (ixs_node_is_sentinel(expanded_lhs) || ixs_node_is_sentinel(expanded_rhs))
-    return IXS_CHECK_UNKNOWN;
-  expanded_lhs = simp_simplify_bounds(state->ctx, expanded_lhs, state->bounds);
-  expanded_rhs = simp_simplify_bounds(state->ctx, expanded_rhs, state->bounds);
-  if (!expanded_lhs || !expanded_rhs) {
-    state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
-  if (expanded_lhs == expanded_rhs)
-    return IXS_CHECK_TRUE;
-  result = equivalence_difference(state, expanded_lhs, expanded_rhs);
+  result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-
-  if (ixs_node_is_bool_valued(expanded_lhs) &&
-      ixs_node_is_bool_valued(expanded_rhs))
-    return equivalence_predicate_shapes(state, expanded_lhs, expanded_rhs,
-                                        depth);
-  return IXS_CHECK_UNKNOWN;
+  return equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
 }
 
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
@@ -12572,6 +13039,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, ixs_reader *r) {
 
 #define SIMPLIFY_ITER_LIMIT 64
 #define CONGRUENT_MOD_PAIR_LIMIT 256u
+#define EQUAL_FLOOR_PAIR_LIMIT 256u
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
 /* Rule-chain functions (rules and the helpers they call):
@@ -16042,6 +16510,7 @@ static const char *extra_transforms[] = {
     "recognize_mod",
     "cancel_floor_mod_pairs",
     "cancel_congruent_mod_difference",
+    "cancel_equal_floor_difference",
     "cancel_scaled_mod_quotient",
     "not_cmp_flip",
 };
@@ -16949,6 +17418,215 @@ static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
   return false;
 }
 
+typedef enum {
+  FLOOR_PARTS_NO_MATCH,
+  FLOOR_PARTS_MATCH,
+  FLOOR_PARTS_ERROR
+} floor_parts_status;
+
+typedef enum {
+  FLOOR_SHIFT_UNPROVEN,
+  FLOOR_SHIFT_PROVEN,
+  FLOOR_SHIFT_ERROR
+} floor_shift_status;
+
+static floor_parts_status quotient_mul_parts(ixs_ctx *ctx, ixs_node *arg,
+                                             ixs_node **numerator,
+                                             ixs_node **denominator) {
+  ixs_node *num;
+  ixs_node *denom;
+  int64_t p, q;
+  uint32_t i;
+  bool has_denominator = false;
+  if (arg->tag != IXS_MUL)
+    return FLOOR_PARTS_NO_MATCH;
+  ixs_node_get_rat(arg->u.mul.coeff, &p, &q);
+  num = ixs_node_int(ctx, p);
+  denom = ixs_node_int(ctx, q);
+  if (!num || !denom)
+    return FLOOR_PARTS_ERROR;
+  has_denominator = q != 1;
+  for (i = 0; i < arg->u.mul.nfactors; i++) {
+    ixs_node *base = arg->u.mul.factors[i].base;
+    int32_t exponent = arg->u.mul.factors[i].exp;
+    int32_t magnitude;
+    if (exponent == INT32_MIN)
+      return FLOOR_PARTS_NO_MATCH;
+    magnitude = exponent < 0 ? -exponent : exponent;
+    if (magnitude > MAX_FOLD_EXP)
+      return FLOOR_PARTS_NO_MATCH;
+    if (exponent > 0) {
+      num = apply_pow(ctx, num, base, exponent);
+    } else {
+      denom = apply_pow(ctx, denom, base, -exponent);
+      has_denominator = true;
+    }
+    if (!num || !denom)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(num) || ixs_node_is_sentinel(denom))
+      return FLOOR_PARTS_NO_MATCH;
+  }
+  if (!has_denominator)
+    return FLOOR_PARTS_NO_MATCH;
+  *numerator = num;
+  *denominator = denom;
+  return FLOOR_PARTS_MATCH;
+}
+
+static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
+                                               ixs_node **numerator,
+                                               ixs_node **denominator) {
+  ixs_node *arg;
+  ixs_node *num;
+  ixs_node *denom = NULL;
+  uint32_t i;
+  if (floor->tag != IXS_FLOOR)
+    return FLOOR_PARTS_NO_MATCH;
+  arg = floor->u.unary.arg;
+  if (arg->tag == IXS_MUL)
+    return quotient_mul_parts(ctx, arg, numerator, denominator);
+  if (arg->tag != IXS_ADD || !ixs_node_is_zero(arg->u.add.coeff) ||
+      arg->u.add.nterms == 0)
+    return FLOOR_PARTS_NO_MATCH;
+  num = ixs_node_int(ctx, 0);
+  if (!num)
+    return FLOOR_PARTS_ERROR;
+  for (i = 0; i < arg->u.add.nterms; i++) {
+    floor_parts_status status;
+    ixs_node *scaled =
+        simp_mul(ctx, arg->u.add.terms[i].coeff, arg->u.add.terms[i].term);
+    ixs_node *term_numerator;
+    ixs_node *term_denominator;
+    if (!scaled)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(scaled))
+      return FLOOR_PARTS_NO_MATCH;
+    status =
+        quotient_mul_parts(ctx, scaled, &term_numerator, &term_denominator);
+    if (status != FLOOR_PARTS_MATCH)
+      return status;
+    if (denom && term_denominator != denom)
+      return FLOOR_PARTS_NO_MATCH;
+    denom = term_denominator;
+    num = simp_add(ctx, num, term_numerator);
+    if (!num)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(num))
+      return FLOOR_PARTS_NO_MATCH;
+  }
+  if (!denom)
+    return FLOOR_PARTS_NO_MATCH;
+  *numerator = num;
+  *denominator = denom;
+  return FLOOR_PARTS_MATCH;
+}
+
+static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
+                                                       ixs_bounds *bnds,
+                                                       ixs_node *numerator,
+                                                       ixs_node *shift,
+                                                       ixs_node *denominator) {
+  ixs_node *remainder;
+  ixs_node *shifted;
+  ixs_node *upper_difference;
+  bool lower_safe;
+  bool upper_safe;
+  if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
+      ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bnds, denominator) != IXS_CHECK_TRUE)
+    return bnds->oom ? FLOOR_SHIFT_ERROR : FLOOR_SHIFT_UNPROVEN;
+  remainder = simp_mod_bnds(ctx, bnds, numerator, denominator);
+  if (!remainder)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(remainder))
+    return FLOOR_SHIFT_UNPROVEN;
+  shifted = simp_add(ctx, remainder, shift);
+  if (!shifted)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(shifted))
+    return FLOOR_SHIFT_UNPROVEN;
+  upper_difference = simp_sub(ctx, shifted, denominator);
+  if (!upper_difference)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(upper_difference))
+    return FLOOR_SHIFT_UNPROVEN;
+  lower_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_GE) ||
+               bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
+  upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
+               bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
+  if (bnds->oom)
+    return FLOOR_SHIFT_ERROR;
+  return lower_safe && upper_safe ? FLOOR_SHIFT_PROVEN : FLOOR_SHIFT_UNPROVEN;
+}
+
+/* One linear scan plus a fixed number of candidate-pair proofs. Quotient
+ * decomposition is bounded by MAX_FOLD_EXP and the normalized child counts. */
+static ixs_node *cancel_equal_floor_difference(ixs_ctx *ctx, ixs_bounds *bnds,
+                                               ixs_node *add) {
+  uint32_t i, j;
+  size_t inspected = 0;
+  if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
+    return add;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    floor_parts_status left_status;
+    ixs_node *left = add->u.add.terms[i].term;
+    ixs_node *left_numerator;
+    ixs_node *left_denominator;
+    left_status =
+        floor_quotient_parts(ctx, left, &left_numerator, &left_denominator);
+    if (left_status == FLOOR_PARTS_ERROR)
+      return NULL;
+    if (left_status != FLOOR_PARTS_MATCH)
+      continue;
+    for (j = i + 1; j < add->u.add.nterms; j++) {
+      floor_parts_status right_status;
+      floor_shift_status proof;
+      ixs_node *right = add->u.add.terms[j].term;
+      ixs_node *right_numerator;
+      ixs_node *right_denominator;
+      ixs_node *shift;
+      int64_t cp, cq;
+      if (inspected++ == EQUAL_FLOOR_PAIR_LIMIT)
+        return add;
+      if (!addterm_coeffs_cancel(add->u.add.terms, i, j, &cp, &cq))
+        continue;
+      right_status = floor_quotient_parts(ctx, right, &right_numerator,
+                                          &right_denominator);
+      if (right_status == FLOOR_PARTS_ERROR)
+        return NULL;
+      if (right_status != FLOOR_PARTS_MATCH ||
+          right_denominator != left_denominator)
+        continue;
+      shift = simp_sub(ctx, right_numerator, left_numerator);
+      if (!shift)
+        return NULL;
+      proof = ixs_node_is_sentinel(shift)
+                  ? FLOOR_SHIFT_UNPROVEN
+                  : floor_shift_stays_in_residue(ctx, bnds, left_numerator,
+                                                 shift, left_denominator);
+      if (proof == FLOOR_SHIFT_ERROR)
+        return NULL;
+      if (proof != FLOOR_SHIFT_PROVEN) {
+        shift = simp_sub(ctx, left_numerator, right_numerator);
+        if (!shift)
+          return NULL;
+        proof = ixs_node_is_sentinel(shift)
+                    ? FLOOR_SHIFT_UNPROVEN
+                    : floor_shift_stays_in_residue(ctx, bnds, right_numerator,
+                                                   shift, right_denominator);
+      }
+      if (proof == FLOOR_SHIFT_ERROR)
+        return NULL;
+      if (proof != FLOOR_SHIFT_PROVEN)
+        continue;
+      IXS_STAT_HIT(ctx);
+      return rebuild_add_without_pair(ctx, add, i, j);
+    }
+  }
+  return add;
+}
+
 /* Mod(x, M) -> x when 0 <= x < M; -> r when x == r (mod m) and m % M == 0;
  * -> 0 when M | x. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
@@ -17134,6 +17812,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                   rewrite_memo_slot *memo,
                                   rewrite_shared_cache *shared) {
   uint32_t i;
+  unsigned floor_candidates = 0;
   ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared);
   if (!result)
     return NULL;
@@ -17142,11 +17821,16 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     ixs_node *c = n->u.add.terms[i].coeff;
     if (!t)
       return NULL;
+    if (t->tag == IXS_FLOOR && floor_candidates < 2u)
+      floor_candidates++;
     result = simp_add(ctx, result, simp_mul(ctx, c, t));
     if (!result)
       return NULL;
   }
-  return cancel_congruent_mod_difference(ctx, bnds, result);
+  result = cancel_congruent_mod_difference(ctx, bnds, result);
+  if (!result || floor_candidates < 2u)
+    return result;
+  return cancel_equal_floor_difference(ctx, bnds, result);
 }
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,

@@ -632,6 +632,53 @@ static void test_xor_known_bit_simplification(void) {
       CHECK(raw_v == simp_v);
     }
   }
+
+  {
+    ixs_node *b = ixs_sym(ctx, "xor_add_b");
+    ixs_node *c = ixs_sym(ctx, "xor_add_c");
+    ixs_node *d = ixs_sym(ctx, "xor_add_d");
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, b, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, b, IXS_CMP_LE, ixs_int(ctx, 1)),
+        ixs_cmp(ctx, c, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, c, IXS_CMP_LE, ixs_int(ctx, 1)),
+        ixs_cmp(ctx, d, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, d, IXS_CMP_LE, ixs_int(ctx, 1)),
+    };
+    ixs_node *four_b = ixs_mul(ctx, ixs_int(ctx, 4), b);
+    ixs_node *eight_c = ixs_mul(ctx, ixs_int(ctx, 8), c);
+    ixs_node *sixteen_d = ixs_mul(ctx, ixs_int(ctx, 16), d);
+    ixs_node *inner0 =
+        ixs_xor(ctx, ixs_add(ctx, ixs_int(ctx, 32), four_b), eight_c);
+    ixs_node *inner1 =
+        ixs_xor(ctx, ixs_add(ctx, ixs_int(ctx, 33), four_b), eight_c);
+    ixs_node *nested0 = ixs_xor(ctx, sixteen_d, inner0);
+    ixs_node *nested1 = ixs_xor(ctx, sixteen_d, inner1);
+    ixs_node *expected0 =
+        ixs_add(ctx, ixs_int(ctx, 32),
+                ixs_add(ctx, four_b, ixs_add(ctx, eight_c, sixteen_d)));
+    ixs_node *expected1 = ixs_add(ctx, expected0, ixs_int(ctx, 1));
+
+    CHECK(ixs_simplify(ctx, nested0, assumes, 6) == expected0);
+    CHECK(ixs_simplify(ctx, nested1, assumes, 6) == expected1);
+    CHECK(ixs_simplify(ctx, ixs_sub(ctx, nested1, nested0), assumes, 6) ==
+          ixs_int(ctx, 1));
+
+    CHECK(ixs_node_tag(
+              ixs_simplify(ctx,
+                           ixs_xor(ctx, ixs_add(ctx, ixs_int(ctx, 32), four_b),
+                                   ixs_mul(ctx, ixs_int(ctx, 4), c)),
+                           assumes, 6)) == IXS_XOR);
+    CHECK(ixs_node_tag(
+              ixs_simplify(ctx,
+                           ixs_xor(ctx, ixs_add(ctx, ixs_int(ctx, 4), four_b),
+                                   ixs_int(ctx, 8)),
+                           assumes, 6)) == IXS_XOR);
+    CHECK(
+        ixs_node_tag(ixs_simplify(
+            ctx, ixs_xor(ctx, ixs_sub(ctx, ixs_int(ctx, 32), four_b), eight_c),
+            assumes, 6)) == IXS_XOR);
+  }
 }
 
 static void test_xor_nested_cancellation(void) {
@@ -1836,6 +1883,56 @@ static void test_floor_symbolic_denom(void) {
   ixs_node *e3 = ixs_floor(ctx, ixs_div(ctx, x, K));
   r = ixs_simplify(ctx, e3, assumes, 3);
   CHECK(r != ixs_int(ctx, 0));
+}
+
+static void test_floor_symbolic_denom_residue(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *a = ixs_sym(ctx, "floor_residue_a");
+  ixs_node *d = ixs_sym(ctx, "floor_residue_d");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *remainder = ixs_mod(ctx, a, d);
+  ixs_node *base = ixs_floor(ctx, ixs_div(ctx, a, d));
+  ixs_node *next = ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, a, one), d));
+  ixs_node *previous = ixs_floor(ctx, ixs_div(ctx, ixs_sub(ctx, a, one), d));
+  ixs_node *difference = ixs_sub(ctx, base, next);
+  ixs_node *positive = ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *no_upper_cross =
+      ixs_cmp(ctx, ixs_add(ctx, remainder, one), IXS_CMP_LT, d);
+  ixs_node *above_lower_boundary =
+      ixs_cmp(ctx, remainder, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *safe[] = {positive, no_upper_cross};
+  ixs_node *safe_negative[] = {positive, above_lower_boundary};
+  ixs_node *boundary[] = {
+      positive,
+      ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_sub(ctx, d, one)),
+  };
+  ixs_node *contradictory[] = {
+      positive,
+      ixs_cmp(ctx, d, IXS_CMP_LT, ixs_int(ctx, 0)),
+      no_upper_cross,
+  };
+  ixs_node *overflow_left =
+      ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, a, ixs_int(ctx, INT64_MAX)), d));
+  ixs_node *overflow_right =
+      ixs_floor(ctx, ixs_div(ctx, ixs_sub(ctx, a, one), d));
+  ixs_node *overflow_difference = ixs_sub(ctx, overflow_left, overflow_right);
+  ixs_node *overflow_result;
+
+  CHECK(ixs_simplify(ctx, difference, safe, 2) == ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx,
+                     ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 3), base),
+                             ixs_mul(ctx, ixs_int(ctx, 3), next)),
+                     safe, 2) == ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, ixs_sub(ctx, base, previous), safe_negative, 2) ==
+        ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, difference, &positive, 1) != ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, difference, &no_upper_cross, 1) != ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, difference, boundary, 2) != ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, difference, contradictory, 3) != ixs_int(ctx, 0));
+  overflow_result = ixs_simplify(ctx, overflow_difference, &positive, 1);
+  CHECK(overflow_result != NULL);
+  CHECK(!ixs_is_error(overflow_result));
+  CHECK(overflow_result != ixs_int(ctx, 0));
 }
 
 static void test_simplify_batch(void) {
@@ -3415,6 +3512,7 @@ int main(void) {
   test_product_zero_branch_collapse();
   test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
+  test_floor_symbolic_denom_residue();
   test_simplify_batch();
   test_fact_backed_simplification();
   test_compound_assumption_simplification();

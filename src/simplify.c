@@ -8,6 +8,7 @@
 
 #define SIMPLIFY_ITER_LIMIT 64
 #define CONGRUENT_MOD_PAIR_LIMIT 256u
+#define EQUAL_FLOOR_PAIR_LIMIT 256u
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
 /* Rule-chain functions (rules and the helpers they call):
@@ -3478,6 +3479,7 @@ static const char *extra_transforms[] = {
     "recognize_mod",
     "cancel_floor_mod_pairs",
     "cancel_congruent_mod_difference",
+    "cancel_equal_floor_difference",
     "cancel_scaled_mod_quotient",
     "not_cmp_flip",
 };
@@ -4385,6 +4387,215 @@ static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
   return false;
 }
 
+typedef enum {
+  FLOOR_PARTS_NO_MATCH,
+  FLOOR_PARTS_MATCH,
+  FLOOR_PARTS_ERROR
+} floor_parts_status;
+
+typedef enum {
+  FLOOR_SHIFT_UNPROVEN,
+  FLOOR_SHIFT_PROVEN,
+  FLOOR_SHIFT_ERROR
+} floor_shift_status;
+
+static floor_parts_status quotient_mul_parts(ixs_ctx *ctx, ixs_node *arg,
+                                             ixs_node **numerator,
+                                             ixs_node **denominator) {
+  ixs_node *num;
+  ixs_node *denom;
+  int64_t p, q;
+  uint32_t i;
+  bool has_denominator = false;
+  if (arg->tag != IXS_MUL)
+    return FLOOR_PARTS_NO_MATCH;
+  ixs_node_get_rat(arg->u.mul.coeff, &p, &q);
+  num = ixs_node_int(ctx, p);
+  denom = ixs_node_int(ctx, q);
+  if (!num || !denom)
+    return FLOOR_PARTS_ERROR;
+  has_denominator = q != 1;
+  for (i = 0; i < arg->u.mul.nfactors; i++) {
+    ixs_node *base = arg->u.mul.factors[i].base;
+    int32_t exponent = arg->u.mul.factors[i].exp;
+    int32_t magnitude;
+    if (exponent == INT32_MIN)
+      return FLOOR_PARTS_NO_MATCH;
+    magnitude = exponent < 0 ? -exponent : exponent;
+    if (magnitude > MAX_FOLD_EXP)
+      return FLOOR_PARTS_NO_MATCH;
+    if (exponent > 0) {
+      num = apply_pow(ctx, num, base, exponent);
+    } else {
+      denom = apply_pow(ctx, denom, base, -exponent);
+      has_denominator = true;
+    }
+    if (!num || !denom)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(num) || ixs_node_is_sentinel(denom))
+      return FLOOR_PARTS_NO_MATCH;
+  }
+  if (!has_denominator)
+    return FLOOR_PARTS_NO_MATCH;
+  *numerator = num;
+  *denominator = denom;
+  return FLOOR_PARTS_MATCH;
+}
+
+static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
+                                               ixs_node **numerator,
+                                               ixs_node **denominator) {
+  ixs_node *arg;
+  ixs_node *num;
+  ixs_node *denom = NULL;
+  uint32_t i;
+  if (floor->tag != IXS_FLOOR)
+    return FLOOR_PARTS_NO_MATCH;
+  arg = floor->u.unary.arg;
+  if (arg->tag == IXS_MUL)
+    return quotient_mul_parts(ctx, arg, numerator, denominator);
+  if (arg->tag != IXS_ADD || !ixs_node_is_zero(arg->u.add.coeff) ||
+      arg->u.add.nterms == 0)
+    return FLOOR_PARTS_NO_MATCH;
+  num = ixs_node_int(ctx, 0);
+  if (!num)
+    return FLOOR_PARTS_ERROR;
+  for (i = 0; i < arg->u.add.nterms; i++) {
+    floor_parts_status status;
+    ixs_node *scaled =
+        simp_mul(ctx, arg->u.add.terms[i].coeff, arg->u.add.terms[i].term);
+    ixs_node *term_numerator;
+    ixs_node *term_denominator;
+    if (!scaled)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(scaled))
+      return FLOOR_PARTS_NO_MATCH;
+    status =
+        quotient_mul_parts(ctx, scaled, &term_numerator, &term_denominator);
+    if (status != FLOOR_PARTS_MATCH)
+      return status;
+    if (denom && term_denominator != denom)
+      return FLOOR_PARTS_NO_MATCH;
+    denom = term_denominator;
+    num = simp_add(ctx, num, term_numerator);
+    if (!num)
+      return FLOOR_PARTS_ERROR;
+    if (ixs_node_is_sentinel(num))
+      return FLOOR_PARTS_NO_MATCH;
+  }
+  if (!denom)
+    return FLOOR_PARTS_NO_MATCH;
+  *numerator = num;
+  *denominator = denom;
+  return FLOOR_PARTS_MATCH;
+}
+
+static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
+                                                       ixs_bounds *bnds,
+                                                       ixs_node *numerator,
+                                                       ixs_node *shift,
+                                                       ixs_node *denominator) {
+  ixs_node *remainder;
+  ixs_node *shifted;
+  ixs_node *upper_difference;
+  bool lower_safe;
+  bool upper_safe;
+  if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
+      ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bnds, denominator) != IXS_CHECK_TRUE)
+    return bnds->oom ? FLOOR_SHIFT_ERROR : FLOOR_SHIFT_UNPROVEN;
+  remainder = simp_mod_bnds(ctx, bnds, numerator, denominator);
+  if (!remainder)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(remainder))
+    return FLOOR_SHIFT_UNPROVEN;
+  shifted = simp_add(ctx, remainder, shift);
+  if (!shifted)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(shifted))
+    return FLOOR_SHIFT_UNPROVEN;
+  upper_difference = simp_sub(ctx, shifted, denominator);
+  if (!upper_difference)
+    return FLOOR_SHIFT_ERROR;
+  if (ixs_node_is_sentinel(upper_difference))
+    return FLOOR_SHIFT_UNPROVEN;
+  lower_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_GE) ||
+               bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
+  upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
+               bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
+  if (bnds->oom)
+    return FLOOR_SHIFT_ERROR;
+  return lower_safe && upper_safe ? FLOOR_SHIFT_PROVEN : FLOOR_SHIFT_UNPROVEN;
+}
+
+/* One linear scan plus a fixed number of candidate-pair proofs. Quotient
+ * decomposition is bounded by MAX_FOLD_EXP and the normalized child counts. */
+static ixs_node *cancel_equal_floor_difference(ixs_ctx *ctx, ixs_bounds *bnds,
+                                               ixs_node *add) {
+  uint32_t i, j;
+  size_t inspected = 0;
+  if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
+    return add;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    floor_parts_status left_status;
+    ixs_node *left = add->u.add.terms[i].term;
+    ixs_node *left_numerator;
+    ixs_node *left_denominator;
+    left_status =
+        floor_quotient_parts(ctx, left, &left_numerator, &left_denominator);
+    if (left_status == FLOOR_PARTS_ERROR)
+      return NULL;
+    if (left_status != FLOOR_PARTS_MATCH)
+      continue;
+    for (j = i + 1; j < add->u.add.nterms; j++) {
+      floor_parts_status right_status;
+      floor_shift_status proof;
+      ixs_node *right = add->u.add.terms[j].term;
+      ixs_node *right_numerator;
+      ixs_node *right_denominator;
+      ixs_node *shift;
+      int64_t cp, cq;
+      if (inspected++ == EQUAL_FLOOR_PAIR_LIMIT)
+        return add;
+      if (!addterm_coeffs_cancel(add->u.add.terms, i, j, &cp, &cq))
+        continue;
+      right_status = floor_quotient_parts(ctx, right, &right_numerator,
+                                          &right_denominator);
+      if (right_status == FLOOR_PARTS_ERROR)
+        return NULL;
+      if (right_status != FLOOR_PARTS_MATCH ||
+          right_denominator != left_denominator)
+        continue;
+      shift = simp_sub(ctx, right_numerator, left_numerator);
+      if (!shift)
+        return NULL;
+      proof = ixs_node_is_sentinel(shift)
+                  ? FLOOR_SHIFT_UNPROVEN
+                  : floor_shift_stays_in_residue(ctx, bnds, left_numerator,
+                                                 shift, left_denominator);
+      if (proof == FLOOR_SHIFT_ERROR)
+        return NULL;
+      if (proof != FLOOR_SHIFT_PROVEN) {
+        shift = simp_sub(ctx, left_numerator, right_numerator);
+        if (!shift)
+          return NULL;
+        proof = ixs_node_is_sentinel(shift)
+                    ? FLOOR_SHIFT_UNPROVEN
+                    : floor_shift_stays_in_residue(ctx, bnds, right_numerator,
+                                                   shift, right_denominator);
+      }
+      if (proof == FLOOR_SHIFT_ERROR)
+        return NULL;
+      if (proof != FLOOR_SHIFT_PROVEN)
+        continue;
+      IXS_STAT_HIT(ctx);
+      return rebuild_add_without_pair(ctx, add, i, j);
+    }
+  }
+  return add;
+}
+
 /* Mod(x, M) -> x when 0 <= x < M; -> r when x == r (mod m) and m % M == 0;
  * -> 0 when M | x. */
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
@@ -4570,6 +4781,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                   rewrite_memo_slot *memo,
                                   rewrite_shared_cache *shared) {
   uint32_t i;
+  unsigned floor_candidates = 0;
   ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared);
   if (!result)
     return NULL;
@@ -4578,11 +4790,16 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     ixs_node *c = n->u.add.terms[i].coeff;
     if (!t)
       return NULL;
+    if (t->tag == IXS_FLOOR && floor_candidates < 2u)
+      floor_candidates++;
     result = simp_add(ctx, result, simp_mul(ctx, c, t));
     if (!result)
       return NULL;
   }
-  return cancel_congruent_mod_difference(ctx, bnds, result);
+  result = cancel_congruent_mod_difference(ctx, bnds, result);
+  if (!result || floor_candidates < 2u)
+    return result;
+  return cancel_equal_floor_difference(ctx, bnds, result);
 }
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,

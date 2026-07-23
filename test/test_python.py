@@ -1290,6 +1290,21 @@ def test_mod_range_intersects_interval_and_congruence(
         assert result == (min(reachable), max(reachable))
 
 
+@given(delta=st.integers(min_value=-8, max_value=8).filter(bool))
+def test_symbolic_floor_difference_uses_remainder_proof(delta: int) -> None:
+    """A proved remainder shift keeps symbolic quotients in one bucket."""
+    ctx = ixsimpl.Context()
+    a, d = ctx.sym("floor_a"), ctx.sym("floor_d")
+    remainder = a % d
+    expr = ixsimpl.floor(a / d) - ixsimpl.floor((a + delta) / d)
+    assumptions = [d > 0]
+    if delta > 0:
+        assumptions.append(remainder + delta < d)
+    else:
+        assumptions.append(remainder + delta >= 0)
+    assert expr.simplify(assumptions=assumptions) == ctx.int_(0)
+
+
 def test_relational_symbolic_mod_elimination() -> None:
     ctx = ixsimpl.Context()
     x, d = ctx.sym("rel_mod_x"), ctx.sym("rel_mod_d")
@@ -2161,10 +2176,94 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
     grid.assume(ctx.eq(x % 16, 0))
     assert ctx.equivalent(ctx.eq(x, 0), ctx.eq(x % 16, 0), grid) is None
 
+    assert ctx.equivalent(x < 8, x <= 7, empty) is True
+    assert ctx.equivalent(x >= 8, x > 7, empty) is True
+    assert ctx.equivalent(x < (1 << 63) - 1, x <= (1 << 63) - 2, empty) is True
+    aligned = ctx.facts()
+    aligned.assume(ctx.eq(x % 16, 0))
+    assert ctx.equivalent(x < 8, x < 9, aligned) is True
+    reachable = ctx.facts()
+    reachable.assume(ctx.eq(x % 8, 0))
+    assert ctx.equivalent(x < 8, x < 9, reachable) is None
+    assert ctx.equivalent(x < 8, x >= 9, empty) is None
+    assert ctx.equivalent(x / 2 < 8, x / 2 <= 7, empty) is None
+
+    divisor = ctx.sym("binding_equiv_divisor")
+    mod_safe = ctx.facts()
+    mod_safe.assume(ctx.eq(x % 16, 3))
+    mod_safe.assume(ctx.eq(divisor % 16, 0))
+    mod_safe.assume(divisor > 0)
+    assert ctx.equivalent((x + 1) % divisor, x % divisor + 1, mod_safe) is True
+    assert ctx.equivalent((x - 2) % divisor, x % divisor - 2, mod_safe) is True
+    assert ctx.equivalent(x % divisor + 1, (x + 1) % divisor, mod_safe) is True
+    assert ctx.equivalent((x - 4) % divisor, x % divisor - 4, mod_safe) is None
+    boundary = ctx.facts()
+    boundary.assume(ctx.eq(x % 16, 15))
+    boundary.assume(ctx.eq(divisor % 16, 0))
+    boundary.assume(divisor > 0)
+    assert ctx.equivalent((x + 1) % divisor, x % divisor + 1, boundary) is None
+    no_positive = ctx.facts()
+    no_positive.assume(ctx.eq(x % 16, 3))
+    no_positive.assume(ctx.eq(divisor % 16, 0))
+    assert ctx.equivalent((x + 1) % divisor, x % divisor + 1, no_positive) is None
+    negative_divisor = ctx.facts()
+    negative_divisor.assume(ctx.eq(x % 16, 3))
+    negative_divisor.assume(ctx.eq(divisor % 16, 0))
+    negative_divisor.assume(divisor < 0)
+    assert ctx.equivalent((x + 1) % divisor, x % divisor + 1, negative_divisor) is None
+    no_divisibility = ctx.facts()
+    no_divisibility.assume(ctx.eq(x % 16, 3))
+    no_divisibility.assume(divisor > 0)
+    assert ctx.equivalent((x + 1) % divisor, x % divisor + 1, no_divisibility) is None
+    noninteger = ctx.facts()
+    noninteger.assume(ctx.eq(divisor % 16, 0))
+    noninteger.assume(divisor > 0)
+    half = x / 2
+    assert ctx.equivalent((half + 1) % divisor, half % divisor + 1, noninteger) is None
+
     with pytest.raises(ValueError, match="not a predicate tree"):
         ctx.check_predicate(x & 7, empty)
     with pytest.raises(ValueError, match="not a predicate tree"):
         ctx.check_predicate(ixsimpl.or_(x, y), empty)
+
+
+@given(
+    modulus=st.integers(min_value=2, max_value=32),
+    residue_seed=st.integers(min_value=0, max_value=255),
+    threshold=st.integers(min_value=-128, max_value=128),
+    width=st.integers(min_value=1, max_value=32),
+    shift_seed=st.integers(min_value=-64, max_value=64),
+)
+def test_total_equivalence_discrete_cut_and_mod_shift_property(
+    modulus: int,
+    residue_seed: int,
+    threshold: int,
+    width: int,
+    shift_seed: int,
+) -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("equiv_property_x")
+    divisor = ctx.sym("equiv_property_divisor")
+    residue = residue_seed % modulus
+    shift = shift_seed % (2 * modulus + 1) - modulus
+    aligned = ctx.facts()
+    aligned.assume(ctx.eq(x % modulus, residue))
+
+    reachable = any(
+        (value - residue) % modulus == 0 for value in range(threshold, threshold + width)
+    )
+    upper = ctx.equivalent(x < threshold, x < threshold + width, aligned)
+    lower = ctx.equivalent(x >= threshold + width, x >= threshold, aligned)
+    expected = None if reachable else True
+    assert upper is expected
+    assert lower is expected
+
+    mod_facts = ctx.facts()
+    mod_facts.assume(ctx.eq(x % modulus, residue))
+    mod_facts.assume(ctx.eq(divisor % modulus, 0))
+    mod_facts.assume(divisor > 0)
+    result = ctx.equivalent((x + shift) % divisor, x % divisor + shift, mod_facts)
+    assert result is (True if 0 <= residue + shift < modulus else None)
 
 
 def test_equivalence_binding_invalid_inputs() -> None:
@@ -2669,6 +2768,72 @@ def test_xor_delta_large_pow2_does_not_overflow() -> None:
         assert simplified.eval(env) == expr.eval(env)
 
 
+def test_carry_free_add_nested_xor_queries() -> None:
+    ctx = ixsimpl.Context()
+    b, c, d = ctx.sym("b"), ctx.sym("c"), ctx.sym("d")
+    base, limit = ctx.sym("base"), ctx.sym("limit")
+    facts = ctx.facts()
+    for bit in (b, c, d):
+        facts.assume(bit >= 0)
+        facts.assume(bit <= 1)
+
+    inner0 = ixsimpl.xor_(32 + 4 * b, 8 * c)
+    inner1 = ixsimpl.xor_(33 + 4 * b, 8 * c)
+    nested0 = ixsimpl.xor_(16 * d, inner0)
+    nested1 = ixsimpl.xor_(16 * d, inner1)
+    expected0 = 32 + 4 * b + 8 * c + 16 * d
+
+    assert ctx.equivalent(inner0, 32 + 4 * b + 8 * c, facts) is True
+    assert ctx.equivalent(nested0, expected0, facts) is True
+    assert ctx.equivalent(nested0 + 1, nested1, facts) is True
+
+    active0 = ixsimpl.and_(base >= 0, 16 * base + nested0 < 16 * limit)
+    active1 = ixsimpl.and_(base >= 0, 16 * base + nested1 < 16 * limit)
+    assert ctx.equivalent(active0, active1, facts) is True
+
+    overlap = ixsimpl.xor_(32 + 4 * b, 4 * c)
+    carry = ixsimpl.xor_(4 + 4 * b, 8)
+    negative = ixsimpl.xor_(32 - 4 * b, 8 * c)
+    assert "xor" in str(overlap.simplify(facts=facts))
+    assert "xor" in str(carry.simplify(facts=facts))
+    assert "xor" in str(negative.simplify(facts=facts))
+    assert ctx.equivalent(overlap, 32 + 4 * b + 4 * c, facts) is None
+    assert ctx.equivalent(carry, 12 + 4 * b, facts) is None
+
+
+@given(
+    positions=st.lists(
+        st.integers(min_value=0, max_value=30),
+        min_size=4,
+        max_size=4,
+        unique=True,
+    )
+)
+def test_carry_free_add_known_bits_property(positions: list[int]) -> None:
+    ctx = ixsimpl.Context()
+    x, y, z = ctx.sym("x"), ctx.sym("y"), ctx.sym("z")
+    facts = ctx.facts()
+    for bit in (x, y, z):
+        facts.assume(bit >= 0)
+        facts.assume(bit <= 1)
+
+    constant_bit, x_bit, y_bit, z_bit = (1 << position for position in positions)
+    lhs = constant_bit + x_bit * x + y_bit * y
+    expr = ixsimpl.xor_(lhs, z_bit * z)
+    expected = lhs + z_bit * z
+    known_zero, known_one, _ = ctx.known_bits(lhs, facts) or (0, 0, None)
+    possible = (~known_zero) & ((1 << 64) - 1)
+
+    assert possible == constant_bit | x_bit | y_bit
+    assert known_one == constant_bit
+    assert ctx.equivalent(expr, expected, facts) is True
+    for xv in (0, 1):
+        for yv in (0, 1):
+            for zv in (0, 1):
+                env = {"x": xv, "y": yv, "z": zv}
+                assert expr.eval(env) == expected.eval(env)
+
+
 def test_noninteger_mod_does_not_feed_divisibility_rewrite() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
@@ -2814,8 +2979,9 @@ def test_facts_assume_many_is_atomic() -> None:
 
     wrong_type = ctx.facts()
     wrong_type.assume(x >= 0)
+    invalid_predicate: Any = 1
     with pytest.raises(TypeError):
-        wrong_type.assume_many([y >= 5, 1])
+        wrong_type.assume_many([y >= 5, invalid_predicate])
     assert ctx.range(x, facts=wrong_type) == (0, None)
 
     other = ixsimpl.Context()

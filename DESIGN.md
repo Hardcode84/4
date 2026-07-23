@@ -880,7 +880,13 @@ floor(floor(x/a) / b)    → floor(x / (a*b))    when a,b > 0 integer
 ceiling(ceiling(x/a) / b) → ceiling(x / (a*b))  when a,b > 0 integer
 Mod(a*floor(x/a), a)     → 0
 Mod(x, n) where 0 <= x < n is provable → x
+floor((A+s)/D) - floor(A/D) → 0
+    when D is a positive integer and 0 <= Mod(A,D)+s < D is provable
 ```
+
+The same-bucket floor scan is linear in the normalized ADD size and inspects
+at most 256 candidate pairs. Quotient reconstruction caps repeated powers at
+`MAX_FOLD_EXP`; reaching either bound leaves the expression unchanged.
 
 #### 4.5 Mod Rules
 
@@ -1067,6 +1073,12 @@ bounds, because the known-bit lattice tracks only the low 64 bits. The
 XOR-delta rule leaves the largest int64 power-of-two delta untouched to avoid
 overflowing temporary arithmetic.
 
+`ADD` preserves sparse bitfacts when every normalized addend is a non-negative
+integer scaled by a positive power of two and their possible-one masks are
+pairwise disjoint. Addition is then carry-free and its possible and required
+bits are the unions of the addend masks. Overlapping masks, negative scales,
+and non-integer scales keep the interval-derived fallback.
+
 #### 4.9 Bitwise And/Or And Logical Not
 
 ```
@@ -1120,7 +1132,10 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   expanded canonical alias, so `2*(A + 8*B)` and `2*A + 16*B` can prove the
   same range when both normalize to the same expanded form.  Comparison
   assumptions over integer-valued expressions also materialize expression
-  range facts; for example `-C + expr <= 0` records `expr <= C`.
+  range facts; for example `-C + expr <= 0` records `expr <= C`. ADD queries
+  also recover a stored range for their constant-free base and shift both
+  endpoints by the query constant. Thus normalized facts on `64*u+w` bound
+  `128+64*u+w` without requiring independent ranges for `u` and `w`.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
@@ -1256,6 +1271,8 @@ This enables rules like:
   integer per congruence and can be extracted from the floor)
 - `c*Mod(A,m) - c*Mod(B,m)` → `0` when `A-B ≡ 0 (mod m)` is proven
   for the shared positive literal modulus
+- Opposite-coefficient floors with one denominator cancel when a remainder
+  proof shows the numerator shift stays in the same quotient bucket
 
 **Bitwise-fact extraction and consumers**:
 
@@ -1386,13 +1403,28 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   difference, expansion followed by simplification under the shared fact
   environment, flattened order-independent matching of predicate `AND`/`OR`
   terms, and a query-specific congruence proof for otherwise identical
-  comparisons of `Mod` residuals. Congruence is deliberately not a generic
-  equality rule: a divisible residual delta does not prove arbitrary
-  comparisons or `x == 0`. A nonzero constant difference or predicates with
-  opposite proven truth values return `FALSE`; other failed sufficient proofs
-  return `UNKNOWN`. Contradictory facts never prove equivalence. Recursive
-  predicate-shape comparison has depth 32, 4096 proof visits, and at most 1024
-  flattened terms, so this API is not an unbounded theorem prover.
+  comparisons of `Mod` residuals. Aligned ordered comparisons normalize to
+  integer residual cuts against zero. Equal cut thresholds prove equality;
+  unequal thresholds prove equality only when the intervening integer gap is
+  unreachable by the residual's range or congruence. This includes strict to
+  non-strict normalization such as `x < 8` versus `x <= 7` without assuming a
+  machine width.
+
+  The same query proves `Mod(A + delta, D) == Mod(A, D) + delta` when both
+  sides are total, `A` and `D` are integer-valued, `D` is positive, and the
+  shifted remainder cannot cross zero or `D`. Direct bounds may prove that
+  interval. The congruence proof requires a known `A == r (mod m)`, `m > 1`,
+  `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
+  `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
+
+  Congruence is deliberately not a generic equality rule: a divisible
+  residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
+  constant difference or predicates with opposite proven truth values return
+  `FALSE`; other failed sufficient proofs return `UNKNOWN`. Contradictory
+  facts never prove equivalence. Recursive predicate-shape comparison has
+  depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
+  inference uses the congruence depth limit and makes one structural pass over
+  the visited expression. This API is not an unbounded theorem prover.
 - **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
   `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
@@ -1512,8 +1544,9 @@ Then `floor([0, 127/128]) = [0, 0]`, collapsing to constant `0`.
 `floor(x/K)` with `x < K-1, K >= 2`, the bounds engine sees
 `x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]` independently, so `x/K`
 has an unbounded interval. Targeted rules can query normalized comparisons for
-specific proofs such as `0 <= x < K` in `Mod(x,K)`; arbitrary cross-variable
-interval projection remains out of scope.
+specific proofs such as `0 <= x < K` in `Mod(x,K)` and same-bucket floor
+differences; arbitrary cross-variable interval projection remains out of
+scope.
 
 ## Error Model
 
