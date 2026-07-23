@@ -128,6 +128,10 @@ endif()
 
 add_executable(test_expand test/test_expand.c)
 target_link_libraries(test_expand ixsimpl)
+target_include_directories(test_expand PRIVATE src)
+if(USE_AMALGAMATION)
+    target_compile_definitions(test_expand PRIVATE IXS_TEST_AMALGAMATION)
+endif()
 add_test(NAME test_expand COMMAND test_expand)
 
 add_executable(test_import test/test_import.c)

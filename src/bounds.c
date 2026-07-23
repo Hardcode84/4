@@ -15,7 +15,18 @@
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
 
+static void bounds_empty_cache_invalidate(ixs_bounds *b) {
+  if (b)
+    b->empty_cache_valid = false;
+}
+
+static void bounds_mark_contradiction(ixs_bounds *b) {
+  b->contradiction = true;
+  bounds_empty_cache_invalidate(b);
+}
+
 static void bounds_cache_clear(ixs_bounds *b) {
+  bounds_empty_cache_invalidate(b);
   if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
     memset(b->cache, 0, b->cache_cap * sizeof(*b->cache));
 }
@@ -78,6 +89,8 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->cache_cap = 0;
   b->range_pw_depth = 0;
   b->contradiction = false;
+  b->empty_cache_valid = false;
+  b->empty_cache_value = false;
   b->oom = false;
   if (b->vars)
     bounds_cache_alloc(b);
@@ -118,6 +131,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->cache_cap = BOUNDS_CACHE_DISABLED;
   dst->range_pw_depth = src->range_pw_depth;
   dst->contradiction = src->contradiction;
+  dst->empty_cache_valid = false;
+  dst->empty_cache_value = false;
   dst->oom = false;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
@@ -166,6 +181,7 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
     b->vars = grown;
     b->cap *= 2;
   }
+  bounds_empty_cache_invalidate(b);
   v = &b->vars[b->nvars++];
   v->name = name;
   v->iv.valid = true;
@@ -261,26 +277,27 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
   int64_t exact;
   if (!v)
     return;
+  bounds_empty_cache_invalidate(b);
   if (v->bits.pow2 == IXS_POW2_OR_ZERO && interval_lower_at_least(&v->iv, 1, 1))
     v->bits.pow2 = IXS_POW2_POSITIVE;
   if ((v->bits.pow2 == IXS_POW2_OR_ZERO &&
        interval_upper_less_than(&v->iv, 0, 1)) ||
       (v->bits.pow2 == IXS_POW2_POSITIVE &&
        interval_upper_less_than(&v->iv, 1, 1)))
-    b->contradiction = true;
+    bounds_mark_contradiction(b);
   if (interval_exact_int(&v->iv, &exact)) {
     uint64_t u = (uint64_t)exact;
     if ((v->bits.known_zero & u) != 0 || (v->bits.known_one & ~u) != 0)
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
     if ((v->bits.pow2 == IXS_POW2_OR_ZERO ||
          v->bits.pow2 == IXS_POW2_POSITIVE) &&
         exact != 0 && !int64_is_positive_pow2(exact))
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
     if (v->bits.pow2 == IXS_POW2_POSITIVE && exact == 0)
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
   }
   if (bitfacts_conflict(&v->bits))
-    b->contradiction = true;
+    bounds_mark_contradiction(b);
 }
 
 static void apply_var_known_bits(ixs_bounds *b, ixs_var_bound *v,
@@ -319,14 +336,14 @@ static void apply_exact_int_bits(ixs_bounds *b, ixs_var_bound *v, int64_t val) {
   apply_var_known_bits(b, v, ~u, u);
   if (val == 0) {
     if (v->bits.pow2 == IXS_POW2_POSITIVE)
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
     else
       v->bits.pow2 = IXS_POW2_OR_ZERO;
   } else if (int64_is_positive_pow2(val)) {
     v->bits.pow2 = IXS_POW2_POSITIVE;
   } else if (v->bits.pow2 == IXS_POW2_OR_ZERO ||
              v->bits.pow2 == IXS_POW2_POSITIVE) {
-    b->contradiction = true;
+    bounds_mark_contradiction(b);
   }
   refine_var_bit_consistency(b, v);
 }
@@ -355,6 +372,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   uint64_t inverse, k, merged;
   if (m <= 0)
     return;
+  bounds_empty_cache_invalidate(b);
   rem = (int64_t)bounds_normalize_residue(rem, (uint64_t)m);
   v = get_or_create_var(b, name);
   if (!v)
@@ -369,7 +387,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   g = ixs_gcd(old_mod, m);
   difference = rem - v->remainder;
   if (bounds_normalize_residue(difference, (uint64_t)g) != 0) {
-    b->contradiction = true;
+    bounds_mark_contradiction(b);
     return;
   }
   if (old_mod > INT64_MAX / (m / g))
@@ -557,11 +575,17 @@ static ixs_interval interval_from_sym_cmp_const(ixs_cmp_op op, int64_t cp,
 }
 
 static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
+  ixs_node *cached;
   ixs_node *result;
   uint32_t i;
   if (!b || !b->ctx || !expr || expr->tag != IXS_ADD ||
       ixs_node_is_zero(expr->u.add.coeff) || expr->u.add.nterms == 0)
     return NULL;
+
+  cached = ixs_node_transform_cache_lookup(
+      b->ctx, expr, IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST);
+  if (cached)
+    return cached;
 
   result = b->ctx->node_zero;
   for (i = 0; i < expr->u.add.nterms; i++) {
@@ -579,6 +603,8 @@ static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
       return NULL;
     }
   }
+  ixs_node_transform_cache_store(b->ctx, expr,
+                                 IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST, result);
   return result;
 }
 
@@ -863,7 +889,7 @@ static void extract_bitfacts_from_const_eq(ixs_bounds *b, ixs_node *expr,
     mask_bits = (uint64_t)mask;
     value_bits = (uint64_t)value;
     if ((value_bits & ~mask_bits) != 0) {
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
       return;
     }
     apply_known_bits(b, name, (~value_bits) & mask_bits,
@@ -875,7 +901,7 @@ static void extract_bitfacts_from_const_eq(ixs_bounds *b, ixs_node *expr,
     mask_bits = (uint64_t)mask;
     value_bits = (uint64_t)value;
     if ((value_bits & mask_bits) != mask_bits) {
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
       return;
     }
     apply_known_bits(b, name, ~value_bits, value_bits & ~mask_bits);
@@ -999,6 +1025,7 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   size_t new_cap;
   if (!b || !expr || b->oom || bounds_is_known_nonzero(b, expr))
     return;
+  bounds_empty_cache_invalidate(b);
   if (b->nnonzero < b->nonzero_cap) {
     b->nonzero[b->nnonzero++] = expr;
     return;
@@ -2526,18 +2553,27 @@ static bool bounds_has_zero_nonzero_conflict(ixs_bounds *b) {
   return false;
 }
 
+static bool bounds_cache_empty_result(ixs_bounds *b, bool result) {
+  b->empty_cache_valid = true;
+  b->empty_cache_value = result;
+  return result;
+}
+
+/* Cache hit is O(1); miss scans variables, expression pairs, and exclusions. */
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
   size_t i, j;
 
+  if (b->empty_cache_valid)
+    return b->empty_cache_value;
   if (b->contradiction)
-    return true;
+    return bounds_cache_empty_result(b, true);
 
   for (i = 0; i < b->nvars; i++) {
     refine_var_bit_consistency(b, &b->vars[i]);
     if (b->contradiction)
-      return true;
+      return bounds_cache_empty_result(b, true);
     if (ixs_interval_is_empty(b->vars[i].iv))
-      return true;
+      return bounds_cache_empty_result(b, true);
   }
 
   for (i = 0; i < b->nexprs; i++) {
@@ -2546,15 +2582,15 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
       if (b->exprs[j].expr == b->exprs[i].expr) {
         iv = iv_intersect(iv, b->exprs[j].iv);
         if (!iv.valid || ixs_interval_is_empty(iv))
-          return true;
+          return bounds_cache_empty_result(b, true);
       }
     }
   }
 
   if (bounds_has_zero_nonzero_conflict(b))
-    return true;
+    return bounds_cache_empty_result(b, true);
 
-  return false;
+  return bounds_cache_empty_result(b, false);
 }
 
 typedef struct {
@@ -2820,6 +2856,7 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
 #define DEFINED_BOUNDS_DEPTH_LIMIT 64u
 #define DEFINED_BOUNDS_VISIT_LIMIT 4096u
 #define DEFINED_BOUNDS_MEMO_CAP 8192u
+#define DEFINED_BOUNDS_CACHE_MIN_CAP 32u
 #define DEFINED_BOUNDS_CACHE_CAP 8192u
 
 typedef struct {
@@ -3013,7 +3050,8 @@ static defined_depth_entry *defined_depth_find(defined_depth_entry *memo,
 }
 
 static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
-                                      ixs_node *root, bool *shared) {
+                                      ixs_node *root, bool *shared,
+                                      size_t *node_visits) {
   defined_depth_frame stack[DEFINED_BOUNDS_DEPTH_LIMIT];
   ixs_arena_mark mark;
   defined_depth_entry *memo;
@@ -3025,6 +3063,8 @@ static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
 
   if (shared)
     *shared = false;
+  if (node_visits)
+    *node_visits = 0;
   if (!root || !defined_child_count(root, &nchildren))
     return false;
   mark = ixs_arena_save(b->scratch);
@@ -3074,30 +3114,41 @@ static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
     depth++;
   }
   safe = true;
+  if (node_visits)
+    *node_visits = visited;
 
 cleanup:
   ixs_arena_restore(b->scratch, mark);
   return safe;
 }
 
+static size_t defined_bounds_cache_capacity(size_t node_visits) {
+  size_t cap = DEFINED_BOUNDS_CACHE_MIN_CAP;
+  while (cap < DEFINED_BOUNDS_CACHE_CAP && node_visits > cap / 2u)
+    cap *= 2u;
+  return cap;
+}
+
 static bool defined_cache_scope_init(defined_cache_scope *scope,
-                                     defined_state *state, ixs_bounds *b) {
+                                     defined_state *state, ixs_bounds *b,
+                                     size_t node_visits) {
   ixs_bounds_cache_entry *cache;
+  size_t cache_cap = defined_bounds_cache_capacity(node_visits);
   scope->mark = ixs_arena_save(b->scratch);
   scope->old_ctx = b->ctx;
   scope->old_cache = b->cache;
   scope->old_cache_cap = b->cache_cap;
   scope->active = false;
-  cache = ixs_arena_alloc(b->scratch, DEFINED_BOUNDS_CACHE_CAP * sizeof(*cache),
-                          sizeof(void *));
+  cache =
+      ixs_arena_alloc(b->scratch, cache_cap * sizeof(*cache), sizeof(void *));
   if (!cache) {
     state->oom = true;
     ixs_arena_restore(b->scratch, scope->mark);
     return false;
   }
-  memset(cache, 0, DEFINED_BOUNDS_CACHE_CAP * sizeof(*cache));
+  memset(cache, 0, cache_cap * sizeof(*cache));
   b->cache = cache;
-  b->cache_cap = DEFINED_BOUNDS_CACHE_CAP;
+  b->cache_cap = cache_cap;
   /* Direct overrides are enough for a proof query. Canonical aliases expand
    * recursively and can revisit a shared DAG before the interval cache sees
    * it, so disable that optional path inside this bounded scope. */
@@ -3125,13 +3176,14 @@ static ixs_check_result defined_relation_zero(defined_state *state,
   ixs_bitfacts bits;
   int64_t modulus, remainder;
   defined_cache_scope cache_scope;
+  size_t node_visits;
   bool shared;
 
   if ((op == IXS_CMP_EQ || op == IXS_CMP_NE) &&
       bounds_is_known_nonzero(b, expr))
     return op == IXS_CMP_NE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
-  if (!defined_bounds_depth_safe(state, b, expr, &shared) ||
-      !defined_cache_scope_init(&cache_scope, state, b))
+  if (!defined_bounds_depth_safe(state, b, expr, &shared, &node_visits) ||
+      !defined_cache_scope_init(&cache_scope, state, b, node_visits))
     return IXS_CHECK_UNKNOWN;
   iv = ixs_bounds_get(b, expr);
   if (b->oom) {
@@ -3173,6 +3225,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
                                                 ixs_bounds *b, ixs_node *cond) {
   ixs_check_result result;
   defined_cache_scope cache_scope;
+  size_t node_visits;
   bool shared;
   if (ixs_node_is_known_false(cond))
     return IXS_CHECK_FALSE;
@@ -3185,7 +3238,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
       if (result != IXS_CHECK_UNKNOWN || state->oom)
         return result;
     }
-    if (!defined_bounds_depth_safe(state, b, cond, &shared))
+    if (!defined_bounds_depth_safe(state, b, cond, &shared, &node_visits))
       return IXS_CHECK_UNKNOWN;
     if (shared) {
       if (!ixs_node_is_zero(cond->u.binary.rhs))
@@ -3193,7 +3246,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
       return defined_relation_zero(state, b, cond->u.binary.lhs,
                                    cond->u.binary.cmp_op);
     }
-    if (!defined_cache_scope_init(&cache_scope, state, b))
+    if (!defined_cache_scope_init(&cache_scope, state, b, node_visits))
       return IXS_CHECK_UNKNOWN;
     result = ixs_bounds_check(b, cond);
     if (b->oom)
@@ -3321,7 +3374,7 @@ static defined_pw_step defined_piecewise_case(defined_state *state,
     return DEFINED_PW_FAILED;
   if (truth == IXS_CHECK_FALSE)
     return DEFINED_PW_NEXT;
-  if (!defined_bounds_depth_safe(state, remaining, cond, NULL)) {
+  if (!defined_bounds_depth_safe(state, remaining, cond, NULL, NULL)) {
     defined_partition_add(partitions, IXS_CHECK_UNKNOWN);
     return DEFINED_PW_STOP;
   }
@@ -3643,7 +3696,7 @@ static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
     if (cur == b->ctx->node_true)
       continue;
     if (cur == b->ctx->node_false) {
-      b->contradiction = true;
+      bounds_mark_contradiction(b);
       bounds_cache_clear(b);
       continue;
     }
@@ -3879,14 +3932,14 @@ static void bounds_transfer_inverse_congruence(ixs_bounds *dst,
                        bounds_normalize_residue(offset, m), m);
   g = bounds_u64_gcd(a, m);
   if (rhs % g != 0) {
-    dst->contradiction = true;
+    bounds_mark_contradiction(dst);
     return;
   }
   reduced = m / g;
   if (reduced == 1u)
     return;
   if (!bounds_mod_inverse((a / g) % reduced, reduced, &inverse)) {
-    dst->contradiction = true;
+    bounds_mark_contradiction(dst);
     return;
   }
   result = bounds_mul_mod((rhs / g) % reduced, inverse, reduced);
@@ -3918,19 +3971,19 @@ static void bounds_check_constant_var_fact(ixs_bounds *dst,
                                            int64_t q) {
   uint64_t value;
   if (!bounds_interval_contains_rational(src->iv, p, q))
-    dst->contradiction = true;
+    bounds_mark_contradiction(dst);
   if (src->modulus > 0 &&
       (q != 1 || bounds_normalize_residue(p, (uint64_t)src->modulus) !=
                      (uint64_t)src->remainder))
-    dst->contradiction = true;
+    bounds_mark_contradiction(dst);
   if (src->bits.known_zero != 0 || src->bits.known_one != 0) {
     if (q != 1) {
-      dst->contradiction = true;
+      bounds_mark_contradiction(dst);
     } else {
       value = (uint64_t)p;
       if ((src->bits.known_zero & value) != 0 ||
           (src->bits.known_one & ~value) != 0)
-        dst->contradiction = true;
+        bounds_mark_contradiction(dst);
     }
   }
   if (src->bits.pow2 != IXS_POW2_UNKNOWN) {
@@ -3938,7 +3991,7 @@ static void bounds_check_constant_var_fact(ixs_bounds *dst,
         (src->bits.pow2 == IXS_POW2_POSITIVE && !int64_is_positive_pow2(p)) ||
         (src->bits.pow2 == IXS_POW2_OR_ZERO && p != 0 &&
          !int64_is_positive_pow2(p)))
-      dst->contradiction = true;
+      bounds_mark_contradiction(dst);
   }
 }
 
@@ -3951,7 +4004,7 @@ static void bounds_transfer_range(ixs_bounds *dst, ixs_node *replacement,
   if (ixs_node_is_const(replacement)) {
     ixs_node_get_rat(replacement, &p, &q);
     if (!bounds_interval_contains_rational(iv, p, q))
-      dst->contradiction = true;
+      bounds_mark_contradiction(dst);
     return;
   }
   if (bounds_extract_integer_affine(replacement, &name, &scale, &offset))
@@ -4240,8 +4293,8 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
   }
   if (!ixs_bounds_fork(&candidate, &dst->bounds))
     goto failed;
-  candidate.contradiction =
-      candidate.contradiction || src->bounds.contradiction;
+  if (src->bounds.contradiction)
+    bounds_mark_contradiction(&candidate);
   if (!bounds_transfer_substituted_exprs(&candidate, &src->bounds, ctx, nsubs,
                                          targets, replacements) ||
       !bounds_transfer_substituted_vars(&candidate, &src->bounds, ctx, nsubs,

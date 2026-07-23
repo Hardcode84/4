@@ -61,6 +61,8 @@ typedef struct {
   size_t cache_cap;
   unsigned range_pw_depth;
   bool contradiction;
+  bool empty_cache_valid;
+  bool empty_cache_value;
   bool oom;
   ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;

@@ -343,6 +343,48 @@ static void test_bounds_assumption_invalidates_cache(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_empty_cache_invalidation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds parent;
+  ixs_bounds child;
+  ixs_bounds expressions;
+  ixs_interval zero = ixs_interval_exact(0, 1);
+  ixs_interval one = ixs_interval_exact(1, 1);
+  ixs_node *x = ixs_sym(ctx, "empty_cache_x");
+
+  CHECK(ixs_bounds_init(&parent, ixs_test_scratch(ctx)));
+  ixs_bounds_add_assumption(&parent,
+                            ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
+  CHECK(!parent.empty_cache_valid);
+  CHECK(!ixs_bounds_has_empty(&parent));
+  CHECK(parent.empty_cache_valid && !parent.empty_cache_value);
+  CHECK(!ixs_bounds_has_empty(&parent));
+
+  CHECK(ixs_bounds_fork(&child, &parent));
+  CHECK(!child.empty_cache_valid);
+  CHECK(!ixs_bounds_has_empty(&child));
+  ixs_bounds_add_assumption(&child,
+                            ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0)));
+  CHECK(!child.empty_cache_valid);
+  CHECK(ixs_bounds_has_empty(&child));
+  CHECK(child.empty_cache_valid && child.empty_cache_value);
+  CHECK(parent.empty_cache_valid && !ixs_bounds_has_empty(&parent));
+
+  ixs_bounds_destroy(&child);
+  ixs_bounds_destroy(&parent);
+
+  CHECK(ixs_bounds_init(&expressions, ixs_test_scratch(ctx)));
+  ixs_bounds_add_expr(&expressions, x, zero);
+  CHECK(!ixs_bounds_has_empty(&expressions));
+  CHECK(expressions.empty_cache_valid);
+  ixs_bounds_add_expr(&expressions, x, one);
+  CHECK(!expressions.empty_cache_valid);
+  CHECK(ixs_bounds_has_empty(&expressions));
+  ixs_bounds_destroy(&expressions);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_two_sided(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -3253,6 +3295,7 @@ static void test_public_defined_traversal_bounds_and_sharing(void) {
   ixs_node *one = ixs_int(ctx, 1);
   ixs_node *shared_positive =
       ixs_cmp(ctx, shared_base, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_facts *shared_facts = ixs_facts_create(ctx);
   ixs_mulfactor guarded_factor;
   ixs_pwcase one_case;
   unsigned i;
@@ -3273,6 +3316,12 @@ static void test_public_defined_traversal_bounds_and_sharing(void) {
   guarded_factor.exp = -1;
   guarded = ixs_node_mul(ctx, one, 1, &guarded_factor);
   CHECK(ixs_check_defined(ctx, guarded, &shared_positive, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(shared_facts, shared_positive));
+  /* Eval memo, stack, depth memo succeed; interval cache fails. */
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 3);
+  CHECK(ixs_check_defined_facts(shared_facts, guarded) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_check_defined_facts(shared_facts, guarded) == IXS_CHECK_TRUE);
   shared_values[0] = guarded;
   shared_values[1] = one;
   shared_conds[0] = shared_positive;
@@ -3403,6 +3452,7 @@ int main(void) {
   test_bounds_sym_lt();
   test_bounds_sym_eq();
   test_bounds_assumption_invalidates_cache();
+  test_bounds_empty_cache_invalidation();
   test_bounds_two_sided();
   test_bounds_sym_gt();
   test_bounds_unknown_sym();

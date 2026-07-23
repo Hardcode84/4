@@ -163,6 +163,12 @@ depth limit. The simplifier, printer, and `ixs_subs` traverse the DAG
 recursively. `ixs_subs` uses a 256-slot direct-mapped memo cache (4 KB on the
 stack) keyed by node pointer to avoid exponential re-traversal of shared
 subexpressions; collisions only cause redundant work, never incorrect results.
+Successful deterministic node transforms use a context-local open-addressed
+cache keyed by source-node identity. Current slots memoize top-level expansion
+and removal of an ADD constant for shifted bounds. Arena-backed storage stays
+at or below 75% load, so hits and inserts are expected O(1). Successful results
+survive session reset; failures and sentinels are not cached. Statistics reset
+clears the cache so rule-hit counters remain observable.
 For expressions built from the corpus (max depth 11) this is safe.
 Deliberately constructing extremely deep trees (depth > ~10,000) via the API
 may cause stack overflow. This is considered acceptable for the target domain.
@@ -1089,6 +1095,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   substitution, so reciprocal guards can use both incoming disequalities and
   branch-local conditions. A direct zero range for the same expression is a
   detected contradiction.
+- **Contradiction cache**: the detected-empty result is cached until any bound,
+  congruence, bit, nonzero, or expression-range mutation. Query hits are O(1);
+  a miss performs the full variable, expression-pair, and exclusion scan.
 - **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
@@ -1391,8 +1400,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   budget of 8192 node visits, a 1024-frame explicit stack, and a 16384-slot
   memo table. Piecewise fact environments nest at most 32 levels and share the
   same visit budget. Interval guard queries are attempted only for subgraphs
-  within 64 levels and 4096 local walk steps. Reaching any limit returns
-  `UNKNOWN`.
+  within 64 levels and 4096 local walk steps. Their temporary interval cache is
+  the smallest power-of-two table from 32 through 8192 with at least two slots
+  per local walk step. Reaching any limit returns `UNKNOWN`.
 - **Public divisibility query** (`ixs_check_divisible_facts`, Python
   `Context.divisible`, C++ `Facts::check_divisible`): first proves that the
   expression is integer-valued, then uses exact values, congruences, and known

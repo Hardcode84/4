@@ -134,6 +134,11 @@ IXS_STATIC bool ixs_rat_normalize(int64_t p, int64_t q, int64_t *rp,
                                   int64_t *rq) {
   if (q == 0)
     return false;
+  if (q == 1) {
+    *rp = p;
+    *rq = 1;
+    return true;
+  }
 
   if (p == 0) {
     *rp = 0;
@@ -166,6 +171,14 @@ IXS_STATIC bool ixs_rat_add(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
                             int64_t *rp, int64_t *rq) {
   if (aq == 0 || bq == 0)
     return false;
+  if (aq == 1 && bq == 1) {
+    int64_t sum;
+    if (!ixs_safe_add(ap, bp, &sum))
+      return false;
+    *rp = sum;
+    *rq = 1;
+    return true;
+  }
   /*
    * a/aq + b/bq = (a*bq + b*aq) / (aq*bq)
    * Reduce first to limit overflow: divide by gcd(aq, bq).
@@ -199,6 +212,14 @@ IXS_STATIC bool ixs_rat_mul(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
                             int64_t *rp, int64_t *rq) {
   if (aq == 0 || bq == 0)
     return false;
+  if (aq == 1 && bq == 1) {
+    int64_t product;
+    if (!ixs_safe_mul(ap, bp, &product))
+      return false;
+    *rp = product;
+    *rq = 1;
+    return true;
+  }
   /* Cross-reduce to limit overflow: gcd(ap, bq) and gcd(bp, aq) */
   int64_t g1 = ixs_gcd(ap, bq);
   int64_t g2 = ixs_gcd(bp, aq);
@@ -293,6 +314,13 @@ IXS_STATIC bool ixs_rat_mod(int64_t ap, int64_t aq, int64_t bp, int64_t bq,
 /* --- Compare --- */
 
 IXS_STATIC int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
+  if (aq == bq && aq > 0) {
+    if (ap < bp)
+      return -1;
+    if (ap > bp)
+      return 1;
+    return 0;
+  }
   /*
    * Compare a/aq vs b/bq where aq, bq > 0.
    * Equivalent to sign(a*bq - b*aq).

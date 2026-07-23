@@ -339,6 +339,109 @@ IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Structural transform cache                                       */
+/* ------------------------------------------------------------------ */
+
+#define IXS_NODE_TRANSFORM_CACHE_INIT_CAP 256u
+
+static size_t node_transform_hash_ptr(const void *ptr) {
+  uint64_t x = (uint64_t)(uintptr_t)ptr;
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+/* Load stays at or below 75%, so lookup and insertion are expected O(1). */
+static ixs_node_transform_cache_entry *
+node_transform_cache_slot(ixs_node_transform_cache_entry *entries, size_t cap,
+                          const ixs_node *source) {
+  size_t mask = cap - 1u;
+  size_t index = node_transform_hash_ptr(source) & mask;
+  while (entries[index].source && entries[index].source != source)
+    index = (index + 1u) & mask;
+  return &entries[index];
+}
+
+static bool node_transform_cache_grow(ixs_ctx *ctx) {
+  size_t new_cap = ctx->transform_cache_cap ? ctx->transform_cache_cap * 2u
+                                            : IXS_NODE_TRANSFORM_CACHE_INIT_CAP;
+  ixs_node_transform_cache_entry *entries;
+  size_t i;
+
+  if (new_cap <= ctx->transform_cache_cap ||
+      new_cap > (size_t)-1 / sizeof(*entries))
+    return false;
+  entries =
+      ixs_arena_alloc(&ctx->arena, new_cap * sizeof(*entries), sizeof(void *));
+  if (!entries)
+    return false;
+  memset(entries, 0, new_cap * sizeof(*entries));
+
+  for (i = 0; i < ctx->transform_cache_cap; i++) {
+    if (ctx->transform_cache[i].source) {
+      ixs_node_transform_cache_entry *slot = node_transform_cache_slot(
+          entries, new_cap, ctx->transform_cache[i].source);
+      *slot = ctx->transform_cache[i];
+    }
+  }
+  ctx->transform_cache = entries;
+  ctx->transform_cache_cap = new_cap;
+  return true;
+}
+
+IXS_STATIC ixs_node *
+ixs_node_transform_cache_lookup(ixs_ctx *ctx, const ixs_node *source,
+                                ixs_node_transform_kind kind) {
+  ixs_node_transform_cache_entry *slot;
+  if (!ctx || !source || (unsigned)kind >= IXS_NODE_TRANSFORM_COUNT ||
+      !ctx->transform_cache_cap)
+    return NULL;
+  slot = node_transform_cache_slot(ctx->transform_cache,
+                                   ctx->transform_cache_cap, source);
+  return slot->source ? slot->results[kind] : NULL;
+}
+
+IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
+                                               ixs_node_transform_kind kind,
+                                               ixs_node *result) {
+  ixs_node_transform_cache_entry *slot;
+
+  if (!ctx || !source || !result ||
+      (unsigned)kind >= IXS_NODE_TRANSFORM_COUNT ||
+      ixs_node_is_sentinel(source) || ixs_node_is_sentinel(result) ||
+      !ixs_ctx_owns_node(ctx, source) || !ixs_ctx_owns_node(ctx, result))
+    return;
+  if (!ctx->transform_cache_cap && !node_transform_cache_grow(ctx))
+    return;
+  slot = node_transform_cache_slot(ctx->transform_cache,
+                                   ctx->transform_cache_cap, source);
+  if (slot->source) {
+    if (!slot->results[kind])
+      slot->results[kind] = result;
+    return;
+  }
+  if (ctx->transform_cache_used + 1u >
+      ctx->transform_cache_cap - ctx->transform_cache_cap / 4u) {
+    if (!node_transform_cache_grow(ctx))
+      return;
+    slot = node_transform_cache_slot(ctx->transform_cache,
+                                     ctx->transform_cache_cap, source);
+  }
+  slot->source = source;
+  slot->results[kind] = result;
+  ctx->transform_cache_used++;
+}
+
+IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx) {
+  if (!ctx || !ctx->transform_cache)
+    return;
+  memset(ctx->transform_cache, 0,
+         ctx->transform_cache_cap * sizeof(*ctx->transform_cache));
+  ctx->transform_cache_used = 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Hash-consing table                                                */
 /* ------------------------------------------------------------------ */
 

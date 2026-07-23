@@ -33,17 +33,27 @@ static void test_gcd(void) {
 
 static void test_normalize(void) {
   int64_t p, q;
+  CHECK(ixs_rat_normalize(INT64_MIN, 1, &p, &q) && p == INT64_MIN && q == 1);
+  CHECK(ixs_rat_normalize(INT64_MAX, 1, &p, &q) && p == INT64_MAX && q == 1);
   CHECK(ixs_rat_normalize(6, 4, &p, &q) && p == 3 && q == 2);
   CHECK(ixs_rat_normalize(0, 5, &p, &q) && p == 0 && q == 1);
+  CHECK(ixs_rat_normalize(0, INT64_MIN, &p, &q) && p == 0 && q == 1);
   CHECK(ixs_rat_normalize(-6, 4, &p, &q) && p == -3 && q == 2);
   CHECK(ixs_rat_normalize(6, -4, &p, &q) && p == -3 && q == 2);
   CHECK(ixs_rat_normalize(-6, -4, &p, &q) && p == 3 && q == 2);
+  CHECK(!ixs_rat_normalize(INT64_MIN, -1, &p, &q));
   CHECK(!ixs_rat_normalize(1, 0, &p, &q));
 }
 
 static void test_add(void) {
   int64_t p, q;
+  CHECK(ixs_rat_add(INT64_MAX, 1, 0, 1, &p, &q) && p == INT64_MAX && q == 1);
+  CHECK(ixs_rat_add(INT64_MIN, 1, 0, 1, &p, &q) && p == INT64_MIN && q == 1);
+  CHECK(ixs_rat_add(INT64_MAX, 1, INT64_MIN, 1, &p, &q) && p == -1 && q == 1);
+  CHECK(!ixs_rat_add(INT64_MAX, 1, 1, 1, &p, &q));
+  CHECK(!ixs_rat_add(INT64_MIN, 1, -1, 1, &p, &q));
   CHECK(ixs_rat_add(1, 2, 1, 3, &p, &q) && p == 5 && q == 6);
+  CHECK(ixs_rat_add(2, 2, 2, 2, &p, &q) && p == 2 && q == 1);
   CHECK(ixs_rat_add(1, 1, -1, 1, &p, &q) && p == 0 && q == 1);
   CHECK(ixs_rat_add(3, 4, 1, 4, &p, &q) && p == 1 && q == 1);
 }
@@ -56,7 +66,13 @@ static void test_sub(void) {
 
 static void test_mul(void) {
   int64_t p, q;
+  CHECK(ixs_rat_mul(INT64_MAX, 1, 1, 1, &p, &q) && p == INT64_MAX && q == 1);
+  CHECK(ixs_rat_mul(INT64_MIN, 1, 1, 1, &p, &q) && p == INT64_MIN && q == 1);
+  CHECK(ixs_rat_mul(INT64_MIN, 1, 0, 1, &p, &q) && p == 0 && q == 1);
+  CHECK(!ixs_rat_mul(INT64_MIN, 1, -1, 1, &p, &q));
+  CHECK(!ixs_rat_mul(INT64_MAX, 1, 2, 1, &p, &q));
   CHECK(ixs_rat_mul(2, 3, 3, 4, &p, &q) && p == 1 && q == 2);
+  CHECK(ixs_rat_mul(2, 2, 2, 2, &p, &q) && p == 1 && q == 1);
   CHECK(ixs_rat_mul(0, 1, 5, 7, &p, &q) && p == 0 && q == 1);
 }
 
@@ -100,8 +116,10 @@ static void test_cmp(void) {
   CHECK(ixs_rat_cmp(1, 3, 1, 2) < 0);
   CHECK(ixs_rat_cmp(2, 4, 1, 2) == 0);
   CHECK(ixs_rat_cmp(-1, 1, 1, 1) < 0);
+  CHECK(ixs_rat_cmp(1, -2, 2, -2) > 0);
   /* Large values that overflow 64-bit cross-multiply */
   CHECK(ixs_rat_cmp(INT64_MAX, 1, INT64_MAX - 1, 1) > 0);
+  CHECK(ixs_rat_cmp(INT64_MAX, INT64_MAX, INT64_MIN, INT64_MAX) > 0);
   CHECK(ixs_rat_cmp(INT64_MAX, INT64_MAX, 1, 1) == 0);
   CHECK(ixs_rat_cmp(INT64_MAX, 2, INT64_MAX, 3) > 0);
   CHECK(ixs_rat_cmp(INT64_MIN + 1, 1, INT64_MIN + 2, 1) < 0);

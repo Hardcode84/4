@@ -4,6 +4,11 @@
 #include <ixsimpl.h>
 #include <string.h>
 
+#ifndef IXS_TEST_AMALGAMATION
+#include "bounds.h"
+#include "node.h"
+#endif
+
 #include "test_check.h"
 
 static char buf[4096];
@@ -165,6 +170,144 @@ static void test_expand_sentinel(void) {
   ixs_ctx_destroy(ctx);
 }
 
+#ifndef IXS_TEST_AMALGAMATION
+static void test_expand_cache(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session other;
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *first = ixs_add(ctx, x, ixs_int(ctx, 1));
+  ixs_node *expanded = ixs_expand(ctx, first);
+  size_t i;
+
+  CHECK(expanded == first);
+  CHECK(ctx->transform_cache_used == 1);
+  CHECK(ixs_node_transform_cache_lookup(ctx, first,
+                                        IXS_NODE_TRANSFORM_EXPAND) == expanded);
+  CHECK(ixs_expand(ctx, first) == expanded);
+  CHECK(ctx->transform_cache_used == 1);
+
+  ixs_session_init(&other, ctx);
+  CHECK((ixs_expand)(&other, first) == expanded);
+  CHECK(ctx->transform_cache_used == 1);
+  ixs_session_destroy(&other);
+
+  for (i = 2; i < 300; i++) {
+    ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, (int64_t)i));
+    CHECK(ixs_expand(ctx, expr) == expr);
+  }
+  CHECK(ctx->transform_cache_used == 299);
+  CHECK(ctx->transform_cache_cap >= 512);
+  CHECK(ixs_expand(ctx, first) == expanded);
+  CHECK(ctx->transform_cache_used == 299);
+
+  (ixs_session_reset)(IXS_TEST_SESSION(ctx));
+  CHECK(ctx->transform_cache_used == 299);
+  CHECK(ixs_expand(ctx, first) == expanded);
+  CHECK(ctx->transform_cache_used == 299);
+
+  ixs_ctx_stats_reset(ctx);
+  CHECK(ctx->transform_cache_used == 0);
+  CHECK(ixs_expand(ctx, first) == expanded);
+  CHECK(ctx->transform_cache_used == 1);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_expand_cache_failure_semantics(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
+  ixs_mulfactor factor;
+  ixs_node *too_large;
+  ixs_node *result;
+
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_expand(ctx, expr) == expr);
+  CHECK(ctx->transform_cache_used == 0);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_expand(ctx, expr) == expr);
+  CHECK(ctx->transform_cache_used == 1);
+
+  factor.base = x;
+  factor.exp = 65;
+  too_large = ixs_node_mul(ctx, ixs_int(ctx, 1), 1, &factor);
+  CHECK(too_large != NULL);
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_expand(ctx, too_large);
+  CHECK(result != NULL && ixs_is_error(result));
+  CHECK(ctx->transform_cache_used == 1);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "exponent magnitude") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_expand(ctx, too_large);
+  CHECK(result != NULL && ixs_is_error(result));
+  CHECK(ctx->transform_cache_used == 1);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "exponent magnitude") != NULL);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_add_without_const_cache(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_addterm terms[2];
+  ixs_node *shifted;
+  ixs_node *pred;
+  ixs_node *base;
+  ixs_session_binding binding;
+  ixs_bounds failed;
+  ixs_bounds populated;
+  ixs_bounds cached;
+
+  terms[0].term = x;
+  terms[0].coeff = one;
+  terms[1].term = y;
+  terms[1].coeff = one;
+  if (ixs_node_cmp(terms[0].term, terms[1].term) > 0) {
+    ixs_addterm swap = terms[0];
+    terms[0] = terms[1];
+    terms[1] = swap;
+  }
+  shifted = ixs_node_add(ctx, one, 2, terms);
+  pred = ixs_cmp(ctx, shifted, IXS_CMP_GE, zero);
+  CHECK(shifted != NULL && pred != NULL);
+  CHECK(ixs_expand(ctx, shifted) == shifted);
+  CHECK(ixs_node_transform_cache_lookup(ctx, shifted,
+                                        IXS_NODE_TRANSFORM_EXPAND) == shifted);
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&failed, ctx, &ctx->scratch));
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(!ixs_bounds_add_assumption(&failed, pred));
+  CHECK(ixs_node_transform_cache_lookup(
+            ctx, shifted, IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST) == NULL);
+
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_bounds_init_ctx(&populated, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&populated, pred));
+  base = ixs_node_transform_cache_lookup(ctx, shifted,
+                                         IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST);
+  CHECK(base != NULL);
+  CHECK(strcmp(pr(base), "x + y") == 0);
+
+  CHECK(ixs_bounds_init_ctx(&cached, ctx, &ctx->scratch));
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_bounds_add_assumption(&cached, pred));
+  CHECK(ixs_node_transform_cache_lookup(
+            ctx, shifted, IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST) == base);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  ixs_session_unbind(&binding);
+
+  ixs_ctx_stats_reset(ctx);
+  CHECK(ixs_node_transform_cache_lookup(
+            ctx, shifted, IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST) == NULL);
+  ixs_ctx_destroy(ctx);
+}
+#endif
+
 int main(void) {
   test_expand_leaves();
   test_expand_add_noop();
@@ -177,6 +320,11 @@ int main(void) {
   test_expand_three_factors();
   test_expand_piecewise();
   test_expand_sentinel();
+#ifndef IXS_TEST_AMALGAMATION
+  test_expand_cache();
+  test_expand_cache_failure_semantics();
+  test_add_without_const_cache();
+#endif
 
   printf("test_expand: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

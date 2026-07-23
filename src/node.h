@@ -39,6 +39,17 @@ typedef struct ixs_session_impl {
   ixs_arena_mark base_mark;
 } ixs_session_impl;
 
+typedef enum {
+  IXS_NODE_TRANSFORM_EXPAND,
+  IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST,
+  IXS_NODE_TRANSFORM_COUNT
+} ixs_node_transform_kind;
+
+typedef struct {
+  struct ixs_node *source;
+  struct ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
+} ixs_node_transform_cache_entry;
+
 struct ixs_node {
   ixs_tag tag;
   uint32_t hash;
@@ -121,6 +132,11 @@ struct ixs_ctx {
   size_t htab_cap;
   size_t htab_used;
 
+  /* Successful structural transforms, keyed by source node identity. */
+  ixs_node_transform_cache_entry *transform_cache;
+  size_t transform_cache_cap;
+  size_t transform_cache_used;
+
   /* Bound session mirrors. Session-owned state is copied in on entry to
    * session-taking APIs and copied back out on return. */
   ixs_arena scratch;
@@ -154,6 +170,15 @@ struct ixs_ctx {
 /* Initialize/destroy the hash table (malloc-managed). */
 IXS_STATIC bool ixs_htab_init(ixs_ctx *ctx);
 IXS_STATIC void ixs_htab_destroy(ixs_ctx *ctx);
+
+/* Context-local memo for deterministic transforms of immutable nodes. */
+IXS_STATIC ixs_node *
+ixs_node_transform_cache_lookup(ixs_ctx *ctx, const ixs_node *source,
+                                ixs_node_transform_kind kind);
+IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
+                                               ixs_node_transform_kind kind,
+                                               ixs_node *result);
+IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx);
 
 /*
  * Intern a node: if an equal node already exists, return it;

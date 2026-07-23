@@ -8,6 +8,11 @@
 #define EXPAND_MAX_DEPTH 256
 #define EXPAND_MAX_EXP 64
 
+static bool expand_cacheable(const ixs_node *expr) {
+  return expr && !ixs_node_is_sentinel(expr) && expr->tag != IXS_INT &&
+         expr->tag != IXS_RAT && expr->tag != IXS_SYM;
+}
+
 static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth);
 
 /*
@@ -197,5 +202,18 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
 }
 
 IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
-  return do_expand(ctx, expr, 0);
+  ixs_node *cached;
+  ixs_node *expanded;
+
+  if (!expand_cacheable(expr))
+    return do_expand(ctx, expr, 0);
+  cached =
+      ixs_node_transform_cache_lookup(ctx, expr, IXS_NODE_TRANSFORM_EXPAND);
+  if (cached)
+    return cached;
+
+  expanded = do_expand(ctx, expr, 0);
+  ixs_node_transform_cache_store(ctx, expr, IXS_NODE_TRANSFORM_EXPAND,
+                                 expanded);
+  return expanded;
 }

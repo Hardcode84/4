@@ -251,6 +251,7 @@ uint64_t ixs_ctx_stat(ixs_ctx *ctx, size_t index, const char **name) {
 }
 
 void ixs_ctx_stats_reset(ixs_ctx *ctx) {
+  ixs_node_transform_cache_clear(ctx);
 #ifdef IXS_STATS
   memset(ctx->stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
 #else
