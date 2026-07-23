@@ -202,7 +202,7 @@ cmake --build build-asan
 ctest --test-dir build-asan
 
 # Python tests (installs all test deps: pytest, xdist, hypothesis, sympy)
-pip install -e ".[test]"
+pip install ".[test]"
 pytest test/
 ```
 

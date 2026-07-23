@@ -35,7 +35,7 @@ CMake selects the amalgamation via `-DUSE_AMALGAMATION=ON` (off by default for d
 
 The `ixsimpl` Python package is a CPython extension module (`bindings/python/_ixsimpl.c`) built against the amalgamation. It exposes two types: `Context` (wraps `ixs_ctx`) and `Expr` (wraps `ixs_node`) with operator overloading for natural expression construction.
 
-- Build: `pip install -e ".[test]"` (uses hatchling + scikit-build-core from `pyproject.toml`).
+- Build: `pip install ".[test]"` (uses hatchling + scikit-build-core from `pyproject.toml`).
 - The Python package is the primary interface for the Hypothesis-based fuzz tests.
 - When changing C API signatures or adding new node types, update `bindings/python/_ixsimpl.c` in the same commit.
 
