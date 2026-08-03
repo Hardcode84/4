@@ -59,7 +59,7 @@ A typical expression (929 chars average, 2994 chars max, depth up to 11):
 | Modular | `Mod(a, b)` | 6,481 |
 | Conditional | `Piecewise((val, cond), ..., (val, True))` | 1,136 |
 | Min/Max | `Max(a, b)`, `Min(a, b)` | 1,140 |
-| Bitwise | `xor(a, b)` | 116 |
+| Bitwise | `xor(a, ...)` | 116 |
 | Boolean | `&` (and), `\|` (or), `~` (not) | ~1,168 |
 | Comparison | `>`, `<`, `>=`, `<=`, `==`, `!=` | ~2,236 |
 
@@ -228,9 +228,8 @@ and diagnostics. Internally, the active session temporarily mirrors that state
 onto `ixs_ctx` while legacy ctx-based helpers run, so the save/restore
 programming model remains unchanged.
 
-Smart constructors (`simp_add`, `simp_mul`, `simp_and`, `simp_or`, `simp_pw`)
-and the parser flatten variadic children into temporary arrays before building
-the final hash-consed node. These temporaries live on the active session's
+Smart constructors for ADD, MUL, Piecewise, and the associative family use
+temporary arrays before building the final hash-consed node. These temporaries live on the active session's
 scratch arena and are mirrored onto `ctx->scratch` only for the duration of the
 bound public call. A save/restore API lets callers rewind the scratch arena
 after the temporary data is consumed:
@@ -425,8 +424,7 @@ mark. The scratch arena never leaks across wrapper boundaries.
 helpers still take `ixs_ctx *`, so public entry points bind the active session
 onto the context on entry and copy the final scratch/diagnostic state back out
 on exit.
-`MAX_TERMS` and `ixs_limits.h` have been removed. OOM injection for
-arena testing is tracked separately (bead 4-96o).
+`MAX_TERMS` and `ixs_limits.h` have been removed.
 
 ### Layer 1: Expression Representation — Hash-Consed DAG
 
@@ -446,12 +444,12 @@ typedef enum {
     IXS_CEIL,        // ceiling(x)
     IXS_MOD,         // Mod(a, b) = a - b*floor(a/b), b > 0
     IXS_PIECEWISE,   // Piecewise((v1,c1), ..., (vn, True))
-    IXS_MAX,         // Max(a, b)
-    IXS_MIN,         // Min(a, b)
-    IXS_XOR,         // bitwise xor(a, b) (integer domain)
+    IXS_MAX,         // flat n-ary Max(args...)
+    IXS_MIN,         // flat n-ary Min(args...)
+    IXS_XOR,         // flat n-ary bitwise xor(args...)
     IXS_CMP,         // comparison: a op b, returns 0 or 1
-    IXS_AND,         // bitwise and(a, b)
-    IXS_OR,          // bitwise or(a, b)
+    IXS_AND,         // flat n-ary bitwise and(args...)
+    IXS_OR,          // flat n-ary bitwise or(args...)
     IXS_NOT,         // logical not: (a == 0) ? 1 : 0
     IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
     IXS_PARSE_ERROR, // sentinel: syntax error from ixs_parse
@@ -494,7 +492,7 @@ struct ixs_node_impl {
         struct {                          // IXS_FLOOR, IXS_CEIL
             ixs_node *arg;
         } unary;
-        struct {                          // IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP
+        struct {                          // IXS_MOD, IXS_CMP
             ixs_node *lhs;
             ixs_node *rhs;
             ixs_cmp_op cmp_op;           // used only for IXS_CMP; value ignored for other binary types
@@ -503,10 +501,11 @@ struct ixs_node_impl {
             uint32_t ncases;
             const struct ixs_pwcase *cases; // array of {value, condition}
         } pw;
-        struct {                          // IXS_AND, IXS_OR
+        struct {                          // IXS_MAX, IXS_MIN, IXS_XOR,
+                                          // IXS_AND, IXS_OR
             uint32_t nargs;
-            ixs_node *const *args;        // new nodes use exactly 2 args
-        } logic;
+            ixs_node *const *args;        // sorted canonical operands
+        } assoc;
         struct {                          // IXS_NOT
             ixs_node *arg;
         } unary_bool;
@@ -516,23 +515,45 @@ struct ixs_node_impl {
 
 Because `ixs_node` aliases a const-qualified implementation struct,
 `ixs_node *` always means "pointer to immutable interned node." The owned ADD,
-MUL, Piecewise, and logic child arrays are const after publication as well.
+MUL, Piecewise, and associative child arrays are const after publication.
 This makes mutation through a node handle a compile-time error in both C and
 C++; it is not merely an API convention.
 
 `ixs_true(s)` returns the interned integer `1`, and `ixs_false(s)` returns the
-interned integer `0`. The v1 binary format still accepts legacy true/false wire
-tags and maps them to those integer constants during deserialization.
-
-New `IXS_AND` and `IXS_OR` nodes are binary bitwise operators. The storage still
-records `nargs` so old serialized n-ary logic nodes can be imported, but smart
-constructors build two-child nodes.
+interned integer `0`.
 
 Bitwise operations use unbounded integer two's-complement semantics, matching
 Python and SymPy-style integer bitwise behavior. There is no fixed bit-width,
 no signed/unsigned reinterpretation, and no wraparound in the core expression
 model. `IXS_NOT` remains logical truthiness, not bitwise complement; adding
 bitwise complement would require a distinct node.
+
+#### Flat associative nodes
+
+MAX, MIN, XOR, AND, and OR keep distinct tags but share the `u.assoc` payload
+and collection code. A generic tag plus an opcode would duplicate the tag's
+job and permit invalid states.
+
+Construction collects the complete operand list in scratch, iteratively
+flattens same-tag children, applies operation-specific reductions, sorts, and
+interns one immutable contiguous array. No binary tree, rope, or chunked form
+is retained. Every association and permutation of the same operands therefore
+has the same node identity.
+
+MAX/MIN/AND/OR are idempotent. XOR is not: equal operands are reduced by
+parity, and constants are folded together. Bitwise reductions are strict over
+the integer domain; a rewrite that removes the last occurrence of an operand
+must also prove that operand defined and integer-valued. AND/OR absorbers keep
+unproved domain witnesses, and an unproved even XOR run keeps two copies.
+
+Empty AND, OR, and XOR use identities `-1`, `0`, and `0`; empty MAX/MIN is an
+error. A single MAX/MIN operand returns directly. A single bitwise operand does
+so only when its integer-domain obligation is proven; otherwise the identity is
+kept as a two-operand guard.
+
+The binary C functions remain convenience wrappers. Producers that already
+have a list -- parser, import, deserializer, bindings, rewrite, and substitution
+-- call the matching `*_many` constructor once rather than building a chain.
 
 Helper structs for compound nodes:
 
@@ -570,9 +591,8 @@ miss, the constructor arena-allocates a mutable implementation object, copies
 `tmp` into it, interns it, and exposes only the const-qualified handle. This
 avoids wasting arena memory on duplicate nodes.
 
-**Canonical ordering**: Children of `IXS_ADD` and `IXS_MUL` are sorted by a
-total order on nodes (by tag, then by content). This ensures `a + b` and
-`b + a` produce the same hash and the same canonical node.
+**Canonical ordering**: Children of `IXS_ADD`, `IXS_MUL`, and every flat
+associative node are sorted by a total order on nodes (by tag, then by content).
 
 ### Layer 2: Rational Arithmetic
 
@@ -642,12 +662,14 @@ atom     = INT | SYMBOL
          | 'floor' '(' expr ')'
          | 'ceiling' '(' expr ')'
          | 'Mod' '(' expr ',' expr ')'
-         | 'Max' '(' expr ',' expr ')'
-         | 'Min' '(' expr ',' expr ')'
-         | 'xor' '(' expr ',' expr ')'
+         | 'Max' '(' expr_list ')'
+         | 'Min' '(' expr_list ')'
+         | 'xor' '(' bit_list ')'
          | 'Piecewise' '(' pw_cases ')'
          | '(' expr ')'
 pw_cases = '(' expr ',' cond ')' (',' '(' expr ',' cond ')')*
+expr_list = expr (',' expr)*
+bit_list = expr ',' expr (',' expr)*
 cond     = cmp_expr (('&' | '|') cmp_expr)*
 cmp_expr = '~'* cmp_body
 cmp_body = expr cmp_op sum | 'True' | 'False' | '(' cond ')' | sum
@@ -684,7 +706,8 @@ Integer literals: sequences of digits. Rationals are not parsed directly —
 they arise from `3/8` being parsed as `IXS_INT(3) / IXS_INT(8)` and
 immediately folded to `IXS_RAT(3, 8)`.
 
-The parser builds the DAG directly via the hash-consing table.
+The parser collects each associative chain or argument list and calls its
+`*_many` constructor once.
 
 ### Layer 4: Simplification Engine
 
@@ -863,8 +886,8 @@ integer-valued (or divisible by a given modulus).  This is a sufficient
 OR-of-factors test, not full product factorization: `6 | (2*3)` cannot
 be proved when neither factor alone is divisible by 6.
 
-`is_known_divisible` also handles `Max` and `Min` when both operands are
-provably divisible; either selected value then preserves the divisor.
+`is_known_divisible` also handles `Max` and `Min` when every operand is
+provably divisible; any selected value then preserves the divisor.
 
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
@@ -1060,30 +1083,35 @@ is in the "live" path does the Piecewise become sentinel.
 #### 4.7 Max / Min Rules
 
 ```
-Max(a, a)       → a
-Max(a, b)       where a >= b provable → a
-Max(1, x)       where x > 0 provable → Max(1, x) (keep)
-                where x >= 1 provable → x
-
-Min(a, a)       → a
-Min(a, b)       where a <= b provable → a
-Min(a, b)       where a,b constant   → min(a, b)
+Max(a) / Min(a)             → a
+Max(..., a, a, ...)         → Max(..., a, ...)
+Min(..., a, a, ...)         → Min(..., a, ...)
+Max(..., constants, ...)    → keep their greatest value
+Min(..., constants, ...)    → keep their least value
+Max(..., b, ...)            → drop b when another operand is provably >= b
+Min(..., b, ...)            → drop b when another operand is provably <= b
 ```
+
+Nested MAX/MIN nodes flatten before these rules run. Empty MAX/MIN is a domain
+error.
 
 #### 4.8 XOR Rules
 
 ```
-xor(a, a)       → 0
-xor(a, 0)       → a
-xor(0, b)       → b
-xor(a, xor(a,b)) → b  (either outer or inner operand order)
-xor(c1, c2)     → c1 ^ c2  (constant fold)
+xor(..., xor(args...), ...) → xor(..., args..., ...)
+xor(..., 0, ...)            → xor(...)
+xor(..., constants, ...)    → fold constants with ^
+xor(..., a repeated n, ...) → keep a iff n is odd
 xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
 
 k*xor(a, b + 2^n) - k*xor(a, b)
                 → k*(2^n - 2*(a & 2^n))
                   when bit n of the pre-toggle operand is known zero
 ```
+
+Parity reduction replaces the old nested-cancellation rule and handles the
+whole flat list in one pass. The strict-domain guard in the representation
+section applies when an even run would disappear.
 
 The known-bit query merges exact interval facts and propagates low 64-bit
 facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
@@ -1103,14 +1131,18 @@ and non-integer scales keep the interval-derived fallback.
 #### 4.9 Bitwise And/Or And Logical Not
 
 ```
-0 & x           → 0
--1 & x          → x
-0 | x           → x
--1 | x          → -1
-c1 & c2         → c1 & c2  (constant fold)
-c1 | c2         → c1 | c2  (constant fold)
-1 & bool        → bool
-1 | bool        → 1
+and(..., and(args...), ...) → and(..., args..., ...)
+or(..., or(args...), ...)   → or(..., args..., ...)
+and(..., x, x, ...)         → and(..., x, ...)
+or(..., x, x, ...)          → or(..., x, ...)
+and(..., constants, ...)    → fold constants with &
+or(..., constants, ...)     → fold constants with |
+0 & x                       → 0       when x is defined and integer
+-1 & x                      → x       when x is integer-valued
+0 | x                       → x       when x is integer-valued
+-1 | x                      → -1      when x is defined and integer
+1 & bool                    → bool
+1 | bool                    → 1
 ~0              → 1
 ~nonzero_const  → 0
 ~(~bool)        → bool
@@ -1120,10 +1152,10 @@ bool & ~bool    → 0
 bool | ~bool    → 1
 ```
 
-`IXS_AND` and `IXS_OR` are binary bitwise integer operators. They are also
-boolean operators when both operands are known 0/1-valued. `IXS_NOT` is logical
-truthiness, not bitwise complement: it returns `1` exactly when its operand is
-zero and `0` otherwise.
+AND and OR apply these rules across the complete flat list. They are also
+boolean operators when every operand is known 0/1-valued. `IXS_NOT` remains
+logical truthiness. Complement matching and its proof use one canonical key for
+`p` and `~p`, so normalization cannot depend on grouping or proof budget.
 
 #### 4.10 Comparison Simplification
 
@@ -1210,7 +1242,7 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
   Initial storage is symbol-level in `ixs_var_bound`. Expression-level
   bitfacts are computed on demand for constants, symbols, comparisons,
-  logical NOT, and bounded-depth `AND`/`OR`/`XOR` trees. A pointer-keyed side
+  logical NOT, and bounded-depth `AND`/`OR`/`XOR` nodes. A pointer-keyed side
   table can be added later if expression-level assumptions need to persist.
   Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
   assumptions remain isolated.
@@ -1375,10 +1407,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   to zero on the corresponding side. An interval containing or touching zero
   reports unknown, including every negative power whose powered base interval
   crosses zero.
-- **Bitwise XOR**: propagation requires both operands to be provably integer
+- **Bitwise XOR**: propagation requires every operand to be provably integer
   and nonnegative. Finite upper bounds determine the possible high-bit span;
   operand known bits then tighten the result's required and possible bits. If
-  either nonnegative operand is unbounded above, the result is `[0,+inf)`.
+  any nonnegative operand is unbounded above, the result is `[0,+inf)`.
   A negative or sign-unknown operand reports unknown. Low-64-bit facts never
   impose a signed or unsigned machine width on the expression.
 - **Piecewise**: propagation follows first-match semantics. Each reachable
@@ -1784,19 +1816,24 @@ ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_max_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_min_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_xor_many(ixs_session *s, uint32_t n, ixs_node *const *args);
 ixs_node *ixs_pw(ixs_session *s, uint32_t n,
                  ixs_node *const *values, ixs_node *const *conds);
 ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_and_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_or_many(ixs_session *s, uint32_t n, ixs_node *const *args);
 ixs_node *ixs_not(ixs_session *s, ixs_node *a);
 ixs_node *ixs_true(ixs_session *s);
 ixs_node *ixs_false(ixs_session *s);
 
-// Assumption roots must be CMP or canonical true/false nodes, or AND trees with
-// those leaves, built in the same context. True is a no-op and false is a
-// contradiction. OR, NOT, malformed, NULL, sentinel, and other roots are
-// rejected atomically with an `assumptions:` diagnostic. Trees are walked with
+// Assumption roots must be CMP or canonical true/false nodes, or flat AND
+// nodes with those leaves, built in the same context. True is a no-op and
+// false is a contradiction. OR, NOT, malformed, NULL, sentinel, and other
+// roots are rejected atomically with an `assumptions:` diagnostic. Trees are walked with
 // a 1024-node limit per root. Pass NULL/0 for no assumptions.
 // NOTE: if the fixed-point iteration limit is reached without convergence, the
 // current best result is returned and an error is appended to the session list.
@@ -2102,8 +2139,7 @@ int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
 ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
-/* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
- * IXS_XOR, or IXS_CMP. */
+/* Only valid when tag is IXS_MOD or IXS_CMP. */
 ixs_node *ixs_node_binary_lhs(const ixs_node *node);
 ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
@@ -2115,9 +2151,9 @@ uint32_t ixs_node_pw_ncases(const ixs_node *node);
 ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
 ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
-/* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
-uint32_t ixs_node_logic_nargs(const ixs_node *node);
-ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
+/* Only valid for MAX, MIN, XOR, AND, or OR.  i must be < nargs. */
+uint32_t ixs_node_assoc_nargs(const ixs_node *node);
+ixs_node *ixs_node_assoc_arg(const ixs_node *node, uint32_t i);
 ```
 
 ~20 functions, all trivial one-liners into the internal union fields
@@ -2142,10 +2178,10 @@ accessors:
 |-----|-----------|-------|
 | ADD | 1 + 2*nterms | coeff, (term_coeff[0], term[0]), ... |
 | MUL | 1 + nfactors | coeff, base[0], base[1], ... |
-| binary | 2 | lhs, rhs |
+| MOD/CMP | 2 | lhs, rhs |
 | unary | 1 | arg |
 | PW | 2*ncases | (value[0], cond[0]), ... |
-| AND/OR | nargs | arg[0], arg[1], ... |
+| MAX/MIN/XOR/AND/OR | nargs | arg[0], arg[1], ... |
 | leaves | 0 | — |
 
 Non-node data (MUL exponents, CMP operator) is not exposed through
@@ -2274,6 +2310,13 @@ in batch mode (the primary use case):
 - Arena: ~2-4 MB
 - Error list, symbol table: negligible
 - **Total: < 8 MB per context**
+
+### Flat associative construction
+
+Normalizing `m` collected operands costs O(m log m) time and O(m) scratch;
+the interned node owns one O(m) argument array. Known lists use `*_many` once.
+Repeated binary append can retain successively larger arrays and is not the
+bulk construction path.
 
 ### Performance invariants
 
@@ -2589,8 +2632,10 @@ Key properties:
 - `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
   compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
-- No heap allocations in expression construction or simplification beyond
-  what the C library does internally. (`str()` allocates a `std::string`.)
+- Range overloads for MAX/MIN/XOR/AND/OR use one temporary contiguous buffer
+  and call one `*_many` function; binary operators allocate no wrapper storage.
+- Simplification adds no C++-side heap allocation. (`str()` and range
+  construction allocate their result/temporary buffers.)
 - NULL and sentinel propagate through operators (same as C API).
 - **Cross-context contract** applies: all `Expr` values passed to an
   operation (including assumptions in `simplify()`) must belong to the
@@ -2731,11 +2776,13 @@ Implementation:
 - `Context.int_(val)` creates an `IXS_INT` node (wraps `ixs_int`).
 - NULL (OOM) raises `MemoryError`. Sentinel propagates as a regular Expr.
 - Module-level functions: `ixsimpl.floor()`, `ixsimpl.ceil()`,
-  `ixsimpl.mod()`, `ixsimpl.max_()`, `ixsimpl.min_()`, `ixsimpl.xor_()`,
-  `ixsimpl.and_()`, `ixsimpl.or_()`, `ixsimpl.not_()`,
+  `ixsimpl.mod()`, variadic `ixsimpl.max_()`, `ixsimpl.min_()`,
+  `ixsimpl.xor_()`, `ixsimpl.and_()`, `ixsimpl.or_()`, `ixsimpl.not_()`,
   `ixsimpl.pw((val, cond), ...)`.
   Trailing underscore on `max_`/`min_`/`xor_`/`and_`/`or_`/`not_` avoids
   shadowing Python builtins.
+- Variadic associative functions validate one context and issue one `*_many`
+  call; they do not left-fold through Python operators.
 - `pyproject.toml` builds the extension; no runtime dependencies.
 
 This binding adds ~800 lines of C and is the primary interface for testing
@@ -2926,9 +2973,14 @@ ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_max_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_min_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_xor_many(ixs_session *s, uint32_t n, ixs_node *const *args);
 ixs_node *ixs_cmp(ixs_session *s, ixs_node *a, ixs_cmp_op op, ixs_node *b);
 ixs_node *ixs_and(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b);
+ixs_node *ixs_and_many(ixs_session *s, uint32_t n, ixs_node *const *args);
+ixs_node *ixs_or_many(ixs_session *s, uint32_t n, ixs_node *const *args);
 ixs_node *ixs_not(ixs_session *s, ixs_node *a);
 ixs_node *ixs_pw(ixs_session *s, uint32_t n,
                  ixs_node *const *values, ixs_node *const *conds);
@@ -3237,14 +3289,23 @@ Wire-format contract:
 - host-independent and little-endian
 - fixed-width scalar fields (`uint8_t` tag, `uint32_t` counts/indices,
   `int64_t` integer payloads)
-- leading magic/version header: magic `IXSB`, version `1`
+- leading magic/version header: magic `IXSB`, version `2`
 - topologically ordered unique-node table
 - child references by earlier table index
-- explicit tag values for sentinels and boolean singletons
+- explicit tag values for sentinels
 - final root index
 - writer callbacks are all-or-nothing: either consume exactly `len` bytes or
   fail without partial writes
 - reader callbacks expose the exact unread byte count via `remaining`
+
+Version 2 stores MAX, MIN, XOR, AND, and OR uniformly as their tag followed by
+`uint32_t nargs` and `nargs` earlier-node indices. The encoder emits sorted,
+flat arrays; the decoder rebuilds each record with one `*_many` call. Boolean
+singletons are ordinary integer 0/1 records.
+
+The decoder accepts version 2 only. A bad version returns `IXS_PARSE_ERROR`
+immediately after the header; there is no legacy decoder, migration, or
+fallback path.
 
 Failure contract:
 
@@ -3280,6 +3341,17 @@ Text parsing/printing remains for:
 - explicit text roundtrip tests
 
 ## Implementation Plan
+
+The flat associative transition is one focused change:
+
+1. Replace the binary/logic payloads with `u.assoc` and add the five `*_many`
+   constructors plus shared flatten/sort support.
+2. Make MAX/MIN, XOR, AND, and OR reductions operate on complete arrays.
+3. Move hashing, equality, traversal, proofs, printing, import, rewrite,
+   substitution, and bindings to the common associative accessors.
+4. Emit version 2 counted lists and reject every other wire version.
+5. Regenerate the amalgamation and run C, Python, fuzz, corpus, and benchmark
+   gates.
 
 The phase list below describes the engine as implemented today. The
 session/store section above is an API and lifetime refactor over the same core,
@@ -3402,8 +3474,12 @@ met (< 50ms total).
    - Sentinel propagation: `ixs_floor(s, sentinel)` → same sentinel, no new error
    - Piecewise sentinel in dead branch: drops cleanly
    - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
-5. **Fuzz testing**: Hypothesis-based (see below).
-6. **Benchmark**: Time all 615 expressions, compare against SymPy baseline.
+5. **Associative tests**: Every permutation and parenthesization of
+   MAX/MIN/XOR/AND/OR has the same pointer; XOR parity, AND/OR idempotence,
+   strict-domain witnesses, variadic bindings, and version rejection are
+   covered directly.
+6. **Fuzz testing**: Hypothesis-based (see below).
+7. **Benchmark**: Time all 615 expressions, compare against SymPy baseline.
    `bench_corpus --batch` measures shared-cache batch simplification;
    no argument measures independent calls.
    Track regressions in CI.  `bench/bench_sympy.py` runs ixsimpl vs
