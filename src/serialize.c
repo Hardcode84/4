@@ -4,12 +4,13 @@
 #include "node.h"
 
 #include "rational.h"
+#include "simplify.h"
 
 #include <limits.h>
 #include <string.h>
 
 #define SERIAL_MAGIC 0x42535849u /* "IXSB" */
-#define SERIAL_VERSION 1u
+#define SERIAL_VERSION 2u
 
 #define SERIAL_MEMO_INIT_CAP 64u
 #define SERIAL_STACK_INIT_CAP 64u
@@ -19,10 +20,7 @@
  */
 #define SERIAL_MAX_NODE_COUNT 1048576u
 
-/*
- * These numeric values are the v1 wire ABI. Keep them frozen even if the
- * public enums move later.
- */
+/* These numeric values are the v2 wire ABI. */
 typedef enum {
   WIRE_INT = 0,
   WIRE_RAT = 1,
@@ -40,10 +38,8 @@ typedef enum {
   WIRE_AND = 13,
   WIRE_OR = 14,
   WIRE_NOT = 15,
-  WIRE_TRUE = 16,
-  WIRE_FALSE = 17,
-  WIRE_ERROR = 18,
-  WIRE_PARSE_ERROR = 19
+  WIRE_ERROR = 16,
+  WIRE_PARSE_ERROR = 17
 } wire_tag;
 
 typedef enum {
@@ -128,7 +124,7 @@ typedef struct {
     struct {
       uint32_t nargs;
       uint32_t *args;
-    } logic;
+    } assoc;
   } u;
 } decode_node;
 
@@ -336,10 +332,14 @@ static bool serial_child_count(const ixs_node *node, uint32_t *out) {
   case IXS_NOT:
     *out = 1u;
     return true;
-  case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    *out = node->u.assoc.nargs;
+    return true;
+  case IXS_MOD:
   case IXS_CMP:
     *out = 2u;
     return true;
@@ -347,10 +347,6 @@ static bool serial_child_count(const ixs_node *node, uint32_t *out) {
     if (node->u.pw.ncases > UINT32_MAX / 2u)
       return false;
     *out = 2u * node->u.pw.ncases;
-    return true;
-  case IXS_AND:
-  case IXS_OR:
-    *out = node->u.logic.nargs;
     return true;
   }
   return false;
@@ -374,21 +370,77 @@ static const ixs_node *serial_child_at(const ixs_node *node, uint32_t child) {
     return node->u.unary.arg;
   case IXS_NOT:
     return node->u.unary_bool.arg;
-  case IXS_MOD:
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    return node->u.assoc.args[child];
+  case IXS_MOD:
   case IXS_CMP:
     return child == 0 ? node->u.binary.lhs : node->u.binary.rhs;
   case IXS_PIECEWISE:
     if ((child & 1u) == 0u)
       return node->u.pw.cases[child / 2u].value;
     return node->u.pw.cases[child / 2u].cond;
-  case IXS_AND:
-  case IXS_OR:
-    return node->u.logic.args[child];
   default:
     return NULL;
+  }
+}
+
+static bool serial_validate_assoc(ixs_ctx *ctx, const ixs_node *node) {
+  uint32_t i;
+  uint32_t equal_run = 1u;
+  bool bitwise =
+      node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR;
+
+  if (node->u.assoc.nargs < 2u)
+    return serial_error(ctx, "associative node has fewer than two operands");
+
+  for (i = 0; i < node->u.assoc.nargs; i++) {
+    const ixs_node *arg = node->u.assoc.args[i];
+    int order;
+
+    if (!arg)
+      return serial_error(ctx, "associative node has a NULL operand");
+    if (arg->tag == node->tag)
+      return serial_error(ctx, "associative node is not flat");
+    if (ixs_node_is_sentinel(arg))
+      return serial_error(ctx, "associative node contains a sentinel");
+    if (bitwise && arg->tag == IXS_RAT)
+      return serial_error(ctx, "bitwise operand is not integer-valued");
+    if (i == 0)
+      continue;
+
+    order = ixs_node_cmp(ctx, node->u.assoc.args[i - 1u], arg);
+    if (order == IXS_NODE_CMP_OOM)
+      return false;
+    if (order > 0)
+      return serial_error(ctx, "associative operands are not sorted");
+    if (order < 0) {
+      equal_run = 1u;
+      continue;
+    }
+    equal_run++;
+    if (node->tag != IXS_XOR)
+      return serial_error(ctx, "idempotent associative node has duplicates");
+    if (equal_run > 2u || (equal_run == 2u && ixs_node_is_integer_valued(arg) &&
+                           ixs_node_is_known_total(arg)))
+      return serial_error(ctx, "XOR node has reducible duplicates");
+  }
+  return true;
+}
+
+static bool serial_validate_node(ixs_ctx *ctx, const ixs_node *node) {
+  switch (node->tag) {
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    return serial_validate_assoc(ctx, node);
+  default:
+    return true;
   }
 }
 
@@ -438,6 +490,9 @@ static bool serial_collect(ixs_ctx *ctx, const ixs_node *root,
       }
       continue;
     }
+
+    if (!serial_validate_node(ctx, frame->node))
+      return false;
 
     slot = serial_memo_find(state, frame->node);
     if (!slot || slot->index != SERIAL_INDEX_PENDING)
@@ -628,15 +683,35 @@ static bool serial_write_cmp(ixs_ctx *ctx, const ixs_writer *w,
          serial_write_ref(ctx, w, state, node->u.binary.rhs);
 }
 
-static bool serial_write_logic(ixs_ctx *ctx, const ixs_writer *w,
+static bool serial_write_assoc(ixs_ctx *ctx, const ixs_writer *w,
                                serial_state *state, const ixs_node *node) {
-  wire_tag tag = node->tag == IXS_AND ? WIRE_AND : WIRE_OR;
+  wire_tag tag;
   uint32_t i;
 
-  if (!writer_u8(w, (uint8_t)tag) || !writer_u32(w, node->u.logic.nargs))
+  switch (node->tag) {
+  case IXS_MAX:
+    tag = WIRE_MAX;
+    break;
+  case IXS_MIN:
+    tag = WIRE_MIN;
+    break;
+  case IXS_XOR:
+    tag = WIRE_XOR;
+    break;
+  case IXS_AND:
+    tag = WIRE_AND;
+    break;
+  case IXS_OR:
+    tag = WIRE_OR;
+    break;
+  default:
+    return serial_error(ctx, "node is not associative");
+  }
+
+  if (!writer_u8(w, (uint8_t)tag) || !writer_u32(w, node->u.assoc.nargs))
     return false;
-  for (i = 0; i < node->u.logic.nargs; i++) {
-    if (!serial_write_ref(ctx, w, state, node->u.logic.args[i]))
+  for (i = 0; i < node->u.assoc.nargs; i++) {
+    if (!serial_write_ref(ctx, w, state, node->u.assoc.args[i]))
       return false;
   }
   return true;
@@ -665,19 +740,13 @@ static bool serial_write_node(ixs_ctx *ctx, const ixs_writer *w,
   case IXS_PIECEWISE:
     return serial_write_piecewise(ctx, w, state, node);
   case IXS_MAX:
-    return serial_write_binary(ctx, w, state, WIRE_MAX, node->u.binary.lhs,
-                               node->u.binary.rhs);
   case IXS_MIN:
-    return serial_write_binary(ctx, w, state, WIRE_MIN, node->u.binary.lhs,
-                               node->u.binary.rhs);
   case IXS_XOR:
-    return serial_write_binary(ctx, w, state, WIRE_XOR, node->u.binary.lhs,
-                               node->u.binary.rhs);
-  case IXS_CMP:
-    return serial_write_cmp(ctx, w, state, node);
   case IXS_AND:
   case IXS_OR:
-    return serial_write_logic(ctx, w, state, node);
+    return serial_write_assoc(ctx, w, state, node);
+  case IXS_CMP:
+    return serial_write_cmp(ctx, w, state, node);
   case IXS_NOT:
     return serial_write_unary(ctx, w, state, WIRE_NOT, node->u.unary_bool.arg);
   case IXS_ERROR:
@@ -729,6 +798,16 @@ static decode_status reader_u32(ixs_ctx *ctx, decode_input *in, uint32_t *out,
   return DECODE_OK;
 }
 
+static int64_t wire_bits_to_i64(uint64_t bits) {
+  uint64_t magnitude;
+  if (bits <= (uint64_t)INT64_MAX)
+    return (int64_t)bits;
+  magnitude = (~bits) + UINT64_C(1);
+  if (magnitude == (UINT64_C(1) << 63))
+    return INT64_MIN;
+  return -(int64_t)magnitude;
+}
+
 static decode_status reader_i64(ixs_ctx *ctx, decode_input *in, int64_t *out,
                                 const char *msg) {
   unsigned char buf[8];
@@ -739,7 +818,7 @@ static decode_status reader_i64(ixs_ctx *ctx, decode_input *in, int64_t *out,
     return status;
   for (i = 0; i < sizeof(buf); i++)
     u |= (uint64_t)buf[i] << (8u * i);
-  *out = (int64_t)u;
+  *out = wire_bits_to_i64(u);
   return DECODE_OK;
 }
 
@@ -855,6 +934,8 @@ static decode_status decode_read_add(ixs_ctx *ctx, decode_input *in,
   status = reader_u32(ctx, in, &node->u.add.nterms, "truncated add term count");
   if (status != DECODE_OK)
     return status;
+  if (node->u.add.nterms > (UINT32_MAX - 1u) / 2u)
+    return decode_error(ctx, in, "add child count exceeds uint32_t");
   status =
       reader_u32(ctx, in, &node->u.add.coeff, "truncated add constant index");
   if (status != DECODE_OK)
@@ -915,6 +996,8 @@ static decode_status decode_read_mul(ixs_ctx *ctx, decode_input *in,
                       "truncated multiply factor count");
   if (status != DECODE_OK)
     return status;
+  if (node->u.mul.nfactors == UINT32_MAX)
+    return decode_error(ctx, in, "multiply child count exceeds uint32_t");
   status = reader_u32(ctx, in, &node->u.mul.coeff,
                       "truncated multiply coefficient index");
   if (status != DECODE_OK)
@@ -1040,6 +1123,8 @@ static decode_status decode_read_piecewise(ixs_ctx *ctx, decode_input *in,
       reader_u32(ctx, in, &node->u.pw.ncases, "truncated piecewise case count");
   if (status != DECODE_OK)
     return status;
+  if (node->u.pw.ncases > UINT32_MAX / 2u)
+    return decode_error(ctx, in, "piecewise child count exceeds uint32_t");
   if (!size_mul_ok((size_t)node->u.pw.ncases, sizeof(*node->u.pw.cases),
                    &bytes))
     return decode_error(ctx, in, "piecewise case count overflows size_t");
@@ -1080,7 +1165,7 @@ static decode_status decode_read_piecewise(ixs_ctx *ctx, decode_input *in,
   return DECODE_OK;
 }
 
-static decode_status decode_read_logic(ixs_ctx *ctx, decode_input *in,
+static decode_status decode_read_assoc(ixs_ctx *ctx, decode_input *in,
                                        decode_node *nodes, uint32_t index,
                                        decode_node *node, wire_tag tag) {
   size_t bytes = 0;
@@ -1089,36 +1174,45 @@ static decode_status decode_read_logic(ixs_ctx *ctx, decode_input *in,
   decode_status status;
 
   node->tag = tag;
-  status = reader_u32(ctx, in, &node->u.logic.nargs,
-                      "truncated logic argument count");
+  status = reader_u32(ctx, in, &node->u.assoc.nargs,
+                      "truncated associative argument count");
   if (status != DECODE_OK)
     return status;
-  if (!size_mul_ok((size_t)node->u.logic.nargs, sizeof(*node->u.logic.args),
+  if ((tag == WIRE_MAX || tag == WIRE_MIN) && node->u.assoc.nargs == 0)
+    return decode_error(ctx, in, "MAX/MIN record has no operands");
+  if (!size_mul_ok((size_t)node->u.assoc.nargs, sizeof(*node->u.assoc.args),
                    &bytes))
-    return decode_error(ctx, in, "logic argument count overflows size_t");
-  if (!size_mul_ok((size_t)node->u.logic.nargs, sizeof(uint32_t), &min_bytes))
-    return decode_error(ctx, in, "logic payload overflows size_t");
+    return decode_error(ctx, in, "associative argument count overflows size_t");
+  if (!size_mul_ok((size_t)node->u.assoc.nargs, sizeof(uint32_t), &min_bytes))
+    return decode_error(ctx, in, "associative payload overflows size_t");
   status = decode_require_bytes(ctx, in, min_bytes,
-                                "logic payload exceeds remaining bytes");
+                                "associative payload exceeds remaining bytes");
   if (status != DECODE_OK)
     return status;
 
-  node->u.logic.args = NULL;
+  node->u.assoc.args = NULL;
   if (bytes > 0) {
-    node->u.logic.args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-    if (!node->u.logic.args)
+    node->u.assoc.args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!node->u.assoc.args)
       return DECODE_OOM;
   }
 
-  for (i = 0; i < node->u.logic.nargs; i++) {
-    status = reader_u32(ctx, in, &node->u.logic.args[i],
-                        "truncated logic child index");
+  for (i = 0; i < node->u.assoc.nargs; i++) {
+    status = reader_u32(ctx, in, &node->u.assoc.args[i],
+                        "truncated associative child index");
     if (status != DECODE_OK)
       return status;
     status =
-        decode_validate_child(ctx, in, nodes, index, node->u.logic.args[i]);
+        decode_validate_child(ctx, in, nodes, index, node->u.assoc.args[i]);
     if (status != DECODE_OK)
       return status;
+    if (nodes[node->u.assoc.args[i]].tag == WIRE_ERROR ||
+        nodes[node->u.assoc.args[i]].tag == WIRE_PARSE_ERROR)
+      return decode_error(ctx, in, "associative operand is a sentinel");
+    if ((tag == WIRE_XOR || tag == WIRE_AND || tag == WIRE_OR) &&
+        nodes[node->u.assoc.args[i]].tag == WIRE_RAT)
+      return decode_error(ctx, in,
+                          "bitwise associative operand is not integer-valued");
   }
 
   return DECODE_OK;
@@ -1162,7 +1256,9 @@ static decode_status decode_read_record(ixs_ctx *ctx, decode_input *in,
   case WIRE_MAX:
   case WIRE_MIN:
   case WIRE_XOR:
-    return decode_read_binary(ctx, in, nodes, index, node, (wire_tag)raw_tag);
+  case WIRE_AND:
+  case WIRE_OR:
+    return decode_read_assoc(ctx, in, nodes, index, node, (wire_tag)raw_tag);
 
   case WIRE_CMP:
     return decode_read_cmp(ctx, in, nodes, index, node);
@@ -1170,12 +1266,6 @@ static decode_status decode_read_record(ixs_ctx *ctx, decode_input *in,
   case WIRE_PIECEWISE:
     return decode_read_piecewise(ctx, in, nodes, index, node);
 
-  case WIRE_AND:
-  case WIRE_OR:
-    return decode_read_logic(ctx, in, nodes, index, node, (wire_tag)raw_tag);
-
-  case WIRE_TRUE:
-  case WIRE_FALSE:
   case WIRE_ERROR:
   case WIRE_PARSE_ERROR:
     node->tag = (wire_tag)raw_tag;
@@ -1212,11 +1302,15 @@ static decode_status decode_validate_build_sizes(ixs_ctx *ctx,
                        &bytes))
         return decode_error(ctx, in, "piecewise case count overflows size_t");
       break;
+    case WIRE_MAX:
+    case WIRE_MIN:
+    case WIRE_XOR:
     case WIRE_AND:
     case WIRE_OR:
-      if (!size_mul_ok((size_t)nodes[i].u.logic.nargs, sizeof(ixs_node *),
+      if (!size_mul_ok((size_t)nodes[i].u.assoc.nargs, sizeof(ixs_node *),
                        &bytes))
-        return decode_error(ctx, in, "logic argument count overflows size_t");
+        return decode_error(ctx, in,
+                            "associative argument count overflows size_t");
       break;
     default:
       break;
@@ -1248,15 +1342,6 @@ static bool ixs_cmp_from_wire(wire_cmp_op op, ixs_cmp_op *out) {
     return true;
   }
   return false;
-}
-
-static ixs_node *decode_build_plain_binary(ixs_ctx *ctx, ixs_tag tag,
-                                           ixs_node *lhs, ixs_node *rhs) {
-  /*
-   * ixs_node_binary() only consults cmp_op for IXS_CMP. The other binary tags
-   * share the storage layout, so any placeholder op is fine here.
-   */
-  return ixs_node_binary(ctx, tag, lhs, rhs, IXS_CMP_EQ);
 }
 
 static ixs_node *decode_build_add(ixs_ctx *ctx, const decode_node *node,
@@ -1303,21 +1388,23 @@ static ixs_node *decode_build_mul(ixs_ctx *ctx, const decode_node *node,
 static ixs_node *decode_build_pw(ixs_ctx *ctx, const decode_node *node,
                                  ixs_node *const *built) {
   uint32_t i;
-  ixs_pwcase *cases = NULL;
+  ixs_node **values = NULL;
+  ixs_node **conds = NULL;
   size_t bytes = 0;
 
-  if (!size_mul_ok((size_t)node->u.pw.ncases, sizeof(*cases), &bytes))
+  if (!size_mul_ok((size_t)node->u.pw.ncases, sizeof(*values), &bytes))
     return NULL;
   if (bytes > 0) {
-    cases = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-    if (!cases)
+    values = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    conds = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
+    if (!values || !conds)
       return NULL;
   }
   for (i = 0; i < node->u.pw.ncases; i++) {
-    cases[i].value = built[node->u.pw.cases[i].value];
-    cases[i].cond = built[node->u.pw.cases[i].cond];
+    values[i] = built[node->u.pw.cases[i].value];
+    conds[i] = built[node->u.pw.cases[i].cond];
   }
-  return ixs_node_pw(ctx, node->u.pw.ncases, cases);
+  return simp_pw(ctx, node->u.pw.ncases, values, conds);
 }
 
 static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
@@ -1329,23 +1416,36 @@ static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
                          built[node->u.binary.rhs], op);
 }
 
-static ixs_node *decode_build_logic(ixs_ctx *ctx, const decode_node *node,
+static ixs_node *decode_build_assoc(ixs_ctx *ctx, const decode_node *node,
                                     ixs_node *const *built) {
   uint32_t i;
   ixs_node **args = NULL;
-  ixs_tag tag = node->tag == WIRE_AND ? IXS_AND : IXS_OR;
   size_t bytes = 0;
 
-  if (!size_mul_ok((size_t)node->u.logic.nargs, sizeof(*args), &bytes))
+  if (!size_mul_ok((size_t)node->u.assoc.nargs, sizeof(*args), &bytes))
     return NULL;
   if (bytes > 0) {
     args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
     if (!args)
       return NULL;
   }
-  for (i = 0; i < node->u.logic.nargs; i++)
-    args[i] = built[node->u.logic.args[i]];
-  return ixs_node_logic(ctx, tag, node->u.logic.nargs, args);
+  for (i = 0; i < node->u.assoc.nargs; i++)
+    args[i] = built[node->u.assoc.args[i]];
+
+  switch (node->tag) {
+  case WIRE_MAX:
+    return simp_max_many(ctx, node->u.assoc.nargs, args);
+  case WIRE_MIN:
+    return simp_min_many(ctx, node->u.assoc.nargs, args);
+  case WIRE_XOR:
+    return simp_xor_many(ctx, node->u.assoc.nargs, args);
+  case WIRE_AND:
+    return simp_and_many(ctx, node->u.assoc.nargs, args);
+  case WIRE_OR:
+    return simp_or_many(ctx, node->u.assoc.nargs, args);
+  default:
+    return NULL;
+  }
 }
 
 static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
@@ -1368,36 +1468,71 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
   case WIRE_CEIL:
     return ixs_node_ceil(ctx, built[node->u.unary.arg]);
   case WIRE_MOD:
-    return decode_build_plain_binary(ctx, IXS_MOD, built[node->u.binary.lhs],
-                                     built[node->u.binary.rhs]);
+    return simp_mod(ctx, built[node->u.binary.lhs], built[node->u.binary.rhs]);
   case WIRE_PIECEWISE:
     return decode_build_pw(ctx, node, built);
   case WIRE_MAX:
-    return decode_build_plain_binary(ctx, IXS_MAX, built[node->u.binary.lhs],
-                                     built[node->u.binary.rhs]);
   case WIRE_MIN:
-    return decode_build_plain_binary(ctx, IXS_MIN, built[node->u.binary.lhs],
-                                     built[node->u.binary.rhs]);
   case WIRE_XOR:
-    return decode_build_plain_binary(ctx, IXS_XOR, built[node->u.binary.lhs],
-                                     built[node->u.binary.rhs]);
-  case WIRE_CMP:
-    return decode_build_cmp(ctx, node, built);
   case WIRE_AND:
   case WIRE_OR:
-    return decode_build_logic(ctx, node, built);
+    return decode_build_assoc(ctx, node, built);
+  case WIRE_CMP:
+    return decode_build_cmp(ctx, node, built);
   case WIRE_NOT:
     return ixs_node_not(ctx, built[node->u.unary.arg]);
-  case WIRE_TRUE:
-    return ctx->node_true;
-  case WIRE_FALSE:
-    return ctx->node_false;
   case WIRE_ERROR:
     return ctx->sentinel_error;
   case WIRE_PARSE_ERROR:
     return ctx->sentinel_parse_error;
   }
   return NULL;
+}
+
+static decode_status decode_preflight_build(ixs_ctx *ctx,
+                                            const decode_input *in,
+                                            const decode_node *nodes,
+                                            uint32_t count,
+                                            size_t built_bytes) {
+  ixs_ctx *validation_ctx = ixs_ctx_create();
+  ixs_session validation_session;
+  ixs_session_binding binding;
+  ixs_node **built;
+  decode_status status = DECODE_OK;
+  uint32_t i;
+
+  if (!validation_ctx)
+    return DECODE_OOM;
+  ixs_session_init(&validation_session, validation_ctx);
+  if (ixs_session_bind(&binding, &validation_session) != validation_ctx) {
+    ixs_session_destroy(&validation_session);
+    ixs_ctx_destroy(validation_ctx);
+    return DECODE_OOM;
+  }
+
+  built =
+      ixs_arena_alloc(&validation_ctx->scratch, built_bytes, sizeof(void *));
+  if (!built) {
+    status = DECODE_OOM;
+  } else {
+    for (i = 0; i < count; i++) {
+      built[i] = decode_build_node(validation_ctx, nodes, built, i);
+      if (!built[i]) {
+        status = DECODE_OOM;
+        break;
+      }
+      if (nodes[i].tag != WIRE_ERROR && nodes[i].tag != WIRE_PARSE_ERROR &&
+          ixs_node_is_sentinel(built[i])) {
+        status = decode_error(ctx, in, "node constructor rejected payload");
+        break;
+      }
+    }
+  }
+
+  ixs_session_unbind(&binding);
+  ixs_session_destroy(&validation_session);
+  ixs_ctx_destroy(validation_ctx);
+  return status;
 }
 
 static bool serialize_stream(ixs_ctx *ctx, const ixs_node *root,
@@ -1429,15 +1564,52 @@ static bool serialize_stream(ixs_ctx *ctx, const ixs_node *root,
   return writer_u32(w, root_index);
 }
 
+static decode_status decode_read_header(ixs_ctx *ctx, decode_input *in,
+                                        uint32_t *count, size_t *node_bytes,
+                                        size_t *built_bytes) {
+  uint32_t magic = 0;
+  uint32_t version = 0;
+  size_t framing_floor = 0;
+  decode_status status;
+
+  status = reader_u32(ctx, in, &magic, "truncated header magic");
+  if (status != DECODE_OK)
+    return status;
+  if (magic != SERIAL_MAGIC)
+    return decode_error(ctx, in, "bad magic");
+
+  status = reader_u32(ctx, in, &version, "truncated header version");
+  if (status != DECODE_OK)
+    return status;
+  if (version != SERIAL_VERSION)
+    return decode_error(ctx, in, "unsupported version");
+
+  status = reader_u32(ctx, in, count, "truncated node count");
+  if (status != DECODE_OK)
+    return status;
+  if (*count == 0)
+    return decode_error(ctx, in, "node table is empty");
+  if (*count > SERIAL_MAX_NODE_COUNT)
+    return decode_error(ctx, in, "node table exceeds implementation limit");
+  if (!size_mul_ok((size_t)*count, sizeof(decode_node), node_bytes))
+    return decode_error(ctx, in, "node table count overflows size_t");
+  if (!size_mul_ok((size_t)*count, sizeof(ixs_node *), built_bytes))
+    return decode_error(ctx, in, "node table count overflows size_t");
+  if (!size_add_ok((size_t)*count, sizeof(uint32_t), &framing_floor))
+    return decode_error(ctx, in, "node count framing overflows size_t");
+
+  /* Cheap framing floor: one tag byte per node plus the final root index. */
+  return decode_require_bytes(
+      ctx, in, framing_floor,
+      "node count exceeds remaining bytes for record tags and root index");
+}
+
 static decode_status decode_stream(ixs_ctx *ctx, decode_input *in,
                                    ixs_node **out) {
   decode_node *nodes = NULL;
   ixs_node **built = NULL;
-  uint32_t magic = 0;
-  uint32_t version = 0;
   uint32_t count = 0;
   uint32_t root_index = 0;
-  size_t framing_floor = 0;
   size_t node_bytes = 0;
   size_t built_bytes = 0;
   uint32_t i;
@@ -1450,49 +1622,7 @@ static decode_status decode_stream(ixs_ctx *ctx, decode_input *in,
     return DECODE_PARSE_ERROR;
   }
 
-  status = reader_u32(ctx, in, &magic, "truncated header magic");
-  if (status != DECODE_OK)
-    return status;
-  if (magic != SERIAL_MAGIC) {
-    (void)decode_error(ctx, in, "bad magic");
-    return DECODE_PARSE_ERROR;
-  }
-
-  status = reader_u32(ctx, in, &version, "truncated header version");
-  if (status != DECODE_OK)
-    return status;
-  if (version != SERIAL_VERSION) {
-    (void)decode_error(ctx, in, "unsupported version");
-    return DECODE_PARSE_ERROR;
-  }
-
-  status = reader_u32(ctx, in, &count, "truncated node count");
-  if (status != DECODE_OK)
-    return status;
-  if (count == 0) {
-    (void)decode_error(ctx, in, "node table is empty");
-    return DECODE_PARSE_ERROR;
-  }
-  if (count > SERIAL_MAX_NODE_COUNT) {
-    (void)decode_error(ctx, in, "node table exceeds implementation limit");
-    return DECODE_PARSE_ERROR;
-  }
-  if (!size_mul_ok((size_t)count, sizeof(*nodes), &node_bytes)) {
-    (void)decode_error(ctx, in, "node table count overflows size_t");
-    return DECODE_PARSE_ERROR;
-  }
-  if (!size_mul_ok((size_t)count, sizeof(*built), &built_bytes)) {
-    (void)decode_error(ctx, in, "node table count overflows size_t");
-    return DECODE_PARSE_ERROR;
-  }
-  if (!size_add_ok((size_t)count, sizeof(uint32_t), &framing_floor)) {
-    (void)decode_error(ctx, in, "node count framing overflows size_t");
-    return DECODE_PARSE_ERROR;
-  }
-  /* Cheap framing floor: one tag byte per node plus the final root index. */
-  status = decode_require_bytes(
-      ctx, in, framing_floor,
-      "node count exceeds remaining bytes for record tags and root index");
+  status = decode_read_header(ctx, in, &count, &node_bytes, &built_bytes);
   if (status != DECODE_OK)
     return status;
 
@@ -1520,6 +1650,9 @@ static decode_status decode_stream(ixs_ctx *ctx, decode_input *in,
   }
 
   status = decode_validate_build_sizes(ctx, in, nodes, count);
+  if (status != DECODE_OK)
+    return status;
+  status = decode_preflight_build(ctx, in, nodes, count, built_bytes);
   if (status != DECODE_OK)
     return status;
   built = ixs_arena_alloc(&ctx->scratch, built_bytes, sizeof(void *));

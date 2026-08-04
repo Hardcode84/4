@@ -25,12 +25,22 @@ IXS_STATIC ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_max_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args);
+IXS_STATIC ixs_node *simp_min_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args);
+IXS_STATIC ixs_node *simp_xor_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args);
 IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
                              ixs_node *const *conds);
 IXS_STATIC ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op,
                               ixs_node *b);
 IXS_STATIC ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_and_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args);
+IXS_STATIC ixs_node *simp_or_many(ixs_ctx *ctx, uint32_t n,
+                                  ixs_node *const *args);
 IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 
 /* Top-down simplification pass with assumptions + bound analysis. */

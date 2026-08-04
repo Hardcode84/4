@@ -99,12 +99,6 @@ static ixs_node *expand_binary(ixs_ctx *ctx, ixs_node *node, int depth) {
   switch (node->tag) {
   case IXS_MOD:
     return simp_mod(ctx, lhs, rhs);
-  case IXS_MAX:
-    return simp_max(ctx, lhs, rhs);
-  case IXS_MIN:
-    return simp_min(ctx, lhs, rhs);
-  case IXS_XOR:
-    return simp_xor(ctx, lhs, rhs);
   case IXS_CMP:
     return simp_cmp(ctx, lhs, node->u.binary.cmp_op, rhs);
   default:
@@ -134,18 +128,54 @@ static ixs_node *expand_pw(ixs_ctx *ctx, ixs_node *node, int depth) {
   return result;
 }
 
-static ixs_node *expand_logic(ixs_ctx *ctx, ixs_node *node, int depth) {
+static ixs_node *expand_assoc(ixs_ctx *ctx, ixs_node *node, int depth) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
   uint32_t i;
-  uint32_t na = node->u.logic.nargs;
+  uint32_t na = node->u.assoc.nargs;
+  ixs_node **args = NULL;
   ixs_node *result;
-  if (na < 2)
-    return node;
-  result = do_expand(ctx, node->u.logic.args[0], depth + 1);
-  for (i = 1; i < na; i++) {
-    ixs_node *arg = do_expand(ctx, node->u.logic.args[i], depth + 1);
-    result = (node->tag == IXS_AND) ? simp_and(ctx, result, arg)
-                                    : simp_or(ctx, result, arg);
+
+  if (na > 0) {
+    size_t sz = (size_t)na * sizeof(*args);
+    if (sz / sizeof(*args) != na) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+    args = ixs_arena_alloc(&ctx->scratch, sz, sizeof(void *));
+    if (!args) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+    for (i = 0; i < na; i++) {
+      args[i] = do_expand(ctx, node->u.assoc.args[i], depth + 1);
+      if (!args[i]) {
+        ixs_arena_restore(&ctx->scratch, mark);
+        return NULL;
+      }
+    }
   }
+
+  switch (node->tag) {
+  case IXS_MAX:
+    result = simp_max_many(ctx, na, args);
+    break;
+  case IXS_MIN:
+    result = simp_min_many(ctx, na, args);
+    break;
+  case IXS_XOR:
+    result = simp_xor_many(ctx, na, args);
+    break;
+  case IXS_AND:
+    result = simp_and_many(ctx, na, args);
+    break;
+  case IXS_OR:
+    result = simp_or_many(ctx, na, args);
+    break;
+  default:
+    result = node;
+    break;
+  }
+  ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
@@ -180,18 +210,18 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
 
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return expand_binary(ctx, node, depth);
 
   case IXS_PIECEWISE:
     return expand_pw(ctx, node, depth);
 
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return expand_logic(ctx, node, depth);
+    return expand_assoc(ctx, node, depth);
 
   case IXS_NOT:
     return simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));

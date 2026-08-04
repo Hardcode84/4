@@ -266,7 +266,7 @@ static void test_add_without_const_cache(void) {
   terms[0].coeff = one;
   terms[1].term = y;
   terms[1].coeff = one;
-  if (ixs_node_cmp(terms[0].term, terms[1].term) > 0) {
+  if (ixs_node_cmp(ctx, terms[0].term, terms[1].term) > 0) {
     ixs_addterm swap = terms[0];
     terms[0] = terms[1];
     terms[1] = swap;
@@ -308,6 +308,45 @@ static void test_add_without_const_cache(void) {
 }
 #endif
 
+static void test_expand_associative_nodes(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "assoc_expand_a");
+  ixs_node *b = ixs_sym(ctx, "assoc_expand_b");
+  ixs_node *c = ixs_sym(ctx, "assoc_expand_c");
+  ixs_node *x = ixs_sym(ctx, "assoc_expand_x");
+  ixs_node *y = ixs_sym(ctx, "assoc_expand_y");
+  ixs_node *z = ixs_sym(ctx, "assoc_expand_z");
+  ixs_node *args[3];
+  ixs_node *expanded[3];
+  ixs_node *expr;
+  ixs_node *expected;
+
+  args[0] = ixs_mul(ctx, x, ixs_add(ctx, a, b));
+  args[1] = ixs_mul(ctx, y, ixs_add(ctx, b, c));
+  args[2] = ixs_mul(ctx, z, ixs_add(ctx, c, a));
+  expanded[0] = ixs_expand(ctx, args[0]);
+  expanded[1] = ixs_expand(ctx, args[1]);
+  expanded[2] = ixs_expand(ctx, args[2]);
+
+  expr = ixs_max_many(ctx, 3, args);
+  expected = ixs_max_many(ctx, 3, expanded);
+  CHECK(ixs_expand(ctx, expr) == expected);
+  expr = ixs_min_many(ctx, 3, args);
+  expected = ixs_min_many(ctx, 3, expanded);
+  CHECK(ixs_expand(ctx, expr) == expected);
+  expr = ixs_xor_many(ctx, 3, args);
+  expected = ixs_xor_many(ctx, 3, expanded);
+  CHECK(ixs_expand(ctx, expr) == expected);
+  expr = ixs_and_many(ctx, 3, args);
+  expected = ixs_and_many(ctx, 3, expanded);
+  CHECK(ixs_expand(ctx, expr) == expected);
+  expr = ixs_or_many(ctx, 3, args);
+  expected = ixs_or_many(ctx, 3, expanded);
+  CHECK(ixs_expand(ctx, expr) == expected);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_expand_leaves();
   test_expand_add_noop();
@@ -320,6 +359,7 @@ int main(void) {
   test_expand_three_factors();
   test_expand_piecewise();
   test_expand_sentinel();
+  test_expand_associative_nodes();
 #ifndef IXS_TEST_AMALGAMATION
   test_expand_cache();
   test_expand_cache_failure_semantics();

@@ -15,6 +15,7 @@
 
 #include "test_check.h"
 #include <ixsimpl.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef INT64_MIN
@@ -810,12 +811,19 @@ static void test_bounds_extrema_divisibility(void) {
   ixs_node *six_x = ixs_mul(ctx, ixs_int(ctx, 6), x);
   ixs_node *nine_y = ixs_mul(ctx, ixs_int(ctx, 9), y);
   ixs_node *ten_y = ixs_mul(ctx, ixs_int(ctx, 10), y);
+  ixs_node *twelve = ixs_int(ctx, 12);
+  ixs_node *divisible[3] = {six_x, nine_y, twelve};
+  ixs_node *mixed[3] = {six_x, ten_y, twelve};
 
   CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
   CHECK(ixs_bounds_is_known_divisible(&b, ixs_max(ctx, six_x, nine_y), 3));
   CHECK(ixs_bounds_is_known_divisible(&b, ixs_min(ctx, six_x, nine_y), 3));
   CHECK(!ixs_bounds_is_known_divisible(&b, ixs_max(ctx, six_x, ten_y), 3));
   CHECK(!ixs_bounds_is_known_divisible(&b, ixs_min(ctx, six_x, ten_y), 3));
+  CHECK(ixs_bounds_is_known_divisible(&b, ixs_max_many(ctx, 3, divisible), 3));
+  CHECK(ixs_bounds_is_known_divisible(&b, ixs_min_many(ctx, 3, divisible), 3));
+  CHECK(!ixs_bounds_is_known_divisible(&b, ixs_max_many(ctx, 3, mixed), 3));
+  CHECK(!ixs_bounds_is_known_divisible(&b, ixs_min_many(ctx, 3, mixed), 3));
 
   ixs_bounds_destroy(&b);
   ixs_ctx_destroy(ctx);
@@ -1789,7 +1797,7 @@ static ixs_node *raw_two_term_add(ixs_ctx *ctx, ixs_node *left_coeff,
   terms[0].term = left;
   terms[1].coeff = right_coeff;
   terms[1].term = right;
-  if (ixs_node_cmp(terms[0].term, terms[1].term) > 0) {
+  if (ixs_node_cmp(ctx, terms[0].term, terms[1].term) > 0) {
     ixs_addterm swap = terms[0];
     terms[0] = terms[1];
     terms[1] = swap;
@@ -1890,6 +1898,95 @@ static void test_public_range_xor(void) {
   assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
   assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
   CHECK(!ixs_range(ctx, expr, assumes, 4, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_associative_many(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "assoc_range_x");
+  ixs_node *y = ixs_sym(ctx, "assoc_range_y");
+  ixs_node *z = ixs_sym(ctx, "assoc_range_z");
+  ixs_node *args[3] = {x, y, z};
+  ixs_node *bounds[6];
+  ixs_node *masked[3] = {x, y, ixs_int(ctx, 3)};
+  ixs_node *scaled[3];
+  ixs_node *overlap[3];
+  ixs_node *congruent[3];
+  ixs_node *mixed[3];
+  ixs_node *extreme[2];
+  ixs_node *expr;
+  ixs_node *sum;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result r;
+
+  bounds[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 1));
+  bounds[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 3));
+  bounds[2] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 5));
+  bounds[3] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 7));
+  bounds[4] = ixs_cmp(ctx, z, IXS_CMP_GE, ixs_int(ctx, -2));
+  bounds[5] = ixs_cmp(ctx, z, IXS_CMP_LE, ixs_int(ctx, 2));
+  CHECK(ixs_range(ctx, ixs_max_many(ctx, 3, args), bounds, 6, &r));
+  CHECK(r.has_lower && r.lower_p == 5 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 7 && r.upper_q == 1);
+  CHECK(ixs_range(ctx, ixs_min_many(ctx, 3, args), bounds, 6, &r));
+  CHECK(r.has_lower && r.lower_p == -2 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 2 && r.upper_q == 1);
+  CHECK(ixs_range(ctx, ixs_and_many(ctx, 3, masked), NULL, 0, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 3 && r.upper_q == 1);
+
+  bounds[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  bounds[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 15));
+  bounds[2] = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0));
+  bounds[3] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 15));
+  bounds[4] = ixs_cmp(ctx, z, IXS_CMP_GE, ixs_int(ctx, 0));
+  bounds[5] = ixs_cmp(ctx, z, IXS_CMP_LE, ixs_int(ctx, 15));
+  CHECK(ixs_range(ctx, ixs_xor_many(ctx, 3, args), bounds, 6, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
+
+  scaled[0] = x;
+  scaled[1] = ixs_mul(ctx, ixs_int(ctx, 16), y);
+  scaled[2] = ixs_mul(ctx, ixs_int(ctx, 256), z);
+  overlap[0] = x;
+  overlap[1] = ixs_mul(ctx, ixs_int(ctx, 8), y);
+  overlap[2] = scaled[2];
+  sum = ixs_add(ctx, scaled[0], ixs_add(ctx, scaled[1], scaled[2]));
+  CHECK(ixs_simplify(ctx, ixs_xor_many(ctx, 3, scaled), bounds, 6) == sum);
+  CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_xor_many(ctx, 3, overlap), bounds,
+                                  6)) == IXS_XOR);
+
+  congruent[0] =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 1));
+  congruent[1] =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), y), ixs_int(ctx, 1));
+  congruent[2] =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), z), ixs_int(ctx, 1));
+  mixed[0] = congruent[0];
+  mixed[1] = congruent[1];
+  mixed[2] = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), z), ixs_int(ctx, 2));
+  CHECK(ixs_check_congruent_facts(facts, ixs_max_many(ctx, 3, congruent), 4,
+                                  1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_congruent_facts(facts, ixs_min_many(ctx, 3, mixed), 4, 1) ==
+        IXS_CHECK_UNKNOWN);
+
+  extreme[0] = ixs_int(ctx, INT64_MAX);
+  extreme[1] = x;
+  CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_max_many(ctx, 2, extreme), bounds,
+                                  1)) == IXS_MAX);
+  extreme[0] = ixs_int(ctx, INT64_MIN);
+  bounds[0] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 0));
+  CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_min_many(ctx, 2, extreme), bounds,
+                                  1)) == IXS_MIN);
+
+  args[0] = ixs_int(ctx, 8);
+  args[1] = x;
+  args[2] = y;
+  bounds[0] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 7));
+  bounds[1] = ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 6));
+  expr = ixs_max_many(ctx, 3, args);
+  CHECK(ixs_simplify(ctx, expr, bounds, 2) == ixs_int(ctx, 8));
 
   ixs_ctx_destroy(ctx);
 }
@@ -2050,9 +2147,10 @@ static void test_bounds_canonical_alias_failure_semantics(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "canonical_fail_x");
   ixs_node *s = ixs_sym(ctx, "canonical_fail_s");
-  ixs_node *lhs = ixs_node_cmp(x, s) < 0 ? x : s;
+  ixs_node *lhs = ixs_node_cmp(ctx, x, s) < 0 ? x : s;
   ixs_node *rhs = lhs == x ? s : x;
-  ixs_node *uncached = ixs_node_binary(ctx, IXS_XOR, lhs, rhs, IXS_CMP_EQ);
+  ixs_node *xor_args[2] = {lhs, rhs};
+  ixs_node *uncached = ixs_node_assoc(ctx, IXS_XOR, 2, xor_args);
   ixs_node *too_large = raw_power(ctx, x, 65);
   ixs_node *expand_oom =
       ixs_mul(ctx, ixs_add(ctx, x, s), ixs_sym(ctx, "canonical_fail_z"));
@@ -2333,7 +2431,7 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
 
 static ixs_node *raw_logic_node(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
                                 ixs_node **args) {
-  ixs_node *node = ixs_node_logic(ctx, tag, nargs, args);
+  ixs_node *node = ixs_node_assoc(ctx, tag, nargs, args);
   CHECK(node != NULL);
   return node;
 }
@@ -2904,6 +3002,35 @@ static void test_public_structural_and_assumption_integrality(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_fact_integrality_associative_many(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "assoc_integral_x");
+  ixs_node *y = ixs_sym(ctx, "assoc_integral_y");
+  ixs_node *k = ixs_sym(ctx, "assoc_integral_k");
+  ixs_node *scaled = ixs_div(ctx, k, ixs_int(ctx, 2));
+  ixs_node *args[3] = {x, y, scaled};
+  ixs_node *exprs[5];
+  ixs_node *even = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                           ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  size_t i;
+
+  exprs[0] = ixs_max_many(ctx, 3, args);
+  exprs[1] = ixs_min_many(ctx, 3, args);
+  exprs[2] = ixs_xor_many(ctx, 3, args);
+  exprs[3] = ixs_and_many(ctx, 3, args);
+  exprs[4] = ixs_or_many(ctx, 3, args);
+  CHECK(ixs_facts_assume_pred(facts, even));
+  for (i = 0; i < sizeof(exprs) / sizeof(exprs[0]); i++) {
+    CHECK(ixs_node_assoc_nargs(exprs[i]) == 3);
+    CHECK(ixs_node_assoc_arg(exprs[i], 2) == scaled);
+    CHECK(!ixs_node_is_integer_valued(exprs[i]));
+    CHECK(ixs_check_integer_valued_facts(facts, exprs[i]) == IXS_CHECK_TRUE);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_fact_integrality_piecewise(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -2987,6 +3114,8 @@ static void test_public_known_bits_propagation(void) {
   ixs_node *slot = ixs_sym(ctx, "slot");
   ixs_node *x = ixs_sym(ctx, "known_x");
   ixs_node *y = ixs_sym(ctx, "known_y");
+  ixs_node *z = ixs_sym(ctx, "known_z");
+  ixs_node *bit_args[3] = {x, y, z};
   ixs_node *wide = ixs_floor(
       ctx, ixs_div(ctx, item, ixs_int(ctx, INT64_C(4611686018427387904))));
   ixs_node *scaled16 = ixs_mul(ctx, ixs_int(ctx, 16), item);
@@ -3008,6 +3137,9 @@ static void test_public_known_bits_propagation(void) {
   CHECK(ixs_facts_assume_pred(facts,
                               ixs_cmp(ctx, ixs_and(ctx, y, ixs_int(ctx, 15)),
                                       IXS_CMP_EQ, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_and(ctx, z, ixs_int(ctx, 15)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 3))));
   CHECK(ixs_facts_assume_pred(facts,
                               ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
 
@@ -3031,6 +3163,16 @@ static void test_public_known_bits_propagation(void) {
   CHECK((bits.known_one & 255u) == 80u);
 
   CHECK(ixs_get_known_bits_facts(facts, ixs_xor(ctx, x, y), &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
+  CHECK((bits.known_one & 15u) == 15u);
+
+  CHECK(ixs_get_known_bits_facts(facts, ixs_xor_many(ctx, 3, bit_args), &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
+  CHECK((bits.known_one & 15u) == 12u);
+  CHECK(ixs_get_known_bits_facts(facts, ixs_and_many(ctx, 3, bit_args), &bits));
+  CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
+  CHECK((bits.known_one & 15u) == 0u);
+  CHECK(ixs_get_known_bits_facts(facts, ixs_or_many(ctx, 3, bit_args), &bits));
   CHECK(((bits.known_zero | bits.known_one) & 15u) == 15u);
   CHECK((bits.known_one & 15u) == 15u);
 
@@ -3232,10 +3374,17 @@ static void test_public_predicate_tree_query(void) {
   ixs_node *both = ixs_and(ctx, x_nonnegative, y_small);
   ixs_node *either = ixs_or(ctx, x_nonnegative, y_small);
   ixs_node *not_x = ixs_not(ctx, x);
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_node *partial_pred =
+      ixs_cmp(ctx, reciprocal, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *guarded_false = ixs_and(ctx, ixs_false(ctx), partial_pred);
+  ixs_node *guarded_true = ixs_or(ctx, ixs_true(ctx), partial_pred);
   ixs_facts *all_true = ixs_facts_create(ctx);
   ixs_facts *one_false = ixs_facts_create(ctx);
   ixs_facts *all_false = ixs_facts_create(ctx);
   ixs_facts *partial = ixs_facts_create(ctx);
+  ixs_facts *no_domain = ixs_facts_create(ctx);
+  ixs_facts *defined = ixs_facts_create(ctx);
 
   CHECK(ixs_facts_assume_pred(all_true, x_nonnegative));
   CHECK(ixs_facts_assume_pred(all_true, y_small));
@@ -3268,6 +3417,17 @@ static void test_public_predicate_tree_query(void) {
   CHECK(ixs_check_predicate_facts(partial, ixs_not(ctx, y)) ==
         IXS_CHECK_UNKNOWN);
   CHECK(ixs_check_predicate_facts(partial, both) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_node_tag(guarded_false) == IXS_AND);
+  CHECK(ixs_node_tag(guarded_true) == IXS_OR);
+  CHECK(ixs_check_predicate_facts(no_domain, guarded_false) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_predicate_facts(no_domain, guarded_true) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(defined,
+                              ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_check_predicate_facts(defined, guarded_false) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_predicate_facts(defined, guarded_true) == IXS_CHECK_TRUE);
 
   ixs_ctx_clear_errors(ctx);
   CHECK(ixs_check_predicate_facts(partial, ixs_and(ctx, x, ixs_int(ctx, 7))) ==
@@ -4093,6 +4253,38 @@ static void test_public_defined_mod_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_defined_bitwise_integrality(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_bit_x");
+  ixs_node *y = ixs_sym(ctx, "defined_bit_y");
+  ixs_node *k = ixs_sym(ctx, "defined_bit_k");
+  ixs_node *scaled = ixs_div(ctx, k, ixs_int(ctx, 2));
+  ixs_node *args[3] = {x, y, scaled};
+  ixs_node *exprs[3];
+  ixs_node *even = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                           ixs_int(ctx, 0));
+  ixs_node *one = ixs_cmp(ctx, k, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_facts *unknown = ixs_facts_create(ctx);
+  ixs_facts *integral = ixs_facts_create(ctx);
+  ixs_facts *fractional = ixs_facts_create(ctx);
+  size_t i;
+
+  exprs[0] = ixs_xor_many(ctx, 3, args);
+  exprs[1] = ixs_and_many(ctx, 3, args);
+  exprs[2] = ixs_or_many(ctx, 3, args);
+  CHECK(ixs_facts_assume_pred(integral, even));
+  CHECK(ixs_facts_assume_pred(fractional, one));
+  for (i = 0; i < sizeof(exprs) / sizeof(exprs[0]); i++) {
+    CHECK(ixs_node_assoc_nargs(exprs[i]) == 3);
+    CHECK(ixs_node_assoc_arg(exprs[i], 2) == scaled);
+    CHECK(ixs_check_defined_facts(unknown, exprs[i]) == IXS_CHECK_UNKNOWN);
+    CHECK(ixs_check_defined_facts(integral, exprs[i]) == IXS_CHECK_TRUE);
+    CHECK(ixs_check_defined_facts(fractional, exprs[i]) == IXS_CHECK_FALSE);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_defined_piecewise_first_match(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "defined_pw_x");
@@ -4271,8 +4463,10 @@ static void test_public_defined_traversal_bounds_and_sharing(void) {
     deep = ixs_node_floor(ctx, deep);
   CHECK(ixs_check_defined(ctx, deep, NULL, 0) == IXS_CHECK_UNKNOWN);
 
-  for (i = 0; i < 60; i++)
-    shared = ixs_node_binary(ctx, IXS_MAX, shared, shared, IXS_CMP_EQ);
+  for (i = 0; i < 60; i++) {
+    ixs_node *max_args[2] = {shared, shared};
+    shared = ixs_node_assoc(ctx, IXS_MAX, 2, max_args);
+  }
   CHECK(ixs_check_defined(ctx, shared, NULL, 0) == IXS_CHECK_TRUE);
   guarded_factor.base = shared;
   guarded_factor.exp = -1;
@@ -4483,9 +4677,103 @@ static void test_same_bucket_floor_oom_is_conservative(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_associative_constructor_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "assoc_oom_x");
+  ixs_node *y = ixs_sym(ctx, "assoc_oom_y");
+  ixs_node *z = ixs_sym(ctx, "assoc_oom_z");
+  ixs_node *args[3] = {x, y, z};
+  ixs_node *constants[2] = {ixs_int(ctx, 1), ixs_int(ctx, 2)};
+  ixs_node *partial = ixs_div(ctx, x, ixs_int(ctx, 2));
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_xor_many(ctx, 3, args) == NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_node_tag(ixs_xor_many(ctx, 3, args)) == IXS_XOR);
+
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_xor_many(ctx, 2, constants) == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_xor_many(ctx, 2, constants) == ixs_int(ctx, 3));
+
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_and_many(ctx, 1, &partial) == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_node_tag(ixs_and_many(ctx, 1, &partial)) == IXS_AND);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_is_domain_error(ixs_pw(ctx, 0, NULL, NULL)));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
+
+static void test_deep_node_order_is_iterative(void) {
+  enum { DEPTH = 150000 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  struct ixs_node_impl *chain_a = calloc(DEPTH, sizeof(*chain_a));
+  struct ixs_node_impl *chain_b = calloc(DEPTH, sizeof(*chain_b));
+  ixs_node *a = ixs_node_sym(ctx, "deep_a", 6);
+  ixs_node *b = ixs_node_sym(ctx, "deep_b", 6);
+  ixs_node *modulus = ixs_node_int(ctx, 7);
+  ixs_node *args[2];
+  uint32_t i;
+  size_t errors;
+
+  CHECK(ctx != NULL && chain_a != NULL && chain_b != NULL && a != NULL &&
+        b != NULL && modulus != NULL);
+  if (!ctx || !chain_a || !chain_b || !a || !b || !modulus) {
+    free(chain_a);
+    free(chain_b);
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+  for (i = 0; i < DEPTH; i++) {
+    chain_a[i].tag = IXS_MOD;
+    chain_a[i].properties = IXS_NODE_PROPERTY_VALID |
+                            IXS_NODE_PROPERTY_INTEGER | IXS_NODE_PROPERTY_TOTAL;
+    chain_a[i].u.binary.lhs = a;
+    chain_a[i].u.binary.rhs = modulus;
+    chain_b[i].tag = IXS_MOD;
+    chain_b[i].properties = chain_a[i].properties;
+    chain_b[i].u.binary.lhs = b;
+    chain_b[i].u.binary.rhs = modulus;
+    a = &chain_a[i];
+    b = &chain_b[i];
+  }
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_node_cmp(ctx, a, b) < 0);
+  ixs_arena_set_fail_after(&ctx->scratch, 0);
+  CHECK(ixs_node_cmp(ctx, a, b) == IXS_NODE_CMP_OOM);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+
+  args[0] = b;
+  args[1] = a;
+  errors = ctx->nerrors;
+  ixs_arena_set_fail_after(&ctx->scratch, 2);
+  CHECK(simp_max_many(ctx, 2, args) == NULL);
+  CHECK(ctx->nerrors == errors);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(simp_max_many(ctx, 2, args) != NULL);
+
+  errors = ctx->nerrors;
+  ixs_arena_set_fail_after(&ctx->scratch, 1);
+  CHECK(simp_add(ctx, a, b) == NULL);
+  CHECK(ctx->nerrors == errors);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(simp_add(ctx, a, b) != NULL);
+  ixs_session_unbind(&binding);
+
+  ixs_ctx_destroy(ctx);
+  free(chain_a);
+  free(chain_b);
+}
 
 int main(void) {
   /* Interval arithmetic */
@@ -4591,6 +4879,7 @@ int main(void) {
   test_public_facts_range_and_transfer();
   test_public_range_powers();
   test_public_range_xor();
+  test_public_range_associative_many();
   test_public_range_piecewise();
   test_failed_expand_is_not_expression_fact_alias();
   test_bounds_canonical_alias_cache();
@@ -4611,6 +4900,7 @@ int main(void) {
   test_public_facts_substitute_contradiction_and_extrema();
   test_public_facts_substitute_failures_are_atomic();
   test_public_structural_and_assumption_integrality();
+  test_public_fact_integrality_associative_many();
   test_public_fact_integrality_piecewise();
   test_public_fact_divisibility();
   test_public_known_bits_propagation();
@@ -4633,6 +4923,7 @@ int main(void) {
   test_public_integrality_invalid_and_contradictory();
   test_public_defined_reciprocal_and_children();
   test_public_defined_mod_contract();
+  test_public_defined_bitwise_integrality();
   test_public_defined_piecewise_first_match();
   test_public_defined_piecewise_condition();
   test_public_defined_facts_and_invalid();
@@ -4641,6 +4932,8 @@ int main(void) {
   test_batch_rewrite_cache_oom_is_atomic();
   test_mod_rewrite_oom_propagates();
   test_same_bucket_floor_oom_is_conservative();
+  test_associative_constructor_oom();
+  test_deep_node_order_is_iterative();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

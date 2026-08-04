@@ -155,6 +155,12 @@ const ixs_node *ixs_mod(ixs_session *s, const ixs_node *a, const ixs_node *b);
 const ixs_node *ixs_max(ixs_session *s, const ixs_node *a, const ixs_node *b);
 const ixs_node *ixs_min(ixs_session *s, const ixs_node *a, const ixs_node *b);
 const ixs_node *ixs_xor(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_max_many(ixs_session *s, uint32_t n,
+                             const ixs_node *const *args);
+const ixs_node *ixs_min_many(ixs_session *s, uint32_t n,
+                             const ixs_node *const *args);
+const ixs_node *ixs_xor_many(ixs_session *s, uint32_t n,
+                             const ixs_node *const *args);
 
 /* Piecewise: n branches.  values[i] is returned when conds[i] is true;
  * last branch is the default (conds[n-1] should be ixs_true). */
@@ -166,6 +172,10 @@ const ixs_node *ixs_cmp(ixs_session *s, const ixs_node *a, ixs_cmp_op op,
                         const ixs_node *b);
 const ixs_node *ixs_and(ixs_session *s, const ixs_node *a, const ixs_node *b);
 const ixs_node *ixs_or(ixs_session *s, const ixs_node *a, const ixs_node *b);
+const ixs_node *ixs_and_many(ixs_session *s, uint32_t n,
+                             const ixs_node *const *args);
+const ixs_node *ixs_or_many(ixs_session *s, uint32_t n,
+                            const ixs_node *const *args);
 const ixs_node *ixs_not(ixs_session *s, const ixs_node *a);
 /* Convenience names for integer 1 and 0. */
 const ixs_node *ixs_true(ixs_session *s);
@@ -582,8 +592,7 @@ int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
 const ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
-/* Only valid when tag is IXS_MOD, IXS_MAX, IXS_MIN,
- * IXS_XOR, or IXS_CMP. */
+/* Only valid when tag is IXS_MOD or IXS_CMP. */
 const ixs_node *ixs_node_binary_lhs(const ixs_node *node);
 const ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
@@ -595,10 +604,9 @@ uint32_t ixs_node_pw_ncases(const ixs_node *node);
 const ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
 const ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
-/* Only valid when tag is IXS_AND or IXS_OR.  New nodes are binary, but
- * deserialized legacy nodes may have more children. i must be < nargs. */
-uint32_t ixs_node_logic_nargs(const ixs_node *node);
-const ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
+/* Only valid for MAX, MIN, XOR, AND, or OR. i must be < nargs. */
+uint32_t ixs_node_assoc_nargs(const ixs_node *node);
+const ixs_node *ixs_node_assoc_arg(const ixs_node *node, uint32_t i);
 
 /* --- Generic child access ----------------------------------------------- */
 
@@ -612,7 +620,7 @@ uint32_t ixs_node_nchildren(const ixs_node *node);
  *   binary: lhs, rhs
  *   unary: arg
  *   PW:  (value[0], cond[0]), (value[1], cond[1]), ...
- *   AND/OR: arg[0], arg[1], ... */
+ *   associative: arg[0], arg[1], ... */
 const ixs_node *ixs_node_child(const ixs_node *node, uint32_t i);
 
 /* --- Rule-hit statistics (requires -DIXS_STATS at compile time) -------- */

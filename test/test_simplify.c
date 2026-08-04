@@ -533,10 +533,11 @@ static void test_boolean(void) {
   CHECK(ixs_node_int_val(ixs_and(ctx, ixs_int(ctx, 6), ixs_int(ctx, 3))) == 2);
   CHECK(ixs_node_int_val(ixs_or(ctx, ixs_int(ctx, 4), ixs_int(ctx, 1))) == 5);
 
-  /* Bitwise nodes are integer-valued only when their operands are. */
+  /* A proven non-integer operand is a domain error. */
   {
     ixs_node *bad = ixs_and(ctx, ixs_rat(ctx, 1, 2), x);
-    CHECK(ixs_node_tag(ixs_floor(ctx, bad)) == IXS_FLOOR);
+    CHECK(ixs_is_domain_error(bad));
+    CHECK(ixs_floor(ctx, bad) == bad);
   }
 
   /* ~ is logical truthiness, not bitwise complement. */
@@ -554,6 +555,209 @@ static void test_boolean(void) {
   }
 }
 
+static bool assoc_has_arg(ixs_node *node, ixs_node *arg) {
+  uint32_t i;
+  for (i = 0; i < ixs_node_assoc_nargs(node); i++) {
+    if (ixs_node_assoc_arg(node, i) == arg)
+      return true;
+  }
+  return false;
+}
+
+static void check_flat_three(ixs_node *node, ixs_tag tag, ixs_node *a,
+                             ixs_node *b, ixs_node *c) {
+  uint32_t i;
+  CHECK(ixs_node_tag(node) == tag);
+  CHECK(ixs_node_assoc_nargs(node) == 3);
+  CHECK(assoc_has_arg(node, a));
+  CHECK(assoc_has_arg(node, b));
+  CHECK(assoc_has_arg(node, c));
+  for (i = 0; i < ixs_node_assoc_nargs(node); i++)
+    CHECK(ixs_node_tag(ixs_node_assoc_arg(node, i)) != tag);
+}
+
+typedef const ixs_node *(*assoc_binary_fn)(ixs_session *, const ixs_node *,
+                                           const ixs_node *);
+typedef const ixs_node *(*assoc_many_fn)(ixs_session *, uint32_t,
+                                         const ixs_node *const *);
+
+static void check_all_three_associations(ixs_ctx *ctx, ixs_tag tag,
+                                         assoc_binary_fn binary,
+                                         assoc_many_fn many, ixs_node *a,
+                                         ixs_node *b, ixs_node *c) {
+  static const unsigned char permutations[6][3] = {
+      {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+  };
+  ixs_node *operands[3] = {a, b, c};
+  ixs_session *session = IXS_TEST_SESSION(ctx);
+  ixs_node *expected = many(session, 3, operands);
+  size_t i;
+
+  check_flat_three(expected, tag, a, b, c);
+  for (i = 0; i < 6; i++) {
+    ixs_node *args[3] = {operands[permutations[i][0]],
+                         operands[permutations[i][1]],
+                         operands[permutations[i][2]]};
+    ixs_node *left =
+        binary(session, binary(session, args[0], args[1]), args[2]);
+    ixs_node *right =
+        binary(session, args[0], binary(session, args[1], args[2]));
+    CHECK(many(session, 3, args) == expected);
+    CHECK(left == expected);
+    CHECK(right == expected);
+  }
+}
+
+static void test_flat_associative_nodes(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *a = ixs_sym(ctx, "assoc_a");
+  ixs_node *b = ixs_sym(ctx, "assoc_b");
+  ixs_node *c = ixs_sym(ctx, "assoc_c");
+  ixs_node *x = ixs_sym(ctx, "assoc_x");
+  ixs_node *y = ixs_sym(ctx, "assoc_y");
+  ixs_node *m = ixs_sym(ctx, "assoc_m");
+  ixs_node *args[5];
+  ixs_node *perm[3] = {c, a, b};
+  ixs_node *saved[3] = {c, a, b};
+  ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *partial = ixs_mod(ctx, x, m);
+
+  /* Do not seed the shared rule-stats context with test-only pair nodes. */
+  {
+    ixs_ctx *permutation_ctx = ctx_create_or_die();
+    ixs_node *pa = ixs_sym(permutation_ctx, "perm_a");
+    ixs_node *pb = ixs_sym(permutation_ctx, "perm_b");
+    ixs_node *pc = ixs_sym(permutation_ctx, "perm_c");
+    check_all_three_associations(permutation_ctx, IXS_MAX, (ixs_max),
+                                 (ixs_max_many), pa, pb, pc);
+    check_all_three_associations(permutation_ctx, IXS_MIN, (ixs_min),
+                                 (ixs_min_many), pa, pb, pc);
+    check_all_three_associations(permutation_ctx, IXS_XOR, (ixs_xor),
+                                 (ixs_xor_many), pa, pb, pc);
+    check_all_three_associations(permutation_ctx, IXS_AND, (ixs_and),
+                                 (ixs_and_many), pa, pb, pc);
+    check_all_three_associations(permutation_ctx, IXS_OR, (ixs_or),
+                                 (ixs_or_many), pa, pb, pc);
+    ixs_ctx_destroy(permutation_ctx);
+  }
+  (void)ixs_or_many(ctx, 3, perm);
+  CHECK(perm[0] == saved[0] && perm[1] == saved[1] && perm[2] == saved[2]);
+
+  args[0] = x;
+  args[1] = x;
+  args[2] = ixs_int(ctx, 3);
+  args[3] = ixs_int(ctx, 7);
+  args[4] = ixs_int(ctx, 3);
+  CHECK(ixs_max_many(ctx, 5, args) == ixs_max(ctx, x, ixs_int(ctx, 7)));
+  CHECK(ixs_min_many(ctx, 5, args) == ixs_min(ctx, x, ixs_int(ctx, 3)));
+
+  args[0] = x;
+  args[1] = x;
+  CHECK(ixs_xor_many(ctx, 2, args) == ixs_int(ctx, 0));
+  args[2] = y;
+  CHECK(ixs_xor_many(ctx, 3, args) == y);
+  args[2] = x;
+  CHECK(ixs_xor_many(ctx, 3, args) == x);
+
+  args[0] = x;
+  args[1] = x;
+  args[2] = ixs_int(ctx, -1);
+  CHECK(ixs_and_many(ctx, 3, args) == x);
+  args[2] = ixs_int(ctx, 0);
+  CHECK(ixs_or_many(ctx, 3, args) == x);
+
+  CHECK(ixs_and_many(ctx, 0, NULL) == ixs_int(ctx, -1));
+  CHECK(ixs_or_many(ctx, 0, NULL) == ixs_int(ctx, 0));
+  CHECK(ixs_xor_many(ctx, 0, NULL) == ixs_int(ctx, 0));
+  CHECK(ixs_is_domain_error(ixs_max_many(ctx, 0, NULL)));
+  CHECK(ixs_is_domain_error(ixs_min_many(ctx, 0, NULL)));
+  CHECK(ixs_max_many(ctx, 1, &x) == x);
+  CHECK(ixs_min_many(ctx, 1, &x) == x);
+  CHECK(ixs_xor_many(ctx, 1, &x) == x);
+  CHECK(ixs_xor_many(ctx, 1, &partial) == partial);
+  CHECK(ixs_and_many(ctx, 1, &partial) == partial);
+  CHECK(ixs_or_many(ctx, 1, &partial) == partial);
+  CHECK(ixs_node_tag(ixs_xor_many(ctx, 1, &half)) == IXS_XOR);
+  CHECK(ixs_node_tag(ixs_and_many(ctx, 1, &half)) == IXS_AND);
+  CHECK(ixs_node_tag(ixs_or_many(ctx, 1, &half)) == IXS_OR);
+
+  args[0] = partial;
+  args[1] = partial;
+  args[2] = partial;
+  args[3] = partial;
+  CHECK(ixs_xor_many(ctx, 3, args) == ixs_xor_many(ctx, 1, &partial));
+  CHECK(ixs_xor_many(ctx, 4, args) == ixs_xor_many(ctx, 2, args));
+
+  CHECK(ixs_node_tag(ixs_and(ctx, ixs_int(ctx, 0), half)) == IXS_AND);
+  CHECK(ixs_node_tag(ixs_or(ctx, ixs_int(ctx, -1), half)) == IXS_OR);
+  CHECK(ixs_node_tag(ixs_xor(ctx, half, half)) == IXS_XOR);
+  CHECK(ixs_node_tag(ixs_and(ctx, ixs_int(ctx, 0), partial)) == IXS_AND);
+  CHECK(ixs_node_tag(ixs_or(ctx, ixs_int(ctx, -1), partial)) == IXS_OR);
+  CHECK(ixs_node_tag(ixs_xor(ctx, partial, partial)) == IXS_XOR);
+  {
+    ixs_node *guard = ixs_and(ctx, ixs_int(ctx, 0), partial);
+    ixs_node *self_eq = ixs_cmp(ctx, guard, IXS_CMP_EQ, guard);
+    ixs_node *zero_eq = ixs_cmp(ctx, guard, IXS_CMP_EQ, ixs_int(ctx, 0));
+    ixs_node *zero_target = m;
+    ixs_node *zero_replacement = ixs_int(ctx, 0);
+    ixs_node *three_replacement = ixs_int(ctx, 3);
+    CHECK(ixs_node_tag(self_eq) == IXS_CMP);
+    CHECK(ixs_node_tag(zero_eq) == IXS_CMP);
+    CHECK(ixs_is_domain_error(
+        ixs_subs(ctx, self_eq, zero_target, zero_replacement)));
+    CHECK(ixs_is_domain_error(
+        ixs_subs(ctx, zero_eq, zero_target, zero_replacement)));
+    CHECK(ixs_subs(ctx, self_eq, zero_target, three_replacement) ==
+          ixs_true(ctx));
+    CHECK(ixs_subs(ctx, zero_eq, zero_target, three_replacement) ==
+          ixs_true(ctx));
+  }
+  CHECK(ixs_and(ctx, ixs_and(ctx, ixs_int(ctx, 0), x), partial) ==
+        ixs_and(ctx, ixs_int(ctx, 0), ixs_and(ctx, x, partial)));
+  CHECK(ixs_xor(ctx, ixs_xor(ctx, partial, partial), x) ==
+        ixs_xor(ctx, partial, ixs_xor(ctx, partial, x)));
+  CHECK(ixs_or(ctx, ixs_int(ctx, -1), x) == ixs_int(ctx, -1));
+
+  args[0] = ixs_int(ctx, INT64_MIN);
+  args[1] = ixs_int(ctx, -1);
+  args[2] = ixs_int(ctx, 1);
+  CHECK(ixs_node_int_val(ixs_xor_many(ctx, 3, args)) == INT64_MAX - 1);
+  args[2] = ixs_int(ctx, -2);
+  CHECK(ixs_node_int_val(ixs_and_many(ctx, 3, args)) == INT64_MIN);
+  args[1] = ixs_int(ctx, 0);
+  args[2] = ixs_int(ctx, 1);
+  CHECK(ixs_node_int_val(ixs_or_many(ctx, 3, args)) == INT64_MIN + 1);
+
+  CHECK(ixs_is_domain_error(ixs_xor(ctx, ixs_rat(ctx, 1, 2), x)));
+  CHECK(ixs_is_domain_error(ixs_and(ctx, ixs_rat(ctx, 1, 2), x)));
+  CHECK(ixs_is_domain_error(ixs_or(ctx, ixs_rat(ctx, 1, 2), x)));
+
+  {
+    ixs_node *replacement = ixs_sym(ctx, "assoc_replacement");
+    ixs_node *source_args[3] = {a, b, c};
+    ixs_node *expected_args[3] = {a, b, replacement};
+    CHECK(ixs_subs(ctx, ixs_max_many(ctx, 3, source_args), c, replacement) ==
+          ixs_max_many(ctx, 3, expected_args));
+    CHECK(ixs_subs(ctx, ixs_min_many(ctx, 3, source_args), c, replacement) ==
+          ixs_min_many(ctx, 3, expected_args));
+    CHECK(ixs_subs(ctx, ixs_xor_many(ctx, 3, source_args), c, replacement) ==
+          ixs_xor_many(ctx, 3, expected_args));
+    CHECK(ixs_subs(ctx, ixs_and_many(ctx, 3, source_args), c, replacement) ==
+          ixs_and_many(ctx, 3, expected_args));
+    CHECK(ixs_subs(ctx, ixs_or_many(ctx, 3, source_args), c, replacement) ==
+          ixs_or_many(ctx, 3, expected_args));
+  }
+
+  {
+    ixs_node *domain = ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 0));
+    ixs_node *parse = ixs_parse(ctx, "?", 1);
+    ixs_node *mixed[3] = {domain, parse, x};
+    CHECK(ixs_xor_many(ctx, 3, mixed) == parse);
+    mixed[2] = NULL;
+    CHECK(ixs_or_many(ctx, 3, mixed) == NULL);
+  }
+}
+
 static void test_xor_known_bit_simplification(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *t0 = ixs_sym(ctx, "$T0");
@@ -566,6 +770,19 @@ static void test_xor_known_bit_simplification(void) {
   ixs_node *expected = ixs_simplify(ctx, ixs_add(ctx, low, shifted), NULL, 0);
 
   CHECK(r == expected);
+
+  {
+    ixs_node *x = ixs_sym(ctx, "xor_partial_x");
+    ixs_node *m = ixs_sym(ctx, "xor_partial_m");
+    ixs_node *selector = ixs_sym(ctx, "xor_partial_selector");
+    ixs_node *partial = ixs_mod(ctx, x, m);
+    ixs_node *guard = ixs_and(ctx, ixs_int(ctx, 0), partial);
+    ixs_node *delta_expr = ixs_sub(
+        ctx, ixs_xor(ctx, selector, ixs_add(ctx, guard, ixs_int(ctx, 2))),
+        ixs_xor(ctx, selector, guard));
+    CHECK(strstr(pr(delta_expr), "xor") != NULL);
+    CHECK(ixs_check_defined(ctx, delta_expr, NULL, 0) == IXS_CHECK_UNKNOWN);
+  }
 
   {
     ixs_node *delta_expr =
@@ -822,6 +1039,18 @@ static void test_sentinel_propagation(void) {
   /* NULL propagation */
   CHECK(ixs_add(ctx, NULL, x) == NULL);
   CHECK(ixs_mul(ctx, x, NULL) == NULL);
+  CHECK(ixs_neg(ctx, NULL) == NULL);
+  CHECK(ixs_floor(ctx, NULL) == NULL);
+  CHECK(ixs_ceil(ctx, NULL) == NULL);
+  CHECK(ixs_not(ctx, NULL) == NULL);
+
+  {
+    ixs_node *values[2] = {ixs_int(ctx, 1), NULL};
+    ixs_node *conds[2] = {ixs_true(ctx), ixs_true(ctx)};
+    CHECK(ixs_pw(ctx, 1, NULL, conds) == NULL);
+    CHECK(ixs_pw(ctx, 1, values, NULL) == NULL);
+    CHECK(ixs_pw(ctx, 2, values, conds) == NULL);
+  }
 
   /* Sentinel propagation */
   ixs_node *err = ixs_mod(ctx, x, ixs_int(ctx, 0));
@@ -833,6 +1062,23 @@ static void test_sentinel_propagation(void) {
 
   r = ixs_floor(ctx, err);
   CHECK(ixs_is_domain_error(r));
+
+  {
+    ixs_node *parse = ixs_parse(ctx, "?", 1);
+    ixs_node *target = ixs_sym(ctx, "sentinel_target");
+    ixs_node *targets[2] = {target, err};
+    ixs_node *replacements[2] = {err, parse};
+    CHECK(ixs_is_parse_error(parse));
+    ixs_ctx_clear_errors(ctx);
+    CHECK(ixs_subs(ctx, err, NULL, x) == NULL);
+    CHECK(ixs_subs(ctx, err, parse, x) == parse);
+    CHECK(ixs_subs(ctx, x, target, err) == err);
+    CHECK(ixs_subs_multi(ctx, x, 1, NULL, replacements) == NULL);
+    CHECK(ixs_subs_multi(ctx, x, 1, targets, NULL) == NULL);
+    CHECK(ixs_subs_multi(ctx, x, 2, targets, replacements) == parse);
+    targets[1] = NULL;
+    CHECK(ixs_subs_multi(ctx, err, 2, targets, replacements) == NULL);
+  }
 
   ixs_ctx_destroy(ctx);
 }
@@ -1427,6 +1673,26 @@ static void test_large_expressions(void) {
       CHECK(conj != NULL && !ixs_is_error(conj));
     }
     CHECK(ixs_node_is_pred(conj));
+  }
+
+  /* XOR parity across many distinct runs, isolated from shared rule stats. */
+  {
+    enum { XOR_RUNS = 2048, XOR_ARGS = 2 * XOR_RUNS };
+    ixs_ctx *parity_ctx = ctx_create_or_die();
+    ixs_node **parity = malloc(XOR_ARGS * sizeof(*parity));
+    char name[16];
+    CHECK(parity != NULL);
+    if (parity) {
+      for (i = 0; i < XOR_RUNS; i++) {
+        snprintf(name, sizeof(name), "xp%d", i);
+        parity[2 * i] = ixs_sym(parity_ctx, name);
+        parity[2 * i + 1] = parity[2 * i];
+      }
+      CHECK(ixs_xor_many(parity_ctx, XOR_ARGS, parity) ==
+            ixs_int(parity_ctx, 0));
+      free(parity);
+    }
+    ixs_ctx_destroy(parity_ctx);
   }
 
   /* Piecewise with >256 cases. */
@@ -3659,6 +3925,7 @@ int main(void) {
   test_mod_rules();
   test_mod_divisor_contract();
   test_boolean();
+  test_flat_associative_nodes();
   test_xor_nested_cancellation();
   test_xor_known_bit_simplification();
   test_simplify_with_bounds();

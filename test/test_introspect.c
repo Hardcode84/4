@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <ixsimpl.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_check.h"
@@ -119,18 +120,21 @@ static void test_binary_accessors(void) {
 
   ixs_node *mx = ixs_max(ctx, a, b);
   CHECK(ixs_node_tag(mx) == IXS_MAX);
-  CHECK(ixs_same_node(ixs_node_binary_lhs(mx), a));
-  CHECK(ixs_same_node(ixs_node_binary_rhs(mx), b));
+  CHECK(ixs_node_assoc_nargs(mx) == 2);
+  CHECK(ixs_same_node(ixs_node_assoc_arg(mx, 0), a) ||
+        ixs_same_node(ixs_node_assoc_arg(mx, 1), a));
 
   ixs_node *mn = ixs_min(ctx, a, b);
   CHECK(ixs_node_tag(mn) == IXS_MIN);
-  CHECK(ixs_same_node(ixs_node_binary_lhs(mn), a));
-  CHECK(ixs_same_node(ixs_node_binary_rhs(mn), b));
+  CHECK(ixs_node_assoc_nargs(mn) == 2);
+  CHECK(ixs_same_node(ixs_node_assoc_arg(mn, 0), a) ||
+        ixs_same_node(ixs_node_assoc_arg(mn, 1), a));
 
   ixs_node *xr = ixs_xor(ctx, a, b);
   CHECK(ixs_node_tag(xr) == IXS_XOR);
-  CHECK(ixs_same_node(ixs_node_binary_lhs(xr), a));
-  CHECK(ixs_same_node(ixs_node_binary_rhs(xr), b));
+  CHECK(ixs_node_assoc_nargs(xr) == 2);
+  CHECK(ixs_same_node(ixs_node_assoc_arg(xr, 0), a) ||
+        ixs_same_node(ixs_node_assoc_arg(xr, 1), a));
 
   ixs_node *diff = ixs_sub(ctx, a, b);
   ixs_node *cmp = ixs_cmp(ctx, diff, IXS_CMP_LT, ixs_int(ctx, 0));
@@ -173,15 +177,15 @@ static void test_logic_accessors(void) {
 
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_tag(and_node) == IXS_AND);
-  CHECK(ixs_node_logic_nargs(and_node) == 2);
-  CHECK(ixs_same_node(ixs_node_logic_arg(and_node, 0), c1) ||
-        ixs_same_node(ixs_node_logic_arg(and_node, 1), c1));
-  CHECK(ixs_same_node(ixs_node_logic_arg(and_node, 0), c2) ||
-        ixs_same_node(ixs_node_logic_arg(and_node, 1), c2));
+  CHECK(ixs_node_assoc_nargs(and_node) == 2);
+  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c1) ||
+        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c1));
+  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c2) ||
+        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c2));
 
   ixs_node *or_node = ixs_or(ctx, c1, c2);
   CHECK(ixs_node_tag(or_node) == IXS_OR);
-  CHECK(ixs_node_logic_nargs(or_node) == 2);
+  CHECK(ixs_node_assoc_nargs(or_node) == 2);
 
   ixs_ctx_destroy(ctx);
   printf("  logic_accessors: OK\n");
@@ -297,9 +301,9 @@ static void test_nchildren_child_logic(void) {
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_nchildren(and_node) == 2);
   CHECK(ixs_same_node(ixs_node_child(and_node, 0),
-                      ixs_node_logic_arg(and_node, 0)));
+                      ixs_node_assoc_arg(and_node, 0)));
   CHECK(ixs_same_node(ixs_node_child(and_node, 1),
-                      ixs_node_logic_arg(and_node, 1)));
+                      ixs_node_assoc_arg(and_node, 1)));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_logic: OK\n");
@@ -453,15 +457,20 @@ static void test_walk_sentinel(void) {
   printf("  walk_sentinel: OK\n");
 }
 
-static ixs_node *build_deep_max_chain(ixs_ctx *ctx, uint32_t depth) {
+static ixs_node *build_wide_max(ixs_ctx *ctx, uint32_t nargs) {
   char name[32];
-  ixs_node *expr = ixs_sym(ctx, "v0");
-  CHECK(expr != NULL);
-  for (uint32_t i = 1; i <= depth; i++) {
+  ixs_node **args = malloc((size_t)nargs * sizeof(*args));
+  ixs_node *expr;
+  uint32_t i;
+  CHECK(args != NULL);
+  if (!args)
+    return NULL;
+  for (i = 0; i < nargs; i++) {
     snprintf(name, sizeof(name), "v%u", (unsigned)i);
-    expr = ixs_max(ctx, expr, ixs_sym(ctx, name));
-    CHECK(expr != NULL);
+    args[i] = ixs_sym(ctx, name);
   }
+  expr = ixs_max_many(ctx, nargs, args);
+  free(args);
   return expr;
 }
 
@@ -526,10 +535,10 @@ static void test_walk_same_session_reentry(void) {
   printf("  walk_same_session_reentry: OK\n");
 }
 
-static void test_walk_deep_chain(void) {
-  enum { WALK_DEPTH = 16384 };
+static void test_walk_wide_assoc(void) {
+  enum { WALK_WIDTH = 16384 };
   ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *expr = build_deep_max_chain(ctx, WALK_DEPTH);
+  ixs_node *expr = build_wide_max(ctx, WALK_WIDTH);
   size_t count = 0;
 
   CHECK(expr != NULL);
@@ -537,15 +546,38 @@ static void test_walk_deep_chain(void) {
 
   ixs_node *res = ixs_walk_pre(ctx, expr, count_nodes, &count);
   CHECK(res == expr);
-  CHECK(count == 2u * (size_t)WALK_DEPTH + 1u);
+  CHECK(count == (size_t)WALK_WIDTH + 1u);
 
   count = 0;
   res = ixs_walk_post(ctx, expr, count_nodes, &count);
   CHECK(res == expr);
-  CHECK(count == 2u * (size_t)WALK_DEPTH + 1u);
+  CHECK(count == (size_t)WALK_WIDTH + 1u);
 
   ixs_ctx_destroy(ctx);
-  printf("  walk_deep_chain: OK\n");
+  printf("  walk_wide_assoc: OK\n");
+}
+
+static void test_deep_value_kinds(void) {
+  enum { DEPTH = 2048 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "kind_x");
+  ixs_node *value = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+  uint32_t i;
+
+  for (i = 0; i < DEPTH; i++) {
+    ixs_node *values[2] = {value, ixs_false(ctx)};
+    ixs_node *conds[2] = {
+        ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, (int64_t)i + 1)),
+        ixs_true(ctx),
+    };
+    value = ixs_pw(ctx, 2, values, conds);
+    CHECK(value != NULL);
+  }
+  CHECK(ixs_node_is_pred(value));
+  CHECK(ixs_node_is_integer_valued(value));
+
+  ixs_ctx_destroy(ctx);
+  printf("  deep_value_kinds: OK\n");
 }
 
 static void test_immutable_node_api(void) {
@@ -583,8 +615,8 @@ static void test_immutable_node_api(void) {
   CHECK(ixs_node_binary_lhs(cmp) != NULL);
   CHECK(ixs_node_int_val(ixs_node_binary_rhs(cmp)) == 0);
   CHECK(ixs_node_cmp_op(cmp) == IXS_CMP_LT);
-  CHECK(ixs_node_logic_nargs(logic) == 2);
-  CHECK(ixs_node_logic_arg(logic, 0) != NULL);
+  CHECK(ixs_node_assoc_nargs(logic) == 2);
+  CHECK(ixs_node_assoc_arg(logic, 0) != NULL);
   CHECK(ixs_node_pw_ncases(piecewise) == 2);
   CHECK(ixs_same_node(ixs_node_pw_value(piecewise, 0), x));
   CHECK(ixs_same_node(ixs_node_pw_cond(piecewise, 1), ixs_true(ctx)));
@@ -627,7 +659,8 @@ int main(void) {
   test_walk_leaf();
   test_walk_sentinel();
   test_walk_same_session_reentry();
-  test_walk_deep_chain();
+  test_walk_wide_assoc();
+  test_deep_value_kinds();
   test_immutable_node_api();
   printf("test_introspect: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

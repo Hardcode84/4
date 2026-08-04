@@ -870,10 +870,10 @@ static bool node_is_sym_minus_one(ixs_node *n, const char *name) {
 
 static bool extract_pow2_and(ixs_node *expr, const char **name) {
   ixs_node *a, *b;
-  if (!expr || expr->tag != IXS_AND || expr->u.logic.nargs != 2 || !name)
+  if (!expr || expr->tag != IXS_AND || expr->u.assoc.nargs != 2 || !name)
     return false;
-  a = expr->u.logic.args[0];
-  b = expr->u.logic.args[1];
+  a = expr->u.assoc.args[0];
+  b = expr->u.assoc.args[1];
   if (a->tag == IXS_SYM && node_is_sym_minus_one(b, a->u.name)) {
     *name = a->u.name;
     return true;
@@ -888,10 +888,10 @@ static bool extract_pow2_and(ixs_node *expr, const char **name) {
 static bool extract_bitop_sym_mask(ixs_node *expr, ixs_tag tag,
                                    const char **name, int64_t *mask) {
   ixs_node *a, *b;
-  if (!expr || expr->tag != tag || expr->u.logic.nargs != 2 || !name || !mask)
+  if (!expr || expr->tag != tag || expr->u.assoc.nargs != 2 || !name || !mask)
     return false;
-  a = expr->u.logic.args[0];
-  b = expr->u.logic.args[1];
+  a = expr->u.assoc.args[0];
+  b = expr->u.assoc.args[1];
   if (a->tag == IXS_SYM && node_get_int_const(b, mask)) {
     *name = a->u.name;
     return true;
@@ -1219,7 +1219,78 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
  * Extract interval bounds and modular congruence from a comparison.
  * Patterns: sym >= 0, sym < N, Mod(sym, M) == R, etc.
  */
+static bool bounds_add_sym_cmp_const(ixs_bounds *b, ixs_node *lhs,
+                                     ixs_node *rhs, ixs_cmp_op op) {
+  ixs_node *sym;
+  ixs_node *constant;
+  ixs_cmp_op effective_op;
+  ixs_interval sym_iv;
+  int64_t p;
+  int64_t q;
+
+  if (lhs->tag == IXS_SYM && ixs_node_is_const(rhs)) {
+    sym = lhs;
+    constant = rhs;
+    effective_op = op;
+  } else if (rhs->tag == IXS_SYM && ixs_node_is_const(lhs)) {
+    sym = rhs;
+    constant = lhs;
+    effective_op = flip_cmp(op);
+  } else {
+    return false;
+  }
+
+  ixs_node_get_rat(constant, &p, &q);
+  apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
+  sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
+  if (sym_iv.valid)
+    ixs_bounds_add_expr(b, sym, sym_iv);
+  return true;
+}
+
+static bool bounds_add_affine_zero_cmp(ixs_bounds *b, ixs_node *lhs,
+                                       ixs_node *rhs, ixs_cmp_op op) {
+  ixs_node *sym;
+  ixs_cmp_op effective_op;
+  ixs_interval sym_iv;
+  int64_t tp;
+  int64_t tq;
+  int64_t kp;
+  int64_t kq;
+  int64_t np;
+  int64_t nq;
+  int64_t raw_p;
+  int64_t raw_q;
+  int64_t p;
+  int64_t q;
+
+  if (!ixs_node_is_zero(rhs) || lhs->tag != IXS_ADD || lhs->u.add.nterms != 1 ||
+      lhs->u.add.terms[0].term->tag != IXS_SYM)
+    return false;
+
+  sym = lhs->u.add.terms[0].term;
+  ixs_node_get_rat(lhs->u.add.terms[0].coeff, &tp, &tq);
+  ixs_node_get_rat(lhs->u.add.coeff, &kp, &kq);
+
+  /* tp/tq * sym + kp/kq OP 0, so divide -kp/kq by tp/tq. */
+  if (tp == 0 || !ixs_rat_neg(kp, kq, &np, &nq) ||
+      !ixs_rat_mul(np, nq, tq, tp, &raw_p, &raw_q) ||
+      !ixs_rat_normalize(raw_p, raw_q, &p, &q))
+    return true;
+
+  effective_op = (ixs_rat_cmp(tp, tq, 0, 1) < 0) ? flip_cmp(op) : op;
+  apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
+  sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
+  if (sym_iv.valid)
+    ixs_bounds_add_expr(b, sym, sym_iv);
+  return true;
+}
+
 static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  ixs_cmp_op op;
+
   if (a->tag != IXS_CMP)
     return;
   bounds_cache_clear(b);
@@ -1227,9 +1298,9 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   extract_modrem(b, a);
   extract_bitfacts(b, a);
 
-  ixs_node *lhs = a->u.binary.lhs;
-  ixs_node *rhs = a->u.binary.rhs;
-  ixs_cmp_op op = a->u.binary.cmp_op;
+  lhs = a->u.binary.lhs;
+  rhs = a->u.binary.rhs;
+  op = a->u.binary.cmp_op;
 
   if (op == IXS_CMP_NE) {
     if (ixs_node_is_zero(rhs))
@@ -1238,68 +1309,25 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
       bounds_add_nonzero(b, rhs);
   }
 
-  /* Normalize to "sym op const" form. */
-  if (lhs->tag == IXS_SYM && ixs_node_is_const(rhs)) {
-    int64_t rp, rq;
-    ixs_interval sym_iv;
-    ixs_node_get_rat(rhs, &rp, &rq);
-    apply_sym_cmp_const(b, lhs->u.name, op, rp, rq);
-    sym_iv = interval_from_sym_cmp_const(op, rp, rq);
-    if (sym_iv.valid)
-      ixs_bounds_add_expr(b, lhs, sym_iv);
+  if (bounds_add_sym_cmp_const(b, lhs, rhs, op))
     return;
-  }
-  if (rhs->tag == IXS_SYM && ixs_node_is_const(lhs)) {
-    int64_t lp, lq;
-    ixs_cmp_op eff_op = flip_cmp(op);
-    ixs_interval sym_iv;
-    ixs_node_get_rat(lhs, &lp, &lq);
-    apply_sym_cmp_const(b, rhs->u.name, eff_op, lp, lq);
-    sym_iv = interval_from_sym_cmp_const(eff_op, lp, lq);
-    if (sym_iv.valid)
-      ixs_bounds_add_expr(b, rhs, sym_iv);
+
+  if (bounds_add_affine_zero_cmp(b, lhs, rhs, op))
     return;
-  }
-
-  /*
-   * Pattern: (sym - const) cmp 0  (from comparison normalization).
-   * The lhs is an ADD with one SYM term and a constant offset.
-   */
-  if (ixs_node_is_zero(rhs) && lhs->tag == IXS_ADD && lhs->u.add.nterms == 1 &&
-      lhs->u.add.terms[0].term->tag == IXS_SYM) {
-    int64_t tp, tq, kp, kq;
-    ixs_node_get_rat(lhs->u.add.terms[0].coeff, &tp, &tq);
-    ixs_node_get_rat(lhs->u.add.coeff, &kp, &kq);
-
-    /* We have: tp/tq * sym + kp/kq  OP  0, i.e. sym OP' (-kp/kq) / (tp/tq).
-     * Dividing by tp/tq flips the comparison when tp/tq < 0. */
-    if (tp == 0)
-      return;
-
-    /* Compute bound = -k / c = (-kp/kq) / (tp/tq) = (-kp * tq) / (kq * tp) */
-    int64_t np, nq;
-    if (!ixs_rat_neg(kp, kq, &np, &nq))
-      return;
-    int64_t raw_p, raw_q;
-    if (!ixs_rat_mul(np, nq, tq, tp, &raw_p, &raw_q))
-      return;
-    int64_t rp2, rq2;
-    if (!ixs_rat_normalize(raw_p, raw_q, &rp2, &rq2))
-      return;
-
-    ixs_cmp_op eff_op = (ixs_rat_cmp(tp, tq, 0, 1) < 0) ? flip_cmp(op) : op;
-    apply_sym_cmp_const(b, lhs->u.add.terms[0].term->u.name, eff_op, rp2, rq2);
-    {
-      ixs_interval sym_iv = interval_from_sym_cmp_const(eff_op, rp2, rq2);
-      if (sym_iv.valid)
-        ixs_bounds_add_expr(b, lhs->u.add.terms[0].term, sym_iv);
-    }
-    return;
-  }
 
   /* Fallback: expr op 0 for non-symbol lhs. Store as expression bound. */
-  if (ixs_node_is_zero(rhs))
+  if (ixs_node_is_zero(rhs)) {
     add_expr_integer_zero_cmp(b, lhs, op);
+  } else if (ixs_bounds_check_defined(b, lhs) == IXS_CHECK_TRUE &&
+             ixs_bounds_check_defined(b, rhs) == IXS_CHECK_TRUE) {
+    ixs_node *difference = simp_sub(b->ctx, lhs, rhs);
+    if (!difference) {
+      b->oom = true;
+      return;
+    }
+    if (!ixs_node_is_sentinel(difference))
+      add_expr_integer_zero_cmp(b, difference, op);
+  }
 }
 
 IXS_STATIC bool ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *a) {
@@ -1631,28 +1659,26 @@ static bool bitfacts_apply_mod(ixs_bounds *b, ixs_node *expr, ixs_bitfacts *out,
   return true;
 }
 
-static inline bool bitfacts_apply_logic(ixs_bounds *b, ixs_node *expr,
+static inline bool bitfacts_apply_assoc(ixs_bounds *b, ixs_node *expr,
                                         ixs_bitfacts *out, unsigned depth) {
-  ixs_bitfacts lhs, rhs;
-  if (expr->u.logic.nargs != 2)
+  ixs_bitfacts result, arg, next;
+  uint32_t i;
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
     return false;
-  if (!bounds_get_bitfacts_depth(b, expr->u.logic.args[0], &lhs, depth - 1) ||
-      !bounds_get_bitfacts_depth(b, expr->u.logic.args[1], &rhs, depth - 1))
+  if (!bounds_get_bitfacts_depth(b, expr->u.assoc.args[0], &result, depth - 1))
     return false;
-  if (expr->tag == IXS_AND)
-    bitfacts_apply_and(out, &lhs, &rhs);
-  else
-    bitfacts_apply_or(out, &lhs, &rhs);
-  return true;
-}
-
-static inline bool bitfacts_apply_xor_node(ixs_bounds *b, ixs_node *expr,
-                                           ixs_bitfacts *out, unsigned depth) {
-  ixs_bitfacts lhs, rhs;
-  if (!bounds_get_bitfacts_depth(b, expr->u.binary.lhs, &lhs, depth - 1) ||
-      !bounds_get_bitfacts_depth(b, expr->u.binary.rhs, &rhs, depth - 1))
-    return false;
-  bitfacts_apply_xor(out, &lhs, &rhs);
+  for (i = 1; i < expr->u.assoc.nargs; i++) {
+    if (!bounds_get_bitfacts_depth(b, expr->u.assoc.args[i], &arg, depth - 1))
+      return false;
+    if (expr->tag == IXS_AND)
+      bitfacts_apply_and(&next, &result, &arg);
+    else if (expr->tag == IXS_OR)
+      bitfacts_apply_or(&next, &result, &arg);
+    else
+      bitfacts_apply_xor(&next, &result, &arg);
+    result = next;
+  }
+  *out = result;
   return true;
 }
 
@@ -1690,9 +1716,8 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
     return bitfacts_apply_bool_value(out);
   case IXS_AND:
   case IXS_OR:
-    return bitfacts_apply_logic(b, expr, out, depth);
   case IXS_XOR:
-    return bitfacts_apply_xor_node(b, expr, out, depth);
+    return bitfacts_apply_assoc(b, expr, out, depth);
   case IXS_ADD:
     return bitfacts_apply_add(b, expr, out, depth);
   case IXS_MUL:
@@ -1788,6 +1813,7 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
                                               int64_t m) {
   ixs_bitfacts bits;
   uint64_t low_mask;
+  uint32_t i;
   if (!b || !expr || m <= 0)
     return false;
 
@@ -1814,8 +1840,13 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
   }
 
   if (expr->tag == IXS_MAX || expr->tag == IXS_MIN) {
-    return ixs_bounds_is_known_divisible(b, expr->u.binary.lhs, m) &&
-           ixs_bounds_is_known_divisible(b, expr->u.binary.rhs, m);
+    if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
+      return false;
+    for (i = 0; i < expr->u.assoc.nargs; i++) {
+      if (!ixs_bounds_is_known_divisible(b, expr->u.assoc.args[i], m))
+        return false;
+    }
+    return true;
   }
 
   return false;
@@ -1847,6 +1878,69 @@ static bool bounds_piecewise_is_integer_with_divinfo(ixs_bounds *b,
   return reachable;
 }
 
+static bool bounds_mul_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
+  uint32_t i;
+  int64_t cp;
+  int64_t cq;
+  int64_t g;
+  int64_t denom;
+
+  ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    if (expr->u.mul.factors[i].exp < 0 ||
+        !ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
+      return false;
+  }
+  if (cq <= 1)
+    return true;
+  g = ixs_gcd(cp, cq);
+  denom = cq / g;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    if (expr->u.mul.factors[i].exp >= 1 &&
+        ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, denom))
+      return true;
+  }
+  return false;
+}
+
+static bool bounds_add_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
+  uint32_t i;
+
+  if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.coeff))
+    return false;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t cp;
+    int64_t cq;
+    int64_t g;
+    int64_t denom;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
+    if (cq == 1) {
+      if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.terms[i].term))
+        return false;
+      continue;
+    }
+    g = ixs_gcd(cp, cq);
+    denom = cq / g;
+    if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, denom))
+      return false;
+  }
+  return true;
+}
+
+static bool bounds_assoc_is_integer_with_divinfo(ixs_bounds *b,
+                                                 ixs_node *expr) {
+  uint32_t i;
+
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
+    return false;
+  for (i = 0; i < expr->u.assoc.nargs; i++) {
+    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.assoc.args[i]))
+      return false;
+  }
+  return true;
+}
+
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr) {
   if (!expr)
@@ -1856,47 +1950,15 @@ IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
   if (!b)
     return false;
 
-  if (expr->tag == IXS_MUL) {
-    uint32_t i;
-    int64_t cp, cq, g, denom;
-    ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp < 0)
-        return false;
-      if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
-        return false;
-    }
-    if (cq <= 1)
-      return true;
-    g = ixs_gcd(cp, cq);
-    denom = cq / g;
-    for (i = 0; i < expr->u.mul.nfactors; i++) {
-      if (expr->u.mul.factors[i].exp >= 1 &&
-          ixs_bounds_is_known_divisible(b, expr->u.mul.factors[i].base, denom))
-        return true;
-    }
-    return false;
-  }
+  if (expr->tag == IXS_MUL)
+    return bounds_mul_is_integer_with_divinfo(b, expr);
 
-  if (expr->tag == IXS_ADD) {
-    uint32_t i;
-    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.coeff))
-      return false;
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      int64_t cp, cq;
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
-      if (cq == 1) {
-        if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.terms[i].term))
-          return false;
-      } else {
-        int64_t g = ixs_gcd(cp, cq);
-        int64_t denom = cq / g;
-        if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, denom))
-          return false;
-      }
-    }
-    return true;
-  }
+  if (expr->tag == IXS_ADD)
+    return bounds_add_is_integer_with_divinfo(b, expr);
+
+  if (expr->tag == IXS_MAX || expr->tag == IXS_MIN || expr->tag == IXS_XOR ||
+      expr->tag == IXS_AND || expr->tag == IXS_OR)
+    return bounds_assoc_is_integer_with_divinfo(b, expr);
 
   if (expr->tag == IXS_PIECEWISE)
     return bounds_piecewise_is_integer_with_divinfo(b, expr);
@@ -2130,14 +2192,19 @@ static bool bounds_known_mod_residue(ixs_bounds *b, ixs_node *expr,
 static bool bounds_known_extrema_residue(ixs_bounds *b, ixs_node *expr,
                                          uint64_t modulus, uint64_t *out,
                                          unsigned depth) {
-  uint64_t lhs, rhs;
-  if (!bounds_known_residue_depth(b, expr->u.binary.lhs, modulus, &lhs,
-                                  depth - 1) ||
-      !bounds_known_residue_depth(b, expr->u.binary.rhs, modulus, &rhs,
-                                  depth - 1) ||
-      lhs != rhs)
+  uint64_t result, arg;
+  uint32_t i;
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args ||
+      !bounds_known_residue_depth(b, expr->u.assoc.args[0], modulus, &result,
+                                  depth - 1))
     return false;
-  *out = lhs;
+  for (i = 1; i < expr->u.assoc.nargs; i++) {
+    if (!bounds_known_residue_depth(b, expr->u.assoc.args[i], modulus, &arg,
+                                    depth - 1) ||
+        result != arg)
+      return false;
+  }
+  *out = result;
   return true;
 }
 
@@ -2270,36 +2337,34 @@ IXS_STATIC ixs_check_result ixs_bounds_check_congruent(ixs_bounds *b,
   return actual == expected ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 }
 
-static ixs_interval bounds_get_and_mask(ixs_node *expr) {
-  int64_t mask;
-  if (expr->u.logic.nargs != 2)
+static ixs_interval bounds_get_and_mask(ixs_bounds *b, ixs_node *expr) {
+  int64_t mask = 0;
+  uint32_t i;
+  bool have_mask = false;
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
     return ixs_interval_unknown();
-  if (expr->u.logic.args[0]->tag == IXS_INT &&
-      expr->u.logic.args[0]->u.ival >= 0) {
-    mask = expr->u.logic.args[0]->u.ival;
-    return ixs_interval_range(0, 1, mask, 1);
+  for (i = 0; i < expr->u.assoc.nargs; i++) {
+    ixs_node *arg = expr->u.assoc.args[i];
+    if (!ixs_bounds_is_integer_with_divinfo(b, arg))
+      return ixs_interval_unknown();
+    if (arg->tag == IXS_INT && arg->u.ival >= 0 &&
+        (!have_mask || arg->u.ival < mask)) {
+      mask = arg->u.ival;
+      have_mask = true;
+    }
   }
-  if (expr->u.logic.args[1]->tag == IXS_INT &&
-      expr->u.logic.args[1]->u.ival >= 0) {
-    mask = expr->u.logic.args[1]->u.ival;
-    return ixs_interval_range(0, 1, mask, 1);
-  }
-  return ixs_interval_unknown();
+  return have_mask ? ixs_interval_range(0, 1, mask, 1) : ixs_interval_unknown();
 }
 
 static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
-  ixs_interval lhs, rhs, result;
-  ixs_bitfacts lhs_bits, rhs_bits, result_bits;
-  int64_t lhs_hi, rhs_hi;
+  ixs_interval arg_iv, result;
+  ixs_bitfacts arg_bits, next_bits, result_bits;
+  int64_t arg_hi, max_hi = 0;
   uint64_t span, possible, required;
+  uint32_t i;
+  bool have_bits;
 
-  if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) ||
-      !ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs))
-    return ixs_interval_unknown();
-  lhs = ixs_bounds_get(b, expr->u.binary.lhs);
-  rhs = ixs_bounds_get(b, expr->u.binary.rhs);
-  if (!interval_lower_at_least(&lhs, 0, 1) ||
-      !interval_lower_at_least(&rhs, 0, 1))
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
     return ixs_interval_unknown();
 
   result = ixs_interval_unknown();
@@ -2308,19 +2373,39 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
   result.lo_q = 1;
   result.lo_inf = false;
   result.hi_inf = false;
-  if (lhs.hi_inf || rhs.hi_inf) {
+  for (i = 0; i < expr->u.assoc.nargs; i++) {
+    ixs_node *arg = expr->u.assoc.args[i];
+    if (!ixs_bounds_is_integer_with_divinfo(b, arg))
+      return ixs_interval_unknown();
+    arg_iv = ixs_bounds_get(b, arg);
+    if (!interval_lower_at_least(&arg_iv, 0, 1))
+      return ixs_interval_unknown();
+    if (arg_iv.hi_inf) {
+      result.hi_inf = true;
+      continue;
+    }
+    arg_hi = ixs_rat_floor(arg_iv.hi_p, arg_iv.hi_q);
+    if (arg_hi > max_hi)
+      max_hi = arg_hi;
+  }
+  if (result.hi_inf) {
     ixs_interval_set_hi_pos_inf(&result);
     return result;
   }
 
-  lhs_hi = ixs_rat_floor(lhs.hi_p, lhs.hi_q);
-  rhs_hi = ixs_rat_floor(rhs.hi_p, rhs.hi_q);
-  span = value_span_mask((uint64_t)(lhs_hi >= rhs_hi ? lhs_hi : rhs_hi));
+  span = value_span_mask((uint64_t)max_hi);
   possible = span;
   required = 0;
-  if (ixs_bounds_get_bitfacts(b, expr->u.binary.lhs, &lhs_bits) &&
-      ixs_bounds_get_bitfacts(b, expr->u.binary.rhs, &rhs_bits)) {
-    bitfacts_apply_xor(&result_bits, &lhs_bits, &rhs_bits);
+  have_bits = ixs_bounds_get_bitfacts(b, expr->u.assoc.args[0], &result_bits);
+  for (i = 1; have_bits && i < expr->u.assoc.nargs; i++) {
+    if (!ixs_bounds_get_bitfacts(b, expr->u.assoc.args[i], &arg_bits)) {
+      have_bits = false;
+      break;
+    }
+    bitfacts_apply_xor(&next_bits, &result_bits, &arg_bits);
+    result_bits = next_bits;
+  }
+  if (have_bits) {
     possible &= ~result_bits.known_zero;
     required = result_bits.known_one & span;
   }
@@ -2582,20 +2667,27 @@ static inline void interval_set_min_upper(ixs_interval *result,
 
 static inline ixs_interval bounds_get_extrema(ixs_bounds *b, ixs_node *expr,
                                               bool is_max) {
-  ixs_interval li = ixs_bounds_get(b, expr->u.binary.lhs);
-  ixs_interval ri = ixs_bounds_get(b, expr->u.binary.rhs);
-  ixs_interval result;
-  if (!li.valid || !ri.valid)
+  ixs_interval result, arg, merged;
+  uint32_t i;
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
     return ixs_interval_unknown();
-  result.valid = true;
-  result.lo_inf = false;
-  result.hi_inf = false;
-  if (is_max) {
-    interval_set_max_lower(&result, &li, &ri);
-    interval_set_max_upper(&result, &li, &ri);
-  } else {
-    interval_set_min_lower(&result, &li, &ri);
-    interval_set_min_upper(&result, &li, &ri);
+  result = ixs_bounds_get(b, expr->u.assoc.args[0]);
+  if (!result.valid)
+    return ixs_interval_unknown();
+  for (i = 1; i < expr->u.assoc.nargs; i++) {
+    arg = ixs_bounds_get(b, expr->u.assoc.args[i]);
+    if (!arg.valid)
+      return ixs_interval_unknown();
+    merged = ixs_interval_unknown();
+    merged.valid = true;
+    if (is_max) {
+      interval_set_max_lower(&merged, &result, &arg);
+      interval_set_max_upper(&merged, &result, &arg);
+    } else {
+      interval_set_min_lower(&merged, &result, &arg);
+      interval_set_min_upper(&merged, &result, &arg);
+    }
+    result = merged;
   }
   return result;
 }
@@ -2797,7 +2889,7 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
   case IXS_MIN:
     return bounds_get_extrema(b, expr, false);
   case IXS_AND:
-    return bounds_get_and_mask(expr);
+    return bounds_get_and_mask(b, expr);
   case IXS_XOR:
     return bounds_get_xor(b, expr);
   case IXS_PIECEWISE:
@@ -3043,6 +3135,7 @@ static ixs_check_result bounds_check_and_mask_query(ixs_bounds *b,
   if (value < 0 || (value_bits & ~mask_bits) != 0)
     return check_equal_result(cmp->u.binary.cmp_op, false);
 
+  memset(&sym_tmp, 0, sizeof(sym_tmp));
   sym_tmp.tag = IXS_SYM;
   sym_tmp.hash = 0;
   sym_tmp.u.name = name;
@@ -3123,7 +3216,7 @@ static ixs_check_result interval_check_zero(const ixs_interval *iv,
   return IXS_CHECK_UNKNOWN;
 }
 
-IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
+static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
   ixs_check_result mod_result, bit_result;
 
@@ -3156,6 +3249,16 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
     return IXS_CHECK_UNKNOWN;
 
   return interval_check_zero(&iv, cmp->u.binary.cmp_op);
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
+  if (cmp && cmp->tag == IXS_CMP &&
+      ((!ixs_node_is_known_total(cmp->u.binary.lhs) &&
+        ixs_bounds_check_defined(b, cmp->u.binary.lhs) != IXS_CHECK_TRUE) ||
+       (!ixs_node_is_known_total(cmp->u.binary.rhs) &&
+        ixs_bounds_check_defined(b, cmp->u.binary.rhs) != IXS_CHECK_TRUE)))
+    return IXS_CHECK_UNKNOWN;
+  return bounds_check_raw(b, cmp);
 }
 
 /* Definedness is a proof query, not an evaluator.  Keep its traversal bounds
@@ -3264,9 +3367,6 @@ static int defined_fixed_child_count(ixs_tag tag) {
   case IXS_NOT:
     return 1;
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return 2;
   default:
@@ -3307,9 +3407,12 @@ static bool defined_child_count(ixs_node *node, uint32_t *out) {
     return true;
   case IXS_AND:
   case IXS_OR:
-    if (node->u.logic.nargs < 2 || !node->u.logic.args)
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    if (node->u.assoc.nargs < 2 || !node->u.assoc.args)
       return false;
-    *out = node->u.logic.nargs;
+    *out = node->u.assoc.nargs;
     return true;
   default:
     return false;
@@ -3333,9 +3436,6 @@ static ixs_node *defined_child_at(ixs_node *node, uint32_t child) {
   case IXS_NOT:
     return node->u.unary_bool.arg;
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return child == 0 ? node->u.binary.lhs : node->u.binary.rhs;
   case IXS_PIECEWISE:
@@ -3343,7 +3443,10 @@ static ixs_node *defined_child_at(ixs_node *node, uint32_t child) {
                               : node->u.pw.cases[child / 2u].cond;
   case IXS_AND:
   case IXS_OR:
-    return node->u.logic.args[child];
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+    return node->u.assoc.args[child];
   default:
     return NULL;
   }
@@ -3561,7 +3664,7 @@ static ixs_check_result defined_condition_truth(defined_state *state,
     }
     if (!defined_cache_scope_init(&cache_scope, state, b, node_visits))
       return IXS_CHECK_UNKNOWN;
-    result = ixs_bounds_check(b, cond);
+    result = bounds_check_raw(b, cond);
     if (b->oom)
       state->oom = true;
     defined_cache_scope_destroy(&cache_scope, b);
@@ -3781,6 +3884,13 @@ static ixs_check_result defined_finalize_node(defined_state *state,
     ixs_check_result guard =
         defined_relation_zero(state, b, node->u.binary.rhs, IXS_CMP_GT);
     result = defined_combine(result, guard);
+  } else if (node->tag == IXS_XOR || node->tag == IXS_AND ||
+             node->tag == IXS_OR) {
+    for (i = 0; i < node->u.assoc.nargs; i++) {
+      ixs_check_result guard =
+          ixs_bounds_check_integer_valued(b, node->u.assoc.args[i]);
+      result = defined_combine(result, guard);
+    }
   }
   return result;
 }
@@ -3814,6 +3924,7 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
                                 defined_frame *frame, unsigned pw_depth,
                                 ixs_check_result *direct, bool *has_direct) {
   ixs_node *node = frame->node;
+  ixs_interval asserted;
   *direct = IXS_CHECK_UNKNOWN;
   *has_direct = false;
 
@@ -3824,6 +3935,13 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
   }
   if (++state->visited > DEFINED_NODE_LIMIT) {
     state->limited = true;
+    return;
+  }
+
+  asserted = bounds_get_expr_overrides(b, node);
+  if (asserted.valid && !ixs_interval_is_empty(asserted)) {
+    *direct = IXS_CHECK_TRUE;
+    *has_direct = true;
     return;
   }
 
@@ -4042,12 +4160,12 @@ bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
     }
 
     if (cur->tag == IXS_AND) {
-      if (cur->u.logic.nargs < 2 || !cur->u.logic.args)
+      if (cur->u.assoc.nargs < 2 || !cur->u.assoc.args)
         return assumption_invalid(b, "malformed AND predicate");
-      if ((size_t)cur->u.logic.nargs > ASSUMPTION_NODE_LIMIT - nstack)
+      if ((size_t)cur->u.assoc.nargs > ASSUMPTION_NODE_LIMIT - nstack)
         return assumption_invalid(b, "predicate node limit (1024) exceeded");
-      for (i = cur->u.logic.nargs; i > 0; i--)
-        stack[nstack++] = cur->u.logic.args[i - 1];
+      for (i = cur->u.assoc.nargs; i > 0; i--)
+        stack[nstack++] = cur->u.assoc.args[i - 1];
       continue;
     }
 
@@ -4955,6 +5073,57 @@ predicate_query_short_circuited(const predicate_query_frame *frame) {
          (frame->node->tag == IXS_OR && frame->result == IXS_CHECK_TRUE);
 }
 
+/* An absorber determines a total result only when every retained operand is
+ * defined and integer-valued. */
+static bool predicate_query_assoc_domain_proven(ixs_bounds *bounds,
+                                                ixs_node *node) {
+  return ixs_bounds_check_defined(bounds, node) == IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(bounds, node) == IXS_CHECK_TRUE;
+}
+
+static void predicate_query_start(predicate_query_frame *frame) {
+  if (frame->started)
+    return;
+  frame->started = true;
+  if (frame->node && frame->node->tag == IXS_AND)
+    frame->result = IXS_CHECK_TRUE;
+  else if (frame->node && frame->node->tag == IXS_OR)
+    frame->result = IXS_CHECK_FALSE;
+  else
+    frame->result = IXS_CHECK_UNKNOWN;
+}
+
+static ixs_node *predicate_query_next_child(predicate_query_frame *frame) {
+  ixs_node *node = frame->node;
+
+  if (node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
+      !predicate_query_short_circuited(frame) &&
+      frame->next_child < node->u.assoc.nargs)
+    return node->u.assoc.args[frame->next_child++];
+  if (node && node->tag == IXS_NOT && frame->next_child == 0) {
+    frame->next_child = 1;
+    return node->u.unary_bool.arg;
+  }
+  return NULL;
+}
+
+static ixs_check_result
+predicate_query_complete(ixs_bounds *bounds,
+                         const predicate_query_frame *frame) {
+  ixs_node *node = frame->node;
+  ixs_check_result result;
+
+  if (!node ||
+      (node->tag != IXS_AND && node->tag != IXS_OR && node->tag != IXS_NOT))
+    return predicate_query_atom(bounds, node);
+
+  result = frame->result;
+  if (predicate_query_short_circuited(frame) &&
+      !predicate_query_assoc_domain_proven(bounds, node))
+    result = IXS_CHECK_UNKNOWN;
+  return result;
+}
+
 static ixs_check_result predicate_query_eval(ixs_bounds *bounds,
                                              ixs_node *predicate) {
   predicate_query_frame stack[PREDICATE_QUERY_STACK_LIMIT];
@@ -4966,28 +5135,11 @@ static ixs_check_result predicate_query_eval(ixs_bounds *bounds,
   stack[0].node = predicate;
   while (depth > 0) {
     predicate_query_frame *frame = &stack[depth - 1u];
-    ixs_node *node = frame->node;
     ixs_node *child = NULL;
     ixs_check_result completed;
 
-    if (!frame->started) {
-      frame->started = true;
-      if (node && node->tag == IXS_AND)
-        frame->result = IXS_CHECK_TRUE;
-      else if (node && node->tag == IXS_OR)
-        frame->result = IXS_CHECK_FALSE;
-      else
-        frame->result = IXS_CHECK_UNKNOWN;
-    }
-
-    if (node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
-        !predicate_query_short_circuited(frame) &&
-        frame->next_child < node->u.logic.nargs) {
-      child = node->u.logic.args[frame->next_child++];
-    } else if (node && node->tag == IXS_NOT && frame->next_child == 0) {
-      frame->next_child = 1;
-      child = node->u.unary_bool.arg;
-    }
+    predicate_query_start(frame);
+    child = predicate_query_next_child(frame);
 
     if (child) {
       if (depth >= PREDICATE_QUERY_STACK_LIMIT ||
@@ -5000,11 +5152,7 @@ static ixs_check_result predicate_query_eval(ixs_bounds *bounds,
       continue;
     }
 
-    if (node &&
-        (node->tag == IXS_AND || node->tag == IXS_OR || node->tag == IXS_NOT))
-      completed = frame->result;
-    else
-      completed = predicate_query_atom(bounds, node);
+    completed = predicate_query_complete(bounds, frame);
     depth--;
     if (depth == 0) {
       answer = completed;
@@ -5518,12 +5666,12 @@ static bool equivalence_flatten_logic(equivalence_state *state, ixs_node *root,
     ixs_node *node = stack[--nstack];
     if (node->tag == tag && ixs_node_is_bool_valued(node)) {
       uint32_t i;
-      if ((size_t)node->u.logic.nargs > EQUIVALENCE_TERM_LIMIT - nstack) {
+      if ((size_t)node->u.assoc.nargs > EQUIVALENCE_TERM_LIMIT - nstack) {
         state->limited = true;
         return false;
       }
-      for (i = 0; i < node->u.logic.nargs; i++)
-        stack[nstack++] = node->u.logic.args[i];
+      for (i = 0; i < node->u.assoc.nargs; i++)
+        stack[nstack++] = node->u.assoc.args[i];
     } else {
       if (*nterms >= EQUIVALENCE_TERM_LIMIT) {
         state->limited = true;

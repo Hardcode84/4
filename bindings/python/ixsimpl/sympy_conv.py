@@ -147,14 +147,17 @@ def to_sympy(
     if tag == ixsimpl.MAX:
         # evaluate=False: SymPy can wrongly collapse nested integer Max/Min
         # expressions, e.g. Max(-1, Min(0, Max(x, Min(y, Max(1, 2*x))))) -> -1.
-        return sympy.Max(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
+        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
+        return sympy.Max(*args, evaluate=False)
 
     if tag == ixsimpl.MIN:
-        return sympy.Min(_convert(expr.child(0)), _convert(expr.child(1)), evaluate=False)
+        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
+        return sympy.Min(*args, evaluate=False)
 
     if tag == ixsimpl.XOR:
         fn = xor_fn if xor_fn is not None else sympy.Xor
-        return fn(_convert(expr.child(0)), _convert(expr.child(1)))
+        args = [_convert(expr.child(i)) for i in range(expr.nchildren)]
+        return fn(*args)
 
     if tag == ixsimpl.CMP:
         rel = _CMP_TO_SYMPY.get(expr.cmp_op)
@@ -248,22 +251,16 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         return ixsimpl.mod(from_sympy(ctx, expr.args[0]), from_sympy(ctx, expr.args[1]))
 
     if isinstance(expr, sympy.Max):
-        result = from_sympy(ctx, expr.args[0])
-        for arg in expr.args[1:]:
-            result = ixsimpl.max_(result, from_sympy(ctx, arg))
-        return result
+        args = [from_sympy(ctx, arg) for arg in expr.args]
+        return ixsimpl.max_(*args)
 
     if isinstance(expr, sympy.Min):
-        result = from_sympy(ctx, expr.args[0])
-        for arg in expr.args[1:]:
-            result = ixsimpl.min_(result, from_sympy(ctx, arg))
-        return result
+        args = [from_sympy(ctx, arg) for arg in expr.args]
+        return ixsimpl.min_(*args)
 
     if isinstance(expr, sympy.Xor):
-        result = from_sympy(ctx, expr.args[0])
-        for arg in expr.args[1:]:
-            result = ixsimpl.xor_(result, from_sympy(ctx, arg))
-        return result
+        args = [from_sympy(ctx, arg) for arg in expr.args]
+        return ixsimpl.xor_(*args)
 
     if isinstance(expr, sympy.Piecewise):
         branches: list[tuple[ixsimpl.Expr, ixsimpl.Expr]] = []
@@ -290,16 +287,12 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
         return ctx.ne(from_sympy(ctx, expr.args[0]), from_sympy(ctx, expr.args[1]))
 
     if isinstance(expr, sympy.And):
-        result = from_sympy(ctx, expr.args[0])
-        for arg in expr.args[1:]:
-            result = ixsimpl.and_(result, from_sympy(ctx, arg))
-        return result
+        args = [from_sympy(ctx, arg) for arg in expr.args]
+        return ixsimpl.and_(*args)
 
     if isinstance(expr, sympy.Or):
-        result = from_sympy(ctx, expr.args[0])
-        for arg in expr.args[1:]:
-            result = ixsimpl.or_(result, from_sympy(ctx, arg))
-        return result
+        args = [from_sympy(ctx, arg) for arg in expr.args]
+        return ixsimpl.or_(*args)
 
     if isinstance(expr, sympy.Not):
         return ixsimpl.not_(from_sympy(ctx, expr.args[0]))
@@ -317,19 +310,13 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
             args = [from_sympy(ctx, a) for a in expr.args]
             if len(args) < 2:
                 raise ValueError(f"xor requires at least 2 arguments, got {len(args)}")
-            result = ixsimpl.xor_(args[0], args[1])
-            for a in args[2:]:
-                result = ixsimpl.xor_(result, a)
-            return result
+            return ixsimpl.xor_(*args)
         if name in {"bitand", "bitor"}:
             args = [from_sympy(ctx, a) for a in expr.args]
             if len(args) < 2:
                 raise ValueError(f"{name} requires at least 2 arguments, got {len(args)}")
             op = ixsimpl.and_ if name == "bitand" else ixsimpl.or_
-            result = op(args[0], args[1])
-            for a in args[2:]:
-                result = op(result, a)
-            return result
+            return op(*args)
 
     raise ValueError(f"unsupported sympy expression type: {type(expr).__name__}: {expr}")
 

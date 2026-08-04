@@ -224,6 +224,19 @@ static void print_binary_func(printbuf *pb, const char *name,
   pb_char(pb, ')');
 }
 
+static void print_assoc_func(printbuf *pb, const char *name,
+                             const ixs_node *n) {
+  uint32_t i;
+  pb_str(pb, name);
+  pb_char(pb, '(');
+  for (i = 0; i < n->u.assoc.nargs; i++) {
+    if (i > 0)
+      pb_str(pb, ", ");
+    print_node(pb, n->u.assoc.args[i], PREC_TOP);
+  }
+  pb_char(pb, ')');
+}
+
 static const char *cmp_op_str(ixs_cmp_op op) {
   switch (op) {
   case IXS_CMP_GT:
@@ -272,13 +285,13 @@ static void print_pw_node(printbuf *pb, const ixs_node *n) {
   pb_char(pb, ')');
 }
 
-static void print_logic_node(printbuf *pb, const ixs_node *n, const char *sep,
-                             prec_t prec) {
+static void print_assoc_infix(printbuf *pb, const ixs_node *n, const char *sep,
+                              prec_t prec) {
   uint32_t i;
-  for (i = 0; i < n->u.logic.nargs; i++) {
+  for (i = 0; i < n->u.assoc.nargs; i++) {
     if (i > 0)
       pb_str(pb, sep);
-    print_wrapped(pb, n->u.logic.args[i], prec);
+    print_wrapped(pb, n->u.assoc.args[i], prec);
   }
 }
 
@@ -326,15 +339,15 @@ static void print_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
     break;
 
   case IXS_MAX:
-    print_binary_func(pb, "Max", n);
+    print_assoc_func(pb, "Max", n);
     break;
 
   case IXS_MIN:
-    print_binary_func(pb, "Min", n);
+    print_assoc_func(pb, "Min", n);
     break;
 
   case IXS_XOR:
-    print_binary_func(pb, "xor", n);
+    print_assoc_func(pb, "xor", n);
     break;
 
   case IXS_CMP:
@@ -346,11 +359,11 @@ static void print_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
     break;
 
   case IXS_AND:
-    print_logic_node(pb, n, " & ", PREC_AND);
+    print_assoc_infix(pb, n, " & ", PREC_AND);
     break;
 
   case IXS_OR:
-    print_logic_node(pb, n, " | ", PREC_OR);
+    print_assoc_infix(pb, n, " | ", PREC_OR);
     break;
 
   case IXS_NOT:
@@ -397,6 +410,39 @@ static void print_c_wrapped(printbuf *pb, const ixs_node *n,
   }
 }
 
+static void print_c_assoc_call(printbuf *pb, const ixs_node *n,
+                               const char *name) {
+  uint32_t i;
+
+  if (n->u.assoc.nargs == 0) {
+    pb_str(pb, name);
+    pb_str(pb, "()");
+    return;
+  }
+  for (i = 1; i < n->u.assoc.nargs; i++) {
+    pb_str(pb, name);
+    pb_char(pb, '(');
+  }
+  print_c_node(pb, n->u.assoc.args[0], PREC_TOP);
+  for (i = 1; i < n->u.assoc.nargs; i++) {
+    pb_str(pb, ", ");
+    print_c_node(pb, n->u.assoc.args[i], PREC_TOP);
+    pb_char(pb, ')');
+  }
+}
+
+static void print_c_assoc_infix(printbuf *pb, const ixs_node *n,
+                                const char *sep) {
+  uint32_t i;
+  pb_char(pb, '(');
+  for (i = 0; i < n->u.assoc.nargs; i++) {
+    if (i > 0)
+      pb_str(pb, sep);
+    print_c_wrapped(pb, n->u.assoc.args[i], PREC_ATOM);
+  }
+  pb_char(pb, ')');
+}
+
 static void print_c_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
   (void)parent_prec;
 
@@ -437,25 +483,19 @@ static void print_c_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
     pb_char(pb, ')');
     break;
   case IXS_MAX:
-    pb_str(pb, "ixs_max_i(");
-    print_c_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_c_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_c_assoc_call(pb, n, "ixs_max_i");
     break;
   case IXS_MIN:
-    pb_str(pb, "ixs_min_i(");
-    print_c_node(pb, n->u.binary.lhs, PREC_TOP);
-    pb_str(pb, ", ");
-    print_c_node(pb, n->u.binary.rhs, PREC_TOP);
-    pb_char(pb, ')');
+    print_c_assoc_call(pb, n, "ixs_min_i");
     break;
   case IXS_XOR:
-    pb_char(pb, '(');
-    print_c_wrapped(pb, n->u.binary.lhs, PREC_ATOM);
-    pb_str(pb, " ^ ");
-    print_c_wrapped(pb, n->u.binary.rhs, PREC_ATOM);
-    pb_char(pb, ')');
+    print_c_assoc_infix(pb, n, " ^ ");
+    break;
+  case IXS_AND:
+    print_c_assoc_infix(pb, n, " & ");
+    break;
+  case IXS_OR:
+    print_c_assoc_infix(pb, n, " | ");
     break;
   default:
     /* Fall back to SymPy format for complex nodes. */

@@ -122,6 +122,7 @@ static void test_cross_store_tag_smoke(void) {
   ixs_session dst_s;
   ixs_node *x;
   ixs_node *y;
+  ixs_node *z;
   ixs_node *zero;
   ixs_node *two;
   ixs_node *three;
@@ -129,11 +130,12 @@ static void test_cross_store_tag_smoke(void) {
   ixs_node *five;
   ixs_node *gt0;
   ixs_node *lt4;
-  ixs_node *not_lt4;
   ixs_node *roots[9];
   ixs_node *imported[9];
   ixs_node *pw_vals[2];
   ixs_node *pw_conds[2];
+  ixs_node *expr_args[3];
+  ixs_node *pred_args[3];
   size_t i;
 
   if (!init_session(&src_ctx, &src_s))
@@ -145,6 +147,7 @@ static void test_cross_store_tag_smoke(void) {
 
   x = ixs_sym(&src_s, "x");
   y = ixs_sym(&src_s, "y");
+  z = ixs_sym(&src_s, "z");
   zero = ixs_int(&src_s, 0);
   two = ixs_int(&src_s, 2);
   three = ixs_int(&src_s, 3);
@@ -152,20 +155,25 @@ static void test_cross_store_tag_smoke(void) {
   five = ixs_int(&src_s, 5);
   gt0 = ixs_cmp(&src_s, x, IXS_CMP_GT, zero);
   lt4 = ixs_cmp(&src_s, y, IXS_CMP_LT, four);
-  not_lt4 = ixs_not(&src_s, lt4);
+  expr_args[0] = x;
+  expr_args[1] = y;
+  expr_args[2] = z;
+  pred_args[0] = gt0;
+  pred_args[1] = lt4;
+  pred_args[2] = ixs_cmp(&src_s, z, IXS_CMP_GT, zero);
 
-  pw_vals[0] = ixs_max(&src_s, x, y);
-  pw_vals[1] = ixs_min(&src_s, x, y);
+  pw_vals[0] = ixs_max_many(&src_s, 3, expr_args);
+  pw_vals[1] = ixs_min_many(&src_s, 3, expr_args);
   pw_conds[0] = gt0;
   pw_conds[1] = ixs_true(&src_s);
 
   roots[0] = gt0;
-  roots[1] = ixs_and(&src_s, gt0, not_lt4);
-  roots[2] = ixs_or(&src_s, gt0, lt4);
+  roots[1] = ixs_and_many(&src_s, 3, pred_args);
+  roots[2] = ixs_or_many(&src_s, 3, pred_args);
   roots[3] = ixs_floor(&src_s, ixs_div(&src_s, x, two));
   roots[4] = ixs_ceil(&src_s, ixs_div(&src_s, y, three));
   roots[5] = ixs_mod(&src_s, ixs_add(&src_s, x, three), five);
-  roots[6] = ixs_xor(&src_s, x, y);
+  roots[6] = ixs_xor_many(&src_s, 3, expr_args);
   roots[7] = ixs_pw(&src_s, 2, pw_vals, pw_conds);
   roots[8] = ixs_not(&src_s, gt0);
 

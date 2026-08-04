@@ -50,15 +50,11 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n, bool is_ceil);
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
-static ixs_node *simp_xor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
-                               ixs_node *b);
+static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
-static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n);
-static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n);
+static bool node_is_known_total_integer(const ixs_node *node);
 static inline ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                                   int32_t exp);
 IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
@@ -150,19 +146,161 @@ static inline void add_decompose(ixs_ctx *ctx, ixs_node *n, int64_t *cp,
   *base = n;
 }
 
-/* Sorting comparator for addterms by their base node. */
-static int addterm_cmp(const void *a, const void *b) {
-  const ixs_addterm *ta = (const ixs_addterm *)a;
-  const ixs_addterm *tb = (const ixs_addterm *)b;
-  return ixs_node_cmp(ta->term, tb->term);
+typedef const ixs_node *(*node_sort_key_fn)(const void *item);
+
+static const ixs_node *addterm_sort_key(const void *item) {
+  return ((const ixs_addterm *)item)->term;
+}
+
+static const ixs_node *mulfactor_sort_key(const void *item) {
+  return ((const ixs_mulfactor *)item)->base;
+}
+
+static const ixs_node *node_ptr_sort_key(const void *item) {
+  return *(ixs_node *const *)item;
+}
+
+static bool node_sort_merge(ixs_ctx *ctx, const unsigned char *src,
+                            unsigned char *dst, size_t elem_size, size_t left,
+                            size_t mid, size_t right, node_sort_key_fn key) {
+  size_t i = left;
+  size_t j = mid;
+  size_t out = left;
+
+  while (i < mid && j < right) {
+    int order =
+        ixs_node_cmp(ctx, key(src + i * elem_size), key(src + j * elem_size));
+    if (order == IXS_NODE_CMP_OOM)
+      return false;
+    if (order <= 0) {
+      memcpy(dst + out * elem_size, src + i * elem_size, elem_size);
+      i++;
+    } else {
+      memcpy(dst + out * elem_size, src + j * elem_size, elem_size);
+      j++;
+    }
+    out++;
+  }
+  if (i < mid)
+    memcpy(dst + out * elem_size, src + i * elem_size, (mid - i) * elem_size);
+  else if (j < right)
+    memcpy(dst + out * elem_size, src + j * elem_size, (right - j) * elem_size);
+  return true;
+}
+
+/* Stable O(n log n) sort with O(n) scratch. Canonical arrays and the common
+ * sorted-prefix-plus-one case take one linear scan. */
+static bool node_key_sort(ixs_ctx *ctx, void *items, size_t count,
+                          size_t elem_size, node_sort_key_fn key) {
+  unsigned char *base = (unsigned char *)items;
+  unsigned char *temp;
+  unsigned char *src;
+  unsigned char *dst;
+  ixs_arena_mark mark;
+  size_t first_break = 0;
+  size_t breaks = 0;
+  size_t i;
+  size_t width;
+
+  if (count < 2u)
+    return true;
+  if (count > (size_t)-1 / elem_size)
+    return false;
+  for (i = 1; i < count; i++) {
+    int order = ixs_node_cmp(ctx, key(base + (i - 1u) * elem_size),
+                             key(base + i * elem_size));
+    if (order == IXS_NODE_CMP_OOM)
+      return false;
+    if (order > 0) {
+      if (breaks == 0)
+        first_break = i;
+      breaks++;
+    }
+  }
+  if (breaks == 0)
+    return true;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  temp = ixs_arena_alloc(&ctx->scratch, count * elem_size, sizeof(void *));
+  if (!temp) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return false;
+  }
+  if (breaks == 1u) {
+    bool ok =
+        node_sort_merge(ctx, base, temp, elem_size, 0, first_break, count, key);
+    if (ok)
+      memcpy(base, temp, count * elem_size);
+    ixs_arena_restore(&ctx->scratch, mark);
+    return ok;
+  }
+
+  src = base;
+  dst = temp;
+  width = 1u;
+  while (width < count) {
+    size_t left;
+    for (left = 0; left < count; left += width * 2u) {
+      size_t mid = left + width;
+      size_t right;
+      if (mid > count)
+        mid = count;
+      right = mid + width;
+      if (right > count)
+        right = count;
+      if (!node_sort_merge(ctx, src, dst, elem_size, left, mid, right, key)) {
+        ixs_arena_restore(&ctx->scratch, mark);
+        return false;
+      }
+    }
+    {
+      unsigned char *swap = src;
+      src = dst;
+      dst = swap;
+    }
+    if (width > count / 2u)
+      width = count;
+    else
+      width *= 2u;
+  }
+  if (src != base)
+    memcpy(base, src, count * elem_size);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return true;
+}
+
+static bool node_ptr_insert_last(ixs_ctx *ctx, ixs_node **items, size_t count) {
+  ixs_node *value;
+  size_t lo = 0;
+  size_t hi;
+
+  if (count < 2u)
+    return true;
+  value = items[count - 1u];
+  hi = count - 1u;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    int order = ixs_node_cmp(ctx, items[mid], value);
+    if (order == IXS_NODE_CMP_OOM)
+      return false;
+    if (order <= 0)
+      lo = mid + 1u;
+    else
+      hi = mid;
+  }
+  if (lo != count - 1u) {
+    memmove(items + lo + 1u, items + lo, (count - lo - 1u) * sizeof(*items));
+    items[lo] = value;
+  }
+  return true;
 }
 
 /* Sort addterms by base, then merge like terms by summing coefficients.
- * Returns new count, or (uint32_t)-1 on overflow/OOM. */
-static uint32_t coalesce_addterms(ixs_ctx *ctx, ixs_addterm *terms,
-                                  uint32_t nterms) {
-  if (nterms > 1)
-    qsort(terms, nterms, sizeof(ixs_addterm), addterm_cmp);
+ * Returns 1 on success, 0 on OOM, and -1 on rational overflow. */
+static int coalesce_addterms(ixs_ctx *ctx, ixs_addterm *terms, uint32_t nterms,
+                             uint32_t *result_count) {
+  if (!node_key_sort(ctx, terms, nterms, sizeof(ixs_addterm), addterm_sort_key))
+    return 0;
   uint32_t w = 0;
   for (uint32_t k = 0; k < nterms; k++) {
     if (w > 0 && terms[w - 1].term == terms[k].term) {
@@ -170,13 +308,13 @@ static uint32_t coalesce_addterms(ixs_ctx *ctx, ixs_addterm *terms,
       ixs_node_get_rat(terms[w - 1].coeff, &ap, &aq);
       ixs_node_get_rat(terms[k].coeff, &bp, &bq);
       if (!ixs_rat_add(ap, aq, bp, bq, &rp, &rq))
-        return (uint32_t)-1;
+        return -1;
       if (ixs_rat_is_zero(rp)) {
         w--;
       } else {
         terms[w - 1].coeff = make_const(ctx, rp, rq);
         if (!terms[w - 1].coeff)
-          return (uint32_t)-1;
+          return 0;
       }
     } else {
       if (w != k)
@@ -184,14 +322,8 @@ static uint32_t coalesce_addterms(ixs_ctx *ctx, ixs_addterm *terms,
       w++;
     }
   }
-  return w;
-}
-
-/* Sorting comparator for mulfactors by their base node. */
-static int mulfactor_cmp(const void *a, const void *b) {
-  const ixs_mulfactor *fa = (const ixs_mulfactor *)a;
-  const ixs_mulfactor *fb = (const ixs_mulfactor *)b;
-  return ixs_node_cmp(fa->base, fb->base);
+  *result_count = w;
+  return 1;
 }
 
 typedef struct {
@@ -387,19 +519,19 @@ static inline bool add_accum_has_tag(add_accum *acc, ixs_tag tag) {
   return false;
 }
 
-static inline uint32_t add_accum_coalesce(ixs_ctx *ctx, add_accum *acc) {
-  acc->nterms = coalesce_addterms(ctx, acc->terms, acc->nterms);
-  return acc->nterms;
+static inline int add_accum_coalesce(ixs_ctx *ctx, add_accum *acc) {
+  return coalesce_addterms(ctx, acc->terms, acc->nterms, &acc->nterms);
 }
 
-static inline uint32_t add_accum_flatten_mod_terms(ixs_ctx *ctx,
-                                                   add_accum *acc) {
+static inline int add_accum_flatten_mod_terms(ixs_ctx *ctx, add_accum *acc) {
+  uint32_t flattened;
   if (!add_accum_has_tag(acc, IXS_MOD))
-    return acc->nterms;
-  acc->nterms = flatten_mul_add_terms(ctx, &acc->terms, &acc->cap, acc->nterms,
-                                      &acc->const_p, &acc->const_q);
-  if (acc->nterms == (uint32_t)-1)
-    return (uint32_t)-1;
+    return 1;
+  flattened = flatten_mul_add_terms(ctx, &acc->terms, &acc->cap, acc->nterms,
+                                    &acc->const_p, &acc->const_q);
+  if (flattened == (uint32_t)-1)
+    return -1;
+  acc->nterms = flattened;
   return add_accum_coalesce(ctx, acc);
 }
 
@@ -463,10 +595,10 @@ static bool addterm_coeffs_cancel(const ixs_addterm *terms, uint32_t i,
   return ixs_rat_is_zero(sp);
 }
 
-static uint32_t replace_opposite_mul_add_pair(
+static int replace_opposite_mul_add_pair(
     ixs_ctx *ctx, ixs_addterm *terms, uint32_t nterms, uint32_t i, uint32_t j,
     ixs_node *outer, int32_t ai, int32_t aj, int64_t ci_p, int64_t ci_q,
-    int64_t *const_p, int64_t *const_q) {
+    int64_t *const_p, int64_t *const_q, uint32_t *result_count) {
   int64_t np, nq, rp, rq;
   ixs_node *nbase;
   ixs_node *add_a = terms[i].term->u.mul.factors[ai].base;
@@ -475,14 +607,14 @@ static uint32_t replace_opposite_mul_add_pair(
   ixs_node *diff = neg_b ? simp_add(ctx, add_a, neg_b) : NULL;
   ixs_node *new_term = diff ? simp_mul(ctx, outer, diff) : NULL;
   if (!new_term)
-    return (uint32_t)-1;
+    return 0;
 
   add_decompose(ctx, new_term, &np, &nq, &nbase);
   if (!ixs_rat_mul(ci_p, ci_q, np, nq, &rp, &rq))
-    return (uint32_t)-1;
+    return -1;
   if (!nbase) {
     if (!ixs_rat_add(*const_p, *const_q, rp, rq, const_p, const_q))
-      return (uint32_t)-1;
+      return -1;
     terms[j] = terms[nterms - 1];
     nterms--;
     terms[i] = terms[nterms - 1];
@@ -490,12 +622,12 @@ static uint32_t replace_opposite_mul_add_pair(
   } else {
     terms[i].coeff = make_const(ctx, rp, rq);
     if (!terms[i].coeff)
-      return (uint32_t)-1;
+      return 0;
     terms[i].term = nbase;
     terms[j] = terms[nterms - 1];
     nterms--;
   }
-  return coalesce_addterms(ctx, terms, nterms);
+  return coalesce_addterms(ctx, terms, nterms, result_count);
 }
 
 static bool flatten_one_mul_add(ixs_ctx *ctx, add_accum *acc, uint32_t idx,
@@ -524,12 +656,13 @@ static bool flatten_one_mul_add(ixs_ctx *ctx, add_accum *acc, uint32_t idx,
 /* Reduce opposite-coefficient MUL pairs that share all factors except
  * one ADD^1 base.  c*K*(PW+A) - c*K*(PW+B) -> c*K*(A-B).
  * Enables cancellation of shared Piecewise sub-expressions.
- * Factor ordering in MUL is hash-based, so the ADD^1 factor may sit
- * at different positions -- we compare the outer product instead.
- * Returns new nterms, or (uint32_t)-1 on overflow/OOM. */
-static uint32_t reduce_opposite_mul_add(ixs_ctx *ctx, ixs_addterm *terms,
-                                        uint32_t nterms, int64_t *const_p,
-                                        int64_t *const_q) {
+ * Canonical factor ordering can put the ADD^1 factor at different positions;
+ * compare the outer product instead.
+ * Returns 1 on success, 0 on OOM, and -1 on rational overflow. */
+static int reduce_opposite_mul_add(ixs_ctx *ctx, ixs_addterm *terms,
+                                   uint32_t *nterms_ptr, int64_t *const_p,
+                                   int64_t *const_q) {
+  uint32_t nterms = *nterms_ptr;
   uint32_t i, j;
   bool changed = true;
   while (changed) {
@@ -545,7 +678,7 @@ static uint32_t reduce_opposite_mul_add(ixs_ctx *ctx, ixs_addterm *terms,
         continue;
       outer_i = mul_without_factor(ctx, mi, ai);
       if (!outer_i)
-        return (uint32_t)-1;
+        return 0;
       for (j = i + 1; j < nterms; j++) {
         ixs_node *mj = terms[j].term;
         int32_t aj;
@@ -561,17 +694,22 @@ static uint32_t reduce_opposite_mul_add(ixs_ctx *ctx, ixs_addterm *terms,
         outer_j = mul_without_factor(ctx, mj, aj);
         if (!outer_j || outer_i != outer_j)
           continue;
-        nterms =
-            replace_opposite_mul_add_pair(ctx, terms, nterms, i, j, outer_i, ai,
-                                          aj, ci_p, ci_q, const_p, const_q);
-        if (nterms == (uint32_t)-1)
-          return (uint32_t)-1;
+        {
+          uint32_t reduced;
+          int rc = replace_opposite_mul_add_pair(ctx, terms, nterms, i, j,
+                                                 outer_i, ai, aj, ci_p, ci_q,
+                                                 const_p, const_q, &reduced);
+          if (rc <= 0)
+            return rc;
+          nterms = reduced;
+        }
         changed = true;
         break;
       }
     }
   }
-  return nterms;
+  *nterms_ptr = nterms;
+  return 1;
 }
 
 /* Distribute MUL-over-ADD for addterms whose base is MUL(..., ADD^1).
@@ -1275,12 +1413,16 @@ static bool xor_offset_delta(ixs_node *a, ixs_node *b, ixs_node **selector,
   int64_t off_a, off_b;
   int side_a, side_b;
 
+  if (a->tag != IXS_XOR || b->tag != IXS_XOR || a->u.assoc.nargs != 2u ||
+      b->u.assoc.nargs != 2u)
+    return false;
+
   for (side_a = 0; side_a < 2; side_a++) {
-    ixs_node *common_a = side_a == 0 ? a->u.binary.lhs : a->u.binary.rhs;
-    ixs_node *other_a = side_a == 0 ? a->u.binary.rhs : a->u.binary.lhs;
+    ixs_node *common_a = a->u.assoc.args[side_a];
+    ixs_node *other_a = a->u.assoc.args[1 - side_a];
     for (side_b = 0; side_b < 2; side_b++) {
-      ixs_node *common_b = side_b == 0 ? b->u.binary.lhs : b->u.binary.rhs;
-      ixs_node *other_b = side_b == 0 ? b->u.binary.rhs : b->u.binary.lhs;
+      ixs_node *common_b = b->u.assoc.args[side_b];
+      ixs_node *other_b = b->u.assoc.args[1 - side_b];
       if (common_a != common_b)
         continue;
       if (!split_const_offset(other_a, &base_a, &off_a) ||
@@ -1366,7 +1508,7 @@ static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
       bit = (uint64_t)(delta < 0 ? -delta : delta);
       if (bit > (uint64_t)(INT64_MAX / 2))
         continue;
-      if (!uint64_pow2(bit) ||
+      if (!node_is_known_total_integer(toggle_operand) || !uint64_pow2(bit) ||
           !bit_known_zero_without_assumptions(ctx, toggle_operand, bit))
         continue;
 
@@ -1503,16 +1645,24 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (rc == 0)
     return NULL;
 
-  if (add_accum_coalesce(ctx, &acc) == (uint32_t)-1)
+  rc = add_accum_coalesce(ctx, &acc);
+  if (rc < 0)
     goto overflow;
+  if (rc == 0)
+    return NULL;
 
-  acc.nterms = reduce_opposite_mul_add(ctx, acc.terms, acc.nterms, &acc.const_p,
-                                       &acc.const_q);
-  if (acc.nterms == (uint32_t)-1)
+  rc = reduce_opposite_mul_add(ctx, acc.terms, &acc.nterms, &acc.const_p,
+                               &acc.const_q);
+  if (rc < 0)
     goto overflow;
+  if (rc == 0)
+    return NULL;
 
-  if (add_accum_flatten_mod_terms(ctx, &acc) == (uint32_t)-1)
+  rc = add_accum_flatten_mod_terms(ctx, &acc);
+  if (rc < 0)
     goto overflow;
+  if (rc == 0)
+    return NULL;
 
   prop = add_try_rewrites(ctx, &acc);
   if (prop)
@@ -1646,10 +1796,11 @@ static inline int mul_accum_absorb_node(ixs_ctx *ctx, mul_accum *acc,
   return mul_accum_push(ctx, acc, x, 1);
 }
 
-static inline int mul_accum_coalesce(mul_accum *acc) {
+static inline int mul_accum_coalesce(ixs_ctx *ctx, mul_accum *acc) {
   uint32_t i, j;
-  if (acc->nfactors > 1)
-    qsort(acc->factors, acc->nfactors, sizeof(ixs_mulfactor), mulfactor_cmp);
+  if (!node_key_sort(ctx, acc->factors, acc->nfactors, sizeof(ixs_mulfactor),
+                     mulfactor_sort_key))
+    return 0;
 
   j = 0;
   for (i = 0; i < acc->nfactors; i++) {
@@ -1720,8 +1871,11 @@ static ixs_node *simp_mul_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   if (ixs_rat_is_zero(acc.coeff_p))
     return ixs_node_int(ctx, 0);
 
-  if (mul_accum_coalesce(&acc) < 0)
+  rc = mul_accum_coalesce(ctx, &acc);
+  if (rc < 0)
     goto overflow;
+  if (rc == 0)
+    return NULL;
 
   return mul_build_result(ctx, &acc);
 
@@ -1741,7 +1895,10 @@ IXS_STATIC ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /* ------------------------------------------------------------------ */
 
 IXS_STATIC ixs_node *simp_neg(ixs_ctx *ctx, ixs_node *a) {
-  ixs_node *prop = ixs_propagate1(a);
+  ixs_node *prop;
+  if (!a)
+    return NULL;
+  prop = ixs_propagate1(a);
   if (prop)
     return prop;
   return simp_mul(ctx, ixs_node_int(ctx, -1), a);
@@ -2688,7 +2845,10 @@ static const ixs_rule ceil_rules[] = {
 /* ---- simp_floor / simp_ceil -------------------------------------- */
 
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
-  ixs_node *prop = ixs_propagate1(x);
+  ixs_node *prop;
+  if (!x)
+    return NULL;
+  prop = ixs_propagate1(x);
   if (prop)
     return prop;
   if (x->tag == IXS_INT)
@@ -2712,7 +2872,10 @@ IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x) {
 }
 
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
-  ixs_node *prop = ixs_propagate1(x);
+  ixs_node *prop;
+  if (!x)
+    return NULL;
+  prop = ixs_propagate1(x);
   if (prop)
     return prop;
   if (x->tag == IXS_INT)
@@ -3334,154 +3497,435 @@ IXS_STATIC ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 /*  simp_max / simp_min                                               */
 /* ------------------------------------------------------------------ */
 
-/* ---- Max/min rule wrappers --------------------------------------- */
+typedef struct {
+  ixs_node **items;
+  size_t count;
+  size_t cap;
+} assoc_vec;
 
-static ixs_node *rule_max_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n) {
-  int64_t ap, aq, bp, bq;
-  (void)ctx;
-  (void)bnds;
-  if (!ixs_node_is_const(n->u.binary.lhs) ||
-      !ixs_node_is_const(n->u.binary.rhs))
-    return n;
-  ixs_node_get_rat(n->u.binary.lhs, &ap, &aq);
-  ixs_node_get_rat(n->u.binary.rhs, &bp, &bq);
-  return ixs_rat_cmp(ap, aq, bp, bq) >= 0 ? n->u.binary.lhs : n->u.binary.rhs;
+static bool assoc_vec_push(ixs_ctx *ctx, assoc_vec *vec, ixs_node *node) {
+  if (vec->count == vec->cap) {
+    vec->items =
+        scratch_grow(&ctx->scratch, vec->items, &vec->cap, sizeof(*vec->items));
+    if (!vec->items)
+      return false;
+  }
+  vec->items[vec->count++] = node;
+  return true;
 }
 
-static ixs_node *rule_min_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n) {
-  int64_t ap, aq, bp, bq;
-  (void)ctx;
-  (void)bnds;
-  if (!ixs_node_is_const(n->u.binary.lhs) ||
-      !ixs_node_is_const(n->u.binary.rhs))
-    return n;
-  ixs_node_get_rat(n->u.binary.lhs, &ap, &aq);
-  ixs_node_get_rat(n->u.binary.rhs, &bp, &bq);
-  return ixs_rat_cmp(ap, aq, bp, bq) <= 0 ? n->u.binary.lhs : n->u.binary.rhs;
+/* Check the entire public input before reducing so propagation is independent
+ * of operand order. */
+static bool assoc_inputs_clean(uint32_t n, ixs_node *const *args,
+                               ixs_node **propagated) {
+  uint32_t i;
+  ixs_node *domain_error = NULL;
+  ixs_node *parse_error = NULL;
+
+  *propagated = NULL;
+  if (n != 0 && !args)
+    return false;
+  for (i = 0; i < n; i++) {
+    if (!args[i])
+      return false;
+    if (args[i]->tag == IXS_PARSE_ERROR)
+      parse_error = args[i];
+    else if (args[i]->tag == IXS_ERROR)
+      domain_error = args[i];
+  }
+  if (parse_error || domain_error) {
+    *propagated = parse_error ? parse_error : domain_error;
+    return false;
+  }
+  return true;
 }
 
-static ixs_node *rule_max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                          ixs_node *n) {
-  return max_bounds_collapse(ctx, bnds, n);
+/* Same-tag children are already flat, but the explicit stack also handles
+ * unpublished raw probes without adding recursive depth. */
+static bool assoc_collect(ixs_ctx *ctx, ixs_tag tag, uint32_t n,
+                          ixs_node *const *args, assoc_vec *out) {
+  assoc_vec stack;
+  uint32_t i;
+
+  stack.cap = n > 4u ? n : 4u;
+  if (stack.cap > (size_t)-1 / sizeof(*stack.items))
+    return false;
+  stack.count = 0;
+  stack.items = ixs_arena_alloc(&ctx->scratch, stack.cap * sizeof(*stack.items),
+                                sizeof(void *));
+  out->cap = stack.cap;
+  out->count = 0;
+  out->items = ixs_arena_alloc(&ctx->scratch, out->cap * sizeof(*out->items),
+                               sizeof(void *));
+  if (!stack.items || !out->items)
+    return false;
+  for (i = n; i != 0; i--) {
+    if (!assoc_vec_push(ctx, &stack, args[i - 1u]))
+      return false;
+  }
+  while (stack.count != 0) {
+    ixs_node *node = stack.items[--stack.count];
+    if (node->tag == tag) {
+      for (i = node->u.assoc.nargs; i != 0; i--) {
+        if (!assoc_vec_push(ctx, &stack, node->u.assoc.args[i - 1u]))
+          return false;
+      }
+    } else if (!assoc_vec_push(ctx, out, node)) {
+      return false;
+    }
+  }
+  return out->count <= UINT32_MAX;
 }
 
-static ixs_node *rule_min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                          ixs_node *n) {
-  return min_bounds_collapse(ctx, bnds, n);
+static bool node_is_known_total_integer(const ixs_node *node) {
+  return ixs_node_is_integer_valued(node) && ixs_node_is_known_total(node);
 }
 
-static const ixs_rule max_rules[] = {
-    {rule_max_const_fold, "max_const_fold", false},
-    {rule_max_bounds_collapse, "max_bounds_collapse", true},
-    {NULL, NULL, false},
-};
+static bool node_is_proven_defined(ixs_bounds *bnds, const ixs_node *node) {
+  return ixs_node_is_known_total(node) ||
+         (bnds && ixs_bounds_check_defined(bnds, node) == IXS_CHECK_TRUE);
+}
 
-static const ixs_rule min_rules[] = {
-    {rule_min_const_fold, "min_const_fold", false},
-    {rule_min_bounds_collapse, "min_bounds_collapse", true},
-    {NULL, NULL, false},
-};
+static int64_t bit_pattern_to_i64(uint64_t bits) {
+  uint64_t magnitude;
+  if (bits <= (uint64_t)INT64_MAX)
+    return (int64_t)bits;
+  magnitude = (~bits) + UINT64_C(1);
+  if (magnitude == (UINT64_C(1) << 63))
+    return INT64_MIN;
+  return -(int64_t)magnitude;
+}
 
-static ixs_node *simp_max_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
-                               ixs_node *b) {
-  ixs_node *node;
-  if (!a || !b)
+static int64_t bit_fold(ixs_tag tag, int64_t lhs, int64_t rhs) {
+  uint64_t a = (uint64_t)lhs;
+  uint64_t b = (uint64_t)rhs;
+  uint64_t result;
+  if (tag == IXS_AND)
+    result = a & b;
+  else if (tag == IXS_OR)
+    result = a | b;
+  else
+    result = a ^ b;
+  return bit_pattern_to_i64(result);
+}
+
+static int interval_upper_cmp(const ixs_interval *a, const ixs_interval *b) {
+  if (a->hi_inf)
+    return b->hi_inf ? 0 : 1;
+  if (b->hi_inf)
+    return -1;
+  return ixs_rat_cmp(a->hi_p, a->hi_q, b->hi_p, b->hi_q);
+}
+
+static int interval_lower_cmp(const ixs_interval *a, const ixs_interval *b) {
+  if (a->lo_inf)
+    return b->lo_inf ? 0 : -1;
+  if (b->lo_inf)
+    return 1;
+  return ixs_rat_cmp(a->lo_p, a->lo_q, b->lo_p, b->lo_q);
+}
+
+typedef struct {
+  ixs_interval first_iv;
+  ixs_interval second_iv;
+  uint32_t first;
+  uint32_t second;
+} extrema_rank;
+
+static bool extrema_endpoint_better(ixs_tag tag, const ixs_interval *candidate,
+                                    const ixs_interval *current) {
+  int cmp = tag == IXS_MAX ? interval_upper_cmp(candidate, current)
+                           : interval_lower_cmp(candidate, current);
+  return tag == IXS_MAX ? cmp > 0 : cmp < 0;
+}
+
+static void extrema_rank_add(extrema_rank *rank, ixs_tag tag, uint32_t index,
+                             ixs_interval iv, uint32_t end) {
+  if (rank->first == end) {
+    rank->first = index;
+    rank->first_iv = iv;
+    return;
+  }
+  if (extrema_endpoint_better(tag, &iv, &rank->first_iv)) {
+    rank->second = rank->first;
+    rank->second_iv = rank->first_iv;
+    rank->first = index;
+    rank->first_iv = iv;
+    return;
+  }
+  if (rank->second == end ||
+      extrema_endpoint_better(tag, &iv, &rank->second_iv)) {
+    rank->second = index;
+    rank->second_iv = iv;
+  }
+}
+
+static bool extrema_candidate_wins(ixs_tag tag, const ixs_interval *candidate,
+                                   const ixs_interval *other) {
+  if (tag == IXS_MAX)
+    return !candidate->lo_inf && !other->hi_inf &&
+           ixs_rat_cmp(candidate->lo_p, candidate->lo_q, other->hi_p,
+                       other->hi_q) >= 0;
+  return !candidate->hi_inf && !other->lo_inf &&
+         ixs_rat_cmp(candidate->hi_p, candidate->hi_q, other->lo_p,
+                     other->lo_q) <= 0;
+}
+
+static ixs_node *assoc_extrema_bounds_winner(ixs_bounds *bnds, ixs_tag tag,
+                                             ixs_node **args, uint32_t n) {
+  extrema_rank rank;
+  uint32_t i;
+
+  if (!bnds)
     return NULL;
+  rank.first_iv = ixs_interval_unknown();
+  rank.second_iv = ixs_interval_unknown();
+  rank.first = n;
+  rank.second = n;
+  for (i = 0; i < n; i++) {
+    ixs_interval iv = ixs_bounds_get(bnds, args[i]);
+    if (!iv.valid || ixs_interval_is_empty(iv) ||
+        !node_is_proven_defined(bnds, args[i]))
+      return NULL;
+    extrema_rank_add(&rank, tag, i, iv, n);
+  }
+  if (rank.second == n)
+    return args[0];
+  for (i = 0; i < n; i++) {
+    ixs_interval candidate = ixs_bounds_get(bnds, args[i]);
+    const ixs_interval *other =
+        i == rank.first ? &rank.second_iv : &rank.first_iv;
+    if (extrema_candidate_wins(tag, &candidate, other))
+      return args[i];
+  }
+  return NULL;
+}
+
+static ixs_node *simp_extrema_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds,
+                                        ixs_tag tag, uint32_t n,
+                                        ixs_node *const *args) {
+  ixs_arena_mark mark;
+  ixs_node *propagated;
+  ixs_node *best = NULL;
+  ixs_node *result;
+  assoc_vec flat;
+  size_t read;
+  uint32_t write;
+
+  if (!assoc_inputs_clean(n, args, &propagated))
+    return propagated;
+  if (n == 0)
+    return simp_err(ctx, tag == IXS_MAX ? "Max: expected an operand"
+                                        : "Min: expected an operand");
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!assoc_collect(ctx, tag, n, args, &flat)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  write = 0;
+  for (read = 0; read < flat.count; read++) {
+    ixs_node *arg = flat.items[read];
+    if (ixs_node_is_const(arg)) {
+      if (!best) {
+        best = arg;
+      } else {
+        int64_t ap, aq, bp, bq;
+        int cmp;
+        ixs_node_get_rat(best, &ap, &aq);
+        ixs_node_get_rat(arg, &bp, &bq);
+        cmp = ixs_rat_cmp(ap, aq, bp, bq);
+        if ((tag == IXS_MAX && cmp < 0) || (tag == IXS_MIN && cmp > 0))
+          best = arg;
+      }
+    } else {
+      flat.items[write++] = arg;
+    }
+  }
+  if (best)
+    flat.items[write++] = best;
+  if (write == 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return simp_err(ctx, tag == IXS_MAX ? "Max: expected an operand"
+                                        : "Min: expected an operand");
+  }
+  if (!node_key_sort(ctx, flat.items, write, sizeof(*flat.items),
+                     node_ptr_sort_key)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
   {
-    ixs_node *prop = ixs_propagate2(a, b);
-    if (prop)
-      return prop;
+    uint32_t unique = 0;
+    uint32_t i;
+    for (i = 0; i < write; i++) {
+      if (unique == 0 || flat.items[i] != flat.items[unique - 1u])
+        flat.items[unique++] = flat.items[i];
+    }
+    write = unique;
   }
-  if (a == b)
-    return a;
-  if (ixs_node_cmp(a, b) > 0) {
-    ixs_node *t = a;
-    a = b;
-    b = t;
-  }
-  node = ixs_node_binary(ctx, IXS_MAX, a, b, (ixs_cmp_op)0);
-  if (!node)
-    return NULL;
-  return try_rules(ctx, bnds, node, max_rules);
+  result = write == 1u
+               ? flat.items[0]
+               : assoc_extrema_bounds_winner(bnds, tag, flat.items, write);
+  if (!result)
+    result = ixs_node_assoc(ctx, tag, write, flat.items);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+IXS_STATIC ixs_node *simp_max_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args) {
+  return simp_extrema_many_bnds(ctx, NULL, IXS_MAX, n, args);
+}
+
+IXS_STATIC ixs_node *simp_min_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args) {
+  return simp_extrema_many_bnds(ctx, NULL, IXS_MIN, n, args);
 }
 
 IXS_STATIC ixs_node *simp_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_max_bnds(ctx, NULL, a, b);
-}
-
-static ixs_node *simp_min_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
-                               ixs_node *b) {
-  ixs_node *node;
-  if (!a || !b)
-    return NULL;
-  {
-    ixs_node *prop = ixs_propagate2(a, b);
-    if (prop)
-      return prop;
-  }
-  if (a == b)
-    return a;
-  if (ixs_node_cmp(a, b) > 0) {
-    ixs_node *t = a;
-    a = b;
-    b = t;
-  }
-  node = ixs_node_binary(ctx, IXS_MIN, a, b, (ixs_cmp_op)0);
-  if (!node)
-    return NULL;
-  return try_rules(ctx, bnds, node, min_rules);
+  ixs_node *args[2] = {a, b};
+  return simp_max_many(ctx, 2, args);
 }
 
 IXS_STATIC ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  return simp_min_bnds(ctx, NULL, a, b);
+  ixs_node *args[2] = {a, b};
+  return simp_min_many(ctx, 2, args);
 }
 
 /* ------------------------------------------------------------------ */
 /*  simp_xor                                                          */
 /* ------------------------------------------------------------------ */
 
-static ixs_node *xor_cancel_nested(ixs_node *outer, ixs_node *nested) {
-  if (!outer || !nested || nested->tag != IXS_XOR)
+static bool xor_partition_constants(ixs_ctx *ctx, assoc_vec *flat,
+                                    int64_t *constant, uint32_t *write,
+                                    ixs_node **failure) {
+  size_t read;
+
+  *constant = 0;
+  *write = 0;
+  *failure = NULL;
+  for (read = 0; read < flat->count; read++) {
+    ixs_node *arg = flat->items[read];
+    if (arg->tag == IXS_RAT && arg->u.rat.q != 1) {
+      *failure = simp_err(ctx, "xor: operand is not integer-valued");
+      return false;
+    }
+    if (arg->tag == IXS_INT)
+      *constant = bit_fold(IXS_XOR, *constant, arg->u.ival);
+    else
+      flat->items[(*write)++] = arg;
+  }
+  return true;
+}
+
+static uint32_t xor_cancel_pairs(ixs_node **items, uint32_t count) {
+  uint32_t out = 0;
+  uint32_t begin = 0;
+
+  while (begin < count) {
+    uint32_t end = begin + 1u;
+    while (end < count && items[end] == items[begin])
+      end++;
+    if (((end - begin) & 1u) != 0) {
+      items[out++] = items[begin];
+    } else if (!node_is_known_total_integer(items[begin])) {
+      items[out++] = items[begin];
+      items[out++] = items[begin];
+    }
+    begin = end;
+  }
+  return out;
+}
+
+static ixs_node *xor_build_result(ixs_ctx *ctx, ixs_node **items,
+                                  uint32_t count, int64_t constant) {
+  if (constant != 0) {
+    ixs_node *constant_node = ixs_node_int(ctx, constant);
+    if (!constant_node)
+      return NULL;
+    items[count++] = constant_node;
+  }
+  if (count == 0)
+    return ctx->node_zero;
+  if (count == 1u && ixs_node_is_integer_valued(items[0]))
+    return items[0];
+  if (count == 1u)
+    items[count++] = ctx->node_zero;
+  if (!node_key_sort(ctx, items, count, sizeof(*items), node_ptr_sort_key))
     return NULL;
-  if (outer == nested->u.binary.lhs)
-    return nested->u.binary.rhs;
-  if (outer == nested->u.binary.rhs)
-    return nested->u.binary.lhs;
-  return NULL;
+  return ixs_node_assoc(ctx, IXS_XOR, count, items);
+}
+
+static ixs_node *xor_disjoint_bits_sum(ixs_ctx *ctx, ixs_bounds *bnds,
+                                       ixs_node *result) {
+  ixs_node *xor_node = result;
+  uint64_t possible_bits = 0;
+  uint32_t i;
+
+  if (!bnds || result->tag != IXS_XOR)
+    return result;
+  for (i = 0; i < xor_node->u.assoc.nargs; i++) {
+    ixs_bitfacts facts;
+    ixs_node *arg = xor_node->u.assoc.args[i];
+    uint64_t possible;
+    if (!bounds_int_nonnegative_finite(bnds, arg) ||
+        !node_is_proven_defined(bnds, arg) ||
+        !ixs_bounds_get_bitfacts(bnds, arg, &facts))
+      return result;
+    possible = ~facts.known_zero;
+    if ((possible_bits & possible) != 0)
+      return result;
+    possible_bits |= possible;
+  }
+  result = ctx->node_zero;
+  for (i = 0; result && i < xor_node->u.assoc.nargs; i++)
+    result = simp_add(ctx, result, xor_node->u.assoc.args[i]);
+  return result;
+}
+
+static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
+                                    ixs_node *const *args) {
+  ixs_arena_mark mark;
+  ixs_node *failure;
+  ixs_node *propagated;
+  ixs_node *result;
+  assoc_vec flat;
+  int64_t constant;
+  uint32_t write;
+
+  if (!assoc_inputs_clean(n, args, &propagated))
+    return propagated;
+  if (n == 0)
+    return ctx->node_zero;
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!assoc_collect(ctx, IXS_XOR, n, args, &flat)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  if (!xor_partition_constants(ctx, &flat, &constant, &write, &failure)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return failure;
+  }
+  if (!node_key_sort(ctx, flat.items, write, sizeof(*flat.items),
+                     node_ptr_sort_key)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  write = xor_cancel_pairs(flat.items, write);
+  result = xor_build_result(ctx, flat.items, write, constant);
+  if (result)
+    result = xor_disjoint_bits_sum(ctx, bnds, result);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+IXS_STATIC ixs_node *simp_xor_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args) {
+  return simp_xor_many_bnds(ctx, NULL, n, args);
 }
 
 IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  ixs_node *cancelled;
-  if (!a || !b)
-    return NULL;
-  ixs_node *prop = ixs_propagate2(a, b);
-  if (prop)
-    return prop;
-
-  if (a == b)
-    return ixs_node_int(ctx, 0);
-  if (ixs_node_is_zero(a))
-    return b;
-  if (ixs_node_is_zero(b))
-    return a;
-
-  /* XOR is associative: a ^ (a ^ b) == b.  Check both outer positions
-   * because callers can present either order before canonical sorting. */
-  cancelled = xor_cancel_nested(a, b);
-  if (!cancelled)
-    cancelled = xor_cancel_nested(b, a);
-  if (cancelled)
-    return cancelled;
-
-  if (a->tag == IXS_INT && b->tag == IXS_INT)
-    return ixs_node_int(ctx, a->u.ival ^ b->u.ival);
-
-  if (ixs_node_cmp(a, b) > 0)
-    return ixs_node_binary(ctx, IXS_XOR, b, a, (ixs_cmp_op)0);
-
-  return ixs_node_binary(ctx, IXS_XOR, a, b, (ixs_cmp_op)0);
+  ixs_node *args[2] = {a, b};
+  return simp_xor_many(ctx, 2, args);
 }
 
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
@@ -3492,31 +3936,6 @@ static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
   if (!iv.valid || iv.lo_inf || iv.hi_inf || iv.hi_q != 1 || iv.hi_p < 0)
     return false;
   return ixs_rat_cmp(iv.lo_p, iv.lo_q, 0, 1) >= 0;
-}
-
-static ixs_node *simp_xor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
-                               ixs_node *b) {
-  ixs_node *node;
-  ixs_bitfacts lhs, rhs;
-  uint64_t possible_overlap;
-
-  node = simp_xor(ctx, a, b);
-  if (!node || node->tag != IXS_XOR || !bnds)
-    return node;
-
-  if (!bounds_int_nonnegative_finite(bnds, node->u.binary.lhs) ||
-      !bounds_int_nonnegative_finite(bnds, node->u.binary.rhs))
-    return node;
-
-  if (!ixs_bounds_get_bitfacts(bnds, node->u.binary.lhs, &lhs) ||
-      !ixs_bounds_get_bitfacts(bnds, node->u.binary.rhs, &rhs))
-    return node;
-
-  possible_overlap = (~lhs.known_zero) & (~rhs.known_zero);
-  if (possible_overlap != 0)
-    return node;
-
-  return simp_add(ctx, node->u.binary.lhs, node->u.binary.rhs);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3576,9 +3995,11 @@ static ixs_node *rule_cmp_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_cmp_identity(ixs_ctx *ctx, ixs_bounds *bnds,
                                    ixs_node *n) {
-  (void)bnds;
   if (n->u.binary.lhs != n->u.binary.rhs)
     return n;
+  if (!node_is_proven_defined(bnds, n)) {
+    return n;
+  }
   switch (n->u.binary.cmp_op) {
   case IXS_CMP_GE:
   case IXS_CMP_LE:
@@ -3594,7 +4015,11 @@ static ixs_node *rule_cmp_identity(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_cmp_normalize(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n) {
-  (void)bnds;
+  if (ixs_node_is_zero(n->u.binary.rhs))
+    return n;
+  if (!node_is_proven_defined(bnds, n)) {
+    return n;
+  }
   return cmp_normalize_to_zero(ctx, n);
 }
 
@@ -3624,7 +4049,10 @@ static const char *extra_transforms[] = {
 };
 
 static const ixs_rule *const all_rule_tables[] = {
-    floor_rules, ceil_rules, mod_rules, max_rules, min_rules, cmp_rules,
+    floor_rules,
+    ceil_rules,
+    mod_rules,
+    cmp_rules,
 };
 
 #define RULE_NAME_CAP 128 /* must be >= IXS_STATS_CAP */
@@ -3726,7 +4154,10 @@ static ixs_node *not_cmp_flip(ixs_ctx *ctx, ixs_node *a) {
 
 IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
   ixs_node *r;
-  ixs_node *prop = ixs_propagate1(a);
+  ixs_node *prop;
+  if (!a)
+    return NULL;
+  prop = ixs_propagate1(a);
   if (prop)
     return prop;
 
@@ -3749,92 +4180,261 @@ IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
   return ixs_node_not(ctx, a);
 }
 
-static bool node_is_minus_one(const ixs_node *n) {
-  return n && n->tag == IXS_INT && n->u.ival == -1;
+static int assoc_contains(ixs_ctx *ctx, ixs_node *const *args, uint32_t n,
+                          const ixs_node *target) {
+  uint32_t lo = 0;
+  uint32_t hi = n;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2u;
+    int cmp = ixs_node_cmp(ctx, args[mid], target);
+    if (cmp == IXS_NODE_CMP_OOM)
+      return -1;
+    if (cmp < 0)
+      lo = mid + 1u;
+    else
+      hi = mid;
+  }
+  if (lo < n) {
+    int cmp = ixs_node_cmp(ctx, args[lo], target);
+    if (cmp == IXS_NODE_CMP_OOM)
+      return -1;
+    return cmp == 0;
+  }
+  return 0;
 }
 
-static bool bool_complement_pair(ixs_node *a, ixs_node *b) {
-  if (a->tag == IXS_NOT && a->u.unary_bool.arg == b &&
-      ixs_node_is_bool_valued(b))
-    return true;
-  if (b->tag == IXS_NOT && b->u.unary_bool.arg == a &&
-      ixs_node_is_bool_valued(a))
-    return true;
-  if (a->tag == IXS_CMP && b->tag == IXS_CMP &&
-      a->u.binary.lhs == b->u.binary.lhs &&
-      a->u.binary.rhs == b->u.binary.rhs &&
-      a->u.binary.cmp_op == cmp_flip_op(b->u.binary.cmp_op))
-    return true;
+static int assoc_has_bool_complement(ixs_ctx *ctx, ixs_node *const *args,
+                                     uint32_t n, ixs_node *arg) {
+  if (arg->tag == IXS_NOT && ixs_node_is_bool_valued(arg->u.unary_bool.arg))
+    return assoc_contains(ctx, args, n, arg->u.unary_bool.arg);
+  if (arg->tag == IXS_CMP) {
+    struct ixs_node_impl probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.tag = IXS_CMP;
+    probe.u.binary.lhs = arg->u.binary.lhs;
+    probe.u.binary.rhs = arg->u.binary.rhs;
+    probe.u.binary.cmp_op = cmp_flip_op(arg->u.binary.cmp_op);
+    return assoc_contains(ctx, args, n, &probe);
+  }
+  if (ixs_node_is_bool_valued(arg)) {
+    struct ixs_node_impl probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.tag = IXS_NOT;
+    probe.u.unary_bool.arg = arg;
+    return assoc_contains(ctx, args, n, &probe);
+  }
   return false;
 }
 
-static ixs_node *make_logic_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *a,
-                                   ixs_node *b) {
-  ixs_node *args[2];
-  if (ixs_node_cmp(a, b) > 0) {
-    ixs_node *tmp = a;
-    a = b;
-    b = tmp;
+static bool logic_sorted_prefix(ixs_tag tag, uint32_t n,
+                                ixs_node *const *args) {
+  return n == 2u && args && args[0] && args[1] && args[0]->tag == tag &&
+         args[1]->tag != tag;
+}
+
+static bool logic_partition_constants(ixs_ctx *ctx, ixs_tag tag,
+                                      assoc_vec *flat, uint32_t *write,
+                                      int64_t *constant, bool *have_constant,
+                                      ixs_node **failure) {
+  size_t read;
+
+  *write = 0;
+  *constant = tag == IXS_AND ? -1 : 0;
+  *have_constant = false;
+  *failure = NULL;
+  for (read = 0; read < flat->count; read++) {
+    ixs_node *arg = flat->items[read];
+    int64_t value;
+    if (arg->tag == IXS_RAT && arg->u.rat.q != 1) {
+      *failure =
+          simp_err(ctx, tag == IXS_AND ? "and: operand is not integer-valued"
+                                       : "or: operand is not integer-valued");
+      return false;
+    }
+    if (arg->tag != IXS_INT && arg->tag != IXS_RAT) {
+      flat->items[(*write)++] = arg;
+      continue;
+    }
+    value = arg->tag == IXS_INT ? arg->u.ival : arg->u.rat.p;
+    *constant = bit_fold(tag, *constant, value);
+    *have_constant = true;
   }
-  args[0] = a;
-  args[1] = b;
-  return ixs_node_logic(ctx, tag, 2, args);
+  return true;
+}
+
+static bool logic_sort_unique(ixs_ctx *ctx, ixs_node **items, uint32_t *count,
+                              bool sorted_prefix) {
+  uint32_t read;
+  uint32_t unique = 0;
+  bool sorted = sorted_prefix
+                    ? node_ptr_insert_last(ctx, items, *count)
+                    : node_key_sort(ctx, items, *count, sizeof(*items),
+                                    node_ptr_sort_key);
+
+  if (!sorted)
+    return false;
+  for (read = 0; read < *count; read++) {
+    if (unique == 0 || items[read] != items[unique - 1u])
+      items[unique++] = items[read];
+  }
+  *count = unique;
+  return true;
+}
+
+static int logic_has_reducible_complement(ixs_ctx *ctx, ixs_node **items,
+                                          uint32_t count, bool sorted_prefix,
+                                          ixs_node *appended) {
+  uint32_t i;
+
+  if (sorted_prefix) {
+    int complement;
+    if (appended->tag == IXS_INT || appended->tag == IXS_RAT)
+      return 0;
+    complement = assoc_has_bool_complement(ctx, items, count, appended);
+    if (complement <= 0)
+      return complement;
+    return node_is_known_total_integer(appended) ? 1 : 0;
+  }
+  for (i = 0; i < count; i++) {
+    int complement = assoc_has_bool_complement(ctx, items, count, items[i]);
+    if (complement < 0)
+      return -1;
+    if (complement && node_is_known_total_integer(items[i]))
+      return 1;
+  }
+  return 0;
+}
+
+static void logic_drop_odd_and_constant(ixs_tag tag, ixs_node **items,
+                                        uint32_t count, int64_t constant,
+                                        bool *have_constant) {
+  uint32_t i;
+
+  if (!*have_constant || tag != IXS_AND ||
+      ((uint64_t)constant & UINT64_C(1)) == 0)
+    return;
+  for (i = 0; i < count; i++) {
+    if (ixs_node_is_bool_valued(items[i])) {
+      *have_constant = false;
+      return;
+    }
+  }
+}
+
+static void logic_filter_absorbed_terms(ixs_tag tag, ixs_node **items,
+                                        uint32_t *count, int64_t constant,
+                                        bool have_constant) {
+  bool drop_total_integers;
+  bool drop_total_bools;
+  uint32_t kept = 0;
+  uint32_t i;
+
+  if (!have_constant)
+    return;
+  drop_total_integers =
+      (tag == IXS_AND && constant == 0) || (tag == IXS_OR && constant == -1);
+  drop_total_bools = tag == IXS_OR && ((uint64_t)constant & UINT64_C(1)) != 0;
+  if (!drop_total_integers && !drop_total_bools)
+    return;
+  for (i = 0; i < *count; i++) {
+    bool drop = node_is_known_total_integer(items[i]) &&
+                (drop_total_integers ||
+                 (drop_total_bools && ixs_node_is_bool_valued(items[i])));
+    if (!drop)
+      items[kept++] = items[i];
+  }
+  *count = kept;
+}
+
+static ixs_node *logic_build_result(ixs_ctx *ctx, ixs_tag tag, ixs_node **items,
+                                    uint32_t count, int64_t constant,
+                                    bool have_constant) {
+  int64_t identity_value = tag == IXS_AND ? -1 : 0;
+  bool identity = !have_constant || constant == identity_value;
+
+  if (count == 0)
+    return ixs_node_int(ctx, have_constant ? constant : identity_value);
+  if (identity && count == 1u && ixs_node_is_integer_valued(items[0]))
+    return items[0];
+  if (!identity || count == 1u) {
+    ixs_node *constant_node =
+        ixs_node_int(ctx, have_constant ? constant : identity_value);
+    if (!constant_node)
+      return NULL;
+    items[count++] = constant_node;
+  }
+  if (!node_ptr_insert_last(ctx, items, count))
+    return NULL;
+  return ixs_node_assoc(ctx, tag, count, items);
+}
+
+static ixs_node *simp_logic_many(ixs_ctx *ctx, ixs_tag tag, uint32_t n,
+                                 ixs_node *const *args) {
+  ixs_arena_mark mark;
+  ixs_node *failure;
+  ixs_node *propagated;
+  ixs_node *result;
+  assoc_vec flat;
+  int64_t constant;
+  bool have_constant;
+  uint32_t write;
+  bool sorted_prefix = logic_sorted_prefix(tag, n, args);
+  int complement;
+
+  if (!assoc_inputs_clean(n, args, &propagated))
+    return propagated;
+  if (n == 0)
+    return ixs_node_int(ctx, tag == IXS_AND ? -1 : 0);
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!assoc_collect(ctx, tag, n, args, &flat)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  if (!logic_partition_constants(ctx, tag, &flat, &write, &constant,
+                                 &have_constant, &failure)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return failure;
+  }
+  if (!logic_sort_unique(ctx, flat.items, &write, sorted_prefix)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  complement = logic_has_reducible_complement(
+      ctx, flat.items, write, sorted_prefix, sorted_prefix ? args[1] : NULL);
+  if (complement < 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  if (complement) {
+    constant = tag == IXS_AND ? 0 : 1;
+    have_constant = true;
+  }
+  logic_drop_odd_and_constant(tag, flat.items, write, constant, &have_constant);
+  logic_filter_absorbed_terms(tag, flat.items, &write, constant, have_constant);
+  result =
+      logic_build_result(ctx, tag, flat.items, write, constant, have_constant);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+IXS_STATIC ixs_node *simp_and_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args) {
+  return simp_logic_many(ctx, IXS_AND, n, args);
+}
+
+IXS_STATIC ixs_node *simp_or_many(ixs_ctx *ctx, uint32_t n,
+                                  ixs_node *const *args) {
+  return simp_logic_many(ctx, IXS_OR, n, args);
 }
 
 IXS_STATIC ixs_node *simp_and(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  if (!a || !b)
-    return NULL;
-  ixs_node *prop = ixs_propagate2(a, b);
-  if (prop)
-    return prop;
-
-  if (a->tag == IXS_INT && b->tag == IXS_INT)
-    return ixs_node_int(ctx, a->u.ival & b->u.ival);
-
-  if (ixs_node_is_zero(a) || ixs_node_is_zero(b))
-    return ctx->node_false;
-  if (node_is_minus_one(a))
-    return b;
-  if (node_is_minus_one(b))
-    return a;
-  if (a == b)
-    return a;
-  if (bool_complement_pair(a, b))
-    return ctx->node_false;
-  if (ixs_node_is_true_value(a) && ixs_node_is_bool_valued(b))
-    return b;
-  if (ixs_node_is_true_value(b) && ixs_node_is_bool_valued(a))
-    return a;
-
-  return make_logic_binary(ctx, IXS_AND, a, b);
+  ixs_node *args[2] = {a, b};
+  return simp_and_many(ctx, 2, args);
 }
 
 IXS_STATIC ixs_node *simp_or(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
-  if (!a || !b)
-    return NULL;
-  ixs_node *prop = ixs_propagate2(a, b);
-  if (prop)
-    return prop;
-
-  if (a->tag == IXS_INT && b->tag == IXS_INT)
-    return ixs_node_int(ctx, a->u.ival | b->u.ival);
-
-  if (ixs_node_is_zero(a))
-    return b;
-  if (ixs_node_is_zero(b))
-    return a;
-  if (node_is_minus_one(a) || node_is_minus_one(b))
-    return ixs_node_int(ctx, -1);
-  if (a == b)
-    return a;
-  if (bool_complement_pair(a, b))
-    return ctx->node_true;
-  if (ixs_node_is_true_value(a) && ixs_node_is_bool_valued(b))
-    return ctx->node_true;
-  if (ixs_node_is_true_value(b) && ixs_node_is_bool_valued(a))
-    return ctx->node_true;
-
-  return make_logic_binary(ctx, IXS_OR, a, b);
+  ixs_node *args[2] = {a, b};
+  return simp_or_many(ctx, 2, args);
 }
 
 static ixs_node *truthy_predicate(ixs_ctx *ctx, ixs_node *c) {
@@ -3869,16 +4469,22 @@ static int pw_merge_previous(ixs_ctx *ctx, ixs_pwcase *cases, uint32_t ncases,
 
 static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
                               ixs_node *const *conds) {
-  size_t cap = n > 16 ? n : 16;
-  ixs_pwcase *cases =
-      ixs_arena_alloc(&ctx->scratch, cap * sizeof(*cases), sizeof(void *));
-  if (!cases)
-    return NULL;
+  size_t cap;
+  ixs_pwcase *cases;
   uint32_t ncases = 0;
   uint32_t i;
 
   if (n == 0)
     return simp_err(ctx, "Piecewise: zero cases");
+  if (n > UINT32_MAX / 2u)
+    return simp_err(ctx, "Piecewise: too many cases");
+
+  cap = n > 16 ? n : 16;
+  if (cap > (size_t)-1 / sizeof(*cases))
+    return simp_err(ctx, "Piecewise: too many cases");
+  cases = ixs_arena_alloc(&ctx->scratch, cap * sizeof(*cases), sizeof(void *));
+  if (!cases)
+    return NULL;
 
   for (i = 0; i < n; i++) {
     ixs_node *v = values[i];
@@ -3938,8 +4544,20 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
 
 IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
                              ixs_node *const *conds) {
-  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
-  ixs_node *result = simp_pw_impl(ctx, n, values, conds);
+  ixs_arena_mark m;
+  ixs_node *result;
+  uint32_t i;
+  if (n > UINT32_MAX / 2u ||
+      (n != 0 && sizeof(ixs_pwcase) > (size_t)-1 / (size_t)n))
+    return simp_err(ctx, "Piecewise: too many cases");
+  if (n > 0 && (!values || !conds))
+    return NULL;
+  for (i = 0; i < n; i++) {
+    if (!values[i] || !conds[i])
+      return NULL;
+  }
+  m = ixs_arena_save(&ctx->scratch);
+  result = simp_pw_impl(ctx, n, values, conds);
   ixs_arena_restore(&ctx->scratch, m);
   return result;
 }
@@ -4033,28 +4651,39 @@ static ixs_node *subs_mul(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   return result;
 }
 
-static ixs_node *subs_logic(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
+static ixs_node *subs_assoc(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                             ixs_node *const *targets,
                             ixs_node *const *replacements,
                             subs_memo_slot *memo) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  uint32_t n = expr->u.assoc.nargs;
   uint32_t i;
   ixs_node *result;
-  if (expr->u.logic.nargs == 0)
-    return expr;
-  result =
-      subs_rec(ctx, expr->u.logic.args[0], nsubs, targets, replacements, memo);
-  if (!result)
+  ixs_node **args =
+      ixs_arena_alloc(&ctx->scratch, n * sizeof(*args), sizeof(void *));
+  if (!args && n != 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
     return NULL;
-  for (i = 1; i < expr->u.logic.nargs; i++) {
-    ixs_node *na = subs_rec(ctx, expr->u.logic.args[i], nsubs, targets,
-                            replacements, memo);
-    if (!na)
-      return NULL;
-    result = expr->tag == IXS_AND ? simp_and(ctx, result, na)
-                                  : simp_or(ctx, result, na);
-    if (!result)
-      return NULL;
   }
+  for (i = 0; i < n; i++) {
+    args[i] = subs_rec(ctx, expr->u.assoc.args[i], nsubs, targets, replacements,
+                       memo);
+    if (!args[i]) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+  }
+  if (expr->tag == IXS_MAX)
+    result = simp_max_many(ctx, n, args);
+  else if (expr->tag == IXS_MIN)
+    result = simp_min_many(ctx, n, args);
+  else if (expr->tag == IXS_XOR)
+    result = simp_xor_many(ctx, n, args);
+  else if (expr->tag == IXS_AND)
+    result = simp_and_many(ctx, n, args);
+  else
+    result = simp_or_many(ctx, n, args);
+  ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
@@ -4106,12 +4735,6 @@ static ixs_node *subs_binary_node(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   switch (expr->tag) {
   case IXS_MOD:
     return simp_mod(ctx, nl, nr);
-  case IXS_MAX:
-    return simp_max(ctx, nl, nr);
-  case IXS_MIN:
-    return simp_min(ctx, nl, nr);
-  case IXS_XOR:
-    return simp_xor(ctx, nl, nr);
   case IXS_CMP:
     return simp_cmp(ctx, nl, expr->u.binary.cmp_op, nr);
   default:
@@ -4197,20 +4820,18 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
     result = subs_round(ctx, expr, nsubs, targets, replacements, memo, true);
     break;
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     result = subs_binary_node(ctx, expr, nsubs, targets, replacements, memo);
     break;
   case IXS_PIECEWISE:
     result = subs_piecewise(ctx, expr, nsubs, targets, replacements, memo);
     break;
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
-    result = subs_logic(ctx, expr, nsubs, targets, replacements, memo);
-    break;
   case IXS_OR:
-    result = subs_logic(ctx, expr, nsubs, targets, replacements, memo);
+    result = subs_assoc(ctx, expr, nsubs, targets, replacements, memo);
     break;
   case IXS_NOT:
     result = subs_not_node(ctx, expr, nsubs, targets, replacements, memo);
@@ -4231,18 +4852,36 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                              ixs_node *const *targets,
                              ixs_node *const *replacements) {
   uint32_t i;
+  ixs_node *parse_error = NULL;
+  ixs_node *domain_error = NULL;
   subs_memo_slot memo[SUBS_MEMO_SIZE];
 
   if (!expr)
     return NULL;
-  if (ixs_node_is_sentinel(expr))
-    return expr;
-  if (nsubs == 0)
-    return expr;
+  if (nsubs > 0 && (!targets || !replacements))
+    return NULL;
+  if (expr->tag == IXS_PARSE_ERROR)
+    parse_error = expr;
+  else if (expr->tag == IXS_ERROR)
+    domain_error = expr;
   for (i = 0; i < nsubs; i++) {
     if (!targets[i] || !replacements[i])
       return NULL;
+    if (targets[i]->tag == IXS_PARSE_ERROR)
+      parse_error = targets[i];
+    else if (targets[i]->tag == IXS_ERROR)
+      domain_error = targets[i];
+    if (replacements[i]->tag == IXS_PARSE_ERROR)
+      parse_error = replacements[i];
+    else if (replacements[i]->tag == IXS_ERROR)
+      domain_error = replacements[i];
   }
+  if (parse_error)
+    return parse_error;
+  if (domain_error)
+    return domain_error;
+  if (nsubs == 0)
+    return expr;
   for (i = 0; i < nsubs; i++) {
     if (expr == targets[i])
       return replacements[i];
@@ -4439,9 +5078,7 @@ static void add_cond_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cond) {
       add_cmp_to_bounds(ctx, bnds, cur);
     } else if (cur->tag == IXS_AND && ixs_node_is_bool_valued(cur)) {
       uint32_t j;
-      /* Walk nested binary AND iteratively; imported legacy streams may still
-       * contain wider AND nodes, but C call depth stays fixed. */
-      for (j = 0; j < cur->u.logic.nargs; j++) {
+      for (j = 0; j < cur->u.assoc.nargs; j++) {
         if (nstack == cap) {
           ixs_node **grown =
               scratch_grow(&ctx->scratch, stack, &cap, sizeof(*stack));
@@ -4449,7 +5086,7 @@ static void add_cond_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cond) {
             return;
           stack = grown;
         }
-        stack[nstack++] = cur->u.logic.args[j];
+        stack[nstack++] = cur->u.assoc.args[j];
       }
     }
   }
@@ -4777,44 +5414,6 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
   return n;
 }
 
-/* max(l, r) -> l or r when bounds prove one always dominates. */
-static ixs_node *max_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n) {
-  ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
-  ixs_interval il, ir;
-  (void)ctx;
-  if (!bnds)
-    return n;
-  il = ixs_bounds_get(bnds, l);
-  ir = ixs_bounds_get(bnds, r);
-  if (!il.valid || !ir.valid)
-    return n;
-  if (ixs_rat_cmp(il.lo_p, il.lo_q, ir.hi_p, ir.hi_q) >= 0)
-    return l;
-  if (ixs_rat_cmp(ir.lo_p, ir.lo_q, il.hi_p, il.hi_q) >= 0)
-    return r;
-  return n;
-}
-
-/* min(l, r) -> l or r when bounds prove one always dominates. */
-static ixs_node *min_bounds_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
-                                     ixs_node *n) {
-  ixs_node *l = n->u.binary.lhs, *r = n->u.binary.rhs;
-  ixs_interval il, ir;
-  (void)ctx;
-  if (!bnds)
-    return n;
-  il = ixs_bounds_get(bnds, l);
-  ir = ixs_bounds_get(bnds, r);
-  if (!il.valid || !ir.valid)
-    return n;
-  if (ixs_rat_cmp(il.hi_p, il.hi_q, ir.lo_p, ir.lo_q) <= 0)
-    return l;
-  if (ixs_rat_cmp(ir.hi_p, ir.hi_q, il.lo_p, il.lo_q) <= 0)
-    return r;
-  return n;
-}
-
 /* Resolve (expr cmp 0) to 1/0 when bounds determine the outcome. */
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n) {
@@ -4839,12 +5438,6 @@ static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   switch (n->tag) {
   case IXS_MOD:
     return simp_mod_bnds(ctx, bnds, l, r);
-  case IXS_MAX:
-    return simp_max_bnds(ctx, bnds, l, r);
-  case IXS_MIN:
-    return simp_min_bnds(ctx, bnds, l, r);
-  case IXS_XOR:
-    return simp_xor_bnds(ctx, bnds, l, r);
   case IXS_CMP:
     return simp_cmp_bnds(ctx, bnds, l, n->u.binary.cmp_op, r);
   default: /* unreachable: only called from rewrite_impl's binary-op labels */
@@ -5006,25 +5599,37 @@ static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                  : simp_floor_bnds(ctx, bnds, arg);
 }
 
-static ixs_node *rewrite_logic_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
+static ixs_node *rewrite_assoc_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                     rewrite_memo_slot *memo,
                                     rewrite_shared_cache *shared) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  uint32_t nargs = n->u.assoc.nargs;
   uint32_t i;
   ixs_node *result;
-  if (n->u.logic.nargs == 0)
-    return n;
-  result = rewrite(ctx, n->u.logic.args[0], bnds, memo, shared);
-  if (!result)
+  ixs_node **args =
+      ixs_arena_alloc(&ctx->scratch, nargs * sizeof(*args), sizeof(void *));
+  if (!args && nargs != 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
     return NULL;
-  for (i = 1; i < n->u.logic.nargs; i++) {
-    ixs_node *arg = rewrite(ctx, n->u.logic.args[i], bnds, memo, shared);
-    if (!arg)
-      return NULL;
-    result = n->tag == IXS_AND ? simp_and(ctx, result, arg)
-                               : simp_or(ctx, result, arg);
-    if (!result)
-      return NULL;
   }
+  for (i = 0; i < nargs; i++) {
+    args[i] = rewrite(ctx, n->u.assoc.args[i], bnds, memo, shared);
+    if (!args[i]) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+  }
+  if (n->tag == IXS_MAX)
+    result = simp_extrema_many_bnds(ctx, bnds, IXS_MAX, nargs, args);
+  else if (n->tag == IXS_MIN)
+    result = simp_extrema_many_bnds(ctx, bnds, IXS_MIN, nargs, args);
+  else if (n->tag == IXS_XOR)
+    result = simp_xor_many_bnds(ctx, bnds, nargs, args);
+  else if (n->tag == IXS_AND)
+    result = simp_and_many(ctx, nargs, args);
+  else
+    result = simp_or_many(ctx, nargs, args);
+  ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
@@ -5056,16 +5661,16 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   case IXS_CEIL:
     return rewrite_round_node(ctx, n, bnds, memo, shared, true);
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return rewrite_binary(ctx, n, bnds, memo, shared);
   case IXS_PIECEWISE:
     return rewrite_piecewise(ctx, n, bnds, memo, shared);
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return rewrite_logic_node(ctx, n, bnds, memo, shared);
+    return rewrite_assoc_node(ctx, n, bnds, memo, shared);
   case IXS_NOT:
     return rewrite_not_node(ctx, n, bnds, memo, shared);
   }

@@ -137,6 +137,33 @@ def test_to_sympy_max_min(
     assert to_sympy(ixsimpl.min_(syms["x"], syms["y"])) == sympy.Min(sp_syms["x"], sp_syms["y"])
 
 
+def test_sympy_conversion_preserves_flat_associative_operands(
+    ctx: ixsimpl.Context,
+    syms: dict[str, ixsimpl.Expr],
+    sp_syms: dict[str, sympy.Symbol],
+) -> None:
+    values = [syms["x"], syms["y"], syms["z"]]
+    sp_values = {sp_syms["x"], sp_syms["y"], sp_syms["z"]}
+
+    sp_max = to_sympy(ixsimpl.max_(*values))
+    sp_min = to_sympy(ixsimpl.min_(*values))
+    assert set(sp_max.args) == sp_values
+    assert set(sp_min.args) == sp_values
+    assert from_sympy(ctx, sp_max).nchildren == 3
+    assert from_sympy(ctx, sp_min).nchildren == 3
+
+    class xor(sympy.Function):  # type: ignore[misc]
+        pass
+
+    sp_xor = to_sympy(ixsimpl.xor_(*values), xor_fn=xor)
+    sp_and = to_sympy(ixsimpl.and_(*values))
+    sp_or = to_sympy(ixsimpl.or_(*values))
+    assert len(sp_xor.args) == len(sp_and.args) == len(sp_or.args) == 3
+    assert from_sympy(ctx, sp_xor).nchildren == 3
+    assert from_sympy(ctx, sp_and).nchildren == 3
+    assert from_sympy(ctx, sp_or).nchildren == 3
+
+
 def test_to_sympy_max_min_nested_regression(ctx: ixsimpl.Context) -> None:
     """Nested Max/Min must not collapse to a wrong constant in SymPy."""
     x = ctx.sym("x")

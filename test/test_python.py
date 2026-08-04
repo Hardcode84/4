@@ -238,6 +238,25 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
         return draw(st.one_of(sym_names, small_ints, small_rats))
     ops = _OPS_WITH_PW if include_piecewise else _OPS_BASE
     op = draw(st.sampled_from(ops))
+    if op in ("xor", "bitand", "bitor"):
+        nargs = draw(st.integers(min_value=2, max_value=5))
+        if draw(st.integers(min_value=0, max_value=3)) == 0:
+            args = draw(
+                st.lists(
+                    st.one_of(sym_names, small_ints),
+                    min_size=nargs,
+                    max_size=nargs,
+                )
+            )
+        else:
+            args = draw(
+                st.lists(
+                    st.integers(min_value=0, max_value=255),
+                    min_size=nargs,
+                    max_size=nargs,
+                )
+            )
+        return (op, *args)
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     if op in ("floor", "ceiling"):
         choice = draw(st.sampled_from(["div", "rat_add", "mul", "sub", "add", "plain"]))
@@ -272,13 +291,15 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
         return (op, a, cond, default)
     if op == "mod" or op == "div":
         b = draw(pos_ints)
-    elif op in ("xor", "bitand", "bitor"):
-        if draw(st.integers(min_value=0, max_value=3)) == 0:
-            a = draw(st.one_of(sym_names, small_ints))
-            b = draw(st.one_of(sym_names, small_ints))
-        else:
-            a = draw(st.integers(min_value=0, max_value=255))
-            b = draw(st.integers(min_value=0, max_value=255))
+    elif op in ("max", "min"):
+        rest = draw(
+            st.lists(
+                st.one_of(sym_names, small_ints, small_rats),
+                min_size=1,
+                max_size=4,
+            )
+        )
+        return (op, a, *rest)
     else:
         b = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
     return (op, a, b)
@@ -295,8 +316,14 @@ def conditions(draw: st.DrawFn, max_depth: int = 2) -> CondTree:
     c1 = draw(conditions(max_depth=max_depth - 1))
     if combiner == "not":
         return ("not", c1)
-    c2 = draw(conditions(max_depth=max_depth - 1))
-    return (combiner, c1, c2)
+    rest = draw(
+        st.lists(
+            conditions(max_depth=max_depth - 2),
+            min_size=1,
+            max_size=3,
+        )
+    )
+    return (combiner, c1, *rest)
 
 
 @st.composite
@@ -345,15 +372,15 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.Mod(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
     if op == "max":
         # evaluate=False avoids wrong eager collapse of some nested Max/Min trees.
-        return sympy.Max(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
+        return sympy.Max(*(to_sympy(arg) for arg in tree[1:]), evaluate=False)
     if op == "min":
-        return sympy.Min(to_sympy(tree[1]), to_sympy(tree[2]), evaluate=False)
+        return sympy.Min(*(to_sympy(arg) for arg in tree[1:]), evaluate=False)
     if op == "xor":
         raise ValueError("xor not supported in SymPy conversion")
     if op == "bitand":
-        return sympy.Function("bitand")(to_sympy(tree[1]), to_sympy(tree[2]))
+        return sympy.Function("bitand")(*(to_sympy(arg) for arg in tree[1:]))
     if op == "bitor":
-        return sympy.Function("bitor")(to_sympy(tree[1]), to_sympy(tree[2]))
+        return sympy.Function("bitor")(*(to_sympy(arg) for arg in tree[1:]))
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         cases = [(to_sympy(tree[1 + 2 * i]), to_sympy_cond(tree[2 + 2 * i])) for i in range(ncases)]
@@ -379,9 +406,9 @@ def to_sympy_cond(tree: CondTree) -> Any:
     if op == "not":
         return ~to_sympy_cond(tree[1])
     if op == "and":
-        return to_sympy_cond(tree[1]) & to_sympy_cond(tree[2])
+        return sympy.And(*(to_sympy_cond(arg) for arg in tree[1:]))
     if op == "or":
-        return to_sympy_cond(tree[1]) | to_sympy_cond(tree[2])
+        return sympy.Or(*(to_sympy_cond(arg) for arg in tree[1:]))
     raise ValueError(f"unknown cond op: {op}")
 
 
@@ -415,15 +442,15 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
     if op == "mod":
         return ixsimpl.mod(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "max":
-        return ixsimpl.max_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+        return ixsimpl.max_(*(to_ixsimpl(ctx, arg) for arg in tree[1:]))
     if op == "min":
-        return ixsimpl.min_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+        return ixsimpl.min_(*(to_ixsimpl(ctx, arg) for arg in tree[1:]))
     if op == "xor":
-        return ixsimpl.xor_(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
+        return ixsimpl.xor_(*(to_ixsimpl(ctx, arg) for arg in tree[1:]))
     if op == "bitand":
-        return to_ixsimpl(ctx, tree[1]) & to_ixsimpl(ctx, tree[2])
+        return ixsimpl.and_(*(to_ixsimpl(ctx, arg) for arg in tree[1:]))
     if op == "bitor":
-        return to_ixsimpl(ctx, tree[1]) | to_ixsimpl(ctx, tree[2])
+        return ixsimpl.or_(*(to_ixsimpl(ctx, arg) for arg in tree[1:]))
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         cases = [
@@ -457,9 +484,9 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
     if op == "not":
         return ixsimpl.not_(to_ixsimpl_cond(ctx, tree[1]))
     if op == "and":
-        return ixsimpl.and_(to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2]))
+        return ixsimpl.and_(*(to_ixsimpl_cond(ctx, arg) for arg in tree[1:]))
     if op == "or":
-        return ixsimpl.or_(to_ixsimpl_cond(ctx, tree[1]), to_ixsimpl_cond(ctx, tree[2]))
+        return ixsimpl.or_(*(to_ixsimpl_cond(ctx, arg) for arg in tree[1:]))
     raise ValueError(f"unknown cond op: {op}")
 
 
@@ -509,15 +536,20 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if op == "mod":
         return _floored_mod(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "max":
-        return max(eval_expr(tree[1], env), eval_expr(tree[2], env))
+        return max(eval_expr(arg, env) for arg in tree[1:])
     if op == "min":
-        return min(eval_expr(tree[1], env), eval_expr(tree[2], env))
-    if op == "xor":
-        return int(eval_expr(tree[1], env)) ^ int(eval_expr(tree[2], env))
-    if op == "bitand":
-        return int(eval_expr(tree[1], env)) & int(eval_expr(tree[2], env))
-    if op == "bitor":
-        return int(eval_expr(tree[1], env)) | int(eval_expr(tree[2], env))
+        return min(eval_expr(arg, env) for arg in tree[1:])
+    if op in ("xor", "bitand", "bitor"):
+        values = [int(eval_expr(arg, env)) for arg in tree[1:]]
+        result = values[0]
+        for value in values[1:]:
+            if op == "xor":
+                result ^= value
+            elif op == "bitand":
+                result &= value
+            else:
+                result |= value
+        return result
     if op == "piecewise":
         ncases = (len(tree) - 2) // 2
         for i in range(ncases):
@@ -549,9 +581,9 @@ def eval_cond(tree: CondTree, env: Env) -> Any:
     if op == "not":
         return not eval_cond(tree[1], env)
     if op == "and":
-        return eval_cond(tree[1], env) and eval_cond(tree[2], env)
+        return all([eval_cond(arg, env) for arg in tree[1:]])
     if op == "or":
-        return eval_cond(tree[1], env) or eval_cond(tree[2], env)
+        return any([eval_cond(arg, env) for arg in tree[1:]])
     raise ValueError(f"unknown cond op: {op}")
 
 
@@ -697,6 +729,37 @@ def _expected_pow2_fact(value: int) -> str | None:
 # ---------------------------------------------------------------------------
 #  Fuzz tests
 # ---------------------------------------------------------------------------
+
+
+@given(
+    op=st.sampled_from(["max", "min", "xor", "bitand", "bitor"]),
+    leaves=st.lists(st.one_of(sym_names, small_ints), min_size=2, max_size=8),
+    env=_wide_env_st(),
+)
+def test_associative_many_grouping_fuzz(op: str, leaves: list[str | int], env: Env) -> None:
+    """Flat, regrouped, and permuted construction interns one result."""
+    assume(any(isinstance(leaf, str) for leaf in leaves))
+    ctx = ixsimpl.Context()
+    args = [to_ixsimpl(ctx, leaf) for leaf in leaves]
+    ctor = {
+        "max": ixsimpl.max_,
+        "min": ixsimpl.min_,
+        "xor": ixsimpl.xor_,
+        "bitand": ixsimpl.and_,
+        "bitor": ixsimpl.or_,
+    }[op]
+
+    flat = ctor(*args)
+    midpoint = len(args) // 2
+    lhs = args[0] if midpoint == 1 else ctor(*args[:midpoint])
+    rhs_args = args[midpoint:]
+    rhs = rhs_args[0] if len(rhs_args) == 1 else ctor(*rhs_args)
+    grouped = ctor(lhs, rhs)
+    permuted = ctor(*reversed(args))
+
+    assert ixsimpl.same_node(flat, grouped)
+    assert ixsimpl.same_node(flat, permuted)
+    assert eval_ixs(flat, ctx, env) == eval_expr((op, *leaves), env)
 
 
 def test_expand_basic() -> None:

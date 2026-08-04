@@ -51,9 +51,16 @@ typedef struct {
   ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
 } ixs_node_transform_cache_entry;
 
+#define IXS_NODE_PROPERTY_VALID 1u
+#define IXS_NODE_PROPERTY_INTEGER 2u
+#define IXS_NODE_PROPERTY_BOOL 4u
+#define IXS_NODE_PROPERTY_TOTAL 8u
+
 /* Only pre-intern builders and unpublished stack probes spell this tag. */
 struct ixs_node_impl {
-  ixs_tag tag;
+  uint16_t tag;
+  uint8_t properties;
+  uint8_t reserved;
   uint32_t hash;
   union ixs_node_data {
     int64_t ival; /* IXS_INT */
@@ -74,7 +81,7 @@ struct ixs_node_impl {
     struct { /* IXS_FLOOR, IXS_CEIL */
       ixs_node *arg;
     } unary;
-    struct { /* IXS_MOD, IXS_MAX, IXS_MIN, IXS_XOR, IXS_CMP */
+    struct { /* IXS_MOD, IXS_CMP */
       ixs_node *lhs;
       ixs_node *rhs;
       ixs_cmp_op cmp_op;
@@ -83,10 +90,10 @@ struct ixs_node_impl {
       uint32_t ncases;
       const ixs_pwcase *cases;
     } pw;
-    struct { /* IXS_AND, IXS_OR */
+    struct { /* IXS_MAX, IXS_MIN, IXS_XOR, IXS_AND, IXS_OR */
       uint32_t nargs;
       ixs_node *const *args;
-    } logic;
+    } assoc;
     struct { /* IXS_NOT */
       ixs_node *arg;
     } unary_bool;
@@ -187,7 +194,7 @@ IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx);
  * otherwise insert this one. The node must already be arena-allocated
  * with hash computed. Returns NULL on OOM (rehash failure).
  */
-IXS_STATIC ixs_node *ixs_htab_intern(ixs_ctx *ctx, ixs_node *node);
+IXS_STATIC ixs_node *ixs_htab_intern(ixs_ctx *ctx, struct ixs_node_impl *node);
 
 /* --- Raw node constructors (no simplification) --- */
 
@@ -205,13 +212,14 @@ IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op);
 IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,
                                  const ixs_pwcase *cases);
-IXS_STATIC ixs_node *ixs_node_logic(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
+IXS_STATIC ixs_node *ixs_node_assoc(ixs_ctx *ctx, ixs_tag tag, uint32_t nargs,
                                     ixs_node *const *args);
 IXS_STATIC ixs_node *ixs_node_not(ixs_ctx *ctx, ixs_node *arg);
 
 /* --- Node comparison (total order for canonical sorting) --- */
 
-IXS_STATIC int ixs_node_cmp(const ixs_node *a, const ixs_node *b);
+#define IXS_NODE_CMP_OOM 2
+IXS_STATIC int ixs_node_cmp(ixs_ctx *ctx, const ixs_node *a, const ixs_node *b);
 IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b);
 
 /* --- Utility --- */
@@ -219,7 +227,6 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b);
 IXS_STATIC bool ixs_node_is_const(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_zero(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_one(const ixs_node *n);
-IXS_STATIC bool ixs_node_is_true_value(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_known_false(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_known_true(const ixs_node *n);
 IXS_STATIC void ixs_node_get_rat(const ixs_node *n, int64_t *p, int64_t *q);
@@ -227,6 +234,7 @@ IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n);
+IXS_STATIC bool ixs_node_is_known_total(const ixs_node *n);
 
 typedef enum {
   IXS_MOD_DIVISOR_UNKNOWN,

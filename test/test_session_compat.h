@@ -113,6 +113,12 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
   IXS_TEST_WITH_CTX((ctx), (ixs_min)(IXS_TEST_SESSION(ctx), (a), (b)))
 #define ixs_xor(ctx, a, b)                                                     \
   IXS_TEST_WITH_CTX((ctx), (ixs_xor)(IXS_TEST_SESSION(ctx), (a), (b)))
+#define ixs_max_many(ctx, n, args)                                             \
+  IXS_TEST_WITH_CTX((ctx), (ixs_max_many)(IXS_TEST_SESSION(ctx), (n), (args)))
+#define ixs_min_many(ctx, n, args)                                             \
+  IXS_TEST_WITH_CTX((ctx), (ixs_min_many)(IXS_TEST_SESSION(ctx), (n), (args)))
+#define ixs_xor_many(ctx, n, args)                                             \
+  IXS_TEST_WITH_CTX((ctx), (ixs_xor_many)(IXS_TEST_SESSION(ctx), (n), (args)))
 #define ixs_pw(ctx, n, values, conds)                                          \
   IXS_TEST_WITH_CTX((ctx),                                                     \
                     (ixs_pw)(IXS_TEST_SESSION(ctx), (n), (values), (conds)))
@@ -122,6 +128,10 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
   IXS_TEST_WITH_CTX((ctx), (ixs_and)(IXS_TEST_SESSION(ctx), (a), (b)))
 #define ixs_or(ctx, a, b)                                                      \
   IXS_TEST_WITH_CTX((ctx), (ixs_or)(IXS_TEST_SESSION(ctx), (a), (b)))
+#define ixs_and_many(ctx, n, args)                                             \
+  IXS_TEST_WITH_CTX((ctx), (ixs_and_many)(IXS_TEST_SESSION(ctx), (n), (args)))
+#define ixs_or_many(ctx, n, args)                                              \
+  IXS_TEST_WITH_CTX((ctx), (ixs_or_many)(IXS_TEST_SESSION(ctx), (n), (args)))
 #define ixs_not(ctx, a)                                                        \
   IXS_TEST_WITH_CTX((ctx), (ixs_not)(IXS_TEST_SESSION(ctx), (a)))
 #define ixs_true(ctx)                                                          \

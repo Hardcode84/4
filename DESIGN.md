@@ -473,7 +473,9 @@ short-lived stack probes that are never published:
 typedef const struct ixs_node_impl ixs_node;
 
 struct ixs_node_impl {
-    ixs_tag tag;
+    uint16_t tag;
+    uint8_t properties;  // cached integer/boolean/total classification
+    uint8_t reserved;
     uint32_t hash;        // precomputed, used for hash-consing
     union ixs_node_data {
         int64_t ival;                     // IXS_INT
@@ -1164,7 +1166,9 @@ a > b   → (a - b) > 0   (normalize to compare against 0)
 ```
 
 Then apply constant folding when `a - b` reduces to a constant, or bound
-analysis when the sign of `a - b` is provable.
+analysis when the sign of `a - b` is provable. Identity folding,
+normalization, and bounds resolution require the compared operands to be
+defined; otherwise the comparison retains the domain witness.
 
 ### Layer 5: Bound Analysis (Phase 4)
 
@@ -2313,8 +2317,11 @@ in batch mode (the primary use case):
 
 ### Flat associative construction
 
-Normalizing `m` collected operands costs O(m log m) time and O(m) scratch;
-the interned node owns one O(m) argument array. Known lists use `*_many` once.
+Normalizing `m` collected operands uses O(m) scratch and O(m log m)
+lexicographic comparisons. A comparison costs O(p) for the unequal structural
+prefix traversed and uses an explicit O(p) scratch stack; interned shared
+children stop at pointer equality. The interned node owns one O(m) argument
+array. Known lists use `*_many` once.
 Repeated binary append can retain successively larger arrays and is not the
 bulk construction path.
 
@@ -3301,7 +3308,8 @@ Wire-format contract:
 Version 2 stores MAX, MIN, XOR, AND, and OR uniformly as their tag followed by
 `uint32_t nargs` and `nargs` earlier-node indices. The encoder emits sorted,
 flat arrays; the decoder rebuilds each record with one `*_many` call. Boolean
-singletons are ordinary integer 0/1 records.
+singletons are ordinary integer 0/1 records. Valid noncanonical lists are
+canonicalized; constructor-domain or arity failures are malformed input.
 
 The decoder accepts version 2 only. A bad version returns `IXS_PARSE_ERROR`
 immediately after the header; there is no legacy decoder, migration, or
@@ -3317,8 +3325,8 @@ Failure contract:
   `IXS_PARSE_ERROR` sentinel on malformed or unsupported binary, and `NULL` on
   OOM.
 - malformed input appends session diagnostics and the decoder validates
-  framing, lengths, tag payloads, integer widths, and child references in
-  session scratch before interning anything from that malformed payload
+  framing and payloads in session scratch, then preflights constructors in an
+  isolated context before interning into the destination
 - malformed input therefore reports a parse error without partially importing
   garbage into the store
 - OOM leaves diagnostics unchanged but can still happen during the later build

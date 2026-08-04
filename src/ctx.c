@@ -406,6 +406,30 @@ ixs_node *ixs_xor(ixs_session *s, ixs_node *a, ixs_node *b) {
   return result;
 }
 
+ixs_node *ixs_max_many(ixs_session *s, uint32_t n, ixs_node *const *args) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_max_many(ctx, n, args);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_min_many(ixs_session *s, uint32_t n, ixs_node *const *args) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_min_many(ctx, n, args);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_xor_many(ixs_session *s, uint32_t n, ixs_node *const *args) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_xor_many(ctx, n, args);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 ixs_node *ixs_pw(ixs_session *s, uint32_t n, ixs_node *const *values,
                  ixs_node *const *conds) {
   ixs_session_binding binding;
@@ -435,6 +459,22 @@ ixs_node *ixs_or(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   ixs_node *result = simp_or(ctx, a, b);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_and_many(ixs_session *s, uint32_t n, ixs_node *const *args) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_and_many(ctx, n, args);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_node *ixs_or_many(ixs_session *s, uint32_t n, ixs_node *const *args) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_or_many(ctx, n, args);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -616,7 +656,7 @@ size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize) {
 /*  Introspection                                                     */
 /* ------------------------------------------------------------------ */
 
-ixs_tag ixs_node_tag(const ixs_node *node) { return node->tag; }
+ixs_tag ixs_node_tag(const ixs_node *node) { return (ixs_tag)node->tag; }
 
 int64_t ixs_node_int_val(const ixs_node *node) { return node->u.ival; }
 

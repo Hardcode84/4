@@ -113,6 +113,32 @@ def test_int_value() -> None:
     assert int(ctx.int_(0)) == 0
 
 
+def test_variadic_associative_functions() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    a, b, c = (ctx.sym(name) for name in ("assoc_a", "assoc_b", "assoc_c"))
+    funcs_and_tags = [
+        (ixsimpl.max_, ixsimpl.MAX),
+        (ixsimpl.min_, ixsimpl.MIN),
+        (ixsimpl.xor_, ixsimpl.XOR),
+        (ixsimpl.and_, ixsimpl.AND),
+        (ixsimpl.or_, ixsimpl.OR),
+    ]
+
+    for func, tag in funcs_and_tags:
+        direct = func(c, a, b)
+        nested = func(func(a, b), c)
+        assert ixsimpl.same_node(direct, nested)
+        assert direct.tag == tag
+        assert direct.nchildren == 3
+        assert all(child.tag != tag for child in direct.children)
+        assert ixsimpl.same_node(func(a), a)
+        with pytest.raises(TypeError):
+            func()  # type: ignore[call-arg]
+        with pytest.raises(ValueError, match="different context"):
+            func(a, other.sym("foreign"))
+
+
 def test_cross_context_simplify() -> None:
     ctx1 = ixsimpl.Context()
     ctx2 = ixsimpl.Context()

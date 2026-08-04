@@ -12,7 +12,7 @@
 static int failures;
 
 #define TEST_SERIAL_MAGIC 0x42535849u
-#define TEST_SERIAL_VERSION 1u
+#define TEST_SERIAL_VERSION 2u
 #define TEST_WIRE_INT 0u
 #define TEST_WIRE_RAT 1u
 #define TEST_WIRE_SYM 2u
@@ -20,6 +20,13 @@ static int failures;
 #define TEST_WIRE_MUL 4u
 #define TEST_WIRE_FLOOR 5u
 #define TEST_WIRE_MOD 7u
+#define TEST_WIRE_PIECEWISE 8u
+#define TEST_WIRE_MAX 9u
+#define TEST_WIRE_MIN 10u
+#define TEST_WIRE_XOR 11u
+#define TEST_WIRE_AND 13u
+#define TEST_WIRE_OR 14u
+#define TEST_WIRE_ERROR 16u
 
 #define CHECK(expr)                                                            \
   do {                                                                         \
@@ -135,11 +142,16 @@ static ixs_node *deserialize_from_buffer(ixs_session *s,
 }
 
 static void store_le32(unsigned char *dst, uint32_t v) {
-  /* Match the v1 wire format's little-endian uint32 fields. */
+  /* Match the wire format's little-endian uint32 fields. */
   dst[0] = (unsigned char)(v & 0xffu);
   dst[1] = (unsigned char)((v >> 8) & 0xffu);
   dst[2] = (unsigned char)((v >> 16) & 0xffu);
   dst[3] = (unsigned char)((v >> 24) & 0xffu);
+}
+
+static uint32_t load_le32(const unsigned char *src) {
+  return (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16) |
+         ((uint32_t)src[3] << 24);
 }
 
 static void store_le64(unsigned char *dst, int64_t v) {
@@ -207,6 +219,22 @@ static void append_add_term(byte_buffer *buf, uint32_t term,
                             uint32_t coefficient) {
   append_le32(buf, term);
   append_le32(buf, coefficient);
+}
+
+static void append_assoc_node(byte_buffer *buf, uint8_t tag, uint32_t nargs,
+                              const uint32_t *args) {
+  uint32_t i;
+  append_u8(buf, tag);
+  append_le32(buf, nargs);
+  for (i = 0; i < nargs; i++)
+    append_le32(buf, args[i]);
+}
+
+static void begin_blob(byte_buffer *buf, uint32_t count) {
+  buffer_reset(buf);
+  append_le32(buf, TEST_SERIAL_MAGIC);
+  append_le32(buf, TEST_SERIAL_VERSION);
+  append_le32(buf, count);
 }
 
 static void build_bounds_alias_blob(byte_buffer *buf) {
@@ -321,6 +349,7 @@ static void check_same_print(ixs_node *a, ixs_node *b) {
 static ixs_node *build_roundtrip_expr(ixs_session *s) {
   ixs_node *x = ixs_sym(s, "x");
   ixs_node *y = ixs_sym(s, "y");
+  ixs_node *z = ixs_sym(s, "z");
   ixs_node *zero = ixs_int(s, 0);
   ixs_node *one = ixs_int(s, 1);
   ixs_node *two = ixs_int(s, 2);
@@ -329,7 +358,11 @@ static ixs_node *build_roundtrip_expr(ixs_session *s) {
   ixs_node *gt0 = ixs_cmp(s, x, IXS_CMP_GT, zero);
   ixs_node *lt5 = ixs_cmp(s, y, IXS_CMP_LT, five);
   ixs_node *not_lt5 = ixs_not(s, lt5);
-  ixs_node *cond0 = ixs_or(s, gt0, not_lt5);
+  ixs_node *z_nonzero = ixs_cmp(s, z, IXS_CMP_NE, zero);
+  ixs_node *assoc_args[3];
+  ixs_node *cond_args[3];
+  ixs_node *root_args[3];
+  ixs_node *cond0;
   ixs_node *vals[2];
   ixs_node *conds[2];
   ixs_node *pw;
@@ -337,16 +370,29 @@ static ixs_node *build_roundtrip_expr(ixs_session *s) {
   ixs_node *modded;
   ixs_node *arith;
 
+  assoc_args[0] = x;
+  assoc_args[1] = y;
+  assoc_args[2] = z;
+  cond_args[0] = gt0;
+  cond_args[1] = not_lt5;
+  cond_args[2] = z_nonzero;
+  cond0 = ixs_or_many(s, 3, cond_args);
   vals[0] = ixs_add(s, ixs_floor(s, ixs_div(s, ixs_add(s, x, one), two)),
-                    ixs_xor(s, x, y));
-  vals[1] = ixs_max(s, x, y);
+                    ixs_xor_many(s, 3, assoc_args));
+  vals[1] = ixs_max_many(s, 3, assoc_args);
   conds[0] = cond0;
   conds[1] = ixs_true(s);
   pw = ixs_pw(s, 2, vals, conds);
   half_up = ixs_ceil(s, ixs_div(s, ixs_add(s, y, three), two));
   modded = ixs_mod(s, ixs_add(s, x, three), five);
-  arith = ixs_add(s, ixs_mul(s, two, pw), ixs_min(s, modded, half_up));
-  return ixs_and(s, gt0, ixs_cmp(s, arith, IXS_CMP_GE, zero));
+  assoc_args[0] = modded;
+  assoc_args[1] = half_up;
+  assoc_args[2] = z;
+  arith = ixs_add(s, ixs_mul(s, two, pw), ixs_min_many(s, 3, assoc_args));
+  root_args[0] = gt0;
+  root_args[1] = ixs_cmp(s, arith, IXS_CMP_GE, zero);
+  root_args[2] = z_nonzero;
+  return ixs_and_many(s, 3, root_args);
 }
 
 static void test_roundtrip_deterministic(void) {
@@ -397,6 +443,82 @@ static void test_roundtrip_deterministic(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+typedef const ixs_node *(*assoc_many_fn)(ixs_session *, uint32_t,
+                                         const ixs_node *const *);
+
+static void check_permutation_encoding(
+    ixs_session *lhs_s, ixs_session *rhs_s, assoc_many_fn fn, uint8_t tag,
+    const ixs_node *lhs_a, const ixs_node *lhs_b, const ixs_node *lhs_c,
+    const ixs_node *rhs_a, const ixs_node *rhs_b, const ixs_node *rhs_c,
+    byte_buffer *lhs, byte_buffer *rhs) {
+  const ixs_node *abc[3] = {lhs_a, lhs_b, lhs_c};
+  const ixs_node *cab[3] = {rhs_c, rhs_a, rhs_b};
+  const ixs_node *left = fn(lhs_s, 3, abc);
+  const ixs_node *right = fn(rhs_s, 3, cab);
+  const size_t root_record_size = 1u + 4u + 3u * 4u;
+
+  CHECK(left != NULL);
+  CHECK(right != NULL);
+  CHECK(left != right);
+  CHECK(serialize_to_buffer(lhs_s, left, lhs));
+  CHECK(serialize_to_buffer(rhs_s, right, rhs));
+  CHECK(lhs->len == rhs->len);
+  if (lhs->len == rhs->len)
+    CHECK(memcmp(lhs->data, rhs->data, lhs->len) == 0);
+  CHECK(lhs->len >= root_record_size + 4u);
+  if (lhs->len >= root_record_size + 4u) {
+    size_t root_offset = lhs->len - 4u - root_record_size;
+    CHECK(lhs->data[root_offset] == tag);
+    CHECK(load_le32(lhs->data + root_offset + 1u) == 3u);
+  }
+}
+
+static void test_associative_permutation_encoding(void) {
+  ixs_ctx *lhs_ctx = NULL;
+  ixs_ctx *rhs_ctx = NULL;
+  ixs_session lhs_s;
+  ixs_session rhs_s;
+  byte_buffer lhs = {0};
+  byte_buffer rhs = {0};
+  const ixs_node *lhs_a;
+  const ixs_node *lhs_b;
+  const ixs_node *lhs_c;
+  const ixs_node *rhs_a;
+  const ixs_node *rhs_b;
+  const ixs_node *rhs_c;
+
+  lhs.fail_after = (size_t)-1;
+  rhs.fail_after = (size_t)-1;
+  if (!init_session(&lhs_ctx, &lhs_s))
+    return;
+  if (!init_session(&rhs_ctx, &rhs_s)) {
+    destroy_session(lhs_ctx, &lhs_s);
+    return;
+  }
+
+  lhs_a = ixs_sym(&lhs_s, "serial_assoc_a");
+  lhs_b = ixs_sym(&lhs_s, "serial_assoc_b");
+  lhs_c = ixs_sym(&lhs_s, "serial_assoc_c");
+  rhs_c = ixs_sym(&rhs_s, "serial_assoc_c");
+  rhs_a = ixs_sym(&rhs_s, "serial_assoc_a");
+  rhs_b = ixs_sym(&rhs_s, "serial_assoc_b");
+
+  check_permutation_encoding(&lhs_s, &rhs_s, ixs_max_many, TEST_WIRE_MAX, lhs_a,
+                             lhs_b, lhs_c, rhs_a, rhs_b, rhs_c, &lhs, &rhs);
+  check_permutation_encoding(&lhs_s, &rhs_s, ixs_min_many, TEST_WIRE_MIN, lhs_a,
+                             lhs_b, lhs_c, rhs_a, rhs_b, rhs_c, &lhs, &rhs);
+  check_permutation_encoding(&lhs_s, &rhs_s, ixs_xor_many, TEST_WIRE_XOR, lhs_a,
+                             lhs_b, lhs_c, rhs_a, rhs_b, rhs_c, &lhs, &rhs);
+  check_permutation_encoding(&lhs_s, &rhs_s, ixs_and_many, TEST_WIRE_AND, lhs_a,
+                             lhs_b, lhs_c, rhs_a, rhs_b, rhs_c, &lhs, &rhs);
+  check_permutation_encoding(&lhs_s, &rhs_s, ixs_or_many, TEST_WIRE_OR, lhs_a,
+                             lhs_b, lhs_c, rhs_a, rhs_b, rhs_c, &lhs, &rhs);
+  buffer_destroy(&rhs);
+  buffer_destroy(&lhs);
+  destroy_session(rhs_ctx, &rhs_s);
+  destroy_session(lhs_ctx, &lhs_s);
+}
+
 static void test_singletons_and_sentinels(void) {
   ixs_ctx *src_ctx = NULL;
   ixs_ctx *dst_ctx = NULL;
@@ -435,6 +557,8 @@ static void test_singletons_and_sentinels(void) {
   for (i = 0; i < 4; i++) {
     ixs_session_clear_errors(&dst_s);
     CHECK(serialize_to_buffer(&src_s, nodes[i], &buf));
+    if (i < 2)
+      CHECK(buf.len > 12u && buf.data[12] == TEST_WIRE_INT);
     decoded = deserialize_from_buffer(&dst_s, &buf);
     CHECK(decoded != NULL);
     CHECK(ixs_session_nerrors(&dst_s) == 0);
@@ -908,6 +1032,248 @@ static void test_malformed_root_rejected_without_pollution(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+static void test_associative_payload_validation(void) {
+  static const uint8_t assoc_tags[] = {
+      TEST_WIRE_MAX, TEST_WIRE_MIN, TEST_WIRE_XOR, TEST_WIRE_AND, TEST_WIRE_OR};
+  static const assoc_many_fn assoc_fns[] = {
+      ixs_max_many, ixs_min_many, ixs_xor_many, ixs_and_many, ixs_or_many};
+  static const uint8_t empty_invalid[] = {TEST_WIRE_MAX, TEST_WIRE_MIN};
+  static const uint8_t empty_identity[] = {TEST_WIRE_XOR, TEST_WIRE_AND,
+                                           TEST_WIRE_OR};
+  static const uint32_t inner_args[] = {0u, 1u};
+  static const uint32_t outer_args[] = {2u, 3u, 1u};
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  uint32_t child = 0;
+  size_t i;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  for (i = 0; i < sizeof(empty_invalid) / sizeof(empty_invalid[0]); i++) {
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+    begin_blob(&buf, 1);
+    append_assoc_node(&buf, empty_invalid[i], 0, NULL);
+    append_le32(&buf, 0);
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "no operands") != NULL);
+  }
+
+  for (i = 0; i < sizeof(empty_identity) / sizeof(empty_identity[0]); i++) {
+    ixs_node *decoded;
+    int64_t expected = empty_identity[i] == TEST_WIRE_AND ? -1 : 0;
+    begin_blob(&buf, 1);
+    append_assoc_node(&buf, empty_identity[i], 0, NULL);
+    append_le32(&buf, 0);
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_node_tag(decoded) == IXS_INT);
+    CHECK(ixs_node_int_val(decoded) == expected);
+    CHECK(ixs_session_nerrors(&s) == 0);
+  }
+
+  begin_blob(&buf, 2);
+  append_int_node(&buf, 7);
+  append_assoc_node(&buf, TEST_WIRE_MAX, 1, &child);
+  append_le32(&buf, 1);
+  ixs_session_clear_errors(&s);
+  {
+    ixs_node *decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_node_tag(decoded) == IXS_INT);
+    CHECK(ixs_node_int_val(decoded) == 7);
+    CHECK(ixs_session_nerrors(&s) == 0);
+  }
+
+  for (i = 0; i < sizeof(assoc_tags) / sizeof(assoc_tags[0]); i++) {
+    const ixs_node *args[4];
+    const ixs_node *decoded;
+    const ixs_node *expected;
+
+    begin_blob(&buf, 5);
+    append_sym_node(&buf, "serial_noncanonical_c");
+    append_sym_node(&buf, "serial_noncanonical_a");
+    append_sym_node(&buf, "serial_noncanonical_b");
+    append_assoc_node(&buf, assoc_tags[i], 2, inner_args);
+    append_assoc_node(&buf, assoc_tags[i], 3, outer_args);
+    append_le32(&buf, 4);
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+
+    args[0] = ixs_sym(&s, "serial_noncanonical_b");
+    args[1] = ixs_sym(&s, "serial_noncanonical_c");
+    args[2] = ixs_sym(&s, "serial_noncanonical_a");
+    args[3] = args[2];
+    expected = assoc_fns[i](&s, 4, args);
+    CHECK(decoded != NULL && !ixs_is_error(decoded));
+    CHECK(ixs_same_node(decoded, expected));
+    CHECK(ixs_session_nerrors(&s) == 0);
+  }
+
+  begin_blob(&buf, 2);
+  append_rat_node(&buf, 1, 2);
+  append_assoc_node(&buf, TEST_WIRE_XOR, 1, &child);
+  append_le32(&buf, 1);
+  {
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "not integer-valued") != NULL);
+  }
+
+  {
+    uint32_t rat_child = 0u;
+    uint32_t max_child = 1u;
+    ixs_node *decoded;
+    size_t before_used;
+
+    begin_blob(&buf, 3);
+    append_rat_node(&buf, 23456789, 23456791);
+    append_assoc_node(&buf, TEST_WIRE_MAX, 1, &rat_child);
+    append_assoc_node(&buf, TEST_WIRE_XOR, 1, &max_child);
+    append_le32(&buf, 2);
+    before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "constructor rejected") != NULL);
+  }
+
+  {
+    uint32_t negative_child = 1u;
+    ixs_node *decoded;
+    size_t before_used;
+
+    begin_blob(&buf, 4);
+    append_sym_node(&buf, "serial_hidden_negative_mod");
+    append_int_node(&buf, -3);
+    append_assoc_node(&buf, TEST_WIRE_MAX, 1, &negative_child);
+    append_u8(&buf, TEST_WIRE_MOD);
+    append_le32(&buf, 0);
+    append_le32(&buf, 2);
+    append_le32(&buf, 3);
+    before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "constructor rejected") != NULL);
+  }
+
+  {
+    ixs_node *decoded;
+    size_t before_used;
+
+    begin_blob(&buf, 3);
+    append_int_node(&buf, 42);
+    append_int_node(&buf, 0);
+    append_u8(&buf, TEST_WIRE_PIECEWISE);
+    append_le32(&buf, 1);
+    append_le32(&buf, 0);
+    append_le32(&buf, 1);
+    append_le32(&buf, 2);
+    before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "constructor rejected") != NULL);
+  }
+
+  begin_blob(&buf, 2);
+  append_u8(&buf, TEST_WIRE_ERROR);
+  append_assoc_node(&buf, TEST_WIRE_OR, 1, &child);
+  append_le32(&buf, 1);
+  {
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "sentinel") != NULL);
+  }
+
+  begin_blob(&buf, 2);
+  append_int_node(&buf, 123456789);
+  append_u8(&buf, TEST_WIRE_MAX);
+  {
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "argument count") != NULL);
+  }
+
+  begin_blob(&buf, 2);
+  append_int_node(&buf, 123456790);
+  append_u8(&buf, TEST_WIRE_MAX);
+  append_le32(&buf, 2);
+  append_le32(&buf, 0);
+  {
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+    ixs_session_clear_errors(&s);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded && ixs_is_parse_error(decoded));
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1);
+    CHECK(strstr(ixs_session_error(&s, 0), "payload exceeds") != NULL);
+  }
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
+static void test_version_mismatch_stops_at_header(void) {
+  static const uint32_t versions[] = {1u, 3u};
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  unsigned char blob[12];
+  size_t i;
+
+  if (!init_session(&ctx, &s))
+    return;
+  for (i = 0; i < sizeof(versions) / sizeof(versions[0]); i++) {
+    byte_reader state;
+    const ixs_reader reader = {reader_read, reader_remaining, &state};
+    ixs_node *decoded;
+    size_t before_used = ctx->htab_used;
+
+    store_le32(blob, TEST_SERIAL_MAGIC);
+    store_le32(blob + 4u, versions[i]);
+    store_le32(blob + 8u, UINT32_MAX);
+    state.data = blob;
+    state.len = sizeof(blob);
+    state.pos = 0;
+    ixs_session_clear_errors(&s);
+    decoded = ixs_deserialize_node(&s, &reader);
+    CHECK(decoded != NULL && ixs_is_parse_error(decoded));
+    CHECK(state.pos == 8u);
+    CHECK(ctx->htab_used == before_used);
+    CHECK(ixs_session_nerrors(&s) == 1u);
+  }
+  destroy_session(ctx, &s);
+}
+
 /*
  * This regression fabricates a noncanonical MUL via raw constructors.
  * Those helpers are internal and disappear in the amalgamated build, so keep
@@ -938,6 +1304,72 @@ static void test_noncanonical_mul_rejected_on_serialize(void) {
   CHECK(strstr(ixs_session_error(&s, 0), "zero exponent") != NULL);
 
   buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
+static void test_noncanonical_assoc_rejected_on_serialize(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *x;
+  ixs_node *y;
+  ixs_node *rat;
+  ixs_node *inner;
+  ixs_node *bad;
+  ixs_node *args[2];
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  x = ixs_sym(&s, "serial_raw_assoc_x");
+  y = ixs_sym(&s, "serial_raw_assoc_y");
+  rat = ixs_rat(&s, 1, 2);
+
+  bad = ixs_node_assoc(ctx, IXS_MAX, 0, NULL);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(buf.len == 0);
+  CHECK(ixs_session_nerrors(&s) == 1);
+
+  args[0] = rat;
+  args[1] = x;
+  bad = ixs_node_assoc(ctx, IXS_XOR, 2, args);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(buf.len == 0);
+  CHECK(ixs_session_nerrors(&s) == 1);
+
+  inner = ixs_max(&s, x, y);
+  args[0] = inner;
+  args[1] = x;
+  bad = ixs_node_assoc(ctx, IXS_MAX, 2, args);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(buf.len == 0);
+  CHECK(ixs_session_nerrors(&s) == 1);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
+static void test_raw_child_count_limits(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  ixs_node *zero;
+
+  if (!init_session(&ctx, &s))
+    return;
+  zero = ixs_int(&s, 0);
+
+  CHECK(ixs_node_add(ctx, zero, (UINT32_MAX - 1u) / 2u + 1u, NULL) == NULL);
+  CHECK(ixs_node_mul(ctx, zero, UINT32_MAX, NULL) == NULL);
+  CHECK(ixs_node_pw(ctx, UINT32_MAX / 2u + 1u, NULL) == NULL);
+  CHECK(ixs_is_domain_error(ixs_pw(&s, UINT32_MAX / 2u + 1u, NULL, NULL)));
+
   destroy_session(ctx, &s);
 }
 
@@ -1049,6 +1481,7 @@ static void test_node_limit_rejected_without_pollution(void) {
 
 int main(void) {
   test_roundtrip_deterministic();
+  test_associative_permutation_encoding();
   test_singletons_and_sentinels();
   test_writer_failure_no_diagnostics();
   test_bounds_canonical_alias_public();
@@ -1056,8 +1489,12 @@ int main(void) {
   test_facts_assume_preds_order_and_identity();
   test_facts_assume_preds_duplicate_skip();
   test_malformed_root_rejected_without_pollution();
+  test_associative_payload_validation();
+  test_version_mismatch_stops_at_header();
 #ifndef IXS_TEST_AMALGAMATION
   test_noncanonical_mul_rejected_on_serialize();
+  test_noncanonical_assoc_rejected_on_serialize();
+  test_raw_child_count_limits();
   test_nonpositive_mod_rejected_on_serialize();
 #endif
   test_nonpositive_mod_rejected_on_deserialize();

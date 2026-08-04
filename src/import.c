@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "node.h"
+#include "simplify.h"
 
 #include <string.h>
 
@@ -210,9 +211,6 @@ static bool import_child_count(const ixs_node *src, uint32_t *out) {
     *out = 1;
     return true;
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     *out = 2;
     return true;
@@ -221,9 +219,12 @@ static bool import_child_count(const ixs_node *src, uint32_t *out) {
       return false;
     *out = 2u * src->u.pw.ncases;
     return true;
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    *out = src->u.logic.nargs;
+    *out = src->u.assoc.nargs;
     return true;
   case IXS_NOT:
     *out = 1;
@@ -248,17 +249,17 @@ static const ixs_node *import_child_at(const ixs_node *src, uint32_t idx) {
   case IXS_CEIL:
     return src->u.unary.arg;
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return idx == 0 ? src->u.binary.lhs : src->u.binary.rhs;
   case IXS_PIECEWISE:
     return (idx & 1u) == 0 ? src->u.pw.cases[idx / 2u].value
                            : src->u.pw.cases[idx / 2u].cond;
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return src->u.logic.args[idx];
+    return src->u.assoc.args[idx];
   case IXS_NOT:
     return src->u.unary_bool.arg;
   default:
@@ -377,25 +378,39 @@ static ixs_node *import_build_pw(ixs_ctx *dst_ctx, import_state *state,
   return ixs_node_pw(dst_ctx, src->u.pw.ncases, cases);
 }
 
-static ixs_node *import_build_logic(ixs_ctx *dst_ctx, import_state *state,
+static ixs_node *import_build_assoc(ixs_ctx *dst_ctx, import_state *state,
                                     const ixs_node *src) {
   uint32_t i;
   ixs_node **args = NULL;
 
-  if (src->u.logic.nargs > 0) {
-    size_t sz = (size_t)src->u.logic.nargs * sizeof(ixs_node *);
-    if (sz / sizeof(ixs_node *) != src->u.logic.nargs)
+  if (src->u.assoc.nargs > 0) {
+    size_t sz = (size_t)src->u.assoc.nargs * sizeof(ixs_node *);
+    if (sz / sizeof(ixs_node *) != src->u.assoc.nargs)
       return NULL;
     args = ixs_arena_alloc(&dst_ctx->scratch, sz, sizeof(void *));
     if (!args)
       return NULL;
-    for (i = 0; i < src->u.logic.nargs; i++) {
-      args[i] = import_memo_dst(state, src->u.logic.args[i]);
+    for (i = 0; i < src->u.assoc.nargs; i++) {
+      args[i] = import_memo_dst(state, src->u.assoc.args[i]);
       if (!args[i])
         return NULL;
     }
   }
-  return ixs_node_logic(dst_ctx, src->tag, src->u.logic.nargs, args);
+
+  switch (src->tag) {
+  case IXS_MAX:
+    return simp_max_many(dst_ctx, src->u.assoc.nargs, args);
+  case IXS_MIN:
+    return simp_min_many(dst_ctx, src->u.assoc.nargs, args);
+  case IXS_XOR:
+    return simp_xor_many(dst_ctx, src->u.assoc.nargs, args);
+  case IXS_AND:
+    return simp_and_many(dst_ctx, src->u.assoc.nargs, args);
+  case IXS_OR:
+    return simp_or_many(dst_ctx, src->u.assoc.nargs, args);
+  default:
+    return NULL;
+  }
 }
 
 static ixs_node *import_build_not(ixs_ctx *dst_ctx, import_state *state,
@@ -417,16 +432,16 @@ static ixs_node *import_build_node(ixs_ctx *dst_ctx, import_state *state,
   case IXS_CEIL:
     return import_build_unary(dst_ctx, state, src);
   case IXS_MOD:
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
   case IXS_CMP:
     return import_build_binary(dst_ctx, state, src);
   case IXS_PIECEWISE:
     return import_build_pw(dst_ctx, state, src);
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return import_build_logic(dst_ctx, state, src);
+    return import_build_assoc(dst_ctx, state, src);
   case IXS_NOT:
     return import_build_not(dst_ctx, state, src);
   default:

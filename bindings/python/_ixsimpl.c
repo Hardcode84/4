@@ -2737,28 +2737,77 @@ static PyObject *mod_binary_op(PyObject *args,
   return (PyObject *)Expr_wrap(ae->ctx_obj, result);
 }
 
+static PyObject *mod_assoc_op(PyObject *args,
+                              const ixs_node *(*op)(ixs_session *, uint32_t,
+                                                    const ixs_node *const *),
+                              const char *name) {
+  Py_ssize_t n = PyTuple_Size(args);
+  Py_ssize_t i;
+  PyObject *first;
+  ExprObject *first_expr;
+  const ixs_node **nodes;
+  const ixs_node *result;
+
+  if (n < 0)
+    return NULL;
+  if (n == 0) {
+    PyErr_Format(PyExc_TypeError, "ixsimpl.%s() requires at least one argument",
+                 name);
+    return NULL;
+  }
+  if ((uint64_t)n > (uint64_t)UINT32_MAX ||
+      (size_t)n > (size_t)-1 / sizeof(*nodes)) {
+    PyErr_Format(PyExc_OverflowError, "too many arguments to ixsimpl.%s()",
+                 name);
+    return NULL;
+  }
+
+  first = PyTuple_GET_ITEM(args, 0);
+  if (!PyObject_TypeCheck(first, &_ExprType)) {
+    PyErr_Format(PyExc_TypeError, "ixsimpl.%s() first arg must be Expr", name);
+    return NULL;
+  }
+  first_expr = (ExprObject *)first;
+
+  nodes = PyMem_Malloc((size_t)n * sizeof(*nodes));
+  if (!nodes)
+    return PyErr_NoMemory();
+  nodes[0] = first_expr->node;
+  for (i = 1; i < n; i++) {
+    nodes[i] = coerce_arg(first_expr->ctx_obj, PyTuple_GET_ITEM(args, i));
+    if (!nodes[i]) {
+      PyMem_Free(nodes);
+      return NULL;
+    }
+  }
+
+  result = op(Context_session(first_expr->ctx_obj), (uint32_t)n, nodes);
+  PyMem_Free(nodes);
+  return (PyObject *)Expr_wrap(first_expr->ctx_obj, result);
+}
+
 static PyObject *mod_mod(PyObject *Py_UNUSED(module), PyObject *args) {
   return mod_binary_op(args, ixs_mod, "mod");
 }
 
 static PyObject *mod_max_(PyObject *Py_UNUSED(module), PyObject *args) {
-  return mod_binary_op(args, ixs_max, "max_");
+  return mod_assoc_op(args, ixs_max_many, "max_");
 }
 
 static PyObject *mod_min_(PyObject *Py_UNUSED(module), PyObject *args) {
-  return mod_binary_op(args, ixs_min, "min_");
+  return mod_assoc_op(args, ixs_min_many, "min_");
 }
 
 static PyObject *mod_xor_(PyObject *Py_UNUSED(module), PyObject *args) {
-  return mod_binary_op(args, ixs_xor, "xor_");
+  return mod_assoc_op(args, ixs_xor_many, "xor_");
 }
 
 static PyObject *mod_and_(PyObject *Py_UNUSED(module), PyObject *args) {
-  return mod_binary_op(args, ixs_and, "and_");
+  return mod_assoc_op(args, ixs_and_many, "and_");
 }
 
 static PyObject *mod_or_(PyObject *Py_UNUSED(module), PyObject *args) {
-  return mod_binary_op(args, ixs_or, "or_");
+  return mod_assoc_op(args, ixs_or_many, "or_");
 }
 
 static PyObject *mod_not_(PyObject *Py_UNUSED(module), PyObject *arg) {
@@ -2881,15 +2930,15 @@ static PyMethodDef module_methods[] = {
     {"mod", (PyCFunction)mod_mod, METH_VARARGS,
      "mod(a, b) -> Expr: floored modulo, defined for b > 0."},
     {"max_", (PyCFunction)mod_max_, METH_VARARGS,
-     "max_(a, b) -> Expr: maximum."},
+     "max_(a, ...) -> Expr: maximum."},
     {"min_", (PyCFunction)mod_min_, METH_VARARGS,
-     "min_(a, b) -> Expr: minimum."},
+     "min_(a, ...) -> Expr: minimum."},
     {"xor_", (PyCFunction)mod_xor_, METH_VARARGS,
-     "xor_(a, b) -> Expr: bitwise xor."},
+     "xor_(a, ...) -> Expr: bitwise xor."},
     {"and_", (PyCFunction)mod_and_, METH_VARARGS,
-     "and_(a, b) -> Expr: bitwise and; boolean and for 0/1 predicates."},
+     "and_(a, ...) -> Expr: bitwise and; boolean and for 0/1 predicates."},
     {"or_", (PyCFunction)mod_or_, METH_VARARGS,
-     "or_(a, b) -> Expr: bitwise or; boolean or for 0/1 predicates."},
+     "or_(a, ...) -> Expr: bitwise or; boolean or for 0/1 predicates."},
     {"not_", (PyCFunction)mod_not_, METH_O,
      "not_(a) -> Expr: logical truthiness not."},
     {"pw", (PyCFunction)mod_pw, METH_VARARGS,
