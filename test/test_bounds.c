@@ -3940,6 +3940,36 @@ static void test_public_exact_divide_basic(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_divide_fact_integer_bitwise_factor(void) {
+  static const char integer_xor[] =
+      "xor(1/8*(8*Mod(raw, 2) + 32*Mod(floor(1/4*raw), 2) + "
+      "16*Mod(floor(1/2*raw), 2)), Mod(floor(1/16*raw), 8))";
+  static const char noninteger_xor[] = "xor(1/8*raw, Mod(floor(1/16*raw), 8))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  const ixs_node *integer =
+      ixs_parse_expr(ctx, integer_xor, sizeof(integer_xor) - 1);
+  const ixs_node *noninteger =
+      ixs_parse_expr(ctx, noninteger_xor, sizeof(noninteger_xor) - 1);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  const ixs_node *scaled_integer = ixs_mul(ctx, ixs_int(ctx, 16), integer);
+  const ixs_node *scaled_noninteger =
+      ixs_mul(ctx, ixs_int(ctx, 16), noninteger);
+  ixs_exact_divide_result result;
+
+  CHECK(!ixs_node_is_integer_valued(integer));
+  CHECK(ixs_check_integer_valued_facts(facts, integer) == IXS_CHECK_TRUE);
+  result = ixs_try_exact_divide_facts(facts, scaled_integer, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(result.quotient != NULL);
+
+  CHECK(ixs_check_integer_valued_facts(facts, noninteger) == IXS_CHECK_UNKNOWN);
+  result = ixs_try_exact_divide_facts(facts, scaled_noninteger, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+  CHECK(result.quotient == NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_fact_simplification(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "exact_pw_item");
@@ -4916,6 +4946,7 @@ int main(void) {
   test_public_algebra_helpers_use_facts();
   test_public_algebra_helper_invalid_inputs();
   test_public_exact_divide_basic();
+  test_public_exact_divide_fact_integer_bitwise_factor();
   test_public_exact_divide_fact_simplification();
   test_public_exact_divide_scaled_mod_domain();
   test_public_exact_divide_extrema_and_overflow();

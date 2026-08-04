@@ -2005,7 +2005,7 @@ static inline bool bounds_mul_divisible(ixs_bounds *b, ixs_node *expr,
   if (c == 0)
     return true;
   for (i = 0; i < expr->u.mul.nfactors; i++) {
-    if (!ixs_node_is_integer_valued(expr->u.mul.factors[i].base))
+    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
       return false;
   }
   remain = m / ixs_gcd(c, m);
