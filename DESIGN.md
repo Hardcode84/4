@@ -1569,8 +1569,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): first simplifies
   the expression in the supplied fact domain, then reuses the same divisibility
   proof and returns a canonical expanded quotient only after that proof
-  succeeds. Fact-proven `Piecewise` branches therefore expose their quotient;
-  uncovered or undefined partitions remain conservative. Its result separates
+  succeeds. A conclusive result also requires the original input to be defined
+  over the complete fact domain, so simplification cannot erase uncovered or
+  undefined partitions. Its result separates
   `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, and
   domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
   preserve quotient sign; `INT64_MIN` is handled without taking its signed

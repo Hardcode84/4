@@ -401,9 +401,10 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
- * nondivisibility; UNKNOWN means facts are insufficient or contradictory.
- * Invalid input, divisor zero, unrepresentable results, and OOM return ERROR
- * and append a diagnostic to the fact set's session when one is available. */
+ * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
+ * not prove the input defined.  Invalid input, divisor zero, unrepresentable
+ * results, and OOM return ERROR and append a diagnostic to the fact set's
+ * session when one is available. */
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    const ixs_node *expr,
                                                    int64_t divisor);

@@ -128,7 +128,7 @@ def _mod_symbol_case_st(draw: st.DrawFn) -> ModSymbolCase:
 
 @st.composite
 def _mod_composite_case_st(draw: st.DrawFn) -> ModCompositeCase:
-    """Composite expression that is divisible by query_mod under assumptions."""
+    """Composite modular proof case, including fact-integral denominators."""
     names = draw(st.lists(sym_names, min_size=2, max_size=2, unique=True))
     query_mod = draw(st.integers(min_value=2, max_value=64))
     coeffs = [c for c in range(-8, 9) if c != 0 and c % query_mod != 0]
@@ -137,9 +137,13 @@ def _mod_composite_case_st(draw: st.DrawFn) -> ModCompositeCase:
     mod_a = query_mod
     mod_b = query_mod
     const = query_mod * draw(st.integers(min_value=-8, max_value=8))
-    target = draw(st.sampled_from([0, -1, query_mod]))
-    cmp_op = draw(st.sampled_from(["==", "!="]))
-    pattern = draw(st.sampled_from(["mul", "add"]))
+    pattern = draw(st.sampled_from(["mul", "add", "reciprocal"]))
+    if pattern == "reciprocal":
+        target = 0
+        cmp_op = "=="
+    else:
+        target = draw(st.sampled_from([0, -1, query_mod]))
+        cmp_op = draw(st.sampled_from(["==", "!="]))
     return (
         names[0],
         names[1],
@@ -2596,6 +2600,7 @@ def test_fact_backed_exact_divide() -> None:
 def test_fact_backed_exact_divide_piecewise() -> None:
     ctx = ixsimpl.Context()
     item, slot = ctx.sym("exact_pw_item"), ctx.sym("exact_pw_slot")
+    k = ctx.sym("exact_pw_k")
     value = 32 * (2 * item + slot)
     piecewise = ixsimpl.pw((value, item < 64))
     expected = 8 * item + 4 * slot
@@ -2612,6 +2617,21 @@ def test_fact_backed_exact_divide_piecewise() -> None:
     inactive = ctx.facts()
     inactive.assume(item >= 64)
     assert ctx.try_exact_divide(piecewise, 8, inactive) == ("unknown", None)
+
+    fact_integer = ixsimpl.pw((k / 2, item > 0))
+    product = 16 * fact_integer
+    partial = ctx.facts()
+    partial.assume(ctx.eq(k % 2, 0))
+    assert ctx.integer_valued(fact_integer, facts=partial) is True
+    assert ctx.defined(fact_integer, facts=partial) is None
+    assert ctx.try_exact_divide(product, 8, partial) == ("unknown", None)
+
+    covered = ctx.facts()
+    covered.assume_many([ctx.eq(k % 2, 0), item > 0])
+    status, quotient = ctx.try_exact_divide(product, 8, covered)
+    assert status == "proven"
+    assert quotient is not None
+    assert ixsimpl.same_node(quotient, k)
 
 
 def test_exact_divide_binding_rejects_cross_context_inputs() -> None:
@@ -2707,13 +2727,19 @@ def test_check_modular_composite_entailment_soundness(
     assumptions = [ctx.eq(a % mod_a, 0)]
     if pattern == "mul":
         expr = coeff_a * a
-    else:
+    elif pattern == "add":
         assumptions.append(ctx.eq(b % mod_b, 0))
         expr = coeff_a * a + coeff_b * b + const
+    else:
+        assumptions.extend([a >= mod_a, b >= 1])
+        expr = query_mod / ixsimpl.max_(b, a / mod_a)
 
     lhs = expr % query_mod
     query = ctx.eq(lhs, target) if cmp_op == "==" else ctx.ne(lhs, target)
     result = ctx.check(query, assumptions=assumptions)
+    if pattern == "reciprocal":
+        assert result is None, f"unexpected proof for case={case}"
+        return
     assert result is not None, f"unexpected unknown for case={case}"
 
     checked = 0

@@ -1775,7 +1775,8 @@ static inline bool bounds_mul_divisible(ixs_bounds *b, ixs_node *expr,
   if (c == 0)
     return true;
   for (i = 0; i < expr->u.mul.nfactors; i++) {
-    if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
+    if (expr->u.mul.factors[i].exp < 0 ||
+        !ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
       return false;
   }
   remain = m / ixs_gcd(c, m);
@@ -4064,10 +4065,12 @@ static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
   return answer;
 }
 
-IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
-                                                     ixs_node *expr) {
+static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
+                                                    ixs_node *expr, bool *oom) {
   defined_state state;
   ixs_check_result result;
+  if (oom)
+    *oom = false;
   if (!b || !b->ctx || !b->scratch || !expr || b->oom ||
       ixs_bounds_has_empty(b))
     return IXS_CHECK_UNKNOWN;
@@ -4076,9 +4079,16 @@ IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
   state.oom = false;
   state.limited = false;
   result = defined_eval(&state, b, expr, 0);
+  if (oom)
+    *oom = state.oom || b->oom;
   if (state.oom || state.limited || b->oom)
     return IXS_CHECK_UNKNOWN;
   return result;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
+                                                     ixs_node *expr) {
+  return bounds_check_defined_status(b, expr, NULL);
 }
 
 static ixs_bounds_build_status assumption_invalid(ixs_bounds *b,
@@ -6444,9 +6454,12 @@ ixs_exact_divide_result
 ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_session_binding binding;
   ixs_check_result proof;
+  ixs_node *input_expr;
   ixs_node *divisor_node;
   ixs_node *quotient;
   ixs_ctx *ctx;
+  bool old_bounds_oom;
+  bool defined_oom;
   bool oom;
 
   if (!facts_bind(facts, &binding, &ctx))
@@ -6481,25 +6494,47 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
     return result;
   }
 
+  input_expr = expr;
   expr = exact_divide_simplify_facts(facts, ctx, expr, &oom);
   if (oom) {
     ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
     ixs_session_unbind(&binding);
     return result;
   }
+  old_bounds_oom = facts->bounds.oom;
   proof = ixs_bounds_check_divisible(&facts->bounds, expr, divisor);
   if (facts->bounds.oom) {
+    if (!old_bounds_oom)
+      bounds_cache_clear(&facts->bounds);
+    facts->bounds.oom = old_bounds_oom;
     ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
     ixs_session_unbind(&binding);
     return result;
   }
+  if (proof == IXS_CHECK_UNKNOWN) {
+    ixs_session_unbind(&binding);
+    return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+  }
+  if (!ixs_node_is_known_total(input_expr)) {
+    ixs_check_result defined =
+        bounds_check_defined_status(&facts->bounds, input_expr, &defined_oom);
+    if (defined_oom) {
+      if (!old_bounds_oom && facts->bounds.oom) {
+        bounds_cache_clear(&facts->bounds);
+        facts->bounds.oom = old_bounds_oom;
+      }
+      ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
+      ixs_session_unbind(&binding);
+      return result;
+    }
+    if (defined != IXS_CHECK_TRUE) {
+      ixs_session_unbind(&binding);
+      return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+    }
+  }
   if (proof == IXS_CHECK_FALSE) {
     ixs_session_unbind(&binding);
     return exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
-  }
-  if (proof != IXS_CHECK_TRUE) {
-    ixs_session_unbind(&binding);
-    return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
   }
 
   divisor_node = ixs_node_int(ctx, divisor);

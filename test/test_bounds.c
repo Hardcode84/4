@@ -3108,6 +3108,36 @@ static void test_public_fact_divisibility(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_fact_divisibility_rejects_reciprocal_factor(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *k = ixs_sym(ctx, "reciprocal_k");
+  ixs_node *z = ixs_sym(ctx, "reciprocal_z");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *base_args[2] = {z, ixs_div(ctx, k, two)};
+  ixs_node *base = ixs_max_many(ctx, 2, base_args);
+  ixs_node *product = ixs_mul(ctx, two, base);
+  ixs_node *reciprocal = ixs_div(ctx, two, base);
+  ixs_node *product_query =
+      ixs_cmp(ctx, ixs_mod(ctx, product, two), IXS_CMP_EQ, zero);
+  ixs_node *reciprocal_query =
+      ixs_cmp(ctx, ixs_mod(ctx, reciprocal, two), IXS_CMP_EQ, zero);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, ixs_mod(ctx, k, two), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(facts, ixs_cmp(ctx, k, IXS_CMP_GE, two)));
+  CHECK(ixs_facts_assume_pred(facts, ixs_cmp(ctx, z, IXS_CMP_GE, one)));
+  CHECK(ixs_check_integer_valued_facts(facts, base) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, product_query) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(facts, reciprocal) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined_facts(facts, reciprocal) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, reciprocal_query) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_known_bits_propagation(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
@@ -3970,6 +4000,38 @@ static void test_public_exact_divide_fact_integer_bitwise_factor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_divide_requires_defined_product(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *k = ixs_sym(ctx, "partial_product_k");
+  ixs_node *x = ixs_sym(ctx, "partial_product_x");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *condition = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
+  ixs_node *values[1] = {ixs_div(ctx, k, two)};
+  ixs_node *conditions[1] = {condition};
+  ixs_node *piecewise = ixs_pw(ctx, 1, values, conditions);
+  ixs_node *product = ixs_mul(ctx, ixs_int(ctx, 16), piecewise);
+  ixs_node *even = ixs_cmp(ctx, ixs_mod(ctx, k, two), IXS_CMP_EQ, zero);
+  ixs_facts *partial = ixs_facts_create(ctx);
+  ixs_facts *covered = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+
+  CHECK(ixs_facts_assume_pred(partial, even));
+  CHECK(ixs_check_integer_valued_facts(partial, piecewise) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined_facts(partial, piecewise) == IXS_CHECK_UNKNOWN);
+  result = ixs_try_exact_divide_facts(partial, product, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
+  CHECK(result.quotient == NULL);
+
+  CHECK(ixs_facts_assume_pred(covered, even));
+  CHECK(ixs_facts_assume_pred(covered, condition));
+  result = ixs_try_exact_divide_facts(covered, product, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, k));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_divide_fact_simplification(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "exact_pw_item");
@@ -4111,12 +4173,18 @@ static void test_public_exact_divide_invalid_and_oom(void) {
   ixs_ctx *other = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
   ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *floor_reciprocal =
+      ixs_floor(ctx, ixs_div(ctx, ixs_int(ctx, 1), item));
   ixs_node *expr = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), item),
                            ixs_mul(ctx, ixs_int(ctx, 32), slot));
+  ixs_node *guarded = ixs_mul(ctx, ixs_int(ctx, 8), floor_reciprocal);
   ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *positive = ixs_facts_create(ctx);
   ixs_facts *contradictory = ixs_facts_create(ctx);
   ixs_exact_divide_result result;
 
+  CHECK(ixs_facts_assume_pred(positive,
+                              ixs_cmp(ctx, item, IXS_CMP_GT, ixs_int(ctx, 0))));
   CHECK(ixs_facts_assume_pred(
       contradictory, ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 10))));
   CHECK(ixs_facts_assume_pred(contradictory,
@@ -4150,6 +4218,18 @@ static void test_public_exact_divide_invalid_and_oom(void) {
   result = ixs_try_exact_divide_facts(facts, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK(result.quotient != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  result = ixs_try_exact_divide_facts(positive, guarded, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
+  CHECK(result.quotient == NULL);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  result = ixs_try_exact_divide_facts(positive, guarded, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, floor_reciprocal));
 
   result = ixs_try_exact_divide_facts(NULL, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);
@@ -4933,6 +5013,7 @@ int main(void) {
   test_public_fact_integrality_associative_many();
   test_public_fact_integrality_piecewise();
   test_public_fact_divisibility();
+  test_public_fact_divisibility_rejects_reciprocal_factor();
   test_public_known_bits_propagation();
   test_public_known_bits_failures();
   test_public_symbol_congruence();
@@ -4947,6 +5028,7 @@ int main(void) {
   test_public_algebra_helper_invalid_inputs();
   test_public_exact_divide_basic();
   test_public_exact_divide_fact_integer_bitwise_factor();
+  test_public_exact_divide_requires_defined_product();
   test_public_exact_divide_fact_simplification();
   test_public_exact_divide_scaled_mod_domain();
   test_public_exact_divide_extrema_and_overflow();
