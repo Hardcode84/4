@@ -47,7 +47,7 @@ repos:
     rev: v1.8.0
     hooks:
       - id: mypy
-        additional_dependencies: [hypothesis, sympy, pytest, tree-sitter, tree-sitter-c]
+        additional_dependencies: [hypothesis, sympy, pytest==8.3.5, tree-sitter, tree-sitter-c]
         args: [--strict]
         types: [python]
 
