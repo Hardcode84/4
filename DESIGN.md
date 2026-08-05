@@ -952,6 +952,9 @@ Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
 Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
                      when all scaled coefficients are integral
+Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
+                     where g = gcd(m, |ci|), r = C mod g, 0 < r < g,
+                     and every ti is integer-valued
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
                      all terms integer   → g*Mod(x, m) + r
@@ -1501,10 +1504,10 @@ This enables rules like:
 
 **Algebraic rewrites** (no bounds needed):
 
-- `Mod(c1*t1 + ... + c, q)` → `Mod(terms, q) + c` when each `|ci|`
-  divides `q`, each `ti` is integer-valued, and `0 < c < gcd(|ci|)`.
-  (Ported from IREE Wave's `symbol_utils.py`, corrected: use `gcd` not
-  `min` for the multi-term case.)
+- `Mod(c1*t1 + ... + c, q)` → `Mod(c1*t1 + ... + c-r, q) + r`, where
+  `g = gcd(q, |c1|, ...)`, `r` is the Euclidean residue of `c` modulo `g`,
+  every `ti` is integer-valued, and `0 < r < g`. Including `q` in the gcd
+  handles coefficients that do not individually divide the modulus.
 
 **Bounds-gated algebraic rewrites**:
 

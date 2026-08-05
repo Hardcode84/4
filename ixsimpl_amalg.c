@@ -19169,14 +19169,16 @@ static ixs_node *mod_clear_rational_add_scale(ixs_ctx *ctx, ixs_node *n) {
   return result;
 }
 
-/* Extract a small constant addend from Mod when every other term's
- * coefficient divides the modulus.  Uses gcd(|ci|) for the bound.
+/* Extract the Euclidean residue of an ADD constant from Mod when every
+ * non-constant addend is a multiple of the same grid.  The grid is the gcd
+ * of the modulus and all integer term coefficients.
  *
- *   Mod(4*floor(a) + 3, 16)  ->  Mod(4*floor(a), 16) + 3
+ *   Mod(16 + 4*floor(a) + 3, 16)
+ *       -> Mod(16 + 4*floor(a), 16) + 3
  *
- * Proof: each |ci| | q, so sum = Sigma ci*ti is a multiple of g = gcd(|ci|).
- * Then (sum mod q) in {0, g, 2g, ..., q-g}.  If 0 < c < g, then
- * (sum mod q) + c < q, so Mod(sum + c, q) = (sum mod q) + c. */
+ * Proof: write the dividend as B + r, where g divides B and the modulus,
+ * and 0 < r < g.  Mod(B, m) is one of 0, g, ..., m-g, so adding r cannot
+ * wrap across m. */
 static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   if (a->tag != IXS_ADD || b->tag != IXS_INT || b->u.ival <= 0)
@@ -19186,10 +19188,12 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
   int64_t const_p, const_q;
   ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
 
-  if (const_q != 1 || const_p <= 0 || a->u.add.nterms == 0)
+  if (const_q != 1 || a->u.add.nterms == 0)
     return n;
 
-  int64_t g = 0;
+  int64_t g = m;
+  int64_t aligned_const;
+  int64_t residue;
   bool ok = true;
   uint32_t i;
 
@@ -19197,27 +19201,33 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
     int64_t cp, cq;
     ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
     int64_t acp = (cp > 0) ? cp : (cp >= -INT64_MAX) ? -cp : 0;
-    if (cq != 1 || acp == 0 || m % acp != 0 ||
+    if (cq != 1 || acp == 0 ||
         !ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
       ok = false;
       break;
     }
-    g = (g == 0) ? acp : ixs_gcd(g, acp);
+    g = ixs_gcd(g, acp);
   }
 
-  if (!ok || g <= 1 || const_p >= g)
+  if (!ok || g <= 1)
+    return n;
+  residue = const_p % g;
+  if (residue < 0)
+    residue += g;
+  if (residue == 0 || !ixs_safe_sub(const_p, residue, &aligned_const))
     return n;
 
-  ixs_node *zero = ixs_node_int(ctx, 0);
-  if (!zero)
+  ixs_node *inner_constant = ixs_node_int(ctx, aligned_const);
+  if (!inner_constant)
     return NULL;
-  ixs_node *inner = ixs_node_add(ctx, zero, a->u.add.nterms, a->u.add.terms);
+  ixs_node *inner =
+      ixs_node_add(ctx, inner_constant, a->u.add.nterms, a->u.add.terms);
   if (!inner)
     return NULL;
   ixs_node *moded = simp_mod(ctx, inner, b);
   if (!moded)
     return NULL;
-  return simp_add(ctx, moded, ixs_node_int(ctx, const_p));
+  return simp_add(ctx, moded, ixs_node_int(ctx, residue));
 }
 
 /* Leading positive integer coefficient of a MUL node, or 0 if the

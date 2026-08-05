@@ -435,6 +435,65 @@ static void test_mod_rules(void) {
   }
 }
 
+static void test_mod_extract_constant_residue(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *lane = ixs_sym(ctx, "residue_lane");
+  ixs_node *tile = ixs_sym(ctx, "residue_tile");
+  ixs_node *modulus = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *aligned =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(2147483712)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 128), lane),
+                      ixs_mul(ctx, ixs_int(ctx, 256), tile)));
+  ixs_node *aligned_mod = ixs_mod(ctx, aligned, modulus);
+  ixs_node *grid_base =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(2147483648)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 128), lane),
+                      ixs_mul(ctx, ixs_int(ctx, 256), tile)));
+  ixs_node *grid_mod = ixs_mod(ctx, grid_base, modulus);
+  int64_t residue;
+
+  CHECK(aligned_mod == ixs_add(ctx, grid_mod, ixs_int(ctx, 64)));
+  for (residue = 1; residue <= 3; residue++) {
+    ixs_node *shifted = ixs_add(ctx, aligned, ixs_int(ctx, residue));
+    ixs_node *expected = ixs_add(ctx, aligned_mod, ixs_int(ctx, residue));
+    CHECK(ixs_mod(ctx, shifted, modulus) == expected);
+  }
+
+  /* The common grid is gcd(modulus, coefficients), even when a coefficient
+   * does not itself divide the modulus. */
+  {
+    ixs_node *x = ixs_sym(ctx, "residue_gcd_x");
+    ixs_node *shifted =
+        ixs_add(ctx, ixs_int(ctx, 23), ixs_mul(ctx, ixs_int(ctx, 6), x));
+    ixs_node *aligned_inner =
+        ixs_add(ctx, ixs_int(ctx, 22), ixs_mul(ctx, ixs_int(ctx, 6), x));
+    ixs_node *expected = ixs_add(ctx, ixs_int(ctx, 1),
+                                 ixs_mod(ctx, aligned_inner, ixs_int(ctx, 16)));
+    CHECK(ixs_mod(ctx, shifted, ixs_int(ctx, 16)) == expected);
+  }
+
+  /* No common grid and non-integer addends stay untouched.  Negative
+   * constants use their Euclidean residue. */
+  {
+    ixs_node *x = ixs_sym(ctx, "residue_negative_x");
+    ixs_node *coprime = ixs_mod(
+        ctx, ixs_add(ctx, ixs_int(ctx, 23), ixs_mul(ctx, ixs_int(ctx, 5), x)),
+        ixs_int(ctx, 16));
+    ixs_node *noninteger = ixs_mod(
+        ctx,
+        ixs_add(ctx, ixs_int(ctx, 129), ixs_mul(ctx, ixs_rat(ctx, 1, 2), x)),
+        ixs_int(ctx, 256));
+    ixs_node *negative_constant = ixs_mod(
+        ctx,
+        ixs_add(ctx, ixs_int(ctx, INT64_MIN), ixs_mul(ctx, ixs_int(ctx, 6), x)),
+        ixs_int(ctx, 9));
+    CHECK(ixs_node_tag(coprime) == IXS_MOD);
+    CHECK(ixs_node_tag(noninteger) == IXS_MOD);
+    CHECK(strcmp(pr(negative_constant), "1 + Mod(6*residue_negative_x, 9)") ==
+          0);
+  }
+}
+
 static void test_mod_divisor_contract(void) {
   ixs_ctx *ctx = ctx_create_or_die();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3932,6 +3991,7 @@ int main(void) {
   test_hash_consing();
   test_floor_rules();
   test_mod_rules();
+  test_mod_extract_constant_residue();
   test_mod_divisor_contract();
   test_boolean();
   test_flat_associative_nodes();
