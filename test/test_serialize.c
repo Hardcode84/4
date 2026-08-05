@@ -865,7 +865,7 @@ static void test_facts_assume_preds_order_and_identity(void) {
   first_position = ixs_facts_create(&s);
   CHECK(first_position != NULL);
   CHECK(ixs_facts_assume_preds(first_position, repeated, 3));
-  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_TRUE);
 
   distinct[0] = raw_predicate;
   distinct[1] = divisor_eight;

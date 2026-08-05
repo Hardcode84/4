@@ -12,6 +12,7 @@
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
+#define FACT_BATCH_ROUND_LIMIT 1024u
 #define RANGE_POWER_EXP_LIMIT 64u
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
@@ -22,9 +23,22 @@ static void bounds_empty_cache_invalidate(ixs_bounds *b) {
     b->empty_cache_valid = false;
 }
 
+static void bounds_mark_semantic_changed(ixs_bounds *b) {
+  if (b && b->semantic_changed)
+    *b->semantic_changed = true;
+}
+
 static void bounds_mark_contradiction(ixs_bounds *b) {
+  if (!b->contradiction)
+    bounds_mark_semantic_changed(b);
   b->contradiction = true;
   bounds_empty_cache_invalidate(b);
+}
+
+static bool bounds_intervals_equal(ixs_interval a, ixs_interval b) {
+  return a.lo_p == b.lo_p && a.lo_q == b.lo_q && a.hi_p == b.hi_p &&
+         a.hi_q == b.hi_q && a.lo_inf == b.lo_inf && a.hi_inf == b.hi_inf &&
+         a.valid == b.valid;
 }
 
 static void bounds_cache_clear(ixs_bounds *b) {
@@ -97,6 +111,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
   b->oom = false;
+  b->semantic_changed = NULL;
   if (b->vars)
     bounds_cache_alloc(b);
   return b->vars != NULL;
@@ -142,6 +157,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
   dst->oom = false;
+  dst->semantic_changed = NULL;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
         dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
@@ -212,6 +228,7 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v->bits.known_zero = 0;
   v->bits.known_one = 0;
   v->bits.pow2 = IXS_POW2_UNKNOWN;
+  bounds_mark_semantic_changed(b);
   return v;
 }
 
@@ -313,8 +330,11 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
   if (!v)
     return;
   bounds_empty_cache_invalidate(b);
-  if (v->bits.pow2 == IXS_POW2_OR_ZERO && interval_lower_at_least(&v->iv, 1, 1))
+  if (v->bits.pow2 == IXS_POW2_OR_ZERO &&
+      interval_lower_at_least(&v->iv, 1, 1)) {
     v->bits.pow2 = IXS_POW2_POSITIVE;
+    bounds_mark_semantic_changed(b);
+  }
   if ((v->bits.pow2 == IXS_POW2_OR_ZERO &&
        interval_upper_less_than(&v->iv, 0, 1)) ||
       (v->bits.pow2 == IXS_POW2_POSITIVE &&
@@ -340,10 +360,16 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
 
 static void apply_var_known_bits(ixs_bounds *b, ixs_var_bound *v,
                                  uint64_t known_zero, uint64_t known_one) {
+  uint64_t old_zero;
+  uint64_t old_one;
   if (!v)
     return;
+  old_zero = v->bits.known_zero;
+  old_one = v->bits.known_one;
   v->bits.known_zero |= known_zero;
   v->bits.known_one |= known_one;
+  if (old_zero != v->bits.known_zero || old_one != v->bits.known_one)
+    bounds_mark_semantic_changed(b);
   refine_var_bit_consistency(b, v);
 }
 
@@ -360,9 +386,11 @@ static void apply_pow2_fact(ixs_bounds *b, ixs_var_bound *v,
   if (pow2 == IXS_POW2_POSITIVE) {
     if (v->bits.pow2 == IXS_POW2_UNKNOWN || v->bits.pow2 == IXS_POW2_OR_ZERO) {
       v->bits.pow2 = IXS_POW2_POSITIVE;
+      bounds_mark_semantic_changed(b);
     }
   } else if (pow2 == IXS_POW2_OR_ZERO && v->bits.pow2 == IXS_POW2_UNKNOWN) {
     v->bits.pow2 = IXS_POW2_OR_ZERO;
+    bounds_mark_semantic_changed(b);
   }
   refine_var_bit_consistency(b, v);
 }
@@ -375,10 +403,15 @@ static void apply_exact_int_bits(ixs_bounds *b, ixs_var_bound *v, int64_t val) {
   if (val == 0) {
     if (v->bits.pow2 == IXS_POW2_POSITIVE)
       bounds_mark_contradiction(b);
-    else
+    else if (v->bits.pow2 != IXS_POW2_OR_ZERO) {
       v->bits.pow2 = IXS_POW2_OR_ZERO;
+      bounds_mark_semantic_changed(b);
+    }
   } else if (int64_is_positive_pow2(val)) {
-    v->bits.pow2 = IXS_POW2_POSITIVE;
+    if (v->bits.pow2 != IXS_POW2_POSITIVE) {
+      v->bits.pow2 = IXS_POW2_POSITIVE;
+      bounds_mark_semantic_changed(b);
+    }
   } else if (v->bits.pow2 == IXS_POW2_OR_ZERO ||
              v->bits.pow2 == IXS_POW2_POSITIVE) {
     bounds_mark_contradiction(b);
@@ -419,6 +452,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   if (v->modulus == 0) {
     v->modulus = m;
     v->remainder = rem;
+    bounds_mark_semantic_changed(b);
     apply_congruence_known_bits(b, v);
     return;
   }
@@ -446,10 +480,14 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
       return;
     k = bounds_mul_mod(target, inverse, (uint64_t)m_div_g);
   }
-  v->modulus = new_mod;
   merged = bounds_mul_mod((uint64_t)old_mod, k, (uint64_t)new_mod);
   merged += (uint64_t)v->remainder;
-  v->remainder = (int64_t)(merged % (uint64_t)new_mod);
+  rem = (int64_t)(merged % (uint64_t)new_mod);
+  if (v->modulus != new_mod || v->remainder != rem) {
+    v->modulus = new_mod;
+    v->remainder = rem;
+    bounds_mark_semantic_changed(b);
+  }
   apply_congruence_known_bits(b, v);
 }
 
@@ -776,8 +814,10 @@ static void add_expr_integer_zero_cmp(ixs_bounds *b, ixs_node *expr,
 static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
                                 int64_t cp, int64_t cq) {
   ixs_var_bound *v = get_or_create_var(b, name);
+  ixs_interval old;
   if (!v)
     return;
+  old = v->iv;
   switch (op) {
   case IXS_CMP_GE:
     if (v->iv.lo_inf || ixs_rat_cmp(cp, cq, v->iv.lo_p, v->iv.lo_q) > 0) {
@@ -828,6 +868,8 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
   case IXS_CMP_NE:
     break;
   }
+  if (!bounds_intervals_equal(old, v->iv))
+    bounds_mark_semantic_changed(b);
   refine_var_bit_consistency(b, v);
 }
 
@@ -999,8 +1041,10 @@ static void apply_pow2_or_zero(ixs_bounds *b, const char *name) {
   ixs_var_bound *v = get_or_create_var(b, name);
   if (!v)
     return;
-  if (v->bits.pow2 == IXS_POW2_UNKNOWN)
+  if (v->bits.pow2 == IXS_POW2_UNKNOWN) {
     v->bits.pow2 = IXS_POW2_OR_ZERO;
+    bounds_mark_semantic_changed(b);
+  }
   refine_var_bit_consistency(b, v);
   apply_sym_cmp_const(b, name, IXS_CMP_GE, 0, 1);
 }
@@ -1221,8 +1265,13 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
                                   expr);
     if (b->expr_index[slot]) {
       ixs_expr_bound *bound = &b->exprs[b->expr_index[slot] - 1u];
-      if (bound->iv.valid)
-        bound->iv = iv_intersect(bound->iv, iv);
+      if (bound->iv.valid) {
+        ixs_interval refined = iv_intersect(bound->iv, iv);
+        if (!bounds_intervals_equal(bound->iv, refined)) {
+          bound->iv = refined;
+          bounds_mark_semantic_changed(b);
+        }
+      }
       bounds_cache_clear(b);
       return;
     }
@@ -1266,6 +1315,7 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   b->exprs[b->nexprs].iv = iv;
   b->expr_index[slot] = b->nexprs + 1u;
   b->nexprs++;
+  bounds_mark_semantic_changed(b);
   bounds_cache_clear(b);
 }
 
@@ -1325,6 +1375,7 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   bounds_empty_cache_invalidate(b);
   if (b->nnonzero < b->nonzero_cap) {
     b->nonzero[b->nnonzero++] = expr;
+    bounds_mark_semantic_changed(b);
     return;
   }
   new_cap = b->nonzero_cap ? b->nonzero_cap * 2u : 4u;
@@ -1342,6 +1393,7 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   b->nonzero = grown;
   b->nonzero_cap = new_cap;
   b->nonzero[b->nnonzero++] = expr;
+  bounds_mark_semantic_changed(b);
 }
 
 /*
@@ -4471,6 +4523,7 @@ static bool facts_query_node_ok(ixs_ctx *ctx, ixs_node *node,
 
 static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
   ixs_var_bound *v = find_var(dst, src->name);
+  ixs_interval old;
   bounds_cache_clear(dst);
   if (!v) {
     v = get_or_create_var(dst, src->name);
@@ -4483,7 +4536,10 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
     return;
   }
 
+  old = v->iv;
   v->iv = iv_intersect(v->iv, src->iv);
+  if (!bounds_intervals_equal(old, v->iv))
+    bounds_mark_semantic_changed(dst);
   if (src->modulus > 0)
     apply_modrem(dst, src->name, src->modulus, src->remainder);
   apply_var_known_bits(dst, v, src->bits.known_zero, src->bits.known_one);
@@ -4725,6 +4781,62 @@ static bool facts_predicate_seen_or_insert(ixs_node **slots, size_t capacity,
   return false;
 }
 
+static ixs_bounds_build_status facts_ingest_predicate_pass(
+    ixs_ctx *ctx, ixs_bounds *candidate, ixs_node *const *predicates,
+    size_t n_predicates, ixs_node **seen, size_t seen_capacity, bool simplify) {
+  size_t i;
+  if (seen)
+    memset(seen, 0, seen_capacity * sizeof(*seen));
+  for (i = 0; i < n_predicates; i++) {
+    ixs_bounds_build_status status;
+    ixs_node *predicate = predicates[i];
+    if (seen && facts_predicate_seen_or_insert(seen, seen_capacity, predicate))
+      continue;
+    if (simplify) {
+      predicate = simp_simplify_bounds(ctx, predicate, candidate);
+      if (!predicate || candidate->oom)
+        return IXS_BOUNDS_BUILD_OOM;
+    }
+    status = bounds_ingest_predicate(candidate, predicate);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static ixs_bounds_build_status
+facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
+                               ixs_node *const *predicates, size_t n_predicates,
+                               ixs_node **seen, size_t seen_capacity) {
+  ixs_bounds_build_status status;
+  size_t round;
+
+  /* Preserve every original identity before fact-conditioned rewrites. */
+  status = facts_ingest_predicate_pass(ctx, candidate, predicates, n_predicates,
+                                       seen, seen_capacity, false);
+  if (status != IXS_BOUNDS_BUILD_OK)
+    return status;
+  if (candidate->contradiction || ixs_bounds_has_empty(candidate))
+    return IXS_BOUNDS_BUILD_OK;
+
+  /* Revisit the whole batch because a later predicate can unlock an earlier
+   * simplification. Semantic fact refinements are monotone; the explicit cap
+   * guards malformed or unexpectedly cyclic future transfer rules. */
+  for (round = 0; round < FACT_BATCH_ROUND_LIMIT; round++) {
+    bool changed = false;
+    candidate->semantic_changed = &changed;
+    status = facts_ingest_predicate_pass(
+        ctx, candidate, predicates, n_predicates, seen, seen_capacity, true);
+    candidate->semantic_changed = NULL;
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+    if (candidate->contradiction || ixs_bounds_has_empty(candidate) || !changed)
+      return IXS_BOUNDS_BUILD_OK;
+  }
+  return assumption_invalid(candidate,
+                            "fact batch saturation limit (1024) exceeded");
+}
+
 ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
                                   size_t n_predicates) {
   ixs_session_binding binding;
@@ -4800,38 +4912,9 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
       !facts_predicate_set_init(&ctx->scratch, n_predicates, &seen,
                                 &seen_capacity))
     status = IXS_BOUNDS_BUILD_OOM;
-  if (status == IXS_BOUNDS_BUILD_OK) {
-    size_t i;
-    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
-      if (seen &&
-          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
-        continue;
-      ixs_node *simplified =
-          simp_simplify_bounds(ctx, predicates[i], &candidate);
-      if (!simplified || candidate.oom) {
-        status = IXS_BOUNDS_BUILD_OOM;
-        break;
-      }
-      status = bounds_ingest_predicate(&candidate, simplified);
-    }
-  }
-  if (status == IXS_BOUNDS_BUILD_OK) {
-    size_t i;
-    if (seen)
-      memset(seen, 0, seen_capacity * sizeof(*seen));
-    /*
-     * Progressive simplification establishes same-batch consequences, but
-     * the original predicates remain assumptions too. Re-ingest their raw
-     * forms after closure so fact-conditioned rewrites cannot erase the full
-     * expression identities needed by later range queries.
-     */
-    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
-      if (seen &&
-          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
-        continue;
-      status = bounds_ingest_predicate(&candidate, predicates[i]);
-    }
-  }
+  if (status == IXS_BOUNDS_BUILD_OK)
+    status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
+                                            n_predicates, seen, seen_capacity);
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {

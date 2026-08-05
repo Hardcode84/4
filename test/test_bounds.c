@@ -1744,6 +1744,77 @@ static void test_public_facts_batch_preserves_affine_range(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_facts_batch_a4w4_order_independent(void) {
+  static const char target_text[] =
+      "raw0*floor(1/64*wi) + 64*raw0*Mod(floor(1/32*wi), 2) + "
+      "32*raw0*Mod(floor(1/16*wi), 2) + "
+      "16*raw0*Mod(floor(1/8*wi), 2) + 16*Mod(wi, 2) + "
+      "64*Mod(floor(1/4*wi), 2) + 32*Mod(floor(1/2*wi), 2)";
+  static const char original_one_text[] =
+      "raw0*xor(64*Mod(floor(1/32*wi), 2), "
+      "32*Mod(floor(1/16*wi), 2), 16*Mod(floor(1/8*wi), 2), "
+      "2*Mod(floor(1/128*wi), 2), 4*Mod(floor(1/256*wi), 2), "
+      "8*Mod(floor(1/512*wi), 2), 128*Mod(floor(1/1024*wi), 2), "
+      "Mod(floor(1/64*wi), 2)) + 16*Mod(wi, 2) + "
+      "64*Mod(floor(1/4*wi), 2) + 32*Mod(floor(1/2*wi), 2)";
+  static const char original_two_text[] =
+      "raw0*xor(2*Mod(floor(1/128*wi), 2), "
+      "4*Mod(floor(1/256*wi), 2), 8*Mod(floor(1/512*wi), 2), "
+      "16*Mod(floor(1/8*wi), 2), 32*Mod(floor(1/16*wi), 2), "
+      "64*Mod(floor(1/32*wi), 2), 128*Mod(floor(1/1024*wi), 2), "
+      "Mod(floor(1/64*wi), 2)) + "
+      "xor(16*Mod(wi, 2), 32*Mod(floor(1/2*wi), 2), "
+      "64*Mod(floor(1/4*wi), 2))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *target = ixs_parse_expr(ctx, target_text, sizeof(target_text) - 1u);
+  ixs_node *original_one =
+      ixs_parse_expr(ctx, original_one_text, sizeof(original_one_text) - 1u);
+  ixs_node *original_two =
+      ixs_parse_expr(ctx, original_two_text, sizeof(original_two_text) - 1u);
+  ixs_node *raw0 = ixs_sym(ctx, "raw0");
+  ixs_node *wi = ixs_sym(ctx, "wi");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *predicates[10];
+  ixs_node *reversed[10];
+  ixs_facts *forward = ixs_facts_create(ctx);
+  ixs_facts *backward = ixs_facts_create(ctx);
+  ixs_range_result range;
+  size_t i;
+
+  predicates[0] = ixs_cmp(ctx, original_one, IXS_CMP_GE, zero);
+  predicates[1] =
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -2147483632), original_one),
+              IXS_CMP_LE, zero);
+  predicates[2] = ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, 2147483648), raw0),
+                          IXS_CMP_GE, zero);
+  predicates[3] = ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -2147483647), raw0),
+                          IXS_CMP_LE, zero);
+  predicates[4] =
+      ixs_cmp(ctx, ixs_mod(ctx, raw0, ixs_int(ctx, 16)), IXS_CMP_EQ, zero);
+  predicates[5] = ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -2147483632), raw0),
+                          IXS_CMP_LE, zero);
+  predicates[6] = ixs_cmp(ctx, original_two, IXS_CMP_GE, zero);
+  predicates[7] =
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -2147483632), original_two),
+              IXS_CMP_LE, zero);
+  predicates[8] = ixs_cmp(ctx, wi, IXS_CMP_GE, zero);
+  predicates[9] =
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -255), wi), IXS_CMP_LE, zero);
+  for (i = 0; i < 10; i++)
+    reversed[i] = predicates[9 - i];
+
+  CHECK(ixs_facts_assume_preds(forward, predicates, 10));
+  CHECK(ixs_facts_assume_preds(backward, reversed, 10));
+  CHECK(ixs_range_facts(forward, target, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 2147483632 && range.upper_q == 1);
+  CHECK(ixs_range_facts(backward, target, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 2147483632 && range.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_proportional_add_edges(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "proportional_x");
@@ -2358,6 +2429,7 @@ static void test_public_facts_assume_batch(void) {
   ixs_node *invalid[2];
   ixs_node *wrong_context_predicates[2];
   ixs_node *oom_predicates[2];
+  ixs_node *contradictory_predicates[2];
   ixs_facts *batch = ixs_facts_create(ctx);
   ixs_facts *sequential = ixs_facts_create(ctx);
   ixs_facts *noop = ixs_facts_create(ctx);
@@ -2365,6 +2437,7 @@ static void test_public_facts_assume_batch(void) {
   ixs_facts *null_array = ixs_facts_create(ctx);
   ixs_facts *wrong_context = ixs_facts_create(ctx);
   ixs_facts *oom = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
   ixs_range_result batch_range;
   ixs_range_result sequential_range;
   size_t before_vars;
@@ -2387,6 +2460,11 @@ static void test_public_facts_assume_batch(void) {
   CHECK(batch_range.upper_p == sequential_range.upper_p);
   CHECK(batch_range.upper_q == sequential_range.upper_q);
   CHECK(ixs_check_facts(batch, predicates[2]) == IXS_CHECK_TRUE);
+
+  contradictory_predicates[0] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0));
+  contradictory_predicates[1] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 1));
+  CHECK(ixs_facts_assume_preds(contradictory, contradictory_predicates, 2));
+  CHECK(ixs_check_facts(contradictory, ixs_true(ctx)) == IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_facts_assume_pred(noop, predicates[0]));
   CHECK(ixs_facts_assume_preds(noop, NULL, 0));
@@ -2488,6 +2566,24 @@ static void test_public_facts_assume_batch_closure(void) {
   CHECK(ixs_facts_assume_pred(open, base_range));
   CHECK(ixs_facts_assume_preds(open, insufficient, 4));
   CHECK(ixs_check_facts(open, query) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_assume_batch_replays_until_stable(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "batch_replay_x");
+  ixs_node *y = ixs_sym(ctx, "batch_replay_y");
+  ixs_node *z = ixs_sym(ctx, "batch_replay_z");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *predicates[3] = {ixs_cmp(ctx, ixs_add(ctx, x, y), IXS_CMP_GE, zero),
+                             ixs_cmp(ctx, ixs_add(ctx, y, z), IXS_CMP_EQ, zero),
+                             ixs_cmp(ctx, z, IXS_CMP_EQ, zero)};
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_preds(facts, predicates, 3));
+  CHECK(ixs_check_facts(facts, ixs_cmp(ctx, x, IXS_CMP_GE, zero)) ==
+        IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -5114,6 +5210,7 @@ int main(void) {
   test_public_range_mod_congruence_intersection();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
+  test_public_facts_batch_a4w4_order_independent();
   test_public_range_proportional_add_edges();
   test_shifted_add_range_oom_and_contradiction();
   test_public_facts_range_and_transfer();
@@ -5127,6 +5224,7 @@ int main(void) {
   test_public_facts_assume_conjunction();
   test_public_facts_assume_batch();
   test_public_facts_assume_batch_closure();
+  test_public_facts_assume_batch_replays_until_stable();
   test_public_facts_assume_batch_mid_simplify_oom();
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
