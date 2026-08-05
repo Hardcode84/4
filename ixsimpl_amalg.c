@@ -267,7 +267,7 @@ struct ixs_difference_constraint {
   int64_t offset;
 };
 
-/* Immutable arbitrary-expression equality edge. Endpoint indices survive
+/* Immutable exact relation lhs == rhs + offset. Endpoint indices survive
  * append-only growth and order-preserving bounds forks. */
 struct ixs_equality_edge {
   ixs_node *lhs;
@@ -276,21 +276,41 @@ struct ixs_equality_edge {
   ixs_equality_edge *next_rhs;
   size_t lhs_endpoint;
   size_t rhs_endpoint;
+  int64_t offset;
 };
+
+typedef struct {
+  uint64_t magnitude;
+  bool negative;
+} bounds_wide_offset;
+
+typedef struct {
+  ixs_node *node;
+  /* Exact node - component-root offset.  Signed magnitude preserves the
+   * transient +2^63 reverse of an INT64_MIN edge. */
+  bounds_wide_offset offset;
+} bounds_equality_walk_entry;
+
+typedef enum {
+  BOUNDS_EQUALITY_WALK_NONE,
+  BOUNDS_EQUALITY_WALK_VALID,
+  BOUNDS_EQUALITY_WALK_INVALID
+} bounds_equality_walk_status;
 
 static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
                                                const char *second);
-static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs);
+static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs, int64_t offset);
 static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
                                                               ixs_node *expr);
-static bool bounds_equality_walk_record(ixs_node **nodes, size_t *count,
-                                        ixs_node *expr);
-static bool bounds_equality_edge_neighbor(size_t endpoint_index,
-                                          ixs_equality_edge *edge,
-                                          ixs_node **neighbor,
-                                          ixs_equality_edge **next);
+static bounds_equality_walk_status
+bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
+                                  bounds_equality_walk_entry *entries,
+                                  size_t *count);
+static bounds_equality_walk_status
+bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
+                                 int64_t *delta);
 
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
@@ -1403,6 +1423,141 @@ static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
   return false;
 }
 
+static ixs_node *bounds_cmp_exact_residual(ixs_bounds *b, ixs_node *cmp) {
+  ixs_node *difference;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
+
+  if (ixs_node_is_zero(cmp->u.binary.rhs))
+    return cmp->u.binary.lhs;
+  if (ixs_node_is_zero(cmp->u.binary.lhs))
+    return cmp->u.binary.rhs;
+
+  /* Failure to represent an optional residual is a missed relation, not a
+   * diagnostic on an otherwise valid comparison. */
+  diag_mark = ixs_arena_save(&b->ctx->diag);
+  saved_errors = b->ctx->errors;
+  saved_nerrors = b->ctx->nerrors;
+  saved_errors_cap = b->ctx->errors_cap;
+  difference = simp_sub(b->ctx, cmp->u.binary.lhs, cmp->u.binary.rhs);
+  if (!difference) {
+    b->oom = true;
+    return NULL;
+  }
+  if (!ixs_node_is_sentinel(difference))
+    return difference;
+  ixs_arena_restore(&b->ctx->diag, diag_mark);
+  b->ctx->errors = saved_errors;
+  b->ctx->nerrors = saved_nerrors;
+  b->ctx->errors_cap = saved_errors_cap;
+  return NULL;
+}
+
+static bool bounds_accumulate_exact_relation_term(ixs_bounds *b, ixs_node *term,
+                                                  ixs_node *coefficient,
+                                                  bool negate,
+                                                  ixs_node **side) {
+  ixs_node *scaled;
+  int64_t coefficient_p;
+  int64_t coefficient_q;
+
+  if (negate) {
+    ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
+    if (!ixs_rat_neg(coefficient_p, coefficient_q, &coefficient_p,
+                     &coefficient_q))
+      return false;
+    coefficient = ixs_node_rat(b->ctx, coefficient_p, coefficient_q);
+    if (!coefficient) {
+      b->oom = true;
+      return false;
+    }
+  }
+  scaled =
+      ixs_node_is_one(coefficient) ? term : simp_mul(b->ctx, coefficient, term);
+  if (!scaled || ixs_node_is_sentinel(scaled)) {
+    if (!scaled)
+      b->oom = true;
+    return false;
+  }
+  *side = simp_add(b->ctx, *side, scaled);
+  if (!*side || ixs_node_is_sentinel(*side)) {
+    if (!*side)
+      b->oom = true;
+    return false;
+  }
+  return true;
+}
+
+/* Split an exact comparison residual
+ *
+ *   constant + positive - negative == 0
+ *
+ * into the arbitrary-expression relation positive == negative + offset.
+ * Direct comparisons which could not be normalized earlier are subtracted
+ * here; using the relation remains guarded by independent endpoint-definedness
+ * proofs at query time. */
+static bool bounds_extract_cmp_exact_relation(ixs_bounds *b, ixs_node *cmp,
+                                              ixs_node **lhs, ixs_node **rhs,
+                                              int64_t *offset) {
+  ixs_node *difference;
+  ixs_node *positive;
+  ixs_node *negative;
+  int64_t constant;
+  int64_t constant_q;
+  uint32_t i;
+
+  if (!b || !b->ctx || !cmp || cmp->tag != IXS_CMP ||
+      cmp->u.binary.cmp_op != IXS_CMP_EQ || !lhs || !rhs || !offset)
+    return false;
+
+  difference = bounds_cmp_exact_residual(b, cmp);
+  if (!difference)
+    return false;
+
+  if (difference->tag != IXS_ADD || difference->u.add.nterms < 2u)
+    return false;
+  ixs_node_get_rat(difference->u.add.coeff, &constant, &constant_q);
+  if (constant_q != 1)
+    return false;
+
+  positive = b->ctx->node_zero;
+  negative = b->ctx->node_zero;
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    ixs_node *term = difference->u.add.terms[i].term;
+    ixs_node *coefficient = difference->u.add.terms[i].coeff;
+    ixs_node **side;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    int sign;
+
+    ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
+    sign = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1);
+    if (sign == 0)
+      continue;
+    side = sign > 0 ? &positive : &negative;
+    if (!bounds_accumulate_exact_relation_term(b, term, coefficient, sign < 0,
+                                               side))
+      return false;
+  }
+
+  if (ixs_node_is_zero(positive) || ixs_node_is_zero(negative))
+    return false;
+  if (constant == INT64_MIN) {
+    /* positive == negative + 2^63 is not int64-representable in this
+     * orientation.  Store the exact reverse relation instead. */
+    *lhs = negative;
+    *rhs = positive;
+    *offset = INT64_MIN;
+  } else {
+    *lhs = positive;
+    *rhs = negative;
+    *offset = -constant;
+  }
+  return true;
+}
+
 static bool sym_name_matches(ixs_node *n, const char *name) {
   return n && n->tag == IXS_SYM && n->u.name == name;
 }
@@ -1734,6 +1889,68 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_cache_clear(b);
 }
 
+static uint64_t bounds_int64_magnitude(int64_t value) {
+  if (value >= 0)
+    return (uint64_t)value;
+  return (uint64_t)(-(value + 1)) + 1u;
+}
+
+static bounds_wide_offset bounds_wide_offset_from_int64(int64_t value) {
+  bounds_wide_offset result;
+  result.magnitude = bounds_int64_magnitude(value);
+  result.negative = value < 0;
+  return result;
+}
+
+static bounds_wide_offset bounds_wide_offset_negate(bounds_wide_offset value) {
+  if (value.magnitude != 0)
+    value.negative = !value.negative;
+  return value;
+}
+
+static bool bounds_wide_offset_add(bounds_wide_offset a, bounds_wide_offset b,
+                                   bounds_wide_offset *result) {
+  if (a.negative == b.negative) {
+    if (a.magnitude > UINT64_MAX - b.magnitude)
+      return false;
+    result->magnitude = a.magnitude + b.magnitude;
+    result->negative = a.negative;
+  } else if (a.magnitude >= b.magnitude) {
+    result->magnitude = a.magnitude - b.magnitude;
+    result->negative = a.negative;
+  } else {
+    result->magnitude = b.magnitude - a.magnitude;
+    result->negative = b.negative;
+  }
+  if (result->magnitude == 0)
+    result->negative = false;
+  return true;
+}
+
+static bool bounds_wide_offset_equal(bounds_wide_offset a,
+                                     bounds_wide_offset b) {
+  return a.magnitude == b.magnitude && a.negative == b.negative;
+}
+
+static bool bounds_wide_offset_to_int64(bounds_wide_offset value,
+                                        int64_t *result) {
+  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
+  if (!value.negative) {
+    if (value.magnitude > (uint64_t)INT64_MAX)
+      return false;
+    *result = (int64_t)value.magnitude;
+    return true;
+  }
+  if (value.magnitude > negative_limit)
+    return false;
+  if (value.magnitude == negative_limit) {
+    *result = INT64_MIN;
+    return true;
+  }
+  *result = -(int64_t)value.magnitude;
+  return true;
+}
+
 static size_t
 bounds_equality_endpoint_slot(const size_t *index, size_t capacity,
                               const ixs_equality_endpoint *endpoints,
@@ -1845,10 +2062,12 @@ static bool bounds_get_or_create_equality_endpoint(ixs_bounds *b,
   return true;
 }
 
-static size_t bounds_equality_hash(ixs_node *lhs, ixs_node *rhs) {
+static size_t bounds_equality_hash(ixs_node *lhs, ixs_node *rhs,
+                                   int64_t offset) {
   uint64_t x = (uint64_t)bounds_expr_hash_ptr(lhs);
   x ^= (uint64_t)bounds_expr_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
        (x << 6) + (x >> 2);
+  x ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (x << 6) + (x >> 2);
   x ^= x >> 33;
   x *= UINT64_C(0xff51afd7ed558ccd);
   x ^= x >> 33;
@@ -1857,9 +2076,10 @@ static size_t bounds_equality_hash(ixs_node *lhs, ixs_node *rhs) {
 
 static size_t bounds_equality_index_slot(ixs_equality_edge *const *index,
                                          size_t capacity, ixs_node *lhs,
-                                         ixs_node *rhs) {
-  size_t slot = bounds_equality_hash(lhs, rhs) & (capacity - 1u);
-  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs))
+                                         ixs_node *rhs, int64_t offset) {
+  size_t slot = bounds_equality_hash(lhs, rhs, offset) & (capacity - 1u);
+  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs ||
+                         index[slot]->offset != offset))
     slot = (slot + 1u) & (capacity - 1u);
   return slot;
 }
@@ -1896,7 +2116,8 @@ static bool bounds_prepare_equality_index(ixs_bounds *b, size_t count,
     size_t slot;
     if (!edge)
       continue;
-    slot = bounds_equality_index_slot(index, capacity, edge->lhs, edge->rhs);
+    slot = bounds_equality_index_slot(index, capacity, edge->lhs, edge->rhs,
+                                      edge->offset);
     index[slot] = edge;
   }
   *prepared = index;
@@ -1904,22 +2125,25 @@ static bool bounds_prepare_equality_index(ixs_bounds *b, size_t count,
   return true;
 }
 
-static bool bounds_has_exact_equality(const ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs) {
+static bool bounds_has_exact_relation(const ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs, int64_t offset) {
+  int64_t reverse_offset;
   size_t slot;
   if (!b->equality_index || !b->equality_index_cap)
     return false;
   slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
-                                    lhs, rhs);
+                                    lhs, rhs, offset);
   if (b->equality_index[slot])
     return true;
+  if (!ixs_safe_neg(offset, &reverse_offset))
+    return false;
   slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
-                                    rhs, lhs);
+                                    rhs, lhs, reverse_offset);
   return b->equality_index[slot] != NULL;
 }
 
-static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs) {
+static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs, int64_t offset) {
   ixs_equality_edge **index;
   ixs_equality_edge *edge;
   size_t lhs_endpoint;
@@ -1928,7 +2152,7 @@ static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
   size_t slot;
 
   if (!b || !lhs || !rhs || lhs == rhs || b->oom ||
-      bounds_has_exact_equality(b, lhs, rhs))
+      bounds_has_exact_relation(b, lhs, rhs, offset))
     return;
   if (!bounds_get_or_create_equality_endpoint(b, lhs, &lhs_endpoint) ||
       !bounds_get_or_create_equality_endpoint(b, rhs, &rhs_endpoint) ||
@@ -1947,13 +2171,14 @@ static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
   edge->rhs = rhs;
   edge->lhs_endpoint = lhs_endpoint;
   edge->rhs_endpoint = rhs_endpoint;
+  edge->offset = offset;
   edge->next_lhs = b->equality_endpoints[lhs_endpoint].edges;
   edge->next_rhs = b->equality_endpoints[rhs_endpoint].edges;
   b->equality_endpoints[lhs_endpoint].edges = edge;
   b->equality_endpoints[rhs_endpoint].edges = edge;
   b->equality_index = index;
   b->equality_index_cap = index_capacity;
-  slot = bounds_equality_index_slot(index, index_capacity, lhs, rhs);
+  slot = bounds_equality_index_slot(index, index_capacity, lhs, rhs, offset);
   index[slot] = edge;
   b->nequalities++;
   bounds_mark_semantic_changed(b);
@@ -2535,6 +2760,7 @@ static bool bounds_add_affine_zero_cmp(ixs_bounds *b, ixs_node *lhs,
 static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   ixs_node *equality_lhs;
   ixs_node *equality_rhs;
+  int64_t equality_offset;
   ixs_node *lhs;
   ixs_node *rhs;
   ixs_cmp_op op;
@@ -2550,9 +2776,13 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   rhs = a->u.binary.rhs;
   op = a->u.binary.cmp_op;
 
-  if (op == IXS_CMP_EQ &&
-      extract_cmp_node_equality(a, &equality_lhs, &equality_rhs))
-    bounds_add_exact_equality(b, equality_lhs, equality_rhs);
+  if (op == IXS_CMP_EQ) {
+    if (bounds_extract_cmp_exact_relation(b, a, &equality_lhs, &equality_rhs,
+                                          &equality_offset))
+      bounds_add_exact_relation(b, equality_lhs, equality_rhs, equality_offset);
+    else if (extract_cmp_node_equality(a, &equality_lhs, &equality_rhs))
+      bounds_add_exact_relation(b, equality_lhs, equality_rhs, 0);
+  }
 
   if (op == IXS_CMP_NE) {
     if (ixs_node_is_zero(rhs))
@@ -3261,51 +3491,29 @@ bounds_check_integer_valued_without_equality(ixs_bounds *b, ixs_node *expr) {
 
 static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
                                                         ixs_node *expr) {
-  ixs_node *nodes[EQUALITY_WALK_LIMIT];
-  size_t head = 0;
+  bounds_equality_walk_entry entries[EQUALITY_WALK_LIMIT + 1u];
   size_t count = 0;
-  size_t visited_edges = 0;
-  size_t root_endpoint;
+  size_t i;
+  bounds_equality_walk_status status;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
 
   if (!expr)
     return IXS_CHECK_UNKNOWN;
   result = bounds_check_integer_valued_without_equality(b, expr);
-  if (!b->nequalities ||
-      !bounds_find_equality_endpoint(b, expr, &root_endpoint) ||
-      bounds_check_defined_without_equality(b, expr) != IXS_CHECK_TRUE ||
-      !bounds_equality_walk_record(nodes, &count, expr))
+  if (!b->nequalities)
     return result;
-
-  while (head < count) {
-    ixs_node *current = nodes[head++];
-    size_t endpoint_index;
-    ixs_equality_edge *edge;
+  status = bounds_collect_equality_component(b, expr, entries, &count);
+  if (status == BOUNDS_EQUALITY_WALK_NONE)
+    return result;
+  if (status == BOUNDS_EQUALITY_WALK_INVALID)
+    return IXS_CHECK_UNKNOWN;
+  for (i = 0; i < count; i++) {
     ixs_check_result current_result =
-        bounds_check_integer_valued_without_equality(b, current);
+        bounds_check_integer_valued_without_equality(b, entries[i].node);
     if (current_result != IXS_CHECK_UNKNOWN) {
       if (result != IXS_CHECK_UNKNOWN && result != current_result)
         return IXS_CHECK_UNKNOWN;
       result = current_result;
-    }
-    if (!bounds_find_equality_endpoint(b, current, &endpoint_index))
-      continue;
-    edge = b->equality_endpoints[endpoint_index].edges;
-    while (edge) {
-      ixs_equality_edge *next;
-      ixs_node *neighbor;
-      size_t old_count = count;
-      if (visited_edges++ >= EQUALITY_WALK_LIMIT ||
-          !bounds_equality_edge_neighbor(endpoint_index, edge, &neighbor,
-                                         &next))
-        return IXS_CHECK_UNKNOWN;
-      edge = next;
-      if (!bounds_equality_walk_record(nodes, &count, neighbor))
-        return IXS_CHECK_UNKNOWN;
-      if (count == old_count)
-        continue;
-      if (bounds_check_defined_without_equality(b, neighbor) != IXS_CHECK_TRUE)
-        count--;
     }
   }
   return result;
@@ -3318,12 +3526,6 @@ IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
   if (b->equality_disabled_depth != 0)
     return bounds_check_integer_valued_without_equality(b, expr);
   return bounds_project_equality_integer(b, expr);
-}
-
-static uint64_t bounds_int64_magnitude(int64_t value) {
-  if (value >= 0)
-    return (uint64_t)value;
-  return (uint64_t)(-(value + 1)) + 1u;
 }
 
 static bool bounds_int64_divisible_by_u64(int64_t value, uint64_t modulus) {
@@ -4300,88 +4502,161 @@ static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
   return result;
 }
 
-static bool bounds_equality_walk_record(ixs_node **nodes, size_t *count,
-                                        ixs_node *expr) {
+static bool bounds_equality_walk_record(bounds_equality_walk_entry *entries,
+                                        size_t *count, ixs_node *expr,
+                                        bounds_wide_offset offset,
+                                        bool *inserted) {
   size_t i;
   for (i = 0; i < *count; i++) {
-    if (nodes[i] == expr)
-      return true;
+    if (entries[i].node == expr) {
+      *inserted = false;
+      return bounds_wide_offset_equal(entries[i].offset, offset);
+    }
   }
-  if (*count >= EQUALITY_WALK_LIMIT)
+  if (*count >= EQUALITY_WALK_LIMIT + 1u)
     return false;
-  nodes[(*count)++] = expr;
+  entries[*count].node = expr;
+  entries[*count].offset = offset;
+  (*count)++;
+  *inserted = true;
   return true;
 }
 
 static bool bounds_equality_edge_neighbor(size_t endpoint_index,
                                           ixs_equality_edge *edge,
                                           ixs_node **neighbor,
+                                          bounds_wide_offset *step,
                                           ixs_equality_edge **next) {
   if (edge->lhs_endpoint == endpoint_index) {
     *neighbor = edge->rhs;
+    *step =
+        bounds_wide_offset_negate(bounds_wide_offset_from_int64(edge->offset));
     *next = edge->next_lhs;
     return true;
   }
   if (edge->rhs_endpoint == endpoint_index) {
     *neighbor = edge->lhs;
+    *step = bounds_wide_offset_from_int64(edge->offset);
     *next = edge->next_rhs;
     return true;
   }
   return false;
 }
 
-/* Walk only the equality component incident to expr. Every edge is usable
- * only after independent structural definedness proofs for both endpoints. */
-static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
-                                                  ixs_interval intrinsic) {
-  ixs_node *nodes[EQUALITY_WALK_LIMIT];
+/* Collect only the exact-relation component incident to expr.  Entries retain
+ * node - expr, and every traversed edge is guarded by independent structural
+ * definedness for the newly reached endpoint.  Count unique edges rather than
+ * their two adjacency incidences so a 192-edge relation chain stays within
+ * the documented 256-edge budget. */
+static bounds_equality_walk_status
+bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
+                                  bounds_equality_walk_entry *entries,
+                                  size_t *count) {
   size_t head = 0;
-  size_t count = 0;
+  size_t edge_count = 0;
   size_t visited_edges = 0;
   size_t root_endpoint;
-  ixs_interval result = intrinsic;
+  bool inserted;
+  bounds_wide_offset zero = {0, false};
 
-  if (!expr || !b->nequalities ||
+  *count = 0;
+  if (!b || !expr || !entries || !b->nequalities ||
       !bounds_find_equality_endpoint(b, expr, &root_endpoint) ||
-      bounds_check_defined_without_equality(b, expr) != IXS_CHECK_TRUE ||
-      !bounds_equality_walk_record(nodes, &count, expr))
-    return intrinsic;
+      bounds_check_defined_without_equality(b, expr) != IXS_CHECK_TRUE)
+    return BOUNDS_EQUALITY_WALK_NONE;
+  if (!bounds_equality_walk_record(entries, count, expr, zero, &inserted))
+    return BOUNDS_EQUALITY_WALK_INVALID;
 
-  while (head < count) {
-    ixs_node *current = nodes[head++];
+  while (head < *count) {
+    bounds_equality_walk_entry current = entries[head++];
     size_t endpoint_index;
     ixs_equality_edge *edge;
-    if (!bounds_find_equality_endpoint(b, current, &endpoint_index))
+    if (!bounds_find_equality_endpoint(b, current.node, &endpoint_index))
       continue;
     edge = b->equality_endpoints[endpoint_index].edges;
     while (edge) {
       ixs_equality_edge *next;
       ixs_node *neighbor;
-      ixs_interval peer;
-      ixs_interval merged;
-      size_t old_count = count;
-      if (visited_edges++ >= EQUALITY_WALK_LIMIT ||
-          !bounds_equality_edge_neighbor(endpoint_index, edge, &neighbor,
+      bounds_wide_offset step;
+      bounds_wide_offset neighbor_offset;
+      if (visited_edges++ >= EQUALITY_WALK_LIMIT * 2u ||
+          !bounds_equality_edge_neighbor(endpoint_index, edge, &neighbor, &step,
                                          &next))
-        return intrinsic;
+        return BOUNDS_EQUALITY_WALK_INVALID;
+      if (endpoint_index == edge->lhs_endpoint &&
+          ++edge_count > EQUALITY_WALK_LIMIT)
+        return BOUNDS_EQUALITY_WALK_INVALID;
       edge = next;
-      if (!bounds_equality_walk_record(nodes, &count, neighbor))
-        return intrinsic;
-      if (count == old_count)
+      if (bounds_check_defined_without_equality(b, neighbor) != IXS_CHECK_TRUE)
         continue;
-      if (bounds_check_defined_without_equality(b, neighbor) !=
-          IXS_CHECK_TRUE) {
-        count--;
-        continue;
-      }
-      peer = bounds_get_without_equality(b, neighbor);
-      if (!peer.valid)
-        continue;
-      merged = result.valid ? iv_intersect(result, peer) : peer;
-      if (ixs_interval_is_empty(merged))
-        return ixs_interval_unknown();
-      result = merged;
+      if (!bounds_wide_offset_add(current.offset, step, &neighbor_offset) ||
+          !bounds_equality_walk_record(entries, count, neighbor,
+                                       neighbor_offset, &inserted))
+        return BOUNDS_EQUALITY_WALK_INVALID;
     }
+  }
+  return BOUNDS_EQUALITY_WALK_VALID;
+}
+
+static bounds_equality_walk_status
+bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
+                                 int64_t *delta) {
+  bounds_equality_walk_entry entries[EQUALITY_WALK_LIMIT + 1u];
+  bounds_equality_walk_status status;
+  size_t count = 0;
+  size_t i;
+  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction)
+    return BOUNDS_EQUALITY_WALK_NONE;
+  if (lhs == rhs) {
+    *delta = 0;
+    return BOUNDS_EQUALITY_WALK_VALID;
+  }
+  status = bounds_collect_equality_component(b, rhs, entries, &count);
+  if (status != BOUNDS_EQUALITY_WALK_VALID)
+    return status;
+  for (i = 0; i < count; i++) {
+    if (entries[i].node != lhs)
+      continue;
+    if (!bounds_wide_offset_to_int64(entries[i].offset, delta))
+      return BOUNDS_EQUALITY_WALK_INVALID;
+    return BOUNDS_EQUALITY_WALK_VALID;
+  }
+  return BOUNDS_EQUALITY_WALK_NONE;
+}
+
+/* Project peer ranges back through node == expr + offset. */
+static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
+                                                  ixs_interval intrinsic) {
+  bounds_equality_walk_entry entries[EQUALITY_WALK_LIMIT + 1u];
+  bounds_equality_walk_status status;
+  size_t count = 0;
+  size_t i;
+  ixs_interval result = intrinsic;
+
+  status = bounds_collect_equality_component(b, expr, entries, &count);
+  if (status == BOUNDS_EQUALITY_WALK_NONE)
+    return intrinsic;
+  if (status == BOUNDS_EQUALITY_WALK_INVALID)
+    return ixs_interval_unknown();
+  for (i = 0; i < count; i++) {
+    ixs_interval peer;
+    ixs_interval shifted;
+    ixs_interval merged;
+    int64_t delta;
+    int64_t negative_delta;
+    if (!bounds_wide_offset_to_int64(entries[i].offset, &delta) ||
+        !ixs_safe_neg(delta, &negative_delta))
+      continue;
+    peer = bounds_get_without_equality(b, entries[i].node);
+    if (!peer.valid)
+      continue;
+    shifted = iv_add(peer, ixs_interval_exact(negative_delta, 1));
+    if (!shifted.valid)
+      continue;
+    merged = result.valid ? iv_intersect(result, shifted) : shifted;
+    if (ixs_interval_is_empty(merged))
+      return ixs_interval_unknown();
+    result = merged;
   }
   return result;
 }
@@ -6371,7 +6646,7 @@ static bool bounds_transfer_substituted_equalities(
     rhs = simp_subs_multi(ctx, edge->rhs, nsubs, targets, replacements);
     if (!lhs || !rhs || ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
       return false;
-    bounds_add_exact_equality(dst, lhs, rhs);
+    bounds_add_exact_relation(dst, lhs, rhs, edge->offset);
     if (dst->oom)
       return false;
   }
@@ -8116,6 +8391,7 @@ static bool algebra_affine_extract(ixs_ctx *ctx, ixs_node *expr,
 bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta) {
   algebra_query_scope scope;
+  bounds_equality_walk_status relation_status;
   ixs_node *nodes[2] = {lhs, rhs};
   ixs_node *difference;
   int64_t result = 0;
@@ -8128,6 +8404,14 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   algebra_query_start(&scope);
   if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
       ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
+    goto cleanup;
+  relation_status =
+      bounds_exact_relation_difference(&facts->bounds, lhs, rhs, &result);
+  if (relation_status == BOUNDS_EQUALITY_WALK_VALID) {
+    ok = true;
+    goto cleanup;
+  }
+  if (relation_status == BOUNDS_EQUALITY_WALK_INVALID)
     goto cleanup;
   difference = simp_sub(scope.ctx, lhs, rhs);
   if (!difference || ixs_node_is_sentinel(difference))

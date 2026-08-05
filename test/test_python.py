@@ -2549,6 +2549,12 @@ def test_fact_backed_exact_equality_relations() -> None:
     assert ctx.constant_difference(x, z, substituted) == 4
     assert ctx.equivalent(x < 9, z < 5, substituted) is True
 
+    modulus = 2**32
+    unsigned_x, unsigned_y, unsigned_z = x % modulus, y % modulus, z % modulus
+    composite = ctx.facts()
+    composite.assume_many([ctx.eq(unsigned_y, unsigned_x + 1), ctx.eq(unsigned_z, unsigned_y + 1)])
+    assert ctx.constant_difference(unsigned_z, unsigned_x, composite) == 2
+
     one_sided = ctx.facts()
     one_sided.assume(x <= y + 4)
     assert ctx.constant_difference(x, y, one_sided) is None
@@ -2628,6 +2634,19 @@ def test_fact_backed_exact_equality_projects_range_and_integrality() -> None:
     range_conflict.assume(ctx.eq(s, s % 8))
     range_conflict.assume(ctx.eq(s, 16))
     assert ctx.range(s, facts=range_conflict) is None
+
+    workitem = ctx.sym("equality_projection_workitem")
+    body = ctx.sym("equality_projection_body")
+    scaled_residual = ctx.facts()
+    scaled_residual.assume_many(
+        [
+            workitem >= 0,
+            workitem <= 2**31 - 1,
+            ctx.eq(body - 128 * (workitem % 16), 0),
+        ]
+    )
+    assert ctx.range(body, facts=scaled_residual) == (0, 1920)
+    assert ctx.check_predicate(body <= 2**32 - 1, scaled_residual) is True
 
 
 def test_fact_backed_algebra_helpers() -> None:

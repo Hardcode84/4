@@ -1977,6 +1977,92 @@ static void test_public_exact_equality_relations(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_residual_relation_chain_and_boundaries(void) {
+  enum { CHAIN_LENGTH = 192 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *two32 = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *nodes[CHAIN_LENGTH + 1];
+  ixs_node *predicates[CHAIN_LENGTH];
+  ixs_facts *chain;
+  ixs_node *appended_symbol;
+  ixs_node *appended;
+  ixs_node *appended_relation;
+  ixs_node *base;
+  ixs_node *middle;
+  ixs_node *tail;
+  ixs_node *boundary_predicates[2];
+  ixs_facts *boundary;
+  ixs_node *wide_negative;
+  ixs_node *wide_positive;
+  ixs_node *wide_tail;
+  ixs_node *wide_difference;
+  ixs_node *wide_exact_zero;
+  ixs_node *wide_predicates[2];
+  ixs_facts *wide;
+  int64_t delta;
+  unsigned i;
+
+  for (i = 0; i <= CHAIN_LENGTH; i++) {
+    char name[48];
+    snprintf(name, sizeof(name), "exact_residual_chain_%u", i);
+    nodes[i] = ixs_mod(ctx, ixs_sym(ctx, name), two32);
+    if (i != 0)
+      predicates[i - 1u] =
+          ixs_cmp(ctx, nodes[i], IXS_CMP_EQ, ixs_add(ctx, nodes[i - 1u], one));
+  }
+  chain = ixs_facts_create(ctx);
+  CHECK(ixs_facts_assume_preds(chain, predicates, CHAIN_LENGTH));
+  for (i = 1; i <= CHAIN_LENGTH; i++) {
+    CHECK(ixs_constant_difference_facts(chain, nodes[i], nodes[0], &delta));
+    CHECK(delta == (int64_t)i);
+  }
+
+  appended_symbol = ixs_sym(ctx, "exact_residual_chain_appended");
+  appended = ixs_mod(ctx, appended_symbol, two32);
+  CHECK(!ixs_constant_difference_facts(chain, appended, nodes[0], &delta));
+  appended_relation = ixs_cmp(ctx, appended, IXS_CMP_EQ,
+                              ixs_add(ctx, nodes[CHAIN_LENGTH], one));
+  CHECK(ixs_facts_assume_pred(chain, appended_relation));
+  CHECK(ixs_constant_difference_facts(chain, appended, nodes[0], &delta));
+  CHECK(delta == CHAIN_LENGTH + 1);
+
+  base = ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_boundary_base"), two));
+  middle =
+      ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_boundary_middle"), two));
+  tail = ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_boundary_tail"), two));
+  boundary_predicates[0] =
+      ixs_cmp(ctx, middle, IXS_CMP_EQ,
+              ixs_add(ctx, base, ixs_int(ctx, INT64_MIN + INT64_C(1))));
+  boundary_predicates[1] =
+      ixs_cmp(ctx, tail, IXS_CMP_EQ, ixs_add(ctx, middle, ixs_int(ctx, -1)));
+  boundary = ixs_facts_create(ctx);
+  CHECK(ixs_facts_assume_preds(boundary, boundary_predicates, 2));
+  CHECK(!ixs_constant_difference_facts(boundary, base, tail, &delta));
+  CHECK(ixs_constant_difference_facts(boundary, tail, base, &delta));
+  CHECK(delta == INT64_MIN);
+
+  wide_negative =
+      ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_wide_negative"), two));
+  wide_positive =
+      ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_wide_positive"), two));
+  wide_tail =
+      ixs_floor(ctx, ixs_div(ctx, ixs_sym(ctx, "exact_wide_tail"), two));
+  wide_difference = ixs_sub(ctx, wide_positive, wide_negative);
+  wide_exact_zero = ixs_add(ctx, wide_difference, ixs_int(ctx, INT64_MIN));
+  wide_predicates[0] =
+      ixs_cmp(ctx, wide_exact_zero, IXS_CMP_EQ, ixs_int(ctx, 0));
+  wide_predicates[1] = ixs_cmp(ctx, wide_tail, IXS_CMP_EQ,
+                               ixs_add(ctx, wide_positive, ixs_int(ctx, -1)));
+  wide = ixs_facts_create(ctx);
+  CHECK(ixs_facts_assume_preds(wide, wide_predicates, 2));
+  CHECK(ixs_constant_difference_facts(wide, wide_tail, wide_negative, &delta));
+  CHECK(delta == INT64_MAX);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void check_public_integer_range(ixs_facts *facts, ixs_node *expr,
                                        int64_t lower, int64_t upper) {
   ixs_range_result range;
@@ -2099,6 +2185,33 @@ static void test_public_exact_equality_range_projection(void) {
   CHECK(ixs_facts_assume_pred(range_conflict,
                               ixs_cmp(ctx, s, IXS_CMP_EQ, sixteen)));
   CHECK(!ixs_range_facts(range_conflict, s, &range));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_exact_scaled_residual_range_projection(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *workitem = ixs_sym(ctx, "exact_scaled_workitem");
+  ixs_node *body = ixs_sym(ctx, "exact_scaled_body");
+  ixs_node *scaled =
+      ixs_mul(ctx, ixs_int(ctx, 128), ixs_mod(ctx, workitem, ixs_int(ctx, 16)));
+  ixs_node *predicates[3] = {
+      ixs_cmp(ctx, workitem, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -INT64_C(2147483647)), workitem),
+              IXS_CMP_LE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_sub(ctx, body, scaled), IXS_CMP_EQ, ixs_int(ctx, 0))};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  CHECK(ixs_facts_assume_preds(facts, predicates, 3));
+  CHECK(ixs_range_facts(facts, body, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 1920 && range.upper_q == 1);
+  CHECK(ixs_check_facts(facts, ixs_cmp(ctx, body, IXS_CMP_GE,
+                                       ixs_int(ctx, 0))) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, ixs_cmp(ctx, body, IXS_CMP_LE,
+                                       ixs_int(ctx, INT64_C(4294967295)))) ==
+        IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -6131,7 +6244,9 @@ int main(void) {
   test_public_range_congruence_tightens_endpoints();
   test_public_range_difference_constraint_propagation();
   test_public_exact_equality_relations();
+  test_public_exact_residual_relation_chain_and_boundaries();
   test_public_exact_equality_range_projection();
+  test_public_exact_scaled_residual_range_projection();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
   test_public_facts_batch_a4w4_order_independent();

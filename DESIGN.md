@@ -1224,19 +1224,23 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   remain bounded independently of the total fact state. A one-sided edge is
   never treated as equality; inconsistent, over-budget, or unrepresentable
   paths fail conservatively.
-- **Arbitrary-expression equality classes**: exact comparison facts whose
-  canonical form is `a - b == 0` retain a bidirectional edge between the
-  hash-consed expression nodes `a` and `b`; neither endpoint has to be a
-  symbol. An open-addressed endpoint index provides expected O(1) adjacency
-  lookup, so range and integrality queries visit only the incident equality
-  component, never the complete fact state. A query inspects at most 256 edge
-  incidences and nests through at most 32 equality-aware range queries.
-  Ranges from independently defined members are intersected and integrality
-  is transferred with conservative tri-state agreement. This projects the
-  intrinsic `[0, 2^32-1]` range of `Mod(s, 2^32)` through the exact fact
-  `s == Mod(s, 2^32)`, including across transitive classes and regardless of
-  fact insertion order. Conflicting, over-budget, or unsupported classes
-  return unknown.
+- **Arbitrary-expression exact relations**: an exact comparison residual
+  `c + positive - negative == 0` retains the integer-offset relation
+  `positive == negative - c`; either endpoint may be any hash-consed
+  expression, including a scaled modulo or a fixed-width wrapper. An
+  open-addressed endpoint index provides expected O(1) adjacency lookup, so
+  range, integrality, and constant-difference queries visit only the incident
+  relation component, never the complete fact state. A shared walk inspects
+  at most 256 unique edges. Its signed-magnitude accumulator preserves the
+  transient `+2^63` reverse of an `INT64_MIN` edge when a later edge brings the
+  queried result back into `int64_t` range. Ranges from independently defined
+  members are shifted back to the query root and intersected; integrality is
+  transferred with conservative tri-state agreement. This projects the
+  intrinsic `[0, 2^32-1]` range of `Mod(s, 2^32)` through exact residuals such
+  as `body - 128*Mod(s, 16) == 0`, and composes relations such as
+  `u1 == u0 + 1, u2 == u1 + 1` across arbitrary expressions. Every endpoint
+  still requires an independent structural definedness proof. Conflicting,
+  over-budget, unsupported, or unrepresentable results return unknown.
 
   Equality never proves an endpoint defined. Before traversing an edge, both
   endpoints must pass independent structural definedness checks with equality
