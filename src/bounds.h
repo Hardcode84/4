@@ -28,8 +28,11 @@ typedef struct {
   ixs_pow2_fact pow2;
 } ixs_bitfacts;
 
+typedef struct ixs_difference_constraint ixs_difference_constraint;
+
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
+  ixs_difference_constraint *difference_edges;
   ixs_interval iv;
   int64_t modulus;   /* 0 = no info, >0 = sym ≡ remainder (mod modulus) */
   int64_t remainder; /* in [0, modulus) when modulus > 0                */
@@ -56,6 +59,9 @@ typedef struct {
   size_t nexprs;
   size_t expr_cap;
   size_t expr_index_cap;
+  ixs_difference_constraint **difference_index;
+  size_t ndifferences;
+  size_t difference_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;

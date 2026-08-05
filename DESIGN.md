@@ -1205,6 +1205,13 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   `128+64*u+w` and `128+2*(64*u+w)` without requiring independent ranges for
   `u` and `w`. Rational overflow or an unrepresentable inverse conservatively
   skips the proportional alias.
+- **Unit-difference constraints**: finite range facts on normalized integer
+  expressions `c + x - y` also retain the relation `x <= y + k`. A finite
+  upper bound flows forward through the relation, and a finite lower bound
+  flows backward. Exact edges are hash-indexed and linked only to their two
+  symbols. Each mutation performs at most 256 incident-edge relaxations, so
+  transitive chains remain bounded independently of the total fact state.
+  Unrepresentable endpoint arithmetic is skipped conservatively.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
@@ -1641,13 +1648,14 @@ Propagation: `[1/128, 1/128] * [0, 127] * iv_recip([1, +inf))`
 = `[0, 127/128] * [0, 1]` = `[0, 127/128]`.
 Then `floor([0, 127/128]) = [0, 0]`, collapsing to constant `0`.
 
-**Limitation**: general interval propagation remains non-relational. For
-`floor(x/K)` with `x < K-1, K >= 2`, the bounds engine sees
-`x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]` independently, so `x/K`
-has an unbounded interval. Targeted rules can query normalized comparisons for
-specific proofs such as `0 <= x < K` in `Mod(x,K)` and same-bucket floor
-differences; arbitrary cross-variable interval projection remains out of
-scope.
+**Limitation**: general interval propagation remains non-relational except for
+the bounded unit-difference constraints described above. For `floor(x/K)`
+with `x < K-1, K >= 2`, the bounds engine sees `x in [0, INT64_MAX]` and
+`K in [2, INT64_MAX]` independently, so `x/K` has an unbounded interval.
+Targeted rules can query normalized comparisons for specific proofs such as
+`0 <= x < K` in `Mod(x,K)` and same-bucket floor differences; arbitrary
+cross-variable interval projection, scaled difference constraints, and
+unanchored negative-cycle detection remain out of scope.
 
 ## Error Model
 

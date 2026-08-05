@@ -1704,6 +1704,129 @@ static void test_public_range_congruence_tightens_endpoints(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_difference_constraint_propagation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *iv = ixs_sym(ctx, "difference_loop_iv");
+  ixs_node *trip = ixs_sym(ctx, "difference_loop_trip");
+  ixs_node *upper_x = ixs_sym(ctx, "difference_upper_x");
+  ixs_node *upper_y = ixs_sym(ctx, "difference_upper_y");
+  ixs_node *upper_z = ixs_sym(ctx, "difference_upper_z");
+  ixs_node *lower_x = ixs_sym(ctx, "difference_lower_x");
+  ixs_node *lower_y = ixs_sym(ctx, "difference_lower_y");
+  ixs_node *lower_z = ixs_sym(ctx, "difference_lower_z");
+  ixs_node *unknown_x = ixs_sym(ctx, "difference_unknown_x");
+  ixs_node *unknown_y = ixs_sym(ctx, "difference_unknown_y");
+  ixs_node *scaled_x = ixs_sym(ctx, "difference_scaled_x");
+  ixs_node *scaled_y = ixs_sym(ctx, "difference_scaled_y");
+  ixs_node *overflow_x = ixs_sym(ctx, "difference_overflow_x");
+  ixs_node *overflow_y = ixs_sym(ctx, "difference_overflow_y");
+  ixs_node *nested_i = ixs_sym(ctx, "difference_nested_i");
+  ixs_node *nested_raw1 = ixs_sym(ctx, "difference_nested_raw1");
+  ixs_node *nested_expr = ixs_mul(ctx, ixs_int(ctx, 32), nested_i);
+  ixs_facts *loop = ixs_facts_create(ctx);
+  ixs_facts *upper = ixs_facts_create(ctx);
+  ixs_facts *lower = ixs_facts_create(ctx);
+  ixs_facts *unknown = ixs_facts_create(ctx);
+  ixs_facts *scaled = ixs_facts_create(ctx);
+  ixs_facts *overflow = ixs_facts_create(ctx);
+  ixs_facts *nested = ixs_facts_create(ctx);
+  ixs_range_result input = {0};
+  ixs_range_result range;
+
+  CHECK(ixs_facts_assume_pred(
+      loop, ixs_cmp(ctx, ixs_sub(ctx, iv, trip), IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(loop,
+                              ixs_cmp(ctx, iv, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      loop, ixs_cmp(ctx, trip, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      loop, ixs_cmp(ctx, trip, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_range_facts(loop, iv, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == INT64_C(2147483646) &&
+        range.upper_q == 1);
+  CHECK(ixs_check_facts(loop, ixs_cmp(ctx, iv, IXS_CMP_LE,
+                                      ixs_int(ctx, INT64_C(2147483646)))) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_i, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_i, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_raw1, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_raw1, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_raw1, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_raw1, IXS_CMP_LE, ixs_int(ctx, 31))));
+  CHECK(ixs_facts_assume_pred(
+      nested, ixs_cmp(ctx, nested_i, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(nested,
+                              ixs_cmp(ctx, ixs_sub(ctx, nested_i, nested_raw1),
+                                      IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_check_defined_facts(nested, nested_expr) == IXS_CHECK_TRUE);
+  CHECK(ixs_range_facts(nested, nested_expr, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 960 && range.upper_q == 1);
+  CHECK(ixs_check_facts(nested, ixs_cmp(ctx, nested_expr, IXS_CMP_LE,
+                                        ixs_int(ctx, INT64_C(4294967295)))) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(
+      ixs_facts_assume_pred(upper, ixs_cmp(ctx, ixs_sub(ctx, upper_x, upper_y),
+                                           IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(
+      ixs_facts_assume_pred(upper, ixs_cmp(ctx, ixs_sub(ctx, upper_y, upper_z),
+                                           IXS_CMP_LE, ixs_int(ctx, 3))));
+  input.has_upper = true;
+  input.upper_p = 100;
+  input.upper_q = 1;
+  CHECK(ixs_facts_assume_range(upper, upper_z, &input));
+  CHECK(ixs_range_facts(upper, upper_x, &range));
+  CHECK(range.has_upper && range.upper_p == 102 && range.upper_q == 1);
+
+  CHECK(
+      ixs_facts_assume_pred(lower, ixs_cmp(ctx, ixs_sub(ctx, lower_x, lower_y),
+                                           IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(
+      ixs_facts_assume_pred(lower, ixs_cmp(ctx, ixs_sub(ctx, lower_y, lower_z),
+                                           IXS_CMP_GE, ixs_int(ctx, 3))));
+  input.has_upper = false;
+  input.has_lower = true;
+  input.lower_p = -100;
+  input.lower_q = 1;
+  CHECK(ixs_facts_assume_range(lower, lower_z, &input));
+  CHECK(ixs_range_facts(lower, lower_x, &range));
+  CHECK(range.has_lower && range.lower_p == -96 && range.lower_q == 1);
+
+  CHECK(ixs_facts_assume_pred(unknown,
+                              ixs_cmp(ctx, ixs_sub(ctx, unknown_x, unknown_y),
+                                      IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      unknown, ixs_cmp(ctx, unknown_y, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(!ixs_range_facts(unknown, unknown_x, &range) || !range.has_upper);
+
+  CHECK(ixs_facts_assume_pred(
+      scaled,
+      ixs_cmp(ctx,
+              ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 2), scaled_x), scaled_y),
+              IXS_CMP_LT, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      scaled, ixs_cmp(ctx, scaled_y, IXS_CMP_LE, ixs_int(ctx, 100))));
+  CHECK(!ixs_range_facts(scaled, scaled_x, &range) || !range.has_upper);
+
+  CHECK(ixs_facts_assume_pred(overflow,
+                              ixs_cmp(ctx, ixs_sub(ctx, overflow_x, overflow_y),
+                                      IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(
+      overflow, ixs_cmp(ctx, overflow_y, IXS_CMP_LE, ixs_int(ctx, INT64_MAX))));
+  CHECK(!ixs_range_facts(overflow, overflow_x, &range) || !range.has_upper);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -2693,6 +2816,9 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
   CHECK(failed->bounds.expr_cap == before.expr_cap);
   CHECK(failed->bounds.expr_index == before.expr_index);
   CHECK(failed->bounds.expr_index_cap == before.expr_index_cap);
+  CHECK(failed->bounds.difference_index == before.difference_index);
+  CHECK(failed->bounds.ndifferences == before.ndifferences);
+  CHECK(failed->bounds.difference_index_cap == before.difference_index_cap);
   CHECK(failed->bounds.nonzero == before.nonzero);
   CHECK(failed->bounds.nnonzero == before.nnonzero);
   CHECK(failed->bounds.nonzero_cap == before.nonzero_cap);
@@ -2712,6 +2838,7 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
   CHECK(failed->bounds.vars[0].bits.known_zero == before_var.bits.known_zero);
   CHECK(failed->bounds.vars[0].bits.known_one == before_var.bits.known_one);
   CHECK(failed->bounds.vars[0].bits.pow2 == before_var.bits.pow2);
+  CHECK(failed->bounds.vars[0].difference_edges == before_var.difference_edges);
 
   ixs_ctx_destroy(ctx);
 }
@@ -5338,6 +5465,7 @@ int main(void) {
   test_public_range_mod_requires_positive_divisor();
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
+  test_public_range_difference_constraint_propagation();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
   test_public_facts_batch_a4w4_order_independent();

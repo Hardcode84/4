@@ -9,6 +9,7 @@
 
 #define BOUNDS_INIT_CAP 16
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
+#define BOUNDS_DIFFERENCE_INDEX_INIT_CAP 8u
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
@@ -17,6 +18,23 @@
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
 #define MOD_RANGE_ENUM_LIMIT 1024u
+#define DIFFERENCE_RELAX_LIMIT 256u
+
+/* An immutable lhs <= rhs + offset edge. Variable indices survive append-only
+ * growth and order-preserving forks, which safely share published edge nodes.
+ */
+struct ixs_difference_constraint {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  ixs_difference_constraint *next_lhs;
+  ixs_difference_constraint *next_rhs;
+  size_t lhs_var;
+  size_t rhs_var;
+  int64_t offset;
+};
+
+static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
+                                               const char *second);
 
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
@@ -100,6 +118,9 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->exprs = NULL;
   b->expr_index = NULL;
   b->expr_index_cap = 0;
+  b->difference_index = NULL;
+  b->ndifferences = 0;
+  b->difference_index_cap = 0;
   b->nonzero = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
@@ -146,6 +167,9 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->exprs = NULL;
   dst->expr_index = NULL;
   dst->expr_index_cap = src->nexprs ? src->expr_index_cap : 0;
+  dst->difference_index = NULL;
+  dst->ndifferences = src->ndifferences;
+  dst->difference_index_cap = src->difference_index_cap;
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
@@ -174,6 +198,19 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
       return false;
     memcpy(dst->expr_index, src->expr_index,
            src->expr_index_cap * sizeof(*src->expr_index));
+  }
+  if (src->difference_index_cap) {
+    if (!src->difference_index ||
+        src->difference_index_cap > SIZE_MAX / sizeof(*dst->difference_index))
+      return false;
+    dst->difference_index = ixs_arena_alloc(dst->scratch,
+                                            src->difference_index_cap *
+                                                sizeof(*dst->difference_index),
+                                            sizeof(void *));
+    if (!dst->difference_index)
+      return false;
+    memcpy(dst->difference_index, src->difference_index,
+           src->difference_index_cap * sizeof(*src->difference_index));
   }
   if (src->nnonzero) {
     dst->nonzero = ixs_arena_alloc(
@@ -218,6 +255,7 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   bounds_empty_cache_invalidate(b);
   v = &b->vars[b->nvars++];
   v->name = name;
+  v->difference_edges = NULL;
   v->iv.valid = true;
   v->iv.lo_inf = false;
   v->iv.hi_inf = false;
@@ -484,6 +522,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   ixs_var_bound *v;
   int64_t g, new_mod, old_mod, step, m_div_g, difference;
   uint64_t inverse, k, merged;
+  bool changed = false;
   if (m <= 0)
     return;
   bounds_empty_cache_invalidate(b);
@@ -497,6 +536,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
     v->remainder = rem;
     bounds_mark_semantic_changed(b);
     apply_congruence_known_bits(b, v);
+    bounds_propagate_difference_bounds(b, name, NULL);
     return;
   }
   old_mod = v->modulus;
@@ -530,8 +570,11 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
     v->modulus = new_mod;
     v->remainder = rem;
     bounds_mark_semantic_changed(b);
+    changed = true;
   }
   apply_congruence_known_bits(b, v);
+  if (changed)
+    bounds_propagate_difference_bounds(b, name, NULL);
 }
 
 /* Recognize Mod(sym, M) == R as a modular congruence.
@@ -858,6 +901,7 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
                                 int64_t cp, int64_t cq) {
   ixs_var_bound *v = get_or_create_var(b, name);
   ixs_interval old;
+  bool changed;
   if (!v)
     return;
   old = v->iv;
@@ -911,9 +955,12 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
   case IXS_CMP_NE:
     break;
   }
-  if (!bounds_intervals_equal(old, v->iv))
+  changed = !bounds_intervals_equal(old, v->iv);
+  if (changed)
     bounds_mark_semantic_changed(b);
   refine_var_bit_consistency(b, v);
+  if (changed)
+    bounds_propagate_difference_bounds(b, name, NULL);
 }
 
 static bool node_get_int_const(ixs_node *n, int64_t *out) {
@@ -1362,6 +1409,284 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_cache_clear(b);
 }
 
+static size_t bounds_difference_hash(ixs_node *lhs, ixs_node *rhs,
+                                     int64_t offset) {
+  uint64_t x = (uint64_t)bounds_expr_hash_ptr(lhs);
+  x ^= (uint64_t)bounds_expr_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
+       (x << 6) + (x >> 2);
+  x ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (x << 6) + (x >> 2);
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+/* Exact-edge lookup is expected O(1); growth rehashes at 75% load. */
+static size_t
+bounds_difference_index_slot(ixs_difference_constraint *const *index,
+                             size_t capacity, ixs_node *lhs, ixs_node *rhs,
+                             int64_t offset) {
+  size_t slot = bounds_difference_hash(lhs, rhs, offset) & (capacity - 1u);
+  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs ||
+                         index[slot]->offset != offset))
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static bool
+bounds_prepare_difference_index(ixs_bounds *b, size_t count,
+                                ixs_difference_constraint ***prepared,
+                                size_t *prepared_capacity) {
+  size_t capacity = b->difference_index_cap;
+  ixs_difference_constraint **index;
+  size_t i;
+
+  if (capacity && count <= capacity - capacity / 4u) {
+    *prepared = b->difference_index;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = BOUNDS_DIFFERENCE_INDEX_INIT_CAP;
+  while (count > capacity - capacity / 4u) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (capacity > SIZE_MAX / sizeof(*index))
+    return false;
+  index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  if (!index)
+    return false;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->difference_index_cap; i++) {
+    ixs_difference_constraint *edge = b->difference_index[i];
+    size_t slot;
+    if (!edge)
+      continue;
+    slot = bounds_difference_index_slot(index, capacity, edge->lhs, edge->rhs,
+                                        edge->offset);
+    index[slot] = edge;
+  }
+  *prepared = index;
+  *prepared_capacity = capacity;
+  return true;
+}
+
+static bool bounds_refine_var_upper(ixs_bounds *b, ixs_var_bound *v,
+                                    int64_t upper) {
+  if (!v ||
+      (!v->iv.hi_inf && ixs_rat_cmp(upper, 1, v->iv.hi_p, v->iv.hi_q) >= 0))
+    return false;
+  v->iv.hi_p = upper;
+  v->iv.hi_q = 1;
+  v->iv.hi_inf = false;
+  bounds_mark_semantic_changed(b);
+  bounds_cache_clear(b);
+  refine_var_bit_consistency(b, v);
+  return true;
+}
+
+static bool bounds_refine_var_lower(ixs_bounds *b, ixs_var_bound *v,
+                                    int64_t lower) {
+  if (!v ||
+      (!v->iv.lo_inf && ixs_rat_cmp(lower, 1, v->iv.lo_p, v->iv.lo_q) <= 0))
+    return false;
+  v->iv.lo_p = lower;
+  v->iv.lo_q = 1;
+  v->iv.lo_inf = false;
+  bounds_mark_semantic_changed(b);
+  bounds_cache_clear(b);
+  refine_var_bit_consistency(b, v);
+  return true;
+}
+
+static ixs_interval bounds_get_difference_symbol(ixs_bounds *b,
+                                                 ixs_var_bound *var,
+                                                 ixs_node *symbol) {
+  ixs_interval iv = var->iv;
+  if (b->nexprs) {
+    ixs_node *canon;
+    iv = iv_intersect(iv, bounds_get_expr_overrides(b, symbol));
+    canon = bounds_canonical_expr(b, symbol);
+    if (canon && canon != symbol)
+      iv = iv_intersect(iv, bounds_get_expr_overrides(b, canon));
+  }
+  if (var->modulus > 0)
+    iv = interval_intersect_congruence(iv, var->modulus, var->remainder);
+  return iv;
+}
+
+static void bounds_relax_difference_edge(ixs_bounds *b,
+                                         ixs_difference_constraint *edge,
+                                         size_t *queue, size_t *tail) {
+  ixs_var_bound *lhs_var = &b->vars[edge->lhs_var];
+  ixs_var_bound *rhs_var = &b->vars[edge->rhs_var];
+  ixs_interval lhs_iv, rhs_iv;
+  int64_t endpoint, derived;
+
+  rhs_iv = bounds_get_difference_symbol(b, rhs_var, edge->rhs);
+  if (rhs_iv.valid && !rhs_iv.hi_inf) {
+    endpoint = ixs_rat_floor(rhs_iv.hi_p, rhs_iv.hi_q);
+    if (ixs_safe_add(endpoint, edge->offset, &derived) &&
+        bounds_refine_var_upper(b, lhs_var, derived) &&
+        *tail < DIFFERENCE_RELAX_LIMIT)
+      queue[(*tail)++] = edge->lhs_var;
+  }
+
+  lhs_iv = bounds_get_difference_symbol(b, lhs_var, edge->lhs);
+  if (lhs_iv.valid && !lhs_iv.lo_inf) {
+    endpoint = ixs_rat_ceil(lhs_iv.lo_p, lhs_iv.lo_q);
+    if (ixs_safe_sub(endpoint, edge->offset, &derived) &&
+        bounds_refine_var_lower(b, rhs_var, derived) &&
+        *tail < DIFFERENCE_RELAX_LIMIT)
+      queue[(*tail)++] = edge->rhs_var;
+  }
+}
+
+static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
+                                               const char *second) {
+  size_t queue[DIFFERENCE_RELAX_LIMIT];
+  ixs_var_bound *first_var;
+  ixs_var_bound *second_var;
+  size_t head = 0;
+  size_t tail = 0;
+  size_t visited = 0;
+
+  if (!b || b->oom || !first)
+    return;
+  first_var = find_var(b, first);
+  if (!first_var)
+    return;
+  queue[tail++] = (size_t)(first_var - b->vars);
+  second_var = second && second != first ? find_var(b, second) : NULL;
+  if (second_var)
+    queue[tail++] = (size_t)(second_var - b->vars);
+
+  /* The worklist follows only incident edges and caps both queued variables
+   * and edge visits, independent of the total bounds state. */
+  while (head < tail && visited < DIFFERENCE_RELAX_LIMIT && !b->oom &&
+         !b->contradiction) {
+    size_t var_index = queue[head++];
+    ixs_difference_constraint *edge = b->vars[var_index].difference_edges;
+    while (edge && visited < DIFFERENCE_RELAX_LIMIT) {
+      ixs_difference_constraint *next;
+      if (edge->lhs_var == var_index)
+        next = edge->next_lhs;
+      else if (edge->rhs_var == var_index)
+        next = edge->next_rhs;
+      else
+        break;
+      visited++;
+      bounds_relax_difference_edge(b, edge, queue, &tail);
+      edge = next;
+    }
+  }
+}
+
+static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
+                                             ixs_node *rhs, int64_t offset) {
+  ixs_difference_constraint **index;
+  ixs_difference_constraint *edge;
+  ixs_var_bound *lhs_var;
+  ixs_var_bound *rhs_var;
+  size_t index_capacity;
+  size_t slot;
+
+  if (!b || !lhs || !rhs || lhs == rhs || lhs->tag != IXS_SYM ||
+      rhs->tag != IXS_SYM || b->oom)
+    return;
+  if (b->difference_index_cap) {
+    slot = bounds_difference_index_slot(
+        b->difference_index, b->difference_index_cap, lhs, rhs, offset);
+    if (b->difference_index[slot])
+      return;
+  }
+  lhs_var = get_or_create_var(b, lhs->u.name);
+  rhs_var = get_or_create_var(b, rhs->u.name);
+  if (!lhs_var || !rhs_var || b->ndifferences == SIZE_MAX ||
+      !bounds_prepare_difference_index(b, b->ndifferences + 1u, &index,
+                                       &index_capacity)) {
+    b->oom = true;
+    return;
+  }
+  edge = ixs_arena_alloc(b->scratch, sizeof(*edge), sizeof(void *));
+  if (!edge) {
+    b->oom = true;
+    return;
+  }
+  lhs_var = find_var(b, lhs->u.name);
+  rhs_var = find_var(b, rhs->u.name);
+  edge->lhs = lhs;
+  edge->rhs = rhs;
+  edge->next_lhs = lhs_var->difference_edges;
+  edge->next_rhs = rhs_var->difference_edges;
+  edge->lhs_var = (size_t)(lhs_var - b->vars);
+  edge->rhs_var = (size_t)(rhs_var - b->vars);
+  edge->offset = offset;
+  lhs_var->difference_edges = edge;
+  rhs_var->difference_edges = edge;
+  b->difference_index = index;
+  b->difference_index_cap = index_capacity;
+  slot = bounds_difference_index_slot(index, index_capacity, lhs, rhs, offset);
+  index[slot] = edge;
+  b->ndifferences++;
+  bounds_mark_semantic_changed(b);
+  bounds_cache_clear(b);
+  bounds_propagate_difference_bounds(b, lhs->u.name, rhs->u.name);
+}
+
+static bool bounds_extract_unit_difference(ixs_node *expr, ixs_node **lhs,
+                                           ixs_node **rhs, int64_t *constant) {
+  uint32_t i;
+  int64_t p, q;
+  if (!expr || !lhs || !rhs || !constant || expr->tag != IXS_ADD ||
+      expr->u.add.nterms != 2u)
+    return false;
+  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+  if (q != 1)
+    return false;
+  *constant = p;
+  *lhs = NULL;
+  *rhs = NULL;
+  for (i = 0; i < 2u; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    if (term->tag != IXS_SYM || q != 1 || (p != 1 && p != -1))
+      return false;
+    if (p == 1) {
+      if (*lhs)
+        return false;
+      *lhs = term;
+    } else {
+      if (*rhs)
+        return false;
+      *rhs = term;
+    }
+  }
+  return *lhs && *rhs && *lhs != *rhs;
+}
+
+static void bounds_add_difference_range(ixs_bounds *b, ixs_node *expr,
+                                        ixs_interval iv) {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  int64_t constant, endpoint, offset;
+  if (!iv.valid || !bounds_extract_unit_difference(expr, &lhs, &rhs, &constant))
+    return;
+  if (!iv.hi_inf) {
+    endpoint = ixs_rat_floor(iv.hi_p, iv.hi_q);
+    if (ixs_safe_sub(endpoint, constant, &offset))
+      bounds_add_difference_constraint(b, lhs, rhs, offset);
+  }
+  if (!iv.lo_inf) {
+    endpoint = ixs_rat_ceil(iv.lo_p, iv.lo_q);
+    if (ixs_safe_sub(constant, endpoint, &offset))
+      bounds_add_difference_constraint(b, rhs, lhs, offset);
+  }
+}
+
 static void bounds_add_proportional_range(ixs_bounds *b, ixs_node *expr,
                                           ixs_interval iv) {
   ixs_node *primitive, *canonical;
@@ -1384,7 +1709,7 @@ static void bounds_add_proportional_range(ixs_bounds *b, ixs_node *expr,
 
 IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                     ixs_interval iv) {
-  ixs_node *canon;
+  ixs_node *canon = NULL;
   bounds_add_expr_raw(b, expr, iv);
   if (b->oom)
     return;
@@ -1397,6 +1722,15 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
     if (!b->oom)
       bounds_add_proportional_range(b, canon, iv);
   }
+  if (b->oom)
+    return;
+  bounds_add_difference_range(b, expr, iv);
+  if (canon && canon != expr)
+    bounds_add_difference_range(b, canon, iv);
+  if (expr->tag == IXS_SYM)
+    bounds_propagate_difference_bounds(b, expr->u.name, NULL);
+  if (canon && canon != expr && canon->tag == IXS_SYM)
+    bounds_propagate_difference_bounds(b, canon->u.name, NULL);
 }
 
 static bool bounds_is_known_nonzero(const ixs_bounds *b, const ixs_node *expr) {
@@ -4573,26 +4907,32 @@ static bool facts_query_node_ok(ixs_ctx *ctx, ixs_node *node,
 static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
   ixs_var_bound *v = find_var(dst, src->name);
   ixs_interval old;
+  bool changed;
   bounds_cache_clear(dst);
   if (!v) {
     v = get_or_create_var(dst, src->name);
     if (!v)
       return;
     *v = *src;
+    v->difference_edges = NULL;
     if (src->modulus > 0)
       dst->has_modrem = true;
     refine_var_bit_consistency(dst, v);
+    bounds_propagate_difference_bounds(dst, src->name, NULL);
     return;
   }
 
   old = v->iv;
   v->iv = iv_intersect(v->iv, src->iv);
-  if (!bounds_intervals_equal(old, v->iv))
+  changed = !bounds_intervals_equal(old, v->iv);
+  if (changed)
     bounds_mark_semantic_changed(dst);
   if (src->modulus > 0)
     apply_modrem(dst, src->name, src->modulus, src->remainder);
   apply_var_known_bits(dst, v, src->bits.known_zero, src->bits.known_one);
   apply_pow2_fact(dst, v, src->bits.pow2);
+  if (changed)
+    bounds_propagate_difference_bounds(dst, src->name, NULL);
 }
 
 static void bounds_add_var_interval(ixs_bounds *dst, const char *name,
