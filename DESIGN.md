@@ -1639,6 +1639,28 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
   `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
 
+  Constant-difference and equivalence queries also pair equally scaled,
+  opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
+  the exact difference between the two dividends. For a positive literal `D`,
+  each Mod result gets a finite integer enclosure tightened to its structural
+  congruence; the projection succeeds only when the dividend difference's
+  residue class has exactly one representable member in the result-difference
+  enclosure. For a shared dynamic `D`, positivity plus the stride-bucket
+  no-wrap proof above makes the Mod difference equal to the dividend
+  difference. The scaled Mod delta and the remaining residual are then
+  combined with checked `int64_t` arithmetic. This models mathematical Mod
+  composition used by fixed-width wrappers; it does not add machine-overflow
+  semantics.
+
+  Paired-Mod projection uses a growable query-local proof stack. Every child
+  enters a Mod dividend or removes one matched Mod pair from a canonical ADD,
+  so progress is structural and there is no separate 32-level, 4096-visit, or
+  fixed-term semantic cutoff. Allocation or checked-size failure returns
+  unknown. For `T` terms at one level, candidate matching is O(T^2) in the
+  worst case and residual construction is O(T); it visits only the queried
+  expression DAG and exact residuals use the weighted equality forest rather
+  than inequality adjacency or context-wide scans.
+
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
   exact difference or predicates with opposite proven truth values return
@@ -1655,8 +1677,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   incoming fact domain, then simplify, expand, and simplify again in that same
   environment. Constant-difference queries also accept an exact integer point
   range for the normalized difference, including a transitive weighted-forest
-  result. Constant differences and additive constants must fit `int64_t`;
-  affine coefficients may be exact rational nodes. Affine
+  result, and use the paired-Mod projection above for exact fixed-width and
+  dynamic-remainder deltas. Constant differences and additive constants must
+  fit `int64_t`; affine coefficients may be exact rational nodes. Affine
   decomposition accepts only one symbol and rejects any nonlinear occurrence
   or residual reference to it. Finite difference substitutes
   `symbol + step` once and may return a symbolic result such as `2*i + 1`;

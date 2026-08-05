@@ -6905,59 +6905,33 @@ typedef struct {
 static ixs_check_result equivalence_core(equivalence_state *state,
                                          ixs_node *lhs, ixs_node *rhs,
                                          unsigned depth);
+static bool bounds_constant_delta_query(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *lhs, ixs_node *rhs,
+                                        bool allow_expand, int64_t *delta);
 
 static ixs_check_result equivalence_difference(equivalence_state *state,
                                                ixs_node *lhs, ixs_node *rhs) {
-  ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
   int64_t delta;
-  if (!difference) {
+  bool proved = bounds_constant_delta_query(state->ctx, state->bounds, lhs, rhs,
+                                            false, &delta);
+  if (state->bounds->oom) {
     state->oom = true;
     return IXS_CHECK_UNKNOWN;
   }
-  if (ixs_node_is_sentinel(difference))
-    return IXS_CHECK_UNKNOWN;
-  difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
-  if (!difference) {
-    state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
-  if (bounds_exact_integer_difference(state->bounds, difference, &delta))
-    return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
-  return IXS_CHECK_UNKNOWN;
+  return proved ? (delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE)
+                : IXS_CHECK_UNKNOWN;
 }
 
 static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
                                       ixs_node *rhs, int64_t *delta) {
-  ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
-  if (!difference) {
+  bool proved = bounds_constant_delta_query(state->ctx, state->bounds, lhs, rhs,
+                                            true, delta);
+  if (state->bounds->oom)
     state->oom = true;
-    return false;
-  }
-  difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
-  if (!difference) {
-    state->oom = true;
-    return false;
-  }
-  if (ixs_node_is_sentinel(difference))
-    return false;
-  if (!bounds_exact_integer_difference(state->bounds, difference, delta)) {
-    difference = expand_impl(state->ctx, difference);
-    if (!difference) {
-      state->oom = true;
-      return false;
-    }
-    if (ixs_node_is_sentinel(difference))
-      return false;
-    difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
-    if (!difference) {
-      state->oom = true;
-      return false;
-    }
-  }
-  return bounds_exact_integer_difference(state->bounds, difference, delta);
+  return proved && !state->oom;
 }
 
-static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
+static uint64_t bounds_scale_stride(uint64_t stride, int64_t coefficient) {
   uint64_t magnitude = bounds_int64_magnitude(coefficient);
   if (stride == 0 || magnitude == 0)
     return 0;
@@ -6966,11 +6940,11 @@ static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
   return stride;
 }
 
-static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
-                                     uint64_t *stride, unsigned depth);
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth);
 
-static bool equivalence_add_stride(equivalence_state *state, ixs_node *expr,
-                                   uint64_t *stride, unsigned depth) {
+static bool bounds_add_stride(ixs_bounds *bounds, ixs_node *expr,
+                              uint64_t *stride, unsigned depth) {
   uint64_t result = 0;
   int64_t cp, cq;
   uint32_t i;
@@ -6982,18 +6956,18 @@ static bool equivalence_add_stride(equivalence_state *state, ixs_node *expr,
     uint64_t term_stride;
     int64_t p, q;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q != 1 || !equivalence_known_stride(state, expr->u.add.terms[i].term,
-                                            &term_stride, depth - 1u))
+    if (q != 1 || !bounds_known_stride(bounds, expr->u.add.terms[i].term,
+                                       &term_stride, depth - 1u))
       return false;
-    term_stride = equivalence_scale_stride(term_stride, p);
+    term_stride = bounds_scale_stride(term_stride, p);
     result = bounds_u64_gcd(result, term_stride);
   }
   *stride = result;
   return true;
 }
 
-static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
-                                   uint64_t *stride, unsigned depth) {
+static bool bounds_mul_stride(ixs_bounds *bounds, ixs_node *expr,
+                              uint64_t *stride, unsigned depth) {
   uint64_t result;
   int64_t p, q;
   uint32_t i;
@@ -7005,10 +6979,10 @@ static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
     return true;
   }
   if (expr->u.mul.nfactors == 1 && expr->u.mul.factors[0].exp == 1) {
-    if (!equivalence_known_stride(state, expr->u.mul.factors[0].base, &result,
-                                  depth - 1u))
+    if (!bounds_known_stride(bounds, expr->u.mul.factors[0].base, &result,
+                             depth - 1u))
       return false;
-    *stride = equivalence_scale_stride(result, p);
+    *stride = bounds_scale_stride(result, p);
     return true;
   }
   for (i = 0; i < expr->u.mul.nfactors; i++) {
@@ -7026,9 +7000,9 @@ static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
 /* Stride inference is bounded by CONGRUENCE_DEPTH_LIMIT. Each ADD or MUL
  * level scans only its normalized immediate operands, so one proof is O(n)
  * in the visited expression rather than restarting integrality walks. */
-static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
-                                     uint64_t *stride, unsigned depth) {
-  if (!expr || !stride || depth == 0 || state->oom || state->limited)
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth) {
+  if (!bounds || !expr || !stride || depth == 0 || bounds->oom)
     return false;
   switch (expr->tag) {
   case IXS_INT:
@@ -7039,27 +7013,21 @@ static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
     return expr->u.rat.q == 1;
   case IXS_SYM: {
     int64_t modulus, remainder;
-    if (ixs_bounds_get_modrem(state->bounds, expr->u.name, &modulus,
-                              &remainder)) {
+    if (ixs_bounds_get_modrem(bounds, expr->u.name, &modulus, &remainder)) {
       (void)remainder;
       *stride = (uint64_t)modulus;
     } else {
       *stride = 1;
     }
-    if (state->bounds->oom) {
-      state->oom = true;
-      return false;
-    }
-    return true;
+    return !bounds->oom;
   }
   case IXS_ADD:
-    return equivalence_add_stride(state, expr, stride, depth);
+    return bounds_add_stride(bounds, expr, stride, depth);
   case IXS_MUL:
-    return equivalence_mul_stride(state, expr, stride, depth);
+    return bounds_mul_stride(bounds, expr, stride, depth);
   case IXS_MOD:
     if (expr->u.binary.rhs->tag == IXS_INT && expr->u.binary.rhs->u.ival > 0 &&
-        equivalence_known_stride(state, expr->u.binary.lhs, stride,
-                                 depth - 1u)) {
+        bounds_known_stride(bounds, expr->u.binary.lhs, stride, depth - 1u)) {
       *stride = bounds_u64_gcd(*stride, (uint64_t)expr->u.binary.rhs->u.ival);
       return true;
     }
@@ -7072,6 +7040,636 @@ static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
     }
     return false;
   }
+}
+
+typedef struct {
+  uint64_t magnitude;
+  bool negative;
+} bounds_wide_integer;
+
+static bounds_wide_integer bounds_wide_integer_from_int64(int64_t value) {
+  bounds_wide_integer result;
+  result.magnitude = bounds_int64_magnitude(value);
+  result.negative = value < 0;
+  return result;
+}
+
+static bounds_wide_integer
+bounds_wide_integer_negate(bounds_wide_integer value) {
+  if (value.magnitude != 0)
+    value.negative = !value.negative;
+  return value;
+}
+
+static bool bounds_wide_integer_add(bounds_wide_integer lhs,
+                                    bounds_wide_integer rhs,
+                                    bounds_wide_integer *result) {
+  if (lhs.negative == rhs.negative) {
+    if (lhs.magnitude > UINT64_MAX - rhs.magnitude)
+      return false;
+    result->magnitude = lhs.magnitude + rhs.magnitude;
+    result->negative = lhs.negative;
+  } else if (lhs.magnitude >= rhs.magnitude) {
+    result->magnitude = lhs.magnitude - rhs.magnitude;
+    result->negative = lhs.negative;
+  } else {
+    result->magnitude = rhs.magnitude - lhs.magnitude;
+    result->negative = rhs.negative;
+  }
+  if (result->magnitude == 0)
+    result->negative = false;
+  return true;
+}
+
+static bool bounds_wide_integer_difference(int64_t lhs, int64_t rhs,
+                                           bounds_wide_integer *result) {
+  return bounds_wide_integer_add(
+      bounds_wide_integer_from_int64(lhs),
+      bounds_wide_integer_negate(bounds_wide_integer_from_int64(rhs)), result);
+}
+
+static int bounds_wide_integer_compare(bounds_wide_integer lhs,
+                                       bounds_wide_integer rhs) {
+  if (lhs.negative != rhs.negative)
+    return lhs.negative ? -1 : 1;
+  if (lhs.magnitude == rhs.magnitude)
+    return 0;
+  if (lhs.negative)
+    return lhs.magnitude > rhs.magnitude ? -1 : 1;
+  return lhs.magnitude < rhs.magnitude ? -1 : 1;
+}
+
+static bool bounds_wide_integer_to_int64(bounds_wide_integer value,
+                                         int64_t *result) {
+  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
+  if (!value.negative) {
+    if (value.magnitude > (uint64_t)INT64_MAX)
+      return false;
+    *result = (int64_t)value.magnitude;
+    return true;
+  }
+  if (value.magnitude > negative_limit)
+    return false;
+  if (value.magnitude == negative_limit) {
+    *result = INT64_MIN;
+    return true;
+  }
+  *result = -(int64_t)value.magnitude;
+  return true;
+}
+
+static uint64_t bounds_wide_integer_residue(bounds_wide_integer value,
+                                            uint64_t modulus) {
+  uint64_t residue = value.magnitude % modulus;
+  if (value.negative && residue != 0)
+    residue = modulus - residue;
+  return residue;
+}
+
+static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
+                                     int64_t *lower, int64_t *upper) {
+  ixs_interval range;
+  uint64_t stride;
+  uint64_t residue;
+  if (ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
+    return false;
+  range = ixs_bounds_get(bounds, expr);
+  if (!range.valid || range.lo_inf || range.hi_inf)
+    return false;
+  *lower = ixs_rat_ceil(range.lo_p, range.lo_q);
+  *upper = ixs_rat_floor(range.hi_p, range.hi_q);
+  if (*lower > *upper)
+    return false;
+  if (!bounds_known_stride(bounds, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
+      stride <= 1u || stride > (uint64_t)INT64_MAX)
+    return !bounds->oom;
+  if (!bounds_known_residue_depth(bounds, expr, stride, &residue,
+                                  CONGRUENCE_DEPTH_LIMIT))
+    return !bounds->oom;
+  return integer_align_congruence_up(*lower, (int64_t)stride, (int64_t)residue,
+                                     lower) &&
+         integer_align_congruence_down(*upper, (int64_t)stride,
+                                       (int64_t)residue, upper) &&
+         *lower <= *upper;
+}
+
+/* Each Mod result preserves its dividend modulo the positive literal divisor.
+ * Independent finite ranges enclose every possible result difference. Exactly
+ * one member of the required residue class makes that difference exact. */
+static bool bounds_unique_modular_delta(ixs_bounds *bounds, ixs_node *lhs,
+                                        ixs_node *rhs,
+                                        int64_t representative_delta,
+                                        int64_t modulus, int64_t *delta) {
+  bounds_wide_integer lower;
+  bounds_wide_integer upper;
+  bounds_wide_integer candidate;
+  bounds_wide_integer next;
+  bounds_wide_integer shift;
+  int64_t lhs_lower;
+  int64_t lhs_upper;
+  int64_t rhs_lower;
+  int64_t rhs_upper;
+  uint64_t current_residue;
+  uint64_t expected_residue;
+  uint64_t modulus_u = (uint64_t)modulus;
+  uint64_t amount;
+
+  if (modulus <= 1 ||
+      !bounds_integer_enclosure(bounds, lhs, &lhs_lower, &lhs_upper) ||
+      !bounds_integer_enclosure(bounds, rhs, &rhs_lower, &rhs_upper) ||
+      !bounds_wide_integer_difference(lhs_lower, rhs_upper, &lower) ||
+      !bounds_wide_integer_difference(lhs_upper, rhs_lower, &upper) ||
+      bounds_wide_integer_compare(lower, upper) > 0)
+    return false;
+
+  expected_residue =
+      (uint64_t)integer_congruence_residue(representative_delta, modulus);
+  current_residue = bounds_wide_integer_residue(lower, modulus_u);
+  amount = expected_residue >= current_residue
+               ? expected_residue - current_residue
+               : modulus_u - (current_residue - expected_residue);
+  shift.magnitude = amount;
+  shift.negative = false;
+  if (!bounds_wide_integer_add(lower, shift, &candidate) ||
+      bounds_wide_integer_compare(candidate, upper) > 0 ||
+      !bounds_wide_integer_to_int64(candidate, delta))
+    return false;
+
+  shift.magnitude = modulus_u;
+  if (bounds_wide_integer_add(candidate, shift, &next) &&
+      bounds_wide_integer_compare(next, upper) <= 0)
+    return false;
+  return true;
+}
+
+static bool bounds_residue_shift_in_range(uint64_t residue, uint64_t modulus,
+                                          int64_t shift) {
+  uint64_t magnitude;
+  if (shift >= 0) {
+    uint64_t positive = (uint64_t)shift;
+    return positive < modulus && residue < modulus - positive;
+  }
+  magnitude = bounds_int64_magnitude(shift);
+  return magnitude <= residue;
+}
+
+/* If the dividend and positive divisor share a stride class, a shift which
+ * stays within one stride bucket cannot cross a divisor boundary. */
+static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
+                                           ixs_node *dividend,
+                                           ixs_node *denominator,
+                                           int64_t shift) {
+  uint64_t modulus;
+  uint64_t residue;
+  if (!bounds_known_stride(bounds, dividend, &modulus,
+                           CONGRUENCE_DEPTH_LIMIT) ||
+      modulus <= 1u || modulus > (uint64_t)INT64_MAX ||
+      !bounds_known_residue_depth(bounds, dividend, modulus, &residue,
+                                  CONGRUENCE_DEPTH_LIMIT) ||
+      ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
+          IXS_CHECK_TRUE)
+    return false;
+  return bounds_residue_shift_in_range(residue, modulus, shift);
+}
+
+static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
+                                               ixs_node *denominator) {
+  ixs_interval range = ixs_bounds_get(bounds, denominator);
+  return range.valid && !range.lo_inf &&
+         ixs_rat_cmp(range.lo_p, range.lo_q, 0, 1) > 0;
+}
+
+typedef enum {
+  BOUNDS_DELTA_FRAME_INITIAL,
+  BOUNDS_DELTA_FRAME_SEARCH,
+  BOUNDS_DELTA_FRAME_REPRESENTATIVE,
+  BOUNDS_DELTA_FRAME_RESIDUAL
+} bounds_delta_frame_stage;
+
+typedef struct {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  ixs_node *difference;
+  uint32_t scan_positive;
+  uint32_t scan_negative;
+  uint32_t matched_positive;
+  uint32_t matched_negative;
+  int64_t modular_delta;
+  bool allow_expand;
+  bool tried_expand;
+  bounds_delta_frame_stage stage;
+} bounds_delta_frame;
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  bounds_delta_frame *frames;
+  size_t depth;
+  size_t capacity;
+  bool child_proved;
+  int64_t child_delta;
+  bool frames_arena_owned;
+} bounds_delta_query;
+
+static bool bounds_delta_push(bounds_delta_query *query, ixs_node *lhs,
+                              ixs_node *rhs, bool allow_expand) {
+  bounds_delta_frame *frames;
+  size_t capacity;
+  size_t old_bytes;
+  size_t new_bytes;
+  if (query->depth == query->capacity) {
+    capacity = query->capacity ? query->capacity : 4u;
+    if (query->capacity) {
+      if (capacity > SIZE_MAX / 2u)
+        goto failed;
+      capacity *= 2u;
+    }
+    if (query->capacity > SIZE_MAX / sizeof(*frames) ||
+        capacity > SIZE_MAX / sizeof(*frames))
+      goto failed;
+    old_bytes = query->capacity * sizeof(*frames);
+    new_bytes = capacity * sizeof(*frames);
+    if (query->frames_arena_owned) {
+      frames = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
+                              new_bytes, sizeof(void *));
+    } else {
+      frames =
+          ixs_arena_alloc(query->bounds->scratch, new_bytes, sizeof(void *));
+      if (frames)
+        memcpy(frames, query->frames, old_bytes);
+    }
+    if (!frames)
+      goto failed;
+    query->frames = frames;
+    query->capacity = capacity;
+    query->frames_arena_owned = true;
+  }
+  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
+  query->frames[query->depth].lhs = lhs;
+  query->frames[query->depth].rhs = rhs;
+  query->frames[query->depth].allow_expand = allow_expand;
+  query->frames[query->depth].stage = BOUNDS_DELTA_FRAME_INITIAL;
+  query->depth++;
+  return true;
+
+failed:
+  query->bounds->oom = true;
+  return false;
+}
+
+static void bounds_delta_complete(bounds_delta_query *query, bool proved,
+                                  int64_t delta) {
+  query->depth--;
+  query->child_proved = proved;
+  query->child_delta = proved ? delta : 0;
+}
+
+static ixs_node *bounds_delta_simplify(bounds_delta_query *query,
+                                       ixs_node *expr) {
+  if (!expr) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  if (ixs_node_is_sentinel(expr))
+    return NULL;
+  expr = simp_simplify_bounds(query->ctx, expr, query->bounds);
+  if (!expr)
+    query->bounds->oom = true;
+  return expr && !ixs_node_is_sentinel(expr) ? expr : NULL;
+}
+
+static bool bounds_modular_pair(ixs_node *difference, uint32_t lhs_index,
+                                uint32_t rhs_index, ixs_node **lhs_term,
+                                ixs_node **rhs_term,
+                                ixs_node **lhs_representative,
+                                ixs_node **rhs_representative,
+                                ixs_node **denominator, int64_t *coefficient) {
+  int64_t lhs_p;
+  int64_t lhs_q;
+  int64_t rhs_p;
+  int64_t rhs_q;
+  int64_t opposite_rhs;
+  ixs_node *lhs_denominator;
+  ixs_node *rhs_denominator;
+
+  *lhs_term = difference->u.add.terms[lhs_index].term;
+  *rhs_term = difference->u.add.terms[rhs_index].term;
+  ixs_node_get_rat(difference->u.add.terms[lhs_index].coeff, &lhs_p, &lhs_q);
+  ixs_node_get_rat(difference->u.add.terms[rhs_index].coeff, &rhs_p, &rhs_q);
+  if (lhs_q != 1 || rhs_q != 1 || lhs_p <= 0 || rhs_p >= 0 ||
+      !ixs_safe_neg(rhs_p, &opposite_rhs) || lhs_p != opposite_rhs ||
+      (*lhs_term)->tag != IXS_MOD || (*rhs_term)->tag != IXS_MOD)
+    return false;
+  *lhs_representative = (*lhs_term)->u.binary.lhs;
+  *rhs_representative = (*rhs_term)->u.binary.lhs;
+  lhs_denominator = (*lhs_term)->u.binary.rhs;
+  rhs_denominator = (*rhs_term)->u.binary.rhs;
+  if (lhs_denominator != rhs_denominator)
+    return false;
+  *denominator = lhs_denominator;
+  *coefficient = lhs_p;
+  return true;
+}
+
+static bool bounds_delta_next_modular_pair(bounds_delta_frame *frame) {
+  uint32_t count = frame->difference->u.add.nterms;
+  while (frame->scan_positive < count) {
+    uint32_t positive = frame->scan_positive;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(frame->difference->u.add.terms[positive].coeff, &p, &q);
+    if (q != 1 || p <= 0 ||
+        frame->difference->u.add.terms[positive].term->tag != IXS_MOD) {
+      frame->scan_positive++;
+      frame->scan_negative = 0;
+      continue;
+    }
+    while (frame->scan_negative < count) {
+      uint32_t negative = frame->scan_negative++;
+      ixs_node *lhs_term;
+      ixs_node *rhs_term;
+      ixs_node *lhs_representative;
+      ixs_node *rhs_representative;
+      ixs_node *denominator;
+      int64_t coefficient;
+      if (!bounds_modular_pair(frame->difference, positive, negative, &lhs_term,
+                               &rhs_term, &lhs_representative,
+                               &rhs_representative, &denominator, &coefficient))
+        continue;
+      (void)lhs_term;
+      (void)rhs_term;
+      (void)lhs_representative;
+      (void)rhs_representative;
+      (void)denominator;
+      frame->matched_positive = positive;
+      frame->matched_negative = negative;
+      (void)coefficient;
+      return true;
+    }
+    frame->scan_positive++;
+    frame->scan_negative = 0;
+  }
+  return false;
+}
+
+static bool bounds_modular_pair_valid(bounds_delta_query *query,
+                                      ixs_node *lhs_term, ixs_node *rhs_term,
+                                      ixs_node *lhs_representative,
+                                      ixs_node *rhs_representative) {
+  return ixs_bounds_check_defined(query->bounds, lhs_term) == IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, rhs_term) == IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, lhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, rhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, lhs_term) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, rhs_term) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, lhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, rhs_representative) ==
+             IXS_CHECK_TRUE;
+}
+
+static ixs_node *bounds_modular_delta_residual(bounds_delta_query *query,
+                                               ixs_node *difference,
+                                               uint32_t lhs_index,
+                                               uint32_t rhs_index) {
+  ixs_addterm *terms;
+  uint32_t count = difference->u.add.nterms - 2u;
+  uint32_t i;
+  uint32_t write = 0;
+  size_t bytes;
+  if (count == 0)
+    return difference->u.add.coeff;
+  bytes = (size_t)count * sizeof(*terms);
+  if (bytes / sizeof(*terms) != count) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  terms = ixs_arena_alloc(query->bounds->scratch, bytes, sizeof(void *));
+  if (!terms) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    if (i != lhs_index && i != rhs_index)
+      terms[write++] = difference->u.add.terms[i];
+  }
+  if (count == 1u) {
+    ixs_node *result = simp_mul(query->ctx, terms[0].coeff, terms[0].term);
+    if (!result) {
+      query->bounds->oom = true;
+      return NULL;
+    }
+    if (ixs_node_is_sentinel(result))
+      return NULL;
+    if (ixs_node_is_zero(difference->u.add.coeff))
+      return result;
+    result = simp_add(query->ctx, difference->u.add.coeff, result);
+    if (!result)
+      query->bounds->oom = true;
+    return result && !ixs_node_is_sentinel(result) ? result : NULL;
+  }
+  {
+    ixs_node *result =
+        ixs_node_add(query->ctx, difference->u.add.coeff, count, terms);
+    if (!result)
+      query->bounds->oom = true;
+    return result;
+  }
+}
+
+static bool bounds_delta_prepare_difference(bounds_delta_query *query,
+                                            bounds_delta_frame *frame,
+                                            ixs_node *difference) {
+  int64_t delta;
+  frame->difference = difference;
+  frame->scan_positive = 0;
+  frame->scan_negative = 0;
+  if (bounds_exact_integer_difference(query->bounds, difference, &delta)) {
+    bounds_delta_complete(query, true, delta);
+    return true;
+  }
+  if (difference->tag != IXS_ADD || difference->u.add.nterms < 2u)
+    return false;
+  frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+  return true;
+}
+
+static bool bounds_delta_try_expanded(bounds_delta_query *query,
+                                      bounds_delta_frame *frame) {
+  ixs_node *expanded;
+  if (!frame->allow_expand || frame->tried_expand)
+    return false;
+  frame->tried_expand = true;
+  expanded =
+      bounds_delta_simplify(query, expand_impl(query->ctx, frame->difference));
+  if (!expanded || expanded == frame->difference)
+    return false;
+  return bounds_delta_prepare_difference(query, frame, expanded);
+}
+
+static void bounds_delta_step_initial(bounds_delta_query *query,
+                                      size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_node *difference;
+  if (ixs_bounds_check_defined(query->bounds, frame->lhs) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(query->bounds, frame->rhs) != IXS_CHECK_TRUE) {
+    bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (frame->lhs == frame->rhs) {
+    bounds_delta_complete(query, true, 0);
+    return;
+  }
+  difference = bounds_delta_simplify(
+      query, simp_sub(query->ctx, frame->lhs, frame->rhs));
+  if (!difference) {
+    if (!query->bounds->oom)
+      bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (!bounds_delta_prepare_difference(query, frame, difference) &&
+      !bounds_delta_try_expanded(query, frame))
+    bounds_delta_complete(query, false, 0);
+}
+
+static void bounds_delta_step_search(bounds_delta_query *query,
+                                     size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_node *lhs_term;
+  ixs_node *rhs_term;
+  ixs_node *lhs_representative;
+  ixs_node *rhs_representative;
+  ixs_node *denominator;
+  int64_t coefficient;
+  if (!bounds_delta_next_modular_pair(frame)) {
+    if (!bounds_delta_try_expanded(query, frame))
+      bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (!bounds_modular_pair(frame->difference, frame->matched_positive,
+                           frame->matched_negative, &lhs_term, &rhs_term,
+                           &lhs_representative, &rhs_representative,
+                           &denominator, &coefficient) ||
+      !bounds_modular_pair_valid(query, lhs_term, rhs_term, lhs_representative,
+                                 rhs_representative))
+    return;
+  (void)denominator;
+  (void)coefficient;
+  frame->stage = BOUNDS_DELTA_FRAME_REPRESENTATIVE;
+  (void)bounds_delta_push(query, lhs_representative, rhs_representative,
+                          frame->allow_expand);
+}
+
+static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
+                                          bounds_delta_frame *frame,
+                                          int64_t *scaled_delta) {
+  ixs_node *lhs_term;
+  ixs_node *rhs_term;
+  ixs_node *lhs_representative;
+  ixs_node *rhs_representative;
+  ixs_node *denominator;
+  int64_t coefficient;
+  int64_t modular_delta;
+  if (!query->child_proved ||
+      !bounds_modular_pair(frame->difference, frame->matched_positive,
+                           frame->matched_negative, &lhs_term, &rhs_term,
+                           &lhs_representative, &rhs_representative,
+                           &denominator, &coefficient))
+    return false;
+  if (denominator->tag == IXS_INT) {
+    if (!bounds_unique_modular_delta(query->bounds, lhs_term, rhs_term,
+                                     query->child_delta, denominator->u.ival,
+                                     &modular_delta))
+      return false;
+  } else {
+    if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
+        !bounds_mod_shift_by_congruence(query->bounds, rhs_representative,
+                                        denominator, query->child_delta))
+      return false;
+    modular_delta = query->child_delta;
+  }
+  return ixs_safe_mul(modular_delta, coefficient, scaled_delta);
+}
+
+static void bounds_delta_step_representative(bounds_delta_query *query,
+                                             size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_node *residual;
+  if (!bounds_delta_project_mod_pair(query, frame, &frame->modular_delta)) {
+    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+    return;
+  }
+  residual = bounds_modular_delta_residual(query, frame->difference,
+                                           frame->matched_positive,
+                                           frame->matched_negative);
+  if (!residual) {
+    if (!query->bounds->oom)
+      frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+    return;
+  }
+  frame->stage = BOUNDS_DELTA_FRAME_RESIDUAL;
+  (void)bounds_delta_push(query, residual, query->ctx->node_zero,
+                          frame->allow_expand);
+}
+
+static void bounds_delta_step_residual(bounds_delta_query *query,
+                                       size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  int64_t result;
+  if (query->child_proved &&
+      ixs_safe_add(frame->modular_delta, query->child_delta, &result)) {
+    bounds_delta_complete(query, true, result);
+  } else {
+    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+  }
+}
+
+/* This is an explicit proof stack, not a bounded recursive search. Every child
+ * either enters a Mod dividend or removes a matched Mod pair from a canonical
+ * ADD. Work is therefore finite in the queried expression DAG; stack growth
+ * is geometric and allocation failure returns unknown. */
+static bool bounds_constant_delta_query(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *lhs, ixs_node *rhs,
+                                        bool allow_expand, int64_t *delta) {
+  bounds_delta_query query;
+  bounds_delta_frame initial_frame;
+  memset(&query, 0, sizeof(query));
+  query.ctx = ctx;
+  query.bounds = bounds;
+  query.frames = &initial_frame;
+  query.capacity = 1u;
+  if (!ctx || !bounds || !lhs || !rhs || !delta || bounds->oom ||
+      bounds->contradiction ||
+      !bounds_delta_push(&query, lhs, rhs, allow_expand))
+    return false;
+
+  while (query.depth != 0 && !bounds->oom) {
+    size_t frame_index = query.depth - 1u;
+    switch (query.frames[frame_index].stage) {
+    case BOUNDS_DELTA_FRAME_INITIAL:
+      bounds_delta_step_initial(&query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_SEARCH:
+      bounds_delta_step_search(&query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_REPRESENTATIVE:
+      bounds_delta_step_representative(&query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_RESIDUAL:
+      bounds_delta_step_residual(&query, frame_index);
+      break;
+    }
+  }
+
+  if (bounds->oom || query.depth != 0 || !query.child_proved)
+    return false;
+  *delta = query.child_delta;
+  return true;
 }
 
 static bool equivalence_no_reachable_integer(equivalence_state *state,
@@ -7094,7 +7692,8 @@ static bool equivalence_no_reachable_integer(equivalence_state *state,
     if (!region.valid)
       return true;
   }
-  if (!equivalence_known_stride(state, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
+  if (!bounds_known_stride(state->bounds, expr, &stride,
+                           CONGRUENCE_DEPTH_LIMIT) ||
       stride <= 1u || stride > (uint64_t)INT64_MAX ||
       !bounds_known_residue_depth(state->bounds, expr, stride, &residue,
                                   CONGRUENCE_DEPTH_LIMIT)) {
@@ -7404,37 +8003,18 @@ static bool equivalence_mod_sum_in_range(equivalence_state *state,
          equivalence_proves_zero_cmp(state, upper, IXS_CMP_LT);
 }
 
-static bool equivalence_residue_shift_in_range(uint64_t residue,
-                                               uint64_t modulus,
-                                               int64_t shift) {
-  uint64_t magnitude;
-  if (shift >= 0) {
-    uint64_t positive = (uint64_t)shift;
-    return positive < modulus && residue < modulus - positive;
-  }
-  magnitude = bounds_int64_magnitude(shift);
-  return magnitude <= residue;
-}
-
 static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
                                                 ixs_node *dividend,
                                                 ixs_node *denominator,
                                                 int64_t shift) {
-  uint64_t modulus;
-  uint64_t residue;
   if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
-      !equivalence_known_stride(state, dividend, &modulus,
-                                CONGRUENCE_DEPTH_LIMIT) ||
-      modulus <= 1u || modulus > (uint64_t)INT64_MAX ||
-      !bounds_known_residue_depth(state->bounds, dividend, modulus, &residue,
-                                  CONGRUENCE_DEPTH_LIMIT) ||
-      ixs_bounds_check_divisible(state->bounds, denominator,
-                                 (int64_t)modulus) != IXS_CHECK_TRUE) {
+      !bounds_mod_shift_by_congruence(state->bounds, dividend, denominator,
+                                      shift)) {
     if (state->bounds->oom)
       state->oom = true;
     return false;
   }
-  return equivalence_residue_shift_in_range(residue, modulus, shift);
+  return true;
 }
 
 static ixs_check_result
@@ -8045,7 +8625,6 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta) {
   algebra_query_scope scope;
   ixs_node *nodes[2] = {lhs, rhs};
-  ixs_node *difference;
   int64_t result = 0;
   bool ok = false;
   if (delta)
@@ -8054,18 +8633,8 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                            delta != NULL, "NULL output", &scope))
     return false;
   algebra_query_start(&scope);
-  if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
-    goto cleanup;
-  difference = simp_sub(scope.ctx, lhs, rhs);
-  if (!difference || ixs_node_is_sentinel(difference))
-    goto cleanup;
-  difference = algebra_query_normalize(&scope, difference);
-  if (!difference)
-    goto cleanup;
-  ok = bounds_exact_integer_difference(&facts->bounds, difference, &result);
-
-cleanup:
+  ok = bounds_constant_delta_query(scope.ctx, &facts->bounds, lhs, rhs, true,
+                                   &result);
   ok = algebra_query_finish(&scope, ok);
   if (ok)
     *delta = result;
