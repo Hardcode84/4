@@ -1673,6 +1673,31 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   expression DAG and exact residuals use the weighted equality forest rather
   than inequality adjacency or context-wide scans.
 
+  Numeric equivalence and constant-difference queries also project encoded
+  truncating quotients internally. The accepted `Piecewise` has exactly two
+  first-match arms: `floor(N/D)` under the exact same-sign predicate and
+  `ceiling(N/D)` under a final true condition. A fact-equivalent same-sign
+  predicate is accepted only over the complete query domain. Standalone
+  `floor(N/D)` and `ceiling(N/D)` forms require the quotient to be proven
+  nonnegative and nonpositive, respectively. Every form additionally requires
+  total operands, integer-valued `N` and `D`, a known sign for nonzero `D`, and
+  a known sign for `N`. The resulting signed remainder is projected to
+  `Mod(N, abs(D))` for nonnegative `N` or `-Mod(-N, abs(D))` for nonpositive
+  `N`. This is a private proof form; neither the rewritten expression nor a
+  remainder-relation list is exposed to callers.
+
+  After projection, the generic constant-difference proof described above
+  carries the signed remainder relation through equal-and-opposite scales such
+  as `16*Mod(N,D)`. There is no second cross-operand `Mod` matcher or
+  substitution pass in the truncation strategy. Malformed, overlapping, or
+  uncovered `Piecewise` encodings, unknown divisor signs, zero divisors,
+  noninteger parts, and shifts crossing a remainder boundary remain unknown.
+  Candidate discovery is iterative, shares the equivalence query's 4096-node
+  visit budget, and admits at most 32 truncating forms total. A single bounded
+  pass returns immediately when neither operand has a usable form, so ordinary
+  no-truncation failures are not rebuilt or simplified by this strategy.
+  Interned nodes cache one private subtree-rounding property bit, making that
+  rejection an O(1) root check rather than an extra hot-path DAG walk.
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
   exact difference or predicates with opposite proven truth values return

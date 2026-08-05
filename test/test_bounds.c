@@ -2495,6 +2495,46 @@ static void test_public_modular_projection_exact_residual(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_constant_difference_no_round_piecewise_fast_path(void) {
+  enum { TERM_COUNT = 256 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *x = ixs_sym(ctx, "no_round_piecewise_x");
+  ixs_node *y = ixs_sym(ctx, "no_round_piecewise_y");
+  ixs_node *values[2] = {x, y};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0)),
+                             ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *lhs = piecewise;
+  ixs_node *rhs = ixs_int(ctx, 0);
+  int64_t delta;
+  unsigned i;
+
+  CHECK(piecewise->tag == IXS_PIECEWISE);
+  CHECK(!ixs_node_contains_rounding(piecewise));
+  for (i = 0; i < TERM_COUNT; i++) {
+    char lhs_name[48];
+    char rhs_name[48];
+    snprintf(lhs_name, sizeof(lhs_name), "no_round_piecewise_lhs_%u", i);
+    snprintf(rhs_name, sizeof(rhs_name), "no_round_piecewise_rhs_%u", i);
+    lhs = ixs_add(ctx, lhs, ixs_sym(ctx, lhs_name));
+    rhs = ixs_add(ctx, rhs, ixs_sym(ctx, rhs_name));
+  }
+  CHECK(!ixs_node_contains_rounding(lhs));
+  CHECK(!ixs_constant_difference_facts(facts, lhs, rhs, &delta));
+
+  values[0] = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  piecewise = ixs_pw(ctx, 2, values, conditions);
+  CHECK(ixs_node_contains_rounding(piecewise));
+  values[0] = x;
+  conditions[0] = ixs_cmp(ctx, values[0], IXS_CMP_LT,
+                          ixs_floor(ctx, ixs_div(ctx, y, ixs_int(ctx, 2))));
+  piecewise = ixs_pw(ctx, 2, values, conditions);
+  CHECK(ixs_node_contains_rounding(piecewise));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_equality_direct(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "exact_direct_x");
@@ -5579,6 +5619,319 @@ static void test_public_total_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *parse_bounds_expr(ixs_ctx *ctx, const char *text) {
+  return ixs_parse_expr(ctx, text, strlen(text));
+}
+
+static ixs_node *parse_bounds_pred(ixs_ctx *ctx, const char *text) {
+  return ixs_parse_pred(ctx, text, strlen(text));
+}
+
+static void test_public_truncating_remainder_equivalence(void) {
+  static const char scaled_zero[] = "16*x - 16*d*Piecewise((floor(x/d), "
+                                    "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
+                                    "(ceiling(x/d), True))";
+  static const char scaled_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "((1 + x) >= 0 & d > 0) | ((1 + x) <= 0 & d < 0)), "
+      "(ceiling((1 + x)/d), True))";
+  static const char wave_negative_zero[] =
+      "16*x - 16*d*Piecewise((floor(x/d), x <= 0 & d < 0), "
+      "(ceiling(x/d), True))";
+  static const char wave_negative_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), True))";
+  static const char floor_quotient[] = "floor(x/d)";
+  static const char ceiling_quotient[] = "ceiling(x/d)";
+  static const char positive_remainder_quotient[] = "(x - Mod(x, 4))/d";
+  static const char negative_remainder_quotient[] = "(x + Mod(-x, 4))/d";
+  static const char wrong_zero[] =
+      "16*x - 16*d*Piecewise((floor(x/d), x < 0 & d < 0), "
+      "(ceiling(x/d), True))";
+  static const char wrong_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "(1 + x) < 0 & d < 0), (ceiling((1 + x)/d), True))";
+  static const char overlap_zero[] =
+      "16*x - 16*d*Piecewise((floor(x/d), "
+      "(x <= 0 & d < 0) | x == 1), (ceiling(x/d), True))";
+  static const char overlap_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "((1 + x) <= 0 & d < 0) | (1 + x) == 1), "
+      "(ceiling((1 + x)/d), True))";
+  static const char uncovered_zero[] =
+      "16*x - 16*d*Piecewise((floor(x/d), x <= 0 & d < 0), "
+      "(ceiling(x/d), x >= 0))";
+  static const char uncovered_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), (1 + x) >= 0))";
+  static const char nonintegral_zero[] =
+      "16*Max(x/2, 0) - 16*d*Piecewise((floor(Max(x/2, 0)/d), "
+      "(Max(x/2, 0) >= 0 & d > 0) | "
+      "(Max(x/2, 0) <= 0 & d < 0)), "
+      "(ceiling(Max(x/2, 0)/d), True))";
+  static const char nonintegral_next[] =
+      "16 + 16*Max(x/2, 0) - 16*d*Piecewise("
+      "(floor((1 + Max(x/2, 0))/d), "
+      "((1 + Max(x/2, 0)) >= 0 & d > 0) | "
+      "((1 + Max(x/2, 0)) <= 0 & d < 0)), "
+      "(ceiling((1 + Max(x/2, 0))/d), True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *zero = parse_bounds_expr(ctx, scaled_zero);
+  ixs_node *next = parse_bounds_expr(ctx, scaled_next);
+  ixs_node *negative_zero = parse_bounds_expr(ctx, wave_negative_zero);
+  ixs_node *negative_next = parse_bounds_expr(ctx, wave_negative_next);
+  ixs_node *floor = parse_bounds_expr(ctx, floor_quotient);
+  ixs_node *ceiling = parse_bounds_expr(ctx, ceiling_quotient);
+  ixs_node *positive_quotient =
+      parse_bounds_expr(ctx, positive_remainder_quotient);
+  ixs_node *negative_quotient =
+      parse_bounds_expr(ctx, negative_remainder_quotient);
+  ixs_node *wrong0 = parse_bounds_expr(ctx, wrong_zero);
+  ixs_node *wrong1 = parse_bounds_expr(ctx, wrong_next);
+  ixs_node *overlap0 = parse_bounds_expr(ctx, overlap_zero);
+  ixs_node *overlap1 = parse_bounds_expr(ctx, overlap_next);
+  ixs_node *uncovered0 = parse_bounds_expr(ctx, uncovered_zero);
+  ixs_node *uncovered1 = parse_bounds_expr(ctx, uncovered_next);
+  ixs_node *nonintegral0 = parse_bounds_expr(ctx, nonintegral_zero);
+  ixs_node *nonintegral1 = parse_bounds_expr(ctx, nonintegral_next);
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_facts *positive = ixs_facts_create(ctx);
+  ixs_facts *dynamic_positive = ixs_facts_create(ctx);
+  ixs_facts *negative_divisor = ixs_facts_create(ctx);
+  ixs_facts *at_zero = ixs_facts_create(ctx);
+  ixs_facts *negative_positive_divisor = ixs_facts_create(ctx);
+  ixs_facts *negative_negative_divisor = ixs_facts_create(ctx);
+  ixs_facts *positive_boundary = ixs_facts_create(ctx);
+  ixs_facts *negative_boundary = ixs_facts_create(ctx);
+  ixs_facts *zero_divisor = ixs_facts_create(ctx);
+  ixs_facts *unknown_divisor = ixs_facts_create(ctx);
+  ixs_facts *nonintegral = ixs_facts_create(ctx);
+  int64_t delta;
+
+  CHECK(ctx && zero && next && negative_zero && negative_next && floor &&
+        ceiling && positive_quotient && negative_quotient && wrong0 && wrong1 &&
+        overlap0 && overlap1 && uncovered0 && uncovered1 && nonintegral0 &&
+        nonintegral1 && sixteen);
+
+  CHECK(ixs_facts_assume_pred(positive, parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(ixs_facts_assume_pred(positive,
+                              parse_bounds_pred(ctx, "x <= 1073741822")));
+  CHECK(ixs_facts_assume_pred(positive, parse_bounds_pred(ctx, "d == 4")));
+  CHECK(ixs_facts_assume_pred(positive,
+                              parse_bounds_pred(ctx, "Mod(x, 2) == 0")));
+  CHECK(ixs_equivalent_facts(positive, next, ixs_add(ctx, zero, sixteen)) ==
+        IXS_CHECK_TRUE);
+  delta = 0;
+  CHECK(ixs_constant_difference_facts(positive, next, zero, &delta));
+  CHECK(delta == 16);
+  CHECK(ixs_equivalent_facts(positive, floor, positive_quotient) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(positive, ceiling, positive_quotient) !=
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "x <= 1073741822")));
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "Mod(x, 2) == 0")));
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "d >= 4")));
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "d <= 1073741824")));
+  CHECK(ixs_facts_assume_pred(dynamic_positive,
+                              parse_bounds_pred(ctx, "Mod(d, 4) == 0")));
+  CHECK(ixs_equivalent_facts(dynamic_positive, next,
+                             ixs_add(ctx, zero, sixteen)) == IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(dynamic_positive, next, zero, &delta));
+  CHECK(delta == 16);
+
+  CHECK(ixs_facts_assume_pred(negative_divisor,
+                              parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(ixs_facts_assume_pred(negative_divisor,
+                              parse_bounds_pred(ctx, "x <= 1073741822")));
+  CHECK(ixs_facts_assume_pred(negative_divisor,
+                              parse_bounds_pred(ctx, "d == -4")));
+  CHECK(ixs_facts_assume_pred(negative_divisor,
+                              parse_bounds_pred(ctx, "Mod(x, 2) == 0")));
+  CHECK(ixs_equivalent_facts(negative_divisor, negative_next,
+                             ixs_add(ctx, negative_zero, sixteen)) ==
+        IXS_CHECK_TRUE);
+  delta = 0;
+  CHECK(ixs_constant_difference_facts(negative_divisor, negative_next,
+                                      negative_zero, &delta));
+  CHECK(delta == 16);
+  CHECK(ixs_equivalent_facts(negative_divisor, ceiling, positive_quotient) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(negative_divisor, floor, positive_quotient) !=
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(at_zero, parse_bounds_pred(ctx, "x == 0")));
+  CHECK(ixs_facts_assume_pred(at_zero, parse_bounds_pred(ctx, "d == -4")));
+  CHECK(ixs_equivalent_facts(at_zero, negative_next,
+                             ixs_add(ctx, negative_zero, sixteen)) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(negative_positive_divisor,
+                              parse_bounds_pred(ctx, "x >= -100")));
+  CHECK(ixs_facts_assume_pred(negative_positive_divisor,
+                              parse_bounds_pred(ctx, "x <= -2")));
+  CHECK(ixs_facts_assume_pred(negative_positive_divisor,
+                              parse_bounds_pred(ctx, "d == 4")));
+  CHECK(ixs_facts_assume_pred(negative_positive_divisor,
+                              parse_bounds_pred(ctx, "Mod(x, 4) == 2")));
+  CHECK(ixs_equivalent_facts(negative_positive_divisor, next,
+                             ixs_add(ctx, zero, sixteen)) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(negative_positive_divisor, ceiling,
+                             negative_quotient) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(negative_positive_divisor, floor,
+                             negative_quotient) != IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(negative_negative_divisor,
+                              parse_bounds_pred(ctx, "x >= -100")));
+  CHECK(ixs_facts_assume_pred(negative_negative_divisor,
+                              parse_bounds_pred(ctx, "x <= -2")));
+  CHECK(ixs_facts_assume_pred(negative_negative_divisor,
+                              parse_bounds_pred(ctx, "d == -4")));
+  CHECK(ixs_facts_assume_pred(negative_negative_divisor,
+                              parse_bounds_pred(ctx, "Mod(x, 4) == 2")));
+  CHECK(ixs_equivalent_facts(negative_negative_divisor, next,
+                             ixs_add(ctx, zero, sixteen)) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(negative_negative_divisor, floor,
+                             negative_quotient) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(negative_negative_divisor, ceiling,
+                             negative_quotient) != IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(positive_boundary,
+                              parse_bounds_pred(ctx, "x == 3")));
+  CHECK(ixs_facts_assume_pred(positive_boundary,
+                              parse_bounds_pred(ctx, "d == 4")));
+  CHECK(ixs_equivalent_facts(positive_boundary, next,
+                             ixs_add(ctx, zero, sixteen)) != IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(negative_boundary,
+                              parse_bounds_pred(ctx, "x == -4")));
+  CHECK(ixs_facts_assume_pred(negative_boundary,
+                              parse_bounds_pred(ctx, "d == -4")));
+  CHECK(ixs_equivalent_facts(negative_boundary, next,
+                             ixs_add(ctx, zero, sixteen)) != IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(zero_divisor, parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(ixs_facts_assume_pred(zero_divisor, parse_bounds_pred(ctx, "d == 0")));
+  CHECK(ixs_equivalent_facts(zero_divisor, next, ixs_add(ctx, zero, sixteen)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_constant_difference_facts(zero_divisor, next, zero, &delta));
+  CHECK(
+      ixs_facts_assume_pred(unknown_divisor, parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(
+      ixs_facts_assume_pred(unknown_divisor, parse_bounds_pred(ctx, "d != 0")));
+  CHECK(ixs_facts_assume_pred(unknown_divisor,
+                              parse_bounds_pred(ctx, "Mod(x, 2) == 0")));
+  CHECK(ixs_equivalent_facts(unknown_divisor, next,
+                             ixs_add(ctx, zero, sixteen)) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_equivalent_facts(negative_divisor, wrong1,
+                             ixs_add(ctx, wrong0, sixteen)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(negative_divisor, overlap1,
+                             ixs_add(ctx, overlap0, sixteen)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(negative_divisor, uncovered1,
+                             ixs_add(ctx, uncovered0, sixteen)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "x <= 100")));
+  CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "d == -4")));
+  CHECK(ixs_equivalent_facts(nonintegral, nonintegral1,
+                             ixs_add(ctx, nonintegral0, sixteen)) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_truncating_remainder_oom(void) {
+  static const char scaled_zero[] = "16*x - 16*d*Piecewise((floor(x/d), "
+                                    "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
+                                    "(ceiling(x/d), True))";
+  static const char scaled_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+      "((1 + x) >= 0 & d > 0) | ((1 + x) <= 0 & d < 0)), "
+      "(ceiling((1 + x)/d), True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *zero = parse_bounds_expr(ctx, scaled_zero);
+  ixs_node *next = parse_bounds_expr(ctx, scaled_next);
+  ixs_node *expected = ixs_add(ctx, zero, ixs_int(ctx, 16));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && zero && next && expected && facts);
+  CHECK(ixs_facts_assume_pred(facts, parse_bounds_pred(ctx, "x >= 0")));
+  CHECK(
+      ixs_facts_assume_pred(facts, parse_bounds_pred(ctx, "x <= 1073741822")));
+  CHECK(ixs_facts_assume_pred(facts, parse_bounds_pred(ctx, "d == 4")));
+  CHECK(ixs_facts_assume_pred(facts, parse_bounds_pred(ctx, "Mod(x, 2) == 0")));
+
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_equivalent_facts(facts, next, expected) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_equivalent_facts(facts, next, expected) == IXS_CHECK_TRUE);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_equivalent_facts(facts, next, expected) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_equivalent_facts(facts, next, expected) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_remainder_projection_limits(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *wide = ixs_int(ctx, 0);
+  ixs_node *projected = ixs_int(ctx, 0);
+  ixs_node *no_remainder = ixs_int(ctx, 0);
+  ixs_node *other = ixs_sym(ctx, "remainder_limit_other");
+  ixs_node *divisor = ixs_sym(ctx, "remainder_limit_divisor");
+  char name[32];
+  unsigned i;
+
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, divisor, IXS_CMP_EQ, ixs_int(ctx, -4))));
+  for (i = 0; i < 33u; i++) {
+    ixs_node *symbol;
+    ixs_node *quotient;
+    ixs_node *values[2];
+    ixs_node *conditions[2];
+    ixs_node *round;
+    ixs_node *modulo;
+    snprintf(name, sizeof(name), "remainder_limit_%u", i);
+    symbol = ixs_sym(ctx, name);
+    CHECK(ixs_facts_assume_pred(
+        facts, ixs_cmp(ctx, symbol, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        facts, ixs_cmp(ctx, ixs_mod(ctx, symbol, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                       ixs_int(ctx, 0))));
+    quotient = ixs_div(ctx, symbol, divisor);
+    values[0] = ixs_floor(ctx, quotient);
+    values[1] = ixs_ceil(ctx, quotient);
+    conditions[0] =
+        ixs_and(ctx, ixs_cmp(ctx, symbol, IXS_CMP_LE, ixs_int(ctx, 0)),
+                ixs_cmp(ctx, divisor, IXS_CMP_LT, ixs_int(ctx, 0)));
+    conditions[1] = ixs_true(ctx);
+    round = ixs_sub(ctx, symbol,
+                    ixs_mul(ctx, divisor, ixs_pw(ctx, 2, values, conditions)));
+    modulo = ixs_mod(ctx, symbol, ixs_int(ctx, 4));
+    wide = ixs_add(ctx, wide, round);
+    projected = ixs_add(ctx, projected, modulo);
+  }
+  CHECK(ixs_equivalent_facts(facts, wide, projected) == IXS_CHECK_UNKNOWN);
+
+  for (i = 0; i < 400u; i++) {
+    snprintf(name, sizeof(name), "remainder_plain_%u", i);
+    no_remainder = ixs_add(ctx, no_remainder, ixs_sym(ctx, name));
+  }
+  CHECK(ixs_equivalent_facts(facts, no_remainder, other) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_finite_domain_equivalence(void) {
   static const char finite_text[] =
       "Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))";
@@ -7301,6 +7654,7 @@ int main(void) {
   test_public_dynamic_modular_projection_difference();
   test_public_modular_projection_unbounded_query_stack();
   test_public_modular_projection_exact_residual();
+  test_public_constant_difference_no_round_piecewise_fast_path();
   test_public_exact_equality_direct();
   test_public_exact_equality_transitive();
   test_public_exact_equality_substitution_and_negatives();
@@ -7356,6 +7710,9 @@ int main(void) {
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
+  test_public_truncating_remainder_equivalence();
+  test_public_truncating_remainder_oom();
+  test_public_remainder_projection_limits();
   test_public_finite_domain_equivalence();
   test_finite_domain_equivalence_growable_discovery();
   test_total_equivalence_new_proof_oom();

@@ -8118,6 +8118,353 @@ static ixs_check_result equivalence_mod_shifts(equivalence_state *state,
   return equivalence_mod_shift_direction(state, rhs, lhs);
 }
 
+#define EQUIVALENCE_TRUNCATING_LIMIT 32u
+#define EQUIVALENCE_TRUNCATING_STACK_LIMIT 1024u
+
+typedef struct {
+  ixs_node *target;
+  ixs_node *replacement;
+} equivalence_truncating_substitution;
+
+static bool equivalence_remainder_domain_proven(equivalence_state *state,
+                                                ixs_node *node) {
+  bool proven = ixs_bounds_check_defined(state->bounds, node) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return proven;
+}
+
+static bool equivalence_remainder_integer_proven(equivalence_state *state,
+                                                 ixs_node *node) {
+  bool proven =
+      ixs_bounds_check_integer_valued(state->bounds, node) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return proven;
+}
+
+static bool equivalence_build_same_sign(equivalence_state *state,
+                                        ixs_node *numerator,
+                                        ixs_node *denominator,
+                                        ixs_node **same_sign) {
+  ixs_node *numerator_nonnegative =
+      simp_cmp(state->ctx, numerator, IXS_CMP_GE, state->ctx->node_zero);
+  ixs_node *numerator_nonpositive =
+      simp_cmp(state->ctx, numerator, IXS_CMP_LE, state->ctx->node_zero);
+  ixs_node *denominator_positive =
+      simp_cmp(state->ctx, denominator, IXS_CMP_GT, state->ctx->node_zero);
+  ixs_node *denominator_negative =
+      simp_cmp(state->ctx, denominator, IXS_CMP_LT, state->ctx->node_zero);
+  ixs_node *both_nonnegative;
+  ixs_node *both_nonpositive;
+  if (!numerator_nonnegative || !numerator_nonpositive ||
+      !denominator_positive || !denominator_negative) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(numerator_nonnegative) ||
+      ixs_node_is_sentinel(numerator_nonpositive) ||
+      ixs_node_is_sentinel(denominator_positive) ||
+      ixs_node_is_sentinel(denominator_negative))
+    return false;
+  both_nonnegative =
+      simp_and(state->ctx, numerator_nonnegative, denominator_positive);
+  both_nonpositive =
+      simp_and(state->ctx, numerator_nonpositive, denominator_negative);
+  if (!both_nonnegative || !both_nonpositive) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(both_nonnegative) ||
+      ixs_node_is_sentinel(both_nonpositive))
+    return false;
+  *same_sign = simp_or(state->ctx, both_nonnegative, both_nonpositive);
+  if (!*same_sign) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*same_sign);
+}
+
+static bool equivalence_match_truncating_round(equivalence_state *state,
+                                               ixs_node *node, unsigned depth,
+                                               ixs_node **quotient,
+                                               bool *matched) {
+  ixs_node *argument;
+  *matched = false;
+  if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL) {
+    argument = node->u.unary.arg;
+    if ((node->tag == IXS_FLOOR &&
+         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_GE)) ||
+        (node->tag == IXS_CEIL &&
+         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_LE)))
+      return true;
+    *quotient = argument;
+    *matched = true;
+    return true;
+  }
+  if (node->tag == IXS_PIECEWISE) {
+    ixs_node *floor_value;
+    ixs_node *ceil_value;
+    ixs_node *same_sign;
+    ixs_node *numerator;
+    ixs_node *denominator;
+    ixs_check_result guard_equivalent;
+    if (node->u.pw.ncases != 2u ||
+        !ixs_node_is_known_true(node->u.pw.cases[1].cond))
+      return true;
+    floor_value = node->u.pw.cases[0].value;
+    ceil_value = node->u.pw.cases[1].value;
+    if (floor_value->tag != IXS_FLOOR || ceil_value->tag != IXS_CEIL ||
+        floor_value->u.unary.arg != ceil_value->u.unary.arg)
+      return true;
+    argument = floor_value->u.unary.arg;
+    if (!simp_decompose_exact_quotient(state->ctx, argument, &numerator,
+                                       &denominator) ||
+        !equivalence_build_same_sign(state, numerator, denominator, &same_sign))
+      return !state->oom;
+    if (!equivalence_remainder_domain_proven(state, node->u.pw.cases[0].cond) ||
+        !equivalence_remainder_domain_proven(state, same_sign))
+      return !state->oom;
+    guard_equivalent = equivalence_core(state, node->u.pw.cases[0].cond,
+                                        same_sign, depth + 1u);
+    if (guard_equivalent != IXS_CHECK_TRUE)
+      return true;
+    *quotient = argument;
+    *matched = true;
+  }
+  return true;
+}
+
+static bool equivalence_truncating_parts_proven(equivalence_state *state,
+                                                ixs_node *node,
+                                                ixs_node *quotient,
+                                                ixs_node *numerator,
+                                                ixs_node *denominator) {
+  return equivalence_remainder_domain_proven(state, node) &&
+         equivalence_remainder_domain_proven(state, quotient) &&
+         equivalence_remainder_domain_proven(state, numerator) &&
+         equivalence_remainder_domain_proven(state, denominator) &&
+         equivalence_remainder_integer_proven(state, numerator) &&
+         equivalence_remainder_integer_proven(state, denominator);
+}
+
+static bool equivalence_build_signed_remainder(equivalence_state *state,
+                                               ixs_node *numerator,
+                                               ixs_node *denominator,
+                                               ixs_node **remainder) {
+  ixs_node *positive_modulus;
+  ixs_node *oriented_dividend;
+  ixs_node *modulo;
+  bool numerator_nonnegative =
+      equivalence_proves_zero_cmp(state, numerator, IXS_CMP_GE);
+  bool denominator_positive;
+  bool denominator_negative;
+
+  if (!numerator_nonnegative &&
+      !equivalence_proves_zero_cmp(state, numerator, IXS_CMP_LE))
+    return false;
+  denominator_positive =
+      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT);
+  denominator_negative =
+      !denominator_positive &&
+      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_LT);
+  if (!denominator_positive && !denominator_negative)
+    return false;
+
+  positive_modulus =
+      denominator_positive ? denominator : simp_neg(state->ctx, denominator);
+  oriented_dividend =
+      numerator_nonnegative ? numerator : simp_neg(state->ctx, numerator);
+  if (!positive_modulus || !oriented_dividend) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(positive_modulus) ||
+      ixs_node_is_sentinel(oriented_dividend))
+    return false;
+  modulo = simp_mod(state->ctx, oriented_dividend, positive_modulus);
+  if (!modulo) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(modulo))
+    return false;
+  *remainder = numerator_nonnegative ? modulo : simp_neg(state->ctx, modulo);
+  if (!*remainder) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*remainder) &&
+         equivalence_remainder_domain_proven(state, *remainder) &&
+         equivalence_remainder_integer_proven(state, *remainder);
+}
+
+static bool equivalence_build_truncating_replacement(equivalence_state *state,
+                                                     ixs_node *node,
+                                                     unsigned depth,
+                                                     ixs_node **replacement,
+                                                     bool *matched) {
+  ixs_node *quotient;
+  ixs_node *numerator;
+  ixs_node *denominator;
+  ixs_node *remainder;
+  ixs_node *difference;
+
+  *replacement = NULL;
+  if (!equivalence_match_truncating_round(state, node, depth, &quotient,
+                                          matched) ||
+      !*matched)
+    return !state->oom;
+  if (!simp_decompose_exact_quotient(state->ctx, quotient, &numerator,
+                                     &denominator) ||
+      !equivalence_truncating_parts_proven(state, node, quotient, numerator,
+                                           denominator) ||
+      !equivalence_build_signed_remainder(state, numerator, denominator,
+                                          &remainder)) {
+    *matched = false;
+    return !state->oom;
+  }
+  /* q = trunc(N/D), R = N - D*q, hence q = (N - R)/D. */
+  difference = simp_sub(state->ctx, numerator, remainder);
+  if (!difference) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(difference)) {
+    *matched = false;
+    return true;
+  }
+  *replacement = simp_div(state->ctx, difference, denominator);
+  if (!*replacement) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(*replacement) ||
+      !equivalence_remainder_domain_proven(state, *replacement)) {
+    *replacement = NULL;
+    *matched = false;
+    return !state->oom;
+  }
+  return true;
+}
+
+/* Candidate discovery walks only the query DAG. Piecewise children are opaque
+ * unless the complete two-arm truncation form matches. */
+static bool equivalence_collect_truncating_substitutions(
+    equivalence_state *state, ixs_node *root, unsigned depth,
+    equivalence_truncating_substitution *substitutions, size_t *nsubs) {
+  ixs_node *stack[EQUIVALENCE_TRUNCATING_STACK_LIMIT];
+  size_t nstack = 1u;
+  stack[0] = root;
+  while (nstack > 0) {
+    ixs_node *node = stack[--nstack];
+    ixs_node *replacement;
+    uint32_t nchildren;
+    uint32_t i;
+    bool matched;
+    size_t existing;
+    if (!ixs_node_contains_rounding(node))
+      continue;
+    if (state->visited >= EQUIVALENCE_VISIT_LIMIT) {
+      state->limited = true;
+      return false;
+    }
+    state->visited++;
+    if ((node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
+         node->tag == IXS_PIECEWISE) &&
+        !equivalence_build_truncating_replacement(state, node, depth,
+                                                  &replacement, &matched))
+      return false;
+    else if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
+             node->tag == IXS_PIECEWISE) {
+      if (matched) {
+        for (existing = 0; existing < *nsubs; existing++)
+          if (substitutions[existing].target == node)
+            break;
+        if (existing == *nsubs) {
+          if (*nsubs >= EQUIVALENCE_TRUNCATING_LIMIT) {
+            state->limited = true;
+            return false;
+          }
+          substitutions[*nsubs].target = node;
+          substitutions[*nsubs].replacement = replacement;
+          (*nsubs)++;
+        }
+        continue;
+      }
+      if (node->tag == IXS_PIECEWISE)
+        continue;
+    }
+    if (!defined_child_count(node, &nchildren))
+      return false;
+    if ((size_t)nchildren > EQUIVALENCE_TRUNCATING_STACK_LIMIT - nstack) {
+      state->limited = true;
+      return false;
+    }
+    for (i = 0; i < nchildren; i++)
+      stack[nstack++] = defined_child_at(node, i);
+  }
+  return true;
+}
+
+static bool equivalence_apply_truncating_substitutions(
+    equivalence_state *state, ixs_node *root,
+    const equivalence_truncating_substitution *substitutions, size_t nsubs,
+    ixs_node **result) {
+  ixs_node *targets[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_node *replacements[EQUIVALENCE_TRUNCATING_LIMIT];
+  size_t i;
+  if (nsubs == 0) {
+    *result = root;
+    return true;
+  }
+  for (i = 0; i < nsubs; i++) {
+    targets[i] = substitutions[i].target;
+    replacements[i] = substitutions[i].replacement;
+  }
+  *result =
+      simp_subs_multi(state->ctx, root, (uint32_t)nsubs, targets, replacements);
+  if (!*result) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*result);
+}
+
+/* Semantic projection is private to proof queries. It does not change the
+ * caller's expression or expose truncation relations as an API. Modular
+ * arithmetic remains in the generic constant-delta proof. */
+static bool equivalence_project_truncating_rounds(equivalence_state *state,
+                                                  ixs_node *lhs, ixs_node *rhs,
+                                                  unsigned depth,
+                                                  ixs_node **projected_lhs,
+                                                  ixs_node **projected_rhs) {
+  equivalence_truncating_substitution
+      substitutions[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_node *nodes[2] = {lhs, rhs};
+  size_t nsubstitutions = 0;
+
+  *projected_lhs = lhs;
+  *projected_rhs = rhs;
+  if (!ixs_node_contains_rounding(lhs) && !ixs_node_contains_rounding(rhs))
+    return false;
+  if (!equivalence_collect_truncating_substitutions(
+          state, lhs, depth, substitutions, &nsubstitutions) ||
+      !equivalence_collect_truncating_substitutions(
+          state, rhs, depth, substitutions, &nsubstitutions) ||
+      nsubstitutions == 0)
+    return false;
+  if (!equivalence_apply_truncating_substitutions(state, lhs, substitutions,
+                                                  nsubstitutions, &nodes[0]) ||
+      !equivalence_apply_truncating_substitutions(state, rhs, substitutions,
+                                                  nsubstitutions, &nodes[1]))
+    return false;
+  *projected_lhs = nodes[0];
+  *projected_rhs = nodes[1];
+  return true;
+}
+
 static bool equivalence_extract_mod_cmp(ixs_node *cmp,
                                         equivalence_mod_cmp *out) {
   ixs_node *residual;
@@ -8339,6 +8686,8 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
 static ixs_check_result equivalence_core(equivalence_state *state,
                                          ixs_node *lhs, ixs_node *rhs,
                                          unsigned depth) {
+  ixs_node *projected_lhs;
+  ixs_node *projected_rhs;
   ixs_node *simplified_lhs;
   ixs_node *simplified_rhs;
   ixs_check_result left_truth;
@@ -8382,6 +8731,20 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
+  if (equivalence_project_truncating_rounds(state, lhs, rhs, depth,
+                                            &projected_lhs, &projected_rhs)) {
+    if (projected_lhs == projected_rhs)
+      return IXS_CHECK_TRUE;
+    result = equivalence_difference(state, projected_lhs, projected_rhs);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+    result = equivalence_mod_shifts(state, projected_lhs, projected_rhs);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+    result = equivalence_expanded(state, projected_lhs, projected_rhs, depth);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+  }
   return equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
 }
 
@@ -9005,6 +9368,7 @@ static bool algebra_affine_extract(ixs_ctx *ctx, ixs_node *expr,
 bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta) {
   algebra_query_scope scope;
+  equivalence_state projection;
   ixs_node *nodes[2] = {lhs, rhs};
   int64_t result = 0;
   bool ok = false;
@@ -9016,6 +9380,20 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   algebra_query_start(&scope);
   ok = bounds_constant_delta_query(scope.ctx, &facts->bounds, lhs, rhs, true,
                                    &result);
+  if (!ok && !facts->bounds.oom &&
+      (ixs_node_contains_rounding(lhs) || ixs_node_contains_rounding(rhs))) {
+    projection.ctx = scope.ctx;
+    projection.bounds = &facts->bounds;
+    projection.visited = 0;
+    projection.limited = false;
+    projection.oom = false;
+    if (equivalence_project_truncating_rounds(&projection, lhs, rhs, 0,
+                                              &nodes[0], &nodes[1]) &&
+        !projection.limited && !projection.oom) {
+      ok = bounds_constant_delta_query(scope.ctx, &facts->bounds, nodes[0],
+                                       nodes[1], true, &result);
+    }
+  }
   ok = algebra_query_finish(&scope, ok);
   if (ok)
     *delta = result;

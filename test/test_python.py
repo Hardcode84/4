@@ -2458,6 +2458,135 @@ def test_total_equivalence_discrete_cut_and_mod_shift_property(
     assert result is (True if 0 <= residue + shift < modulus else None)
 
 
+def test_truncating_remainder_equivalence_projection() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    d = ctx.sym("d")
+    scaled_zero = ctx.parse_expr(
+        "16*x - 16*d*Piecewise((floor(x/d), "
+        "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
+        "(ceiling(x/d), True))"
+    )
+    scaled_next = ctx.parse_expr(
+        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+        "((1 + x) >= 0 & d > 0) | ((1 + x) <= 0 & d < 0)), "
+        "(ceiling((1 + x)/d), True))"
+    )
+    wave_negative_zero = ctx.parse_expr(
+        "16*x - 16*d*Piecewise((floor(x/d), x <= 0 & d < 0), " "(ceiling(x/d), True))"
+    )
+    wave_negative_next = ctx.parse_expr(
+        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+        "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), True))"
+    )
+    floor_quotient = ctx.parse_expr("floor(x/d)")
+    ceiling_quotient = ctx.parse_expr("ceiling(x/d)")
+    positive_remainder_quotient = ctx.parse_expr("(x - Mod(x, 4))/d")
+    negative_remainder_quotient = ctx.parse_expr("(x + Mod(-x, 4))/d")
+
+    positive = ctx.facts()
+    positive.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, 4), ctx.eq(x % 2, 0)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive) is True
+    assert ctx.constant_difference(scaled_next, scaled_zero, positive) == 16
+    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, positive) is True
+    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, positive) is not True
+
+    dynamic_positive = ctx.facts()
+    dynamic_positive.assume_many(
+        [
+            x >= 0,
+            x <= 2**30 - 2,
+            ctx.eq(x % 2, 0),
+            d >= 4,
+            d <= 2**30,
+            ctx.eq(d % 4, 0),
+        ]
+    )
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, dynamic_positive) is True
+    assert ctx.constant_difference(scaled_next, scaled_zero, dynamic_positive) == 16
+
+    negative_divisor = ctx.facts()
+    negative_divisor.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
+    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, negative_divisor) is True
+    assert ctx.constant_difference(wave_negative_next, wave_negative_zero, negative_divisor) == 16
+    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, negative_divisor) is True
+    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, negative_divisor) is not True
+
+    at_zero = ctx.facts()
+    at_zero.assume_many([ctx.eq(x, 0), ctx.eq(d, -4)])
+    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, at_zero) is True
+
+    for divisor in (4, -4):
+        negative = ctx.facts()
+        negative.assume_many([x >= -100, x <= -2, ctx.eq(d, divisor), ctx.eq(x % 4, 2)])
+        assert ctx.equivalent(scaled_next, scaled_zero + 16, negative) is True
+        rounded = ceiling_quotient if divisor > 0 else floor_quotient
+        wrong_round = floor_quotient if divisor > 0 else ceiling_quotient
+        assert ctx.equivalent(rounded, negative_remainder_quotient, negative) is True
+        assert ctx.equivalent(wrong_round, negative_remainder_quotient, negative) is not True
+
+    positive_wrap = ctx.facts()
+    positive_wrap.assume_many([ctx.eq(x, 3), ctx.eq(d, 4)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive_wrap) is not True
+    negative_wrap = ctx.facts()
+    negative_wrap.assume_many([ctx.eq(x, -4), ctx.eq(d, -4)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, negative_wrap) is not True
+
+
+def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    d = ctx.sym("d")
+
+    def pair(condition: str, fallback: str = "True") -> tuple[ixsimpl.Expr, ixsimpl.Expr]:
+        zero = ctx.parse_expr(
+            f"16*x - 16*d*Piecewise((floor(x/d), {condition}), " f"(ceiling(x/d), {fallback}))"
+        )
+        next_condition = condition.replace("x", "(1 + x)")
+        next_fallback = fallback.replace("x", "(1 + x)")
+        next_ = ctx.parse_expr(
+            "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+            f"{next_condition}), (ceiling((1 + x)/d), {next_fallback}))"
+        )
+        return zero, next_
+
+    facts = ctx.facts()
+    facts.assume_many([x >= 0, x <= 100, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
+
+    wrong_zero, wrong_next = pair("x < 0 & d < 0")
+    assert ctx.equivalent(wrong_next, wrong_zero + 16, facts) is None
+    overlap_zero, overlap_next = pair("(x <= 0 & d < 0) | x == 1")
+    assert ctx.equivalent(overlap_next, overlap_zero + 16, facts) is None
+    uncovered_zero, uncovered_next = pair("x <= 0 & d < 0", "x >= 0")
+    assert ctx.equivalent(uncovered_next, uncovered_zero + 16, facts) is None
+
+    zero_divisor = ctx.facts()
+    zero_divisor.assume_many([x >= 0, ctx.eq(d, 0)])
+    assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is None
+    assert ctx.constant_difference(wrong_next, wrong_zero, zero_divisor) is None
+
+    unknown_divisor = ctx.facts()
+    unknown_divisor.assume_many([x >= 0, ctx.ne(d, 0), ctx.eq(x % 2, 0)])
+    exact_zero, exact_next = pair("(x >= 0 & d > 0) | (x <= 0 & d < 0)")
+    assert ctx.equivalent(exact_next, exact_zero + 16, unknown_divisor) is None
+
+    nonintegral_zero = ctx.parse_expr(
+        "16*Max(x/2, 0) - 16*d*Piecewise((floor(Max(x/2, 0)/d), "
+        "(Max(x/2, 0) >= 0 & d > 0) | (Max(x/2, 0) <= 0 & d < 0)), "
+        "(ceiling(Max(x/2, 0)/d), True))"
+    )
+    nonintegral_next = ctx.parse_expr(
+        "16 + 16*Max(x/2, 0) - 16*d*Piecewise("
+        "(floor((1 + Max(x/2, 0))/d), "
+        "((1 + Max(x/2, 0)) >= 0 & d > 0) | "
+        "((1 + Max(x/2, 0)) <= 0 & d < 0)), "
+        "(ceiling((1 + Max(x/2, 0))/d), True))"
+    )
+    nonintegral = ctx.facts()
+    nonintegral.assume_many([x >= 0, x <= 100, ctx.eq(d, -4)])
+    assert ctx.equivalent(nonintegral_next, nonintegral_zero + 16, nonintegral) is None
+
+
 def test_finite_domain_equivalence_binding() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")

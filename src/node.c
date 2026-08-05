@@ -759,7 +759,8 @@ static bool node_property_total(const ixs_node *node) {
          (node->properties & IXS_NODE_PROPERTY_TOTAL) != 0;
 }
 
-static uint8_t node_pack_properties(bool integer, bool boolean, bool total) {
+static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
+                                    bool rounding) {
   uint8_t properties = IXS_NODE_PROPERTY_VALID;
 
   if (integer)
@@ -768,6 +769,8 @@ static uint8_t node_pack_properties(bool integer, bool boolean, bool total) {
     properties |= IXS_NODE_PROPERTY_BOOL;
   if (total)
     properties |= IXS_NODE_PROPERTY_TOTAL;
+  if (rounding)
+    properties |= IXS_NODE_PROPERTY_ROUNDING;
   return properties;
 }
 
@@ -775,28 +778,35 @@ static uint8_t node_compute_add_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.add.coeff);
   bool total = node_property_total(node->u.add.coeff);
+  bool rounding = ixs_node_contains_rounding(node->u.add.coeff);
 
-  for (i = 0; integer && i < node->u.add.nterms; i++)
-    integer = node_property_integer(node->u.add.terms[i].coeff) &&
+  for (i = 0; i < node->u.add.nterms; i++) {
+    integer = integer && node_property_integer(node->u.add.terms[i].coeff) &&
               node_property_integer(node->u.add.terms[i].term);
-  for (i = 0; total && i < node->u.add.nterms; i++)
-    total = node_property_total(node->u.add.terms[i].coeff) &&
+    total = total && node_property_total(node->u.add.terms[i].coeff) &&
             node_property_total(node->u.add.terms[i].term);
-  return node_pack_properties(integer, false, total);
+    rounding = rounding ||
+               ixs_node_contains_rounding(node->u.add.terms[i].coeff) ||
+               ixs_node_contains_rounding(node->u.add.terms[i].term);
+  }
+  return node_pack_properties(integer, false, total, rounding);
 }
 
 static uint8_t node_compute_mul_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.mul.coeff);
   bool total = node_property_total(node->u.mul.coeff);
+  bool rounding = ixs_node_contains_rounding(node->u.mul.coeff);
 
-  for (i = 0; integer && i < node->u.mul.nfactors; i++)
-    integer = node->u.mul.factors[i].exp >= 0 &&
+  for (i = 0; i < node->u.mul.nfactors; i++) {
+    integer = integer && node->u.mul.factors[i].exp >= 0 &&
               node_property_integer(node->u.mul.factors[i].base);
-  for (i = 0; total && i < node->u.mul.nfactors; i++)
-    total = node->u.mul.factors[i].exp >= 0 &&
+    total = total && node->u.mul.factors[i].exp >= 0 &&
             node_property_total(node->u.mul.factors[i].base);
-  return node_pack_properties(integer, false, total);
+    rounding =
+        rounding || ixs_node_contains_rounding(node->u.mul.factors[i].base);
+  }
+  return node_pack_properties(integer, false, total, rounding);
 }
 
 static uint8_t node_compute_pw_properties(const ixs_node *node) {
@@ -805,14 +815,18 @@ static uint8_t node_compute_pw_properties(const ixs_node *node) {
   bool boolean = integer;
   bool total = integer && ixs_node_is_known_true(
                               node->u.pw.cases[node->u.pw.ncases - 1u].cond);
+  bool rounding = false;
 
   for (i = 0; i < node->u.pw.ncases; i++) {
     integer = integer && node_property_integer(node->u.pw.cases[i].value);
     boolean = boolean && node_property_bool(node->u.pw.cases[i].value);
     total = total && node_property_total(node->u.pw.cases[i].value) &&
             node_property_total(node->u.pw.cases[i].cond);
+    rounding = rounding ||
+               ixs_node_contains_rounding(node->u.pw.cases[i].value) ||
+               ixs_node_contains_rounding(node->u.pw.cases[i].cond);
   }
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding);
 }
 
 static uint8_t node_compute_assoc_properties(const ixs_node *node) {
@@ -821,22 +835,25 @@ static uint8_t node_compute_assoc_properties(const ixs_node *node) {
   bool integer = has_args;
   bool boolean = has_args && (node->tag == IXS_AND || node->tag == IXS_OR);
   bool total = has_args;
+  bool rounding = false;
 
   for (i = 0; i < node->u.assoc.nargs; i++) {
     integer = integer && node_property_integer(node->u.assoc.args[i]);
     if (boolean)
       boolean = node_property_bool(node->u.assoc.args[i]);
     total = total && node_property_total(node->u.assoc.args[i]);
+    rounding = rounding || ixs_node_contains_rounding(node->u.assoc.args[i]);
   }
   if (node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR)
     total = total && integer;
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding);
 }
 
 static uint8_t node_compute_simple_properties(const ixs_node *node) {
   bool integer = false;
   bool boolean = false;
   bool total = false;
+  bool rounding = false;
 
   switch ((ixs_tag)node->tag) {
   case IXS_INT:
@@ -856,17 +873,21 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   case IXS_CEIL:
     integer = true;
     total = node_property_total(node->u.unary.arg);
+    rounding = true;
     break;
   case IXS_CMP:
     integer = true;
     boolean = true;
     total = node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
+    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
+               ixs_node_contains_rounding(node->u.binary.rhs);
     break;
   case IXS_NOT:
     integer = true;
     boolean = true;
     total = node_property_total(node->u.unary_bool.arg);
+    rounding = ixs_node_contains_rounding(node->u.unary_bool.arg);
     break;
   case IXS_MOD:
     integer = node_property_integer(node->u.binary.lhs) &&
@@ -875,6 +896,8 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
                 IXS_MOD_DIVISOR_POSITIVE &&
             node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
+    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
+               ixs_node_contains_rounding(node->u.binary.rhs);
     break;
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
@@ -882,7 +905,7 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   default:
     break;
   }
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding);
 }
 
 static uint8_t node_compute_properties(const ixs_node *node) {
