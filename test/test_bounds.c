@@ -5899,6 +5899,55 @@ static void test_public_defined_facts_and_invalid(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_defined_expression_facts_do_not_close_domain(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_range_x");
+  ixs_node *d = ixs_sym(ctx, "defined_range_d");
+  ixs_node *floored = ixs_floor(ctx, ixs_div(ctx, x, d));
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *self_equality = ixs_cmp(ctx, floored, IXS_CMP_EQ, zero);
+  ixs_node *divisor_nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, zero);
+  ixs_node *closed_assumptions[2] = {self_equality, divisor_nonzero};
+  ixs_facts *range_only = ixs_facts_create(ctx);
+  ixs_facts *range_closed = ixs_facts_create(ctx);
+  ixs_facts *equality_only = ixs_facts_create(ctx);
+  ixs_facts *equality_closed = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  range.has_lower = true;
+  range.has_upper = true;
+  range.lower_p = 0;
+  range.lower_q = 1;
+  range.upper_p = 7;
+  range.upper_q = 1;
+
+  CHECK(ixs_facts_assume_range(range_only, floored, &range));
+  CHECK(ixs_check_defined_facts(range_only, floored) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_range(range_closed, floored, &range));
+  CHECK(ixs_facts_assume_pred(range_closed, divisor_nonzero));
+  CHECK(ixs_check_defined_facts(range_closed, floored) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(equality_only, self_equality));
+  CHECK(ixs_check_defined_facts(equality_only, floored) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(equality_closed, self_equality));
+  CHECK(ixs_facts_assume_pred(equality_closed, divisor_nonzero));
+  CHECK(ixs_check_defined_facts(equality_closed, floored) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_check_defined(ctx, floored, &self_equality, 1) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, floored, closed_assumptions, 2) ==
+        IXS_CHECK_TRUE);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_check_defined_facts(range_closed, floored) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_check_defined_facts(range_closed, floored) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_defined_traversal_bounds_and_sharing(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *shallow = ixs_sym(ctx, "defined_depth");
@@ -6418,6 +6467,7 @@ int main(void) {
   test_public_defined_piecewise_first_match();
   test_public_defined_piecewise_condition();
   test_public_defined_facts_and_invalid();
+  test_public_defined_expression_facts_do_not_close_domain();
   test_public_defined_traversal_bounds_and_sharing();
   test_fact_simplify_session_lifetime_and_oom();
   test_batch_rewrite_cache_oom_is_atomic();

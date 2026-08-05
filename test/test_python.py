@@ -2612,6 +2612,35 @@ def test_definedness_queries_assumptions_facts_and_piecewise() -> None:
     assert ctx.defined(reciprocal, facts=facts) is True
 
 
+def test_definedness_expression_facts_do_not_close_domain() -> None:
+    ctx = ixsimpl.Context()
+    x, d = ctx.sym("defined_range_x"), ctx.sym("defined_range_d")
+    floored = ixsimpl.floor(x / d)
+    equality = ctx.eq(floored, 0)
+    divisor_nonzero = ctx.ne(d, 0)
+
+    range_only = ctx.facts()
+    range_only.assume_range(floored, 0, 7)
+    assert ctx.defined(floored, facts=range_only) is None
+
+    range_closed = ctx.facts()
+    range_closed.assume_range(floored, 0, 7)
+    range_closed.assume(divisor_nonzero)
+    assert ctx.defined(floored, facts=range_closed) is True
+
+    equality_only = ctx.facts()
+    equality_only.assume(equality)
+    assert ctx.defined(floored, facts=equality_only) is None
+
+    equality_closed = ctx.facts()
+    equality_closed.assume(equality)
+    equality_closed.assume(divisor_nonzero)
+    assert ctx.defined(floored, facts=equality_closed) is True
+
+    assert ctx.defined(floored, assumptions=[equality]) is None
+    assert ctx.defined(floored, assumptions=[equality, divisor_nonzero]) is True
+
+
 def test_definedness_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
