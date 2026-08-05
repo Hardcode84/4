@@ -878,6 +878,100 @@ static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
   return result;
 }
 
+/*
+ * Write an ADD as offset + scale * primitive, using its first canonical term
+ * coefficient as scale. The transform cache makes repeated range queries
+ * O(1); a miss is linear only in the immediate ADD terms.
+ */
+static bool bounds_get_proportional_primitive(
+    ixs_bounds *b, ixs_node *expr, ixs_node **primitive, int64_t *scale_p,
+    int64_t *scale_q, int64_t *offset_p, int64_t *offset_q) {
+  ixs_node *normalized;
+  ixs_addterm *terms;
+  ixs_arena_mark mark;
+  size_t term_bytes;
+  uint32_t i;
+  /* Context-free proof scopes intentionally disable canonical alias creation.
+   */
+  if (!b->ctx)
+    return false;
+
+  if (expr->tag != IXS_ADD || expr->u.add.nterms == 0)
+    return false;
+  ixs_node_get_rat(expr->u.add.terms[0].coeff, scale_p, scale_q);
+  ixs_node_get_rat(expr->u.add.coeff, offset_p, offset_q);
+  if (*scale_p == 0)
+    return false;
+
+  normalized = ixs_node_transform_cache_lookup(
+      b->ctx, expr, IXS_NODE_TRANSFORM_PROPORTIONAL_PRIMITIVE);
+  if (!normalized) {
+    mark = ixs_arena_save(b->scratch);
+    term_bytes = (size_t)expr->u.add.nterms * sizeof(*terms);
+    if (term_bytes / sizeof(*terms) != expr->u.add.nterms) {
+      b->oom = true;
+      ixs_arena_restore(b->scratch, mark);
+      return false;
+    }
+    terms = ixs_arena_alloc(b->scratch, term_bytes, sizeof(void *));
+    if (!terms) {
+      b->oom = true;
+      ixs_arena_restore(b->scratch, mark);
+      return false;
+    }
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t coeff_p, coeff_q, normalized_p, normalized_q;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &coeff_p, &coeff_q);
+      if (!ixs_rat_div(coeff_p, coeff_q, *scale_p, *scale_q, &normalized_p,
+                       &normalized_q)) {
+        ixs_arena_restore(b->scratch, mark);
+        return false;
+      }
+      terms[i].term = expr->u.add.terms[i].term;
+      terms[i].coeff = ixs_node_rat(b->ctx, normalized_p, normalized_q);
+      if (!terms[i].coeff) {
+        b->oom = true;
+        ixs_arena_restore(b->scratch, mark);
+        return false;
+      }
+    }
+    /* Dividing by the first coefficient makes this coefficient exactly one. */
+    normalized = expr->u.add.nterms == 1
+                     ? terms[0].term
+                     : ixs_node_add(b->ctx, b->ctx->node_zero,
+                                    expr->u.add.nterms, terms);
+    ixs_arena_restore(b->scratch, mark);
+    if (!normalized) {
+      b->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(normalized))
+      return false;
+    ixs_node_transform_cache_store(
+        b->ctx, expr, IXS_NODE_TRANSFORM_PROPORTIONAL_PRIMITIVE, normalized);
+  }
+  *primitive = normalized;
+  return true;
+}
+
+static ixs_interval bounds_apply_affine(ixs_interval iv, int64_t scale_p,
+                                        int64_t scale_q, int64_t offset_p,
+                                        int64_t offset_q) {
+  return iv_add(iv_mul_const(iv, scale_p, scale_q),
+                ixs_interval_exact(offset_p, offset_q));
+}
+
+static ixs_interval bounds_invert_affine(ixs_interval iv, int64_t scale_p,
+                                         int64_t scale_q, int64_t offset_p,
+                                         int64_t offset_q) {
+  int64_t neg_p, neg_q, inverse_p, inverse_q;
+  if (!ixs_rat_neg(offset_p, offset_q, &neg_p, &neg_q) ||
+      !ixs_rat_div(1, 1, scale_p, scale_q, &inverse_p, &inverse_q))
+    return ixs_interval_unknown();
+  return iv_mul_const(iv_add(iv, ixs_interval_exact(neg_p, neg_q)), inverse_p,
+                      inverse_q);
+}
+
 static void add_shifted_add_range(ixs_bounds *b, ixs_node *expr,
                                   ixs_interval iv) {
   ixs_node *base;
@@ -1292,6 +1386,17 @@ static size_t bounds_expr_index_slot(const size_t *index, size_t capacity,
   return slot;
 }
 
+static ixs_interval bounds_get_expr_overrides(ixs_bounds *b, ixs_node *expr) {
+  size_t slot;
+  if (!b || !expr || !b->expr_index || !b->expr_index_cap)
+    return ixs_interval_unknown();
+  slot =
+      bounds_expr_index_slot(b->expr_index, b->expr_index_cap, b->exprs, expr);
+  if (!b->expr_index[slot])
+    return ixs_interval_unknown();
+  return b->exprs[b->expr_index[slot] - 1u].iv;
+}
+
 /*
  * Rebuilds only at 75% load. Growth is amortized O(1), and publication stays
  * with the caller so a later dense-array allocation cannot split the index.
@@ -1396,15 +1501,41 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_cache_clear(b);
 }
 
+static void bounds_add_proportional_range(ixs_bounds *b, ixs_node *expr,
+                                          ixs_interval iv) {
+  ixs_node *primitive, *canonical;
+  ixs_interval primitive_iv;
+  int64_t scale_p, scale_q, offset_p, offset_q;
+  if (!bounds_get_proportional_primitive(b, expr, &primitive, &scale_p,
+                                         &scale_q, &offset_p, &offset_q) ||
+      (primitive == expr && scale_p == 1 && scale_q == 1 && offset_p == 0))
+    return;
+  primitive_iv = bounds_invert_affine(iv, scale_p, scale_q, offset_p, offset_q);
+  if (!primitive_iv.valid)
+    return;
+  bounds_add_expr_raw(b, primitive, primitive_iv);
+  if (b->oom)
+    return;
+  canonical = bounds_canonical_expr(b, primitive);
+  if (canonical && canonical != primitive)
+    bounds_add_expr_raw(b, canonical, primitive_iv);
+}
+
 IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                     ixs_interval iv) {
   ixs_node *canon;
   bounds_add_expr_raw(b, expr, iv);
   if (b->oom)
     return;
+  bounds_add_proportional_range(b, expr, iv);
+  if (b->oom)
+    return;
   canon = bounds_canonical_expr(b, expr);
-  if (canon && canon != expr)
+  if (canon && canon != expr) {
     bounds_add_expr_raw(b, canon, iv);
+    if (!b->oom)
+      bounds_add_proportional_range(b, canon, iv);
+  }
 }
 
 static bool bounds_is_known_nonzero(const ixs_bounds *b, const ixs_node *expr) {
@@ -2653,6 +2784,26 @@ static inline ixs_interval bounds_get_symbol(ixs_bounds *b, ixs_node *expr) {
   return v ? v->iv : ixs_interval_unknown();
 }
 
+static ixs_interval bounds_get_proportional_range(ixs_bounds *b,
+                                                  ixs_node *expr) {
+  ixs_node *primitive, *canonical;
+  ixs_interval primitive_iv;
+  int64_t scale_p, scale_q, offset_p, offset_q;
+  if (!bounds_get_proportional_primitive(b, expr, &primitive, &scale_p,
+                                         &scale_q, &offset_p, &offset_q) ||
+      (primitive == expr && scale_p == 1 && scale_q == 1 && offset_p == 0))
+    return ixs_interval_unknown();
+  primitive_iv = bounds_get_expr_overrides(b, primitive);
+  canonical = bounds_canonical_expr(b, primitive);
+  if (canonical && canonical != primitive)
+    primitive_iv =
+        iv_intersect(primitive_iv, bounds_get_expr_overrides(b, canonical));
+  if (!primitive_iv.valid)
+    return ixs_interval_unknown();
+  return bounds_apply_affine(primitive_iv, scale_p, scale_q, offset_p,
+                             offset_q);
+}
+
 static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
   ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
@@ -2664,6 +2815,8 @@ static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
     scaled = iv_mul_const(ti, cp, cq);
     result = iv_add(result, scaled);
   }
+  if (!b->oom && b->nexprs != 0)
+    result = iv_intersect(result, bounds_get_proportional_range(b, expr));
   if (!b->oom && b->nexprs != 0 && !ixs_node_is_zero(expr->u.add.coeff)) {
     ixs_node *base = bounds_expr_without_add_const(b, expr);
     if (base && base != expr) {
@@ -3128,17 +3281,6 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
   default:
     return ixs_interval_unknown();
   }
-}
-
-static ixs_interval bounds_get_expr_overrides(ixs_bounds *b, ixs_node *expr) {
-  size_t slot;
-  if (!b || !expr || !b->expr_index || !b->expr_index_cap)
-    return ixs_interval_unknown();
-  slot =
-      bounds_expr_index_slot(b->expr_index, b->expr_index_cap, b->exprs, expr);
-  if (!b->expr_index[slot])
-    return ixs_interval_unknown();
-  return b->exprs[b->expr_index[slot] - 1u].iv;
 }
 
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
@@ -4903,6 +5045,23 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
         break;
       }
       status = bounds_ingest_predicate(&candidate, simplified);
+    }
+  }
+  if (status == IXS_BOUNDS_BUILD_OK) {
+    size_t i;
+    if (seen)
+      memset(seen, 0, seen_capacity * sizeof(*seen));
+    /*
+     * Progressive simplification establishes same-batch consequences, but
+     * the original predicates remain assumptions too. Re-ingest their raw
+     * forms after closure so fact-conditioned rewrites cannot erase the full
+     * expression identities needed by later range queries.
+     */
+    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
+      if (seen &&
+          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
+        continue;
+      status = bounds_ingest_predicate(&candidate, predicates[i]);
     }
   }
   if (status == IXS_BOUNDS_BUILD_OK) {
