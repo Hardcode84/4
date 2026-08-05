@@ -1181,11 +1181,10 @@ Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 - **Variable storage**: Per-variable bounds live in a growable array on the
-  scratch arena (starts at 16 slots, doubles on overflow).  Lookup is O(n)
-  linear scan by interned name pointer.  If profiling shows this is hot,
-  the array can be swapped for an open-addressing hash map keyed on the
-  same pointer — the `ixs_bounds` interface is designed to make that a
-  drop-in replacement.
+  scratch arena (starts at 16 slots, doubles on overflow). An open-addressed
+  dense-index table keyed by interned name pointer provides expected O(1)
+  lookup and insertion. The index grows at 75% load, so rehashing is amortized
+  O(1); a failed growth does not publish a partial variable or index.
 - **Interval bounds**: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
   extracts interval bounds from comparison assumptions automatically
 - **Expression range facts**: explicit or derived facts of the form
@@ -1333,11 +1332,13 @@ concrete answer. Simplification may return `IXS_ERROR` and append a diagnostic
 when the reporting path has enough context, but callers must not rely on every
 contradictory assumption set producing an error string.
 
-The current bounds payload does not connect separate symbols. A predicate such
-as `x - y <= 3` retains an expression bound, but it cannot project an endpoint
-from `y` to `x` or discover a cycle through a third symbol. This is the exact
-ownership boundary of the relational-facts port; the existing interval,
-congruence, bitfact, and expression-override domains remain unchanged.
+The bounds payload connects normalized integer expressions of the form
+`c + x - y` through directed constraints `x - y <= k`. Finite upper endpoints
+flow with the edge and finite lower endpoints flow against it. Each source
+endpoint is first intersected with its symbol expression override and aligned
+to its congruence, so projected bounds retain the existing interval and
+modular-domain precision. Non-unit coefficients remain expression facts and
+do not enter this graph.
 
 **Relational-facts acceptance contract**: Once unit-difference projection is
 enabled, every admitted constraint `x - y <= c` participates in one complete
@@ -1378,8 +1379,44 @@ only the affected relation component, never the context or arena. Offset
 composition uses checked arithmetic; an unrepresentable mutation fails and
 poisons instead of weakening the domain.
 
+The directed graph uses immutable arena-owned edge records, separate incoming
+and outgoing adjacency heads, and append-stable variable indices. Adjacency,
+feasibility, and worklist state live in a lazily allocated parallel table, so a
+fact set without relational constraints retains no graph-variable payload.
+Forks copy the variable and graph-variable tables plus the exact-edge hash
+index while sharing only the immutable edge records; a new edge changes heads
+and feasibility potentials in the candidate generation alone. Substitution
+rebuilds graph constraints from the substituted expression facts, then
+transfers symbol endpoints and congruences through the rebuilt graph. Thus no
+edge contains a pointer to a variable slot from another generation.
+
+Each graph variable carries a feasible potential for the constraints already
+committed. Inserting an edge that violates those potentials starts an
+incremental shortest-path worklist. All resulting improvements contain the new
+edge; an improving path with at least as many edges as graph variables repeats
+a vertex and therefore proves a negative cycle. The candidate is marked
+contradictory before commit. There is no iteration or queue cap. The common
+case of an already satisfied edge is O(1); otherwise feasibility and endpoint
+closure are Bellman-Ford-like over the affected relation component, O(VE) in
+the worst case, with O(V) operation-scoped scratch. Exact-edge index growth is
+amortized O(1), and retained graph storage is O(V + E). Here `V` and `E` are
+the variables and edges owned by one fact set, not total context or arena
+state. Monotonic per-fact epochs mark queue membership, so starting a worklist
+does not clear all `V` variable slots. Temporary work is restored before
+return.
+
+Checked overflow while composing a feasibility potential is a representation
+failure: the public mutator rolls back, poisons the fact set, and returns
+false. Endpoint projection is conservative at an unrepresentable `int64_t`
+boundary, matching interval widening; other queued vertices are still
+processed. Allocation and checked-size failures follow the same transactional
+rollback contract. A contradiction is semantic rather than operational: it is
+committed and all queries return their established unknown/no-result form.
+
 `bench_relational_facts` measures the production witness through public APIs
 and keeps every generated fact set alive so peak RSS exposes retained storage.
+`--chain-edges N` batches a late-anchored N-edge chain and defaults to 100
+retained fact sets, making the 300-to-600-edge CPU and RSS ratios reproducible.
 The raw `my/facts-fix@106bbfd` result is the controlled baseline. A candidate is
 a no-go if its median release CPU time or retained-RSS slope is more than 25%
 above that baseline, or if doubling a late-anchored chain from 300 to 600 edges

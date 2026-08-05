@@ -21,7 +21,7 @@ def test_relational_negative_cycle_contract() -> None:
     capability.assume(x - y <= 0)
     capability.assume(y <= 0)
     relation_support = ctx.check(x <= 0, facts=capability)
-    assert relation_support is not False
+    assert relation_support is True
 
     cycle = ctx.facts()
     cycle.assume(x - y <= -1)
@@ -29,12 +29,17 @@ def test_relational_negative_cycle_contract() -> None:
     cycle.assume(z - x <= 0)
     cycle.assume(a >= 0)
 
-    # Relational projection owns feasibility once it claims the first proof.
-    if relation_support is True:
-        assert ctx.check(a >= 0, facts=cycle) is None
-        assert ctx.range(a, facts=cycle) is None
-        assert ctx.equivalent(a, a, cycle) is None
-        assert ctx.constant_difference(a, a, cycle) is None
+    assert ctx.check(a >= 0, facts=cycle) is None
+    assert ctx.range(a, facts=cycle) is None
+    assert ctx.equivalent(a, a, cycle) is None
+    assert ctx.constant_difference(a, a, cycle) is None
+
+    zero_cycle = ctx.facts()
+    zero_cycle.assume(x - y <= -1)
+    zero_cycle.assume(y - z <= 0)
+    zero_cycle.assume(z - x <= 1)
+    zero_cycle.assume(a >= 0)
+    assert ctx.check(a >= 0, facts=zero_cycle) is True
 
 
 def test_relational_chain_insertion_order_contract() -> None:
@@ -55,10 +60,10 @@ def test_relational_chain_insertion_order_contract() -> None:
 
     late_check = ctx.check(nodes[0] <= 0, facts=late_anchor)
     early_check = ctx.check(nodes[0] <= 0, facts=early_anchor)
-    assert late_check is not False
-    assert early_check is not False
-    assert late_check is early_check
+    assert late_check is True
+    assert early_check is True
     assert ctx.range(nodes[0], facts=late_anchor) == ctx.range(nodes[0], facts=early_anchor)
+    assert ctx.range(nodes[0], facts=late_anchor) == (None, 0)
 
 
 def test_relational_exact_equality_noise_contract() -> None:
@@ -93,7 +98,7 @@ def test_relational_loop_bound_production_witness() -> None:
     capability.assume(iv - trip <= 0)
     capability.assume(trip <= 0)
     relation_support = ctx.check(iv <= 0, facts=capability)
-    assert relation_support is not False
+    assert relation_support is True
 
     facts = ctx.facts()
     facts.assume(iv - trip <= -1)
@@ -103,5 +108,4 @@ def test_relational_loop_bound_production_witness() -> None:
     result = ctx.range(iv, facts=facts)
     assert result is not None
     assert result[0] == 0
-    if relation_support is True:
-        assert result[1] == 2**31 - 2
+    assert result[1] == 2**31 - 2

@@ -15,11 +15,8 @@
  * Stores per-variable intervals extracted from comparison assumptions,
  * and propagates through expression structure.
  *
- * The var table is a growable array on the scratch arena.  Lookup is
- * linear by pointer equality (symbol names are interned).  If this
- * ever becomes a bottleneck, swap the array for an open-addressing
- * hash map keyed on the interned name pointer -- the interface is
- * already designed to make that a drop-in replacement.
+ * The var table is a growable array on the scratch arena with an
+ * open-addressed index keyed by interned symbol-name pointers.
  */
 
 typedef struct {
@@ -27,6 +24,16 @@ typedef struct {
   uint64_t known_one;  /* low 64 bits known to be one */
   ixs_pow2_fact pow2;
 } ixs_bitfacts;
+
+typedef struct ixs_difference_constraint ixs_difference_constraint;
+
+typedef struct {
+  ixs_difference_constraint *incoming;
+  ixs_difference_constraint *outgoing;
+  int64_t potential;
+  size_t queue_epoch;
+  size_t hops;
+} ixs_difference_var;
 
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
@@ -51,11 +58,20 @@ typedef struct {
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
+  size_t *var_index; /* open-addressed dense-index table */
+  size_t var_index_cap;
   ixs_expr_bound *exprs; /* per-expression overrides from branch conditions */
   size_t *expr_index;    /* open-addressed dense-index table */
   size_t nexprs;
   size_t expr_cap;
   size_t expr_index_cap;
+  ixs_difference_constraint **difference_index;
+  ixs_difference_var *difference_vars;
+  size_t ndifferences;
+  size_t ndifference_vars;
+  size_t difference_index_cap;
+  size_t difference_var_cap;
+  size_t difference_epoch;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;

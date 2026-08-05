@@ -45,6 +45,7 @@ static void test_relational_negative_cycle_contract(void) {
   ixs_node *a_nonnegative = ixs_cmp(ctx, a, IXS_CMP_GE, zero);
   ixs_facts *capability = ixs_facts_create(ctx);
   ixs_facts *cycle = ixs_facts_create(ctx);
+  ixs_facts *zero_cycle = ixs_facts_create(ctx);
   ixs_range_result range;
   ixs_check_result relation_support;
   int64_t delta = 0;
@@ -52,22 +53,23 @@ static void test_relational_negative_cycle_contract(void) {
   CHECK(assume_unit_difference_upper(ctx, capability, x, y, 0));
   CHECK(ixs_facts_assume_pred(capability, ixs_cmp(ctx, y, IXS_CMP_LE, zero)));
   relation_support = ixs_check_facts(capability, x_nonpositive);
-  CHECK(relation_support != IXS_CHECK_FALSE);
+  CHECK(relation_support == IXS_CHECK_TRUE);
 
   CHECK(assume_unit_difference_upper(ctx, cycle, x, y, -1));
   CHECK(assume_unit_difference_upper(ctx, cycle, y, z, 0));
   CHECK(assume_unit_difference_upper(ctx, cycle, z, x, 0));
   CHECK(ixs_facts_assume_pred(cycle, a_nonnegative));
 
-  /* The current engine may decline relational projection entirely. Once a
-   * fact set derives through a unit-difference edge, it also owns feasibility
-   * and cannot answer from an empty relational domain. */
-  if (relation_support == IXS_CHECK_TRUE) {
-    CHECK(ixs_check_facts(cycle, a_nonnegative) == IXS_CHECK_UNKNOWN);
-    CHECK(!ixs_range_facts(cycle, a, &range));
-    CHECK(ixs_equivalent_facts(cycle, a, a) == IXS_CHECK_UNKNOWN);
-    CHECK(!ixs_constant_difference_facts(cycle, a, a, &delta));
-  }
+  CHECK(ixs_check_facts(cycle, a_nonnegative) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_range_facts(cycle, a, &range));
+  CHECK(ixs_equivalent_facts(cycle, a, a) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_constant_difference_facts(cycle, a, a, &delta));
+
+  CHECK(assume_unit_difference_upper(ctx, zero_cycle, x, y, -1));
+  CHECK(assume_unit_difference_upper(ctx, zero_cycle, y, z, 0));
+  CHECK(assume_unit_difference_upper(ctx, zero_cycle, z, x, 1));
+  CHECK(ixs_facts_assume_pred(zero_cycle, a_nonnegative));
+  CHECK(ixs_check_facts(zero_cycle, a_nonnegative) == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -119,14 +121,15 @@ static void test_relational_chain_insertion_order_contract(void) {
       ixs_check_facts(late_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
   early_check =
       ixs_check_facts(early_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
-  CHECK(late_check != IXS_CHECK_FALSE);
-  CHECK(early_check != IXS_CHECK_FALSE);
-  CHECK(late_check == early_check);
+  CHECK(late_check == IXS_CHECK_TRUE);
+  CHECK(early_check == IXS_CHECK_TRUE);
 
   late_range_ok = ixs_range_facts(late_anchor, nodes[0], &late_range);
   early_range_ok = ixs_range_facts(early_anchor, nodes[0], &early_range);
   CHECK(public_ranges_equal(late_range_ok, &late_range, early_range_ok,
                             &early_range));
+  CHECK(late_range_ok && late_range.has_upper && late_range.upper_p == 0 &&
+        late_range.upper_q == 1);
 
   ixs_ctx_destroy(ctx);
 }
@@ -200,7 +203,7 @@ static void test_relational_loop_bound_production_witness(void) {
       ixs_facts_assume_pred(capability, ixs_cmp(ctx, trip, IXS_CMP_LE, zero)));
   relation_support =
       ixs_check_facts(capability, ixs_cmp(ctx, iv, IXS_CMP_LE, zero));
-  CHECK(relation_support != IXS_CHECK_FALSE);
+  CHECK(relation_support == IXS_CHECK_TRUE);
 
   CHECK(assume_unit_difference_upper(ctx, facts, iv, trip, -1));
   CHECK(ixs_facts_assume_pred(facts, ixs_cmp(ctx, iv, IXS_CMP_GE, zero)));
@@ -210,10 +213,8 @@ static void test_relational_loop_bound_production_witness(void) {
       facts, ixs_cmp(ctx, trip, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
   CHECK(ixs_range_facts(facts, iv, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
-  if (relation_support == IXS_CHECK_TRUE) {
-    CHECK(range.has_upper && range.upper_p == INT64_C(2147483646) &&
-          range.upper_q == 1);
-  }
+  CHECK(range.has_upper && range.upper_p == INT64_C(2147483646) &&
+        range.upper_q == 1);
 
   ixs_ctx_destroy(ctx);
 }
