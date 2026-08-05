@@ -4172,6 +4172,134 @@ static void test_public_equivalence_congruent_signed_no_wrap(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *wrapped_xor_ordered_cmp(ixs_ctx *ctx, ixs_node *lane,
+                                         ixs_node *tile, ixs_node *limit,
+                                         int64_t offset) {
+  ixs_node *lane_bits = ixs_mul(ctx, ixs_int(ctx, 128), lane);
+  ixs_node *tile_bits = ixs_mul(ctx, ixs_int(ctx, 256), tile);
+  ixs_node *xor_bits = ixs_xor(ctx, ixs_int(ctx, 64 + offset), lane_bits);
+  ixs_node *biased = ixs_add(ctx, ixs_int(ctx, INT64_C(2147483648)),
+                             ixs_add(ctx, tile_bits, xor_bits));
+  ixs_node *wrapped =
+      ixs_add(ctx, ixs_mod(ctx, biased, ixs_int(ctx, INT64_C(4294967296))),
+              ixs_int(ctx, INT64_C(-2147483648)));
+  return ixs_cmp(ctx, ixs_sub(ctx, wrapped, limit), IXS_CMP_LT,
+                 ixs_int(ctx, 0));
+}
+
+static void test_public_equivalence_ordered_congruence_forms(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *base = ixs_sym(ctx, "ordered_grid_base");
+  ixs_node *limit = ixs_sym(ctx, "ordered_grid_limit");
+  ixs_node *toggle = ixs_sym(ctx, "ordered_grid_toggle");
+  ixs_node *residual = ixs_sub(
+      ctx, ixs_add(ctx, base, ixs_mul(ctx, ixs_int(ctx, 4), toggle)), limit);
+  ixs_node *plus_four = ixs_add(ctx, residual, ixs_int(ctx, 4));
+  ixs_node *plus_eight = ixs_add(ctx, residual, ixs_int(ctx, 8));
+  ixs_node *plus_twelve = ixs_add(ctx, residual, ixs_int(ctx, 12));
+  ixs_node *plus_sixteen = ixs_add(ctx, residual, ixs_int(ctx, 16));
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_facts *grid = ixs_facts_create(ctx);
+  ixs_facts *coarse = ixs_facts_create(ctx);
+  ixs_facts *wide_toggle = ixs_facts_create(ctx);
+  ixs_node *lane = ixs_sym(ctx, "ordered_wrap_lane");
+  ixs_node *tile = ixs_sym(ctx, "ordered_wrap_tile");
+  ixs_node *wrap_limit = ixs_sym(ctx, "ordered_wrap_limit");
+  ixs_facts *wrapped = ixs_facts_create(ctx);
+  ixs_facts *wrapped_no_lane = ixs_facts_create(ctx);
+  ixs_facts *wrapped_no_limit_grid = ixs_facts_create(ctx);
+  ixs_node *wrapped_base =
+      wrapped_xor_ordered_cmp(ctx, lane, tile, wrap_limit, 0);
+  int64_t offset;
+
+  CHECK(ixs_facts_assume_pred(
+      grid,
+      ixs_cmp(ctx, ixs_mod(ctx, base, ixs_int(ctx, 16)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(
+      grid,
+      ixs_cmp(ctx, ixs_mod(ctx, limit, ixs_int(ctx, 16)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(grid, ixs_cmp(ctx, toggle, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      grid, ixs_cmp(ctx, toggle, IXS_CMP_LE, ixs_int(ctx, 1))));
+
+  CHECK(ixs_equivalent_facts(grid, ixs_cmp(ctx, residual, IXS_CMP_LT, zero),
+                             ixs_cmp(ctx, plus_eight, IXS_CMP_LT, zero)) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(grid, ixs_cmp(ctx, residual, IXS_CMP_GE, zero),
+                             ixs_cmp(ctx, plus_eight, IXS_CMP_GE, zero)) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(grid, ixs_cmp(ctx, plus_four, IXS_CMP_LE, zero),
+                             ixs_cmp(ctx, plus_twelve, IXS_CMP_LE, zero)) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(grid, ixs_cmp(ctx, plus_four, IXS_CMP_GT, zero),
+                             ixs_cmp(ctx, plus_twelve, IXS_CMP_GT, zero)) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      coarse,
+      ixs_cmp(ctx, ixs_mod(ctx, base, ixs_int(ctx, 8)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(
+      coarse,
+      ixs_cmp(ctx, ixs_mod(ctx, limit, ixs_int(ctx, 8)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(coarse, ixs_cmp(ctx, toggle, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      coarse, ixs_cmp(ctx, toggle, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_equivalent_facts(coarse, ixs_cmp(ctx, residual, IXS_CMP_LT, zero),
+                             ixs_cmp(ctx, plus_eight, IXS_CMP_LT, zero)) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      wide_toggle,
+      ixs_cmp(ctx, ixs_mod(ctx, base, ixs_int(ctx, 16)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(
+      wide_toggle,
+      ixs_cmp(ctx, ixs_mod(ctx, limit, ixs_int(ctx, 16)), IXS_CMP_EQ, zero)));
+  CHECK(ixs_facts_assume_pred(wide_toggle,
+                              ixs_cmp(ctx, toggle, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      wide_toggle, ixs_cmp(ctx, toggle, IXS_CMP_LE, ixs_int(ctx, 2))));
+  CHECK(ixs_equivalent_facts(
+            wide_toggle, ixs_cmp(ctx, residual, IXS_CMP_LT, zero),
+            ixs_cmp(ctx, plus_eight, IXS_CMP_LT, zero)) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(grid, ixs_cmp(ctx, residual, IXS_CMP_LT, zero),
+                             ixs_cmp(ctx, plus_sixteen, IXS_CMP_LT, zero)) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(wrapped, ixs_cmp(ctx, lane, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      wrapped, ixs_cmp(ctx, lane, IXS_CMP_LE, ixs_int(ctx, 31))));
+  CHECK(ixs_facts_assume_pred(
+      wrapped, ixs_cmp(ctx, ixs_mod(ctx, wrap_limit, ixs_int(ctx, 4)),
+                       IXS_CMP_EQ, zero)));
+  for (offset = 1; offset <= 3; offset++)
+    CHECK(ixs_equivalent_facts(
+              wrapped, wrapped_base,
+              wrapped_xor_ordered_cmp(ctx, lane, tile, wrap_limit, offset)) ==
+          IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(
+            wrapped, wrapped_base,
+            wrapped_xor_ordered_cmp(ctx, lane, tile, wrap_limit, 4)) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      wrapped_no_lane, ixs_cmp(ctx, ixs_mod(ctx, wrap_limit, ixs_int(ctx, 4)),
+                               IXS_CMP_EQ, zero)));
+  CHECK(ixs_equivalent_facts(
+            wrapped_no_lane, wrapped_base,
+            wrapped_xor_ordered_cmp(ctx, lane, tile, wrap_limit, 1)) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(wrapped_no_limit_grid,
+                              ixs_cmp(ctx, lane, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      wrapped_no_limit_grid, ixs_cmp(ctx, lane, IXS_CMP_LE, ixs_int(ctx, 31))));
+  CHECK(ixs_equivalent_facts(
+            wrapped_no_limit_grid, wrapped_base,
+            wrapped_xor_ordered_cmp(ctx, lane, tile, wrap_limit, 1)) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_total_equivalence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "equiv_x");
@@ -4388,11 +4516,37 @@ static void test_total_equivalence_new_proof_oom(void) {
   ixs_node *lhs = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
   ixs_node *rhs = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 7));
   ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *base = ixs_sym(ctx, "equiv_ordered_oom_base");
+  ixs_node *limit = ixs_sym(ctx, "equiv_ordered_oom_limit");
+  ixs_node *toggle = ixs_sym(ctx, "equiv_ordered_oom_toggle");
+  ixs_node *residual = ixs_sub(
+      ctx, ixs_add(ctx, base, ixs_mul(ctx, ixs_int(ctx, 4), toggle)), limit);
+  ixs_node *ordered_lhs = ixs_cmp(ctx, residual, IXS_CMP_LT, ixs_int(ctx, 0));
+  ixs_node *ordered_rhs = ixs_cmp(ctx, ixs_add(ctx, residual, ixs_int(ctx, 8)),
+                                  IXS_CMP_LT, ixs_int(ctx, 0));
+  ixs_facts *ordered = ixs_facts_create(ctx);
 
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
   CHECK(ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   CHECK(ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(ordered,
+                              ixs_cmp(ctx, ixs_mod(ctx, base, ixs_int(ctx, 16)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      ordered, ixs_cmp(ctx, ixs_mod(ctx, limit, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                       ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      ordered, ixs_cmp(ctx, toggle, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      ordered, ixs_cmp(ctx, toggle, IXS_CMP_LE, ixs_int(ctx, 1))));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_equivalent_facts(ordered, ordered_lhs, ordered_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_equivalent_facts(ordered, ordered_lhs, ordered_rhs) ==
+        IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -5771,6 +5925,7 @@ int main(void) {
   test_public_congruence_query();
   test_public_predicate_tree_query();
   test_public_equivalence_congruent_signed_no_wrap();
+  test_public_equivalence_ordered_congruence_forms();
   test_public_total_equivalence();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();

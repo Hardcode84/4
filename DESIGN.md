@@ -951,6 +951,9 @@ Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
 Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
                      when all scaled coefficients are integral
+Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
+                     where g = gcd(m, |ci|), r = C mod g, 0 < r < g,
+                     and every ti is integer-valued
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
 Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
                      all terms integer   → g*Mod(x, m) + r
@@ -1517,7 +1520,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   unequal thresholds prove equality only when the intervening integer gap is
   unreachable by the residual's range or congruence. This includes strict to
   non-strict normalization such as `x < 8` versus `x <= 7` without assuming a
-  machine width.
+  machine width. If that single-residue proof is insufficient, the query walks
+  only the two residual expression DAGs and collects at most 32 congruence
+  moduli attached to their symbols. For each candidate `d > 1`, `< 0` and
+  `>= 0` use the exact `floor(residual/d)` form, while `<= 0` and `> 0` use
+  `ceiling(residual/d)`. Fact-backed simplification can then canonicalize
+  bounded residue unions without a caller-side expression rewrite. The walk
+  has depth 1024 and visits at most 4096 nodes; its cost is independent of all
+  unrelated nodes in the context.
 
   The same query proves `Mod(A + delta, D) == Mod(A, D) + delta` when both
   sides are total, `A` and `D` are integer-valued, `D` is positive, and the

@@ -6195,6 +6195,7 @@ static ixs_check_result predicate_query_eval(ixs_bounds *bounds,
 #define EQUIVALENCE_DEPTH_LIMIT 32u
 #define EQUIVALENCE_VISIT_LIMIT 4096u
 #define EQUIVALENCE_TERM_LIMIT 1024u
+#define EQUIVALENCE_CONGRUENCE_LIMIT 32u
 
 typedef struct {
   ixs_ctx *ctx;
@@ -6441,6 +6442,133 @@ static bool equivalence_ordered_cut(ixs_cmp_op op, bool *lower,
   }
 }
 
+static void equivalence_insert_congruence(int64_t *moduli, size_t *nmoduli,
+                                          int64_t modulus) {
+  size_t at;
+  if (modulus <= 1)
+    return;
+  for (at = 0; at < *nmoduli; at++) {
+    if (moduli[at] == modulus)
+      return;
+    if (moduli[at] > modulus)
+      break;
+  }
+  if (*nmoduli >= EQUIVALENCE_CONGRUENCE_LIMIT)
+    return;
+  if (at < *nmoduli)
+    memmove(&moduli[at + 1u], &moduli[at], (*nmoduli - at) * sizeof(*moduli));
+  moduli[at] = modulus;
+  (*nmoduli)++;
+}
+
+/* Walk only the queried expression DAG.  The fixed visit and depth limits
+ * keep candidate discovery independent of total context size. */
+static void equivalence_collect_congruences(equivalence_state *state,
+                                            ixs_node *root, int64_t *moduli,
+                                            size_t *nmoduli) {
+  defined_depth_frame stack[DEFINED_STACK_LIMIT];
+  size_t depth = 1u;
+  size_t visited = 1u;
+  uint32_t nchildren;
+
+  if (!root || !defined_child_count(root, &nchildren))
+    return;
+  stack[0].node = root;
+  stack[0].next_child = 0;
+  stack[0].nchildren = nchildren;
+  while (depth > 0 && visited <= EQUIVALENCE_VISIT_LIMIT &&
+         *nmoduli < EQUIVALENCE_CONGRUENCE_LIMIT) {
+    defined_depth_frame *frame = &stack[depth - 1u];
+    ixs_node *child;
+    int64_t modulus;
+    int64_t remainder;
+
+    if (frame->node->tag == IXS_SYM && frame->next_child == 0) {
+      bool known = ixs_bounds_get_modrem(state->bounds, frame->node->u.name,
+                                         &modulus, &remainder);
+      if (state->bounds->oom) {
+        state->oom = true;
+        return;
+      }
+      if (known) {
+        (void)remainder;
+        equivalence_insert_congruence(moduli, nmoduli, modulus);
+      }
+    }
+    if (frame->next_child >= frame->nchildren) {
+      depth--;
+      continue;
+    }
+    child = defined_child_at(frame->node, frame->next_child++);
+    visited++;
+    if (!child || !defined_child_count(child, &nchildren))
+      continue;
+    if (depth >= DEFINED_STACK_LIMIT)
+      return;
+    stack[depth].node = child;
+    stack[depth].next_child = 0;
+    stack[depth].nchildren = nchildren;
+    depth++;
+  }
+}
+
+static ixs_node *equivalence_build_rounded_ordered(equivalence_state *state,
+                                                   ixs_node *cmp,
+                                                   int64_t divisor) {
+  ixs_node *scale = ixs_node_int(state->ctx, divisor);
+  ixs_node *quotient;
+  ixs_node *rounded;
+  ixs_node *normalized;
+  if (!scale)
+    return NULL;
+  quotient = simp_div(state->ctx, cmp->u.binary.lhs, scale);
+  if (!quotient)
+    return NULL;
+  switch (cmp->u.binary.cmp_op) {
+  case IXS_CMP_LT:
+  case IXS_CMP_GE:
+    rounded = simp_floor(state->ctx, quotient);
+    break;
+  case IXS_CMP_LE:
+  case IXS_CMP_GT:
+    rounded = simp_ceil(state->ctx, quotient);
+    break;
+  default:
+    return cmp;
+  }
+  if (!rounded)
+    return NULL;
+  normalized = simp_cmp(state->ctx, rounded, cmp->u.binary.cmp_op,
+                        state->ctx->node_zero);
+  return normalized;
+}
+
+static ixs_check_result
+equivalence_ordered_congruence_forms(equivalence_state *state, ixs_node *lhs,
+                                     ixs_node *rhs) {
+  int64_t moduli[EQUIVALENCE_CONGRUENCE_LIMIT];
+  size_t nmoduli = 0;
+  size_t i;
+  equivalence_collect_congruences(state, lhs->u.binary.lhs, moduli, &nmoduli);
+  equivalence_collect_congruences(state, rhs->u.binary.lhs, moduli, &nmoduli);
+  if (state->oom)
+    return IXS_CHECK_UNKNOWN;
+  for (i = 0; i < nmoduli; i++) {
+    ixs_node *normalized[2];
+    normalized[0] = equivalence_build_rounded_ordered(state, lhs, moduli[i]);
+    normalized[1] = equivalence_build_rounded_ordered(state, rhs, moduli[i]);
+    if (!normalized[0] || !normalized[1] ||
+        !simp_simplify_batch_bounds(state->ctx, normalized, 2, state->bounds)) {
+      state->oom = true;
+      return IXS_CHECK_UNKNOWN;
+    }
+    if (!ixs_node_is_sentinel(normalized[0]) &&
+        !ixs_node_is_sentinel(normalized[1]) && normalized[0] == normalized[1])
+      return IXS_CHECK_TRUE;
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
 static ixs_check_result
 equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
                                 ixs_node *rhs) {
@@ -6458,25 +6586,26 @@ equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
       ixs_bounds_check_integer_valued(state->bounds, lhs->u.binary.lhs) !=
           IXS_CHECK_TRUE ||
       ixs_bounds_check_integer_valued(state->bounds, rhs->u.binary.lhs) !=
-          IXS_CHECK_TRUE ||
-      !equivalence_integer_delta(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
-                                 &delta) ||
-      !ixs_safe_add(right_threshold, delta, &mapped_threshold))
+          IXS_CHECK_TRUE)
     return IXS_CHECK_UNKNOWN;
-  if (left_threshold == mapped_threshold)
-    return IXS_CHECK_TRUE;
-  lo = left_threshold < mapped_threshold ? left_threshold : mapped_threshold;
-  hi = left_threshold < mapped_threshold ? mapped_threshold : left_threshold;
-  if (left_lower) {
-    if (!ixs_safe_sub(hi, 1, &hi))
-      return IXS_CHECK_UNKNOWN;
-  } else {
-    if (!ixs_safe_add(lo, 1, &lo))
-      return IXS_CHECK_UNKNOWN;
+  if (equivalence_integer_delta(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
+                                &delta) &&
+      ixs_safe_add(right_threshold, delta, &mapped_threshold)) {
+    if (left_threshold == mapped_threshold)
+      return IXS_CHECK_TRUE;
+    lo = left_threshold < mapped_threshold ? left_threshold : mapped_threshold;
+    hi = left_threshold < mapped_threshold ? mapped_threshold : left_threshold;
+    if (left_lower) {
+      if (!ixs_safe_sub(hi, 1, &hi))
+        return IXS_CHECK_UNKNOWN;
+    } else {
+      if (!ixs_safe_add(lo, 1, &lo))
+        return IXS_CHECK_UNKNOWN;
+    }
+    if (equivalence_no_reachable_integer(state, lhs->u.binary.lhs, lo, hi))
+      return IXS_CHECK_TRUE;
   }
-  return equivalence_no_reachable_integer(state, lhs->u.binary.lhs, lo, hi)
-             ? IXS_CHECK_TRUE
-             : IXS_CHECK_UNKNOWN;
+  return equivalence_ordered_congruence_forms(state, lhs, rhs);
 }
 
 static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
@@ -18242,14 +18371,16 @@ static ixs_node *mod_clear_rational_add_scale(ixs_ctx *ctx, ixs_node *n) {
   return result;
 }
 
-/* Extract a small constant addend from Mod when every other term's
- * coefficient divides the modulus.  Uses gcd(|ci|) for the bound.
+/* Extract the Euclidean residue of an ADD constant from Mod when every
+ * non-constant addend is a multiple of the same grid.  The grid is the gcd
+ * of the modulus and all integer term coefficients.
  *
- *   Mod(4*floor(a) + 3, 16)  ->  Mod(4*floor(a), 16) + 3
+ *   Mod(16 + 4*floor(a) + 3, 16)
+ *       -> Mod(16 + 4*floor(a), 16) + 3
  *
- * Proof: each |ci| | q, so sum = Sigma ci*ti is a multiple of g = gcd(|ci|).
- * Then (sum mod q) in {0, g, 2g, ..., q-g}.  If 0 < c < g, then
- * (sum mod q) + c < q, so Mod(sum + c, q) = (sum mod q) + c. */
+ * Proof: write the dividend as B + r, where g divides B and the modulus,
+ * and 0 < r < g.  Mod(B, m) is one of 0, g, ..., m-g, so adding r cannot
+ * wrap across m. */
 static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
   if (a->tag != IXS_ADD || b->tag != IXS_INT || b->u.ival <= 0)
@@ -18259,10 +18390,12 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
   int64_t const_p, const_q;
   ixs_node_get_rat(a->u.add.coeff, &const_p, &const_q);
 
-  if (const_q != 1 || const_p <= 0 || a->u.add.nterms == 0)
+  if (const_q != 1 || a->u.add.nterms == 0)
     return n;
 
-  int64_t g = 0;
+  int64_t g = m;
+  int64_t aligned_const;
+  int64_t residue;
   bool ok = true;
   uint32_t i;
 
@@ -18270,27 +18403,33 @@ static ixs_node *mod_extract_small_const(ixs_ctx *ctx, ixs_node *n) {
     int64_t cp, cq;
     ixs_node_get_rat(a->u.add.terms[i].coeff, &cp, &cq);
     int64_t acp = (cp > 0) ? cp : (cp >= -INT64_MAX) ? -cp : 0;
-    if (cq != 1 || acp == 0 || m % acp != 0 ||
+    if (cq != 1 || acp == 0 ||
         !ixs_node_is_integer_valued(a->u.add.terms[i].term)) {
       ok = false;
       break;
     }
-    g = (g == 0) ? acp : ixs_gcd(g, acp);
+    g = ixs_gcd(g, acp);
   }
 
-  if (!ok || g <= 1 || const_p >= g)
+  if (!ok || g <= 1)
+    return n;
+  residue = const_p % g;
+  if (residue < 0)
+    residue += g;
+  if (residue == 0 || !ixs_safe_sub(const_p, residue, &aligned_const))
     return n;
 
-  ixs_node *zero = ixs_node_int(ctx, 0);
-  if (!zero)
+  ixs_node *inner_constant = ixs_node_int(ctx, aligned_const);
+  if (!inner_constant)
     return NULL;
-  ixs_node *inner = ixs_node_add(ctx, zero, a->u.add.nterms, a->u.add.terms);
+  ixs_node *inner =
+      ixs_node_add(ctx, inner_constant, a->u.add.nterms, a->u.add.terms);
   if (!inner)
     return NULL;
   ixs_node *moded = simp_mod(ctx, inner, b);
   if (!moded)
     return NULL;
-  return simp_add(ctx, moded, ixs_node_int(ctx, const_p));
+  return simp_add(ctx, moded, ixs_node_int(ctx, residue));
 }
 
 /* Leading positive integer coefficient of a MUL node, or 0 if the

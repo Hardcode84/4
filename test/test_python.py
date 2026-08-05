@@ -2359,6 +2359,65 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
         ctx.check_predicate(ixsimpl.or_(x, y), empty)
 
 
+def test_ordered_equivalence_uses_full_tree_congruence() -> None:
+    ctx = ixsimpl.Context()
+    base = ctx.sym("python_ordered_base")
+    limit = ctx.sym("python_ordered_limit")
+    toggle = ctx.sym("python_ordered_toggle")
+    residual = base + 4 * toggle - limit
+    facts = ctx.facts()
+    facts.assume_many([ctx.eq(base % 16, 0), ctx.eq(limit % 16, 0), toggle >= 0, toggle <= 1])
+
+    assert ctx.equivalent(residual < 0, residual + 8 < 0, facts) is True
+    assert ctx.equivalent(residual >= 0, residual + 8 >= 0, facts) is True
+    assert ctx.equivalent(residual + 4 <= 0, residual + 12 <= 0, facts) is True
+    assert ctx.equivalent(residual + 4 > 0, residual + 12 > 0, facts) is True
+    assert ctx.equivalent(residual < 0, residual + 16 < 0, facts) is None
+
+    coarse = ctx.facts()
+    coarse.assume_many([ctx.eq(base % 8, 0), ctx.eq(limit % 8, 0), toggle >= 0, toggle <= 1])
+    assert ctx.equivalent(residual < 0, residual + 8 < 0, coarse) is None
+
+    wide_toggle = ctx.facts()
+    wide_toggle.assume_many([ctx.eq(base % 16, 0), ctx.eq(limit % 16, 0), toggle >= 0, toggle <= 2])
+    assert ctx.equivalent(residual < 0, residual + 8 < 0, wide_toggle) is None
+
+
+def test_wrapped_xor_ordered_equivalence_and_mod_residue_split() -> None:
+    ctx = ixsimpl.Context()
+    lane = ctx.sym("python_ordered_lane")
+    tile = ctx.sym("python_ordered_tile")
+    limit = ctx.sym("python_ordered_wrap_limit")
+    modulus = 1 << 32
+    aligned_dividend = (1 << 31) + 64 + 128 * lane + 256 * tile
+    aligned_mod = aligned_dividend % modulus
+
+    for offset in (1, 2, 3):
+        shifted_mod = (aligned_dividend + offset) % modulus
+        assert ixsimpl.same_node(shifted_mod, aligned_mod + offset)
+
+    facts = ctx.facts()
+    facts.assume_many([lane >= 0, lane <= 31, ctx.eq(limit % 4, 0)])
+
+    def predicate(offset: int) -> ixsimpl.Expr:
+        lane_bits = ixsimpl.xor_(ctx.int_(64 + offset), 128 * lane)
+        wrapped = ((1 << 31) + 256 * tile + lane_bits) % modulus - (1 << 31)
+        return wrapped - limit < 0
+
+    assert ctx.equivalent(predicate(0), predicate(1), facts) is True
+    assert ctx.equivalent(predicate(0), predicate(2), facts) is True
+    assert ctx.equivalent(predicate(0), predicate(3), facts) is True
+    assert ctx.equivalent(predicate(0), predicate(4), facts) is None
+
+    no_lane_range = ctx.facts()
+    no_lane_range.assume(ctx.eq(limit % 4, 0))
+    assert ctx.equivalent(predicate(0), predicate(1), no_lane_range) is None
+
+    no_limit_grid = ctx.facts()
+    no_limit_grid.assume_many([lane >= 0, lane <= 31])
+    assert ctx.equivalent(predicate(0), predicate(1), no_limit_grid) is None
+
+
 @given(
     modulus=st.integers(min_value=2, max_value=32),
     residue_seed=st.integers(min_value=0, max_value=255),
