@@ -1641,6 +1641,69 @@ static void test_public_range_mod_congruence_intersection(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void assume_signed_i32_grid(ixs_ctx *ctx, ixs_facts *facts,
+                                   ixs_node *symbol) {
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, symbol, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, symbol, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, ixs_mod(ctx, symbol, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                     ixs_int(ctx, 0))));
+}
+
+static void test_public_range_congruence_tightens_endpoints(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "congruent_endpoint_x");
+  ixs_node *negated = ixs_mul(ctx, ixs_int(ctx, -1), x);
+  ixs_node *plus_seven = ixs_add(ctx, x, ixs_int(ctx, 7));
+  ixs_node *plus_sixteen = ixs_add(ctx, x, ixs_int(ctx, 16));
+  ixs_facts *aligned = ixs_facts_create(ctx);
+  ixs_facts *residue_seven = ixs_facts_create(ctx);
+  ixs_facts *unaligned = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  assume_signed_i32_grid(ctx, aligned, x);
+  CHECK(ixs_range_facts(aligned, x, &range));
+  CHECK(range.has_lower && range.lower_p == INT32_MIN && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == INT64_C(2147483632) &&
+        range.upper_q == 1);
+  CHECK(ixs_range_facts(aligned, negated, &range));
+  CHECK(range.has_lower && range.lower_p == INT64_C(-2147483632) &&
+        range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == INT64_C(2147483648) &&
+        range.upper_q == 1);
+  CHECK(ixs_check_facts(aligned, ixs_cmp(ctx, plus_seven, IXS_CMP_LE,
+                                         ixs_int(ctx, INT32_MAX))) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(aligned, ixs_cmp(ctx, plus_sixteen, IXS_CMP_LE,
+                                         ixs_int(ctx, INT32_MAX))) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      residue_seven, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      residue_seven, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_facts_assume_pred(residue_seven,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 7))));
+  CHECK(ixs_range_facts(residue_seven, x, &range));
+  CHECK(range.has_lower && range.lower_p == INT64_C(-2147483641) &&
+        range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == INT64_C(2147483639) &&
+        range.upper_q == 1);
+
+  CHECK(ixs_facts_assume_pred(
+      unaligned, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      unaligned, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_check_facts(unaligned, ixs_cmp(ctx, plus_seven, IXS_CMP_LE,
+                                           ixs_int(ctx, INT32_MAX))) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -3697,6 +3760,72 @@ static void test_public_predicate_tree_query(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *signed_i32_offset_cmp(ixs_ctx *ctx, ixs_node *value,
+                                       ixs_node *limit, int64_t offset,
+                                       ixs_cmp_op op) {
+  ixs_node *biased =
+      ixs_add(ctx, value, ixs_int(ctx, INT64_C(2147483648) + offset));
+  ixs_node *wrapped =
+      ixs_add(ctx, ixs_mod(ctx, biased, ixs_int(ctx, INT64_C(4294967296))),
+              ixs_int(ctx, INT64_C(-2147483648)));
+  return ixs_cmp(ctx, ixs_sub(ctx, wrapped, limit), op, ixs_int(ctx, 0));
+}
+
+static void test_public_equivalence_congruent_signed_no_wrap(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *base = ixs_sym(ctx, "equiv_signed_base");
+  ixs_node *limit = ixs_sym(ctx, "equiv_signed_limit");
+  ixs_node *toggle = ixs_sym(ctx, "equiv_signed_toggle");
+  ixs_node *lt_one = signed_i32_offset_cmp(ctx, base, limit, 1, IXS_CMP_LT);
+  ixs_node *lt_seven = signed_i32_offset_cmp(ctx, base, limit, 7, IXS_CMP_LT);
+  ixs_node *lt_sixteen =
+      signed_i32_offset_cmp(ctx, base, limit, 16, IXS_CMP_LT);
+  ixs_node *le_one = signed_i32_offset_cmp(ctx, base, limit, 1, IXS_CMP_LE);
+  ixs_node *le_seven = signed_i32_offset_cmp(ctx, base, limit, 7, IXS_CMP_LE);
+  ixs_node *gt_one = signed_i32_offset_cmp(ctx, base, limit, 1, IXS_CMP_GT);
+  ixs_node *gt_seven = signed_i32_offset_cmp(ctx, base, limit, 7, IXS_CMP_GT);
+  ixs_node *bucket_base =
+      ixs_add(ctx, base, ixs_mul(ctx, ixs_int(ctx, 4), toggle));
+  ixs_node *bucket_plus_eight = ixs_add(ctx, bucket_base, ixs_int(ctx, 8));
+  ixs_node *bucket_plus_twelve = ixs_add(ctx, bucket_base, ixs_int(ctx, 12));
+  ixs_facts *aligned = ixs_facts_create(ctx);
+  ixs_facts *signed_only = ixs_facts_create(ctx);
+  ixs_facts *bucket = ixs_facts_create(ctx);
+
+  assume_signed_i32_grid(ctx, aligned, base);
+  assume_signed_i32_grid(ctx, aligned, limit);
+  CHECK(ixs_equivalent_facts(aligned, lt_one, lt_seven) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(aligned, lt_one, lt_sixteen) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(aligned, le_one, le_seven) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(aligned, gt_one, gt_seven) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      signed_only, ixs_cmp(ctx, base, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      signed_only, ixs_cmp(ctx, base, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_facts_assume_pred(
+      signed_only, ixs_cmp(ctx, limit, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      signed_only, ixs_cmp(ctx, limit, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
+  CHECK(ixs_equivalent_facts(signed_only, lt_one, lt_seven) ==
+        IXS_CHECK_UNKNOWN);
+
+  assume_signed_i32_grid(ctx, bucket, base);
+  assume_signed_i32_grid(ctx, bucket, limit);
+  CHECK(ixs_facts_assume_pred(
+      bucket, ixs_cmp(ctx, toggle, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      bucket, ixs_cmp(ctx, toggle, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_check_facts(bucket, ixs_cmp(ctx, bucket_plus_eight, IXS_CMP_LE,
+                                        ixs_int(ctx, INT32_MAX))) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(bucket, ixs_cmp(ctx, bucket_plus_twelve, IXS_CMP_LE,
+                                        ixs_int(ctx, INT32_MAX))) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_total_equivalence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "equiv_x");
@@ -5208,6 +5337,7 @@ int main(void) {
   test_public_range_mod_int64_min_step();
   test_public_range_mod_requires_positive_divisor();
   test_public_range_mod_congruence_intersection();
+  test_public_range_congruence_tightens_endpoints();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
   test_public_facts_batch_a4w4_order_independent();
@@ -5247,6 +5377,7 @@ int main(void) {
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();
+  test_public_equivalence_congruent_signed_no_wrap();
   test_public_total_equivalence();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();
