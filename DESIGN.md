@@ -1175,7 +1175,11 @@ a > b   → (a - b) > 0   (normalize to compare against 0)
 Then apply constant folding when `a - b` reduces to a constant, or bound
 analysis when the sign of `a - b` is provable. Identity folding,
 normalization, and bounds resolution require the compared operands to be
-defined; otherwise the comparison retains the domain witness.
+defined; otherwise the comparison retains the domain witness. Normalization
+is opportunistic: if the exact `a - b` rational form exceeds the node
+representation, the original structurally valid comparison is retained and
+the failed fold's diagnostic is discarded. Allocation failure still
+propagates as `NULL`.
 
 ### Layer 5: Bound Analysis (Phase 4)
 

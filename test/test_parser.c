@@ -505,6 +505,26 @@ static void test_complex_expr(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_signed_wrap64_roundtrip(void) {
+  static const char input[] =
+      "-9223372036854775808 + Mod(4+x,4294967296) + "
+      "4294967296*Mod(2147483648+floor((4+x)/4294967296),4294967296)";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *expr = ixs_parse_expr(ctx, input, strlen(input));
+  ixs_node *roundtrip;
+  char printed[4096];
+
+  CHECK(expr && !ixs_is_error(expr));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  CHECK(ixs_print(expr, printed, sizeof(printed)) < sizeof(printed));
+  roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
+  CHECK(roundtrip && !ixs_is_error(roundtrip));
+  CHECK(ixs_same_node(expr, roundtrip));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_negation(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
@@ -581,6 +601,7 @@ int main(void) {
   test_kind_parsers_and_predicates();
   test_errors();
   test_complex_expr();
+  test_signed_wrap64_roundtrip();
   test_negation();
   test_depth_limit_covers_signed_and_condition_parens();
 

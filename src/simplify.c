@@ -3963,17 +3963,33 @@ static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
 /*  simp_cmp                                                          */
 /* ------------------------------------------------------------------ */
 
-/* Normalize: (a op b) -> ((a - b) op 0) so all comparisons have zero RHS. */
+/* Normalize: (a op b) -> ((a - b) op 0) so all comparisons have zero RHS.
+ * The original comparison remains valid when the normalized rational form is
+ * not representable.  Treat that failure as a missed fold, not a domain
+ * error. */
 static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
   ixs_node *diff;
   if (ixs_node_is_zero(b))
     return n;
+  diag_mark = ixs_arena_save(&ctx->diag);
+  saved_errors = ctx->errors;
+  saved_nerrors = ctx->nerrors;
+  saved_errors_cap = ctx->errors_cap;
   diff = simp_sub(ctx, a, b);
   if (!diff)
     return diff;
-  if (ixs_node_is_sentinel(diff))
-    return diff;
+  if (ixs_node_is_sentinel(diff)) {
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+    return n;
+  }
   return simp_cmp(ctx, diff, n->u.binary.cmp_op, ixs_node_int(ctx, 0));
 }
 
