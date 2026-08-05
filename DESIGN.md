@@ -1209,9 +1209,14 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   expressions `c + x - y` also retain the relation `x <= y + k`. A finite
   upper bound flows forward through the relation, and a finite lower bound
   flows backward. Exact edges are hash-indexed and linked only to their two
-  symbols. Each mutation performs at most 256 incident-edge relaxations, so
-  transitive chains remain bounded independently of the total fact state.
-  Unrepresentable endpoint arithmetic is skipped conservatively.
+  symbols. Complementary edges `x <= y + k` and `y <= x - k` also establish
+  the exact relation `x == y + k`. Range, equivalence, and constant-difference
+  queries traverse only those exact pairs, validate every reached path for a
+  consistent offset, and inspect at most 256 incident edges. Each mutation
+  likewise performs at most 256 incident-edge relaxations, so transitive chains
+  remain bounded independently of the total fact state. A one-sided edge is
+  never treated as equality; inconsistent, over-budget, or unrepresentable
+  paths fail conservatively.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
@@ -1523,17 +1528,21 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
-  constant difference or predicates with opposite proven truth values return
-  `FALSE`; other failed sufficient proofs return `UNKNOWN`. Contradictory
-  facts never prove equivalence. Recursive predicate-shape comparison has
-  depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
-  inference uses the congruence depth limit and makes one structural pass over
-  the visited expression. This API is not an unbounded theorem prover.
+  exact difference or predicates with opposite proven truth values return
+  `FALSE`; an exact zero range for the normalized difference, including one
+  obtained from the bounded unit-difference traversal, returns `TRUE`. Other
+  failed sufficient proofs return `UNKNOWN`. Contradictory facts never prove
+  equivalence. Recursive predicate-shape comparison has depth 32, 4096 proof
+  visits, and at most 1024 flattened terms; stride inference uses the
+  congruence depth limit and makes one structural pass over the visited
+  expression. This API is not an unbounded theorem prover.
 - **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
   `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
   incoming fact domain, then simplify, expand, and simplify again in that same
-  environment. Constant differences and additive constants must fit
+  environment. Constant-difference queries also accept an exact integer point
+  range for the normalized difference, including bounded transitive
+  unit-symbol relations. Constant differences and additive constants must fit
   `int64_t`; affine coefficients may be exact rational nodes. Affine
   decomposition accepts only one symbol and rejects any nonlinear occurrence
   or residual reference to it. Finite difference substitutes

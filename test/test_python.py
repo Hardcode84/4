@@ -2368,6 +2368,68 @@ def test_equivalence_binding_invalid_inputs() -> None:
         ctx.check_predicate(sentinel, facts)
 
 
+def test_fact_backed_exact_equality_relations() -> None:
+    ctx = ixsimpl.Context()
+    x, y, z = (
+        ctx.sym(name)
+        for name in ("exact_binding_x", "exact_binding_y", "exact_binding_z")
+    )
+
+    affine = 2 * x + 3
+    affine_range = ctx.facts()
+    affine_range.assume_range(affine, 11, 11)
+    assert ctx.range(affine - 11, facts=affine_range) == (0, 0)
+    assert ctx.equivalent(affine, ctx.int_(11), affine_range) is True
+    assert ctx.constant_difference(affine, ctx.int_(11), affine_range) == 0
+
+    direct = ctx.facts()
+    direct.assume(ctx.eq(y, x + 4))
+    assert ctx.range(y - (x + 4), facts=direct) == (0, 0)
+    assert ctx.equivalent(y, x + 4, direct) is True
+    assert ctx.constant_difference(y, x, direct) == 4
+
+    nonaffine = ctx.facts()
+    nonaffine.assume(ctx.eq(x % 7, y % 5 + 4))
+    assert ctx.range(x % 7 - y % 5, facts=nonaffine) == (4, 4)
+    assert ctx.equivalent(x % 7, y % 5 + 4, nonaffine) is True
+    assert ctx.constant_difference(x % 7, y % 5, nonaffine) == 4
+
+    forward = ctx.facts()
+    forward.assume(ctx.eq(x, y))
+    forward.assume(ctx.eq(y, z))
+    assert ctx.range(x - z, facts=forward) == (0, 0)
+    assert ctx.equivalent(x, z, forward) is True
+    assert ctx.constant_difference(x, z, forward) == 0
+    assert ctx.equivalent(x < 9, z < 9, forward) is True
+
+    reverse = ctx.facts()
+    reverse.assume(ctx.eq(y, z))
+    reverse.assume(ctx.eq(x, y))
+    assert ctx.range(x - z, facts=reverse) == (0, 0)
+    assert ctx.equivalent(x, z, reverse) is True
+
+    offset = ctx.facts()
+    offset.assume(ctx.eq(x, y + 3))
+    offset.assume(ctx.eq(y, z + 4))
+    assert ctx.range(x - z, facts=offset) == (7, 7)
+    assert ctx.equivalent(x, z + 7, offset) is True
+    assert ctx.constant_difference(x, z, offset) == 7
+    assert ctx.equivalent(x < 9, z < 2, offset) is True
+
+    source = ctx.facts()
+    source.assume(ctx.eq(x, y + 4))
+    substituted = source.subs(y, z)
+    assert ctx.range(x - (z + 4), facts=substituted) == (0, 0)
+    assert ctx.equivalent(x, z + 4, substituted) is True
+    assert ctx.constant_difference(x, z, substituted) == 4
+    assert ctx.equivalent(x < 9, z < 5, substituted) is True
+
+    one_sided = ctx.facts()
+    one_sided.assume(x <= y + 4)
+    assert ctx.constant_difference(x, y, one_sided) is None
+    assert ctx.equivalent(x, y + 4, one_sided) is None
+
+
 def test_fact_backed_algebra_helpers() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("algebra_binding_x")

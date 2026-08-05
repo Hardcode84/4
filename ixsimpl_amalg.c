@@ -1898,6 +1898,113 @@ static bool bounds_extract_unit_difference(ixs_node *expr, ixs_node **lhs,
   return *lhs && *rhs && *lhs != *rhs;
 }
 
+static bool
+bounds_difference_edge_is_exact(const ixs_bounds *b,
+                                const ixs_difference_constraint *edge) {
+  int64_t reverse_offset;
+  size_t slot;
+  if (!b || !edge || !b->difference_index || !b->difference_index_cap ||
+      !ixs_safe_neg(edge->offset, &reverse_offset))
+    return false;
+  slot =
+      bounds_difference_index_slot(b->difference_index, b->difference_index_cap,
+                                   edge->rhs, edge->lhs, reverse_offset);
+  return b->difference_index[slot] != NULL;
+}
+
+typedef struct {
+  size_t var_index;
+  int64_t delta;
+} bounds_exact_difference_entry;
+
+/* Complementary constraints lhs <= rhs + k and rhs <= lhs - k establish
+ * lhs == rhs + k. Traverse only those exact pairs, with a fixed work and
+ * incident-edge budget, and reject inconsistent or unrepresentable paths. */
+static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
+                                           ixs_node *rhs, int64_t *delta) {
+  bounds_exact_difference_entry entries[DIFFERENCE_RELAX_LIMIT];
+  ixs_var_bound *lhs_var;
+  ixs_var_bound *rhs_var;
+  size_t lhs_index;
+  size_t head = 0;
+  size_t nentries = 1;
+  size_t visited = 0;
+  size_t i;
+  bool found = false;
+  int64_t result = 0;
+
+  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
+      lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
+    return false;
+  if (lhs == rhs) {
+    *delta = 0;
+    return true;
+  }
+  if (!b->difference_index || !b->difference_index_cap)
+    return false;
+  lhs_var = find_var(b, lhs->u.name);
+  rhs_var = find_var(b, rhs->u.name);
+  if (!lhs_var || !rhs_var)
+    return false;
+  lhs_index = (size_t)(lhs_var - b->vars);
+  entries[0].var_index = (size_t)(rhs_var - b->vars);
+  entries[0].delta = 0;
+
+  while (head < nentries) {
+    size_t current_index = entries[head].var_index;
+    int64_t current_delta = entries[head].delta;
+    ixs_difference_constraint *edge = b->vars[current_index].difference_edges;
+    head++;
+    while (edge) {
+      ixs_difference_constraint *next;
+      int64_t next_delta;
+      size_t next_index;
+      if (visited >= DIFFERENCE_RELAX_LIMIT)
+        return false;
+      visited++;
+      if (edge->lhs_var == current_index)
+        next = edge->next_lhs;
+      else if (edge->rhs_var == current_index)
+        next = edge->next_rhs;
+      else
+        return false;
+      if (edge->rhs_var != current_index ||
+          !bounds_difference_edge_is_exact(b, edge)) {
+        edge = next;
+        continue;
+      }
+      next_index = edge->lhs_var;
+      if (!ixs_safe_add(current_delta, edge->offset, &next_delta))
+        return false;
+      for (i = 0; i < nentries && entries[i].var_index != next_index; i++)
+        ;
+      if (i < nentries) {
+        if (entries[i].delta != next_delta)
+          return false;
+      } else {
+        if (nentries >= DIFFERENCE_RELAX_LIMIT)
+          return false;
+        entries[nentries].var_index = next_index;
+        entries[nentries].delta = next_delta;
+        nentries++;
+      }
+      edge = next;
+    }
+  }
+
+  for (i = 0; i < nentries; i++) {
+    if (entries[i].var_index == lhs_index) {
+      found = true;
+      result = entries[i].delta;
+      break;
+    }
+  }
+  if (!found)
+    return false;
+  *delta = result;
+  return true;
+}
+
 static void bounds_add_difference_range(ixs_bounds *b, ixs_node *expr,
                                         ixs_interval iv) {
   ixs_node *lhs;
@@ -3713,7 +3820,12 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
   ixs_node *canon;
+  ixs_node *difference_lhs;
+  ixs_node *difference_rhs;
   ixs_var_bound *var;
+  int64_t constant;
+  int64_t symbol_delta;
+  int64_t exact;
   if (!b)
     return ixs_interval_unknown();
   if (bounds_cacheable_expr(expr) && bounds_cache_lookup(b, expr, &iv))
@@ -3731,9 +3843,31 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
     if (var && var->modulus > 0)
       iv = interval_intersect_congruence(iv, var->modulus, var->remainder);
   }
+  if (bounds_extract_unit_difference(expr, &difference_lhs, &difference_rhs,
+                                     &constant) &&
+      bounds_exact_symbol_difference(b, difference_lhs, difference_rhs,
+                                     &symbol_delta) &&
+      ixs_safe_add(constant, symbol_delta, &exact))
+    iv = iv_intersect(iv, ixs_interval_exact(exact, 1));
   if (bounds_cacheable_expr(expr))
     bounds_cache_store(b, expr, iv);
   return iv;
+}
+
+static bool bounds_exact_integer_difference(ixs_bounds *b, ixs_node *difference,
+                                            int64_t *delta) {
+  int64_t p;
+  int64_t q;
+  if (!b || !difference || !delta || ixs_node_is_sentinel(difference))
+    return false;
+  if (ixs_node_is_const(difference)) {
+    ixs_node_get_rat(difference, &p, &q);
+    if (q == 1) {
+      *delta = p;
+      return true;
+    }
+  }
+  return ixs_interval_is_point_int(ixs_bounds_get(b, difference), delta);
 }
 
 static bool bounds_interval_is_zero(ixs_interval iv) {
@@ -6057,19 +6191,10 @@ static ixs_check_result equivalence_core(equivalence_state *state,
                                          ixs_node *lhs, ixs_node *rhs,
                                          unsigned depth);
 
-static bool equivalence_constant_nonzero(ixs_node *node) {
-  int64_t p;
-  int64_t q;
-  if (!ixs_node_is_const(node))
-    return false;
-  ixs_node_get_rat(node, &p, &q);
-  (void)q;
-  return p != 0;
-}
-
 static ixs_check_result equivalence_difference(equivalence_state *state,
                                                ixs_node *lhs, ixs_node *rhs) {
   ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
+  int64_t delta;
   if (!difference) {
     state->oom = true;
     return IXS_CHECK_UNKNOWN;
@@ -6081,17 +6206,14 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
     state->oom = true;
     return IXS_CHECK_UNKNOWN;
   }
-  if (ixs_node_is_zero(difference))
-    return IXS_CHECK_TRUE;
-  if (equivalence_constant_nonzero(difference))
-    return IXS_CHECK_FALSE;
+  if (bounds_exact_integer_difference(state->bounds, difference, &delta))
+    return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
   return IXS_CHECK_UNKNOWN;
 }
 
 static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
                                       ixs_node *rhs, int64_t *delta) {
   ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
-  int64_t p, q;
   if (!difference) {
     state->oom = true;
     return false;
@@ -6103,7 +6225,7 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
   }
   if (ixs_node_is_sentinel(difference))
     return false;
-  if (!ixs_node_is_const(difference)) {
+  if (!bounds_exact_integer_difference(state->bounds, difference, delta)) {
     difference = expand_impl(state->ctx, difference);
     if (!difference) {
       state->oom = true;
@@ -6116,16 +6238,8 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
       state->oom = true;
       return false;
     }
-    if (ixs_node_is_sentinel(difference))
-      return false;
   }
-  if (!ixs_node_is_const(difference))
-    return false;
-  ixs_node_get_rat(difference, &p, &q);
-  if (q != 1)
-    return false;
-  *delta = p;
-  return true;
+  return bounds_exact_integer_difference(state->bounds, difference, delta);
 }
 
 static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
@@ -7037,7 +7151,6 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   ixs_node *nodes[2] = {lhs, rhs};
   ixs_node *difference;
   int64_t result = 0;
-  int64_t q;
   bool ok = false;
   if (delta)
     *delta = 0;
@@ -7052,10 +7165,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   if (!difference || ixs_node_is_sentinel(difference))
     goto cleanup;
   difference = algebra_query_normalize(&scope, difference);
-  if (!difference || !ixs_node_is_const(difference))
+  if (!difference)
     goto cleanup;
-  ixs_node_get_rat(difference, &result, &q);
-  ok = q == 1;
+  ok = bounds_exact_integer_difference(&facts->bounds, difference, &result);
 
 cleanup:
   ok = algebra_query_finish(&scope, ok);

@@ -1827,6 +1827,152 @@ static void test_public_range_difference_constraint_propagation(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void check_public_exact_integer_range(ixs_facts *facts, ixs_node *expr,
+                                             int64_t expected) {
+  ixs_range_result range;
+  CHECK(ixs_range_facts(facts, expr, &range));
+  CHECK(range.has_lower && range.lower_p == expected && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == expected && range.upper_q == 1);
+}
+
+static void test_public_exact_equality_relations(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "exact_relation_x");
+  ixs_node *y = ixs_sym(ctx, "exact_relation_y");
+  ixs_node *z = ixs_sym(ctx, "exact_relation_z");
+  ixs_node *w = ixs_sym(ctx, "exact_relation_w");
+  ixs_node *affine =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 3));
+  ixs_node *x_plus_four = ixs_add(ctx, x, ixs_int(ctx, 4));
+  ixs_node *z_plus_seven = ixs_add(ctx, z, ixs_int(ctx, 7));
+  ixs_node *mod_x = ixs_mod(ctx, x, ixs_int(ctx, 7));
+  ixs_node *mod_y = ixs_mod(ctx, y, ixs_int(ctx, 5));
+  ixs_facts *affine_range = ixs_facts_create(ctx);
+  ixs_facts *direct = ixs_facts_create(ctx);
+  ixs_facts *nonaffine = ixs_facts_create(ctx);
+  ixs_facts *forward = ixs_facts_create(ctx);
+  ixs_facts *reverse = ixs_facts_create(ctx);
+  ixs_facts *offset = ixs_facts_create(ctx);
+  ixs_facts *source = ixs_facts_create(ctx);
+  ixs_facts *substituted = ixs_facts_create(ctx);
+  ixs_facts *one_sided = ixs_facts_create(ctx);
+  ixs_facts *scaled = ixs_facts_create(ctx);
+  ixs_facts *inconsistent = ixs_facts_create(ctx);
+  ixs_facts *overflow = ixs_facts_create(ctx);
+  ixs_range_result exact = {.has_lower = true,
+                            .has_upper = true,
+                            .lower_p = 11,
+                            .lower_q = 1,
+                            .upper_p = 11,
+                            .upper_q = 1};
+  int64_t delta = 0;
+
+  CHECK(ixs_facts_assume_range(affine_range, affine, &exact));
+  check_public_exact_integer_range(affine_range, affine, 11);
+  check_public_exact_integer_range(affine_range,
+                                   ixs_sub(ctx, affine, ixs_int(ctx, 11)), 0);
+  CHECK(ixs_equivalent_facts(affine_range, affine, ixs_int(ctx, 11)) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(affine_range, affine, ixs_int(ctx, 11),
+                                      &delta));
+  CHECK(delta == 0);
+
+  CHECK(
+      ixs_facts_assume_pred(direct, ixs_cmp(ctx, y, IXS_CMP_EQ, x_plus_four)));
+  check_public_exact_integer_range(direct, ixs_sub(ctx, y, x_plus_four), 0);
+  CHECK(ixs_equivalent_facts(direct, y, x_plus_four) == IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(direct, y, x, &delta));
+  CHECK(delta == 4);
+
+  CHECK(ixs_facts_assume_pred(
+      nonaffine,
+      ixs_cmp(ctx, mod_x, IXS_CMP_EQ, ixs_add(ctx, mod_y, ixs_int(ctx, 4)))));
+  check_public_exact_integer_range(nonaffine, ixs_sub(ctx, mod_x, mod_y), 4);
+  CHECK(ixs_equivalent_facts(nonaffine, mod_x,
+                             ixs_add(ctx, mod_y, ixs_int(ctx, 4))) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(nonaffine, mod_x, mod_y, &delta));
+  CHECK(delta == 4);
+
+  CHECK(ixs_facts_assume_pred(forward, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
+  CHECK(ixs_facts_assume_pred(forward, ixs_cmp(ctx, y, IXS_CMP_EQ, z)));
+  check_public_exact_integer_range(forward, ixs_sub(ctx, x, z), 0);
+  CHECK(ixs_equivalent_facts(forward, x, z) == IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(forward, x, z, &delta));
+  CHECK(delta == 0);
+  CHECK(ixs_equivalent_facts(
+            forward, ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 9)),
+            ixs_cmp(ctx, z, IXS_CMP_LT, ixs_int(ctx, 9))) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(reverse, ixs_cmp(ctx, y, IXS_CMP_EQ, z)));
+  CHECK(ixs_facts_assume_pred(reverse, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
+  check_public_exact_integer_range(reverse, ixs_sub(ctx, x, z), 0);
+  CHECK(ixs_equivalent_facts(reverse, x, z) == IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(reverse, x, z, &delta));
+  CHECK(delta == 0);
+
+  CHECK(ixs_facts_assume_pred(
+      offset, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_add(ctx, y, ixs_int(ctx, 3)))));
+  CHECK(ixs_facts_assume_pred(
+      offset, ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 4)))));
+  check_public_exact_integer_range(offset, ixs_sub(ctx, x, z), 7);
+  CHECK(ixs_equivalent_facts(offset, x, z_plus_seven) == IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(offset, x, z, &delta));
+  CHECK(delta == 7);
+  CHECK(ixs_equivalent_facts(
+            offset, ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 9)),
+            ixs_cmp(ctx, z, IXS_CMP_LT, ixs_int(ctx, 2))) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      source, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_add(ctx, y, ixs_int(ctx, 4)))));
+  CHECK(ixs_facts_substitute(substituted, source, y, z));
+  check_public_exact_integer_range(
+      substituted, ixs_sub(ctx, x, ixs_add(ctx, z, ixs_int(ctx, 4))), 0);
+  CHECK(
+      ixs_equivalent_facts(substituted, x, ixs_add(ctx, z, ixs_int(ctx, 4))) ==
+      IXS_CHECK_TRUE);
+  CHECK(ixs_constant_difference_facts(substituted, x, z, &delta));
+  CHECK(delta == 4);
+  CHECK(ixs_equivalent_facts(
+            substituted, ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 9)),
+            ixs_cmp(ctx, z, IXS_CMP_LT, ixs_int(ctx, 5))) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(
+      one_sided,
+      ixs_cmp(ctx, x, IXS_CMP_LE, ixs_add(ctx, y, ixs_int(ctx, 4)))));
+  CHECK(!ixs_constant_difference_facts(one_sided, x, y, &delta));
+  CHECK(ixs_equivalent_facts(one_sided, x, ixs_add(ctx, y, ixs_int(ctx, 4))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(
+            one_sided, ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 9)),
+            ixs_cmp(ctx, y, IXS_CMP_LT, ixs_int(ctx, 5))) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      scaled, ixs_cmp(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), IXS_CMP_EQ, y)));
+  CHECK(ixs_equivalent_facts(scaled, ixs_mul(ctx, ixs_int(ctx, 2), x), y) ==
+        IXS_CHECK_TRUE);
+  CHECK(!ixs_constant_difference_facts(scaled, x, y, &delta));
+
+  CHECK(ixs_facts_assume_pred(inconsistent, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
+  CHECK(ixs_facts_assume_pred(inconsistent, ixs_cmp(ctx, y, IXS_CMP_EQ, z)));
+  CHECK(ixs_facts_assume_pred(inconsistent, ixs_cmp(ctx, x, IXS_CMP_EQ, w)));
+  CHECK(ixs_facts_assume_pred(
+      inconsistent,
+      ixs_cmp(ctx, w, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 1)))));
+  CHECK(!ixs_constant_difference_facts(inconsistent, x, z, &delta));
+  CHECK(ixs_equivalent_facts(inconsistent, x, z) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      overflow,
+      ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_add(ctx, y, ixs_int(ctx, INT64_MAX)))));
+  CHECK(ixs_facts_assume_pred(
+      overflow, ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 1)))));
+  CHECK(!ixs_constant_difference_facts(overflow, x, z, &delta));
+  CHECK(ixs_equivalent_facts(overflow, x, z) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "A");
@@ -5466,6 +5612,7 @@ int main(void) {
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
   test_public_range_difference_constraint_propagation();
+  test_public_exact_equality_relations();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
   test_public_facts_batch_a4w4_order_independent();
