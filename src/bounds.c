@@ -1225,39 +1225,95 @@ static ixs_node *bounds_cmp_exact_residual(ixs_bounds *b, ixs_node *cmp) {
   return NULL;
 }
 
-static bool bounds_accumulate_exact_relation_term(ixs_bounds *b, ixs_node *term,
-                                                  ixs_node *coefficient,
-                                                  bool negate,
-                                                  ixs_node **side) {
-  ixs_node *scaled;
-  int64_t coefficient_p;
-  int64_t coefficient_q;
+/* The source residual is already a canonical ADD: its terms are unique and
+ * sorted by node key. Stable sign partitioning preserves both properties, so
+ * build each side in one hash-consing pass instead of repeatedly rebuilding
+ * a growing binary sum. */
+static ixs_node *bounds_build_exact_relation_side(ixs_bounds *b,
+                                                  ixs_addterm *terms,
+                                                  uint32_t nterms) {
+  ixs_node *result;
+  if (nterms == 0)
+    return b->ctx->node_zero;
+  if (nterms == 1) {
+    if (ixs_node_is_one(terms[0].coeff))
+      return terms[0].term;
+    result = simp_mul(b->ctx, terms[0].coeff, terms[0].term);
+  } else {
+    result = ixs_node_add(b->ctx, b->ctx->node_zero, nterms, terms);
+  }
+  if (!result) {
+    b->oom = true;
+    return NULL;
+  }
+  return ixs_node_is_sentinel(result) ? NULL : result;
+}
 
-  if (negate) {
+static bool bounds_partition_exact_relation(ixs_bounds *b, ixs_node *difference,
+                                            ixs_node **positive,
+                                            ixs_node **negative) {
+  ixs_arena_mark mark = ixs_arena_save(b->scratch);
+  ixs_addterm *terms;
+  ixs_addterm *positive_terms;
+  ixs_addterm *negative_terms;
+  size_t bytes;
+  uint32_t positive_count = 0;
+  uint32_t negative_count = 0;
+  uint32_t i;
+  bool ok = false;
+
+  bytes = (size_t)difference->u.add.nterms * sizeof(*terms);
+  if (bytes / sizeof(*terms) != difference->u.add.nterms ||
+      bytes > SIZE_MAX / 2u) {
+    b->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  bytes *= 2u;
+  terms = ixs_arena_alloc(b->scratch, bytes, sizeof(void *));
+  if (!terms) {
+    b->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  positive_terms = terms;
+  negative_terms = terms + difference->u.add.nterms;
+
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    ixs_node *coefficient = difference->u.add.terms[i].coeff;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    int sign;
+
     ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
+    sign = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1);
+    if (sign > 0) {
+      positive_terms[positive_count++] = difference->u.add.terms[i];
+      continue;
+    }
+    if (sign == 0)
+      continue;
     if (!ixs_rat_neg(coefficient_p, coefficient_q, &coefficient_p,
                      &coefficient_q))
-      return false;
+      goto cleanup;
     coefficient = ixs_node_rat(b->ctx, coefficient_p, coefficient_q);
     if (!coefficient) {
       b->oom = true;
-      return false;
+      goto cleanup;
     }
+    negative_terms[negative_count].term = difference->u.add.terms[i].term;
+    negative_terms[negative_count++].coeff = coefficient;
   }
-  scaled =
-      ixs_node_is_one(coefficient) ? term : simp_mul(b->ctx, coefficient, term);
-  if (!scaled || ixs_node_is_sentinel(scaled)) {
-    if (!scaled)
-      b->oom = true;
-    return false;
-  }
-  *side = simp_add(b->ctx, *side, scaled);
-  if (!*side || ixs_node_is_sentinel(*side)) {
-    if (!*side)
-      b->oom = true;
-    return false;
-  }
-  return true;
+
+  *positive =
+      bounds_build_exact_relation_side(b, positive_terms, positive_count);
+  *negative =
+      bounds_build_exact_relation_side(b, negative_terms, negative_count);
+  ok = *positive && *negative;
+
+cleanup:
+  ixs_arena_restore(b->scratch, mark);
+  return ok;
 }
 
 /* Split an exact comparison residual
@@ -1276,7 +1332,6 @@ static bool bounds_extract_cmp_exact_relation(ixs_bounds *b, ixs_node *cmp,
   ixs_node *negative;
   int64_t constant;
   int64_t constant_q;
-  uint32_t i;
 
   if (!b || !b->ctx || !cmp || cmp->tag != IXS_CMP ||
       cmp->u.binary.cmp_op != IXS_CMP_EQ || !lhs || !rhs || !offset)
@@ -1292,25 +1347,8 @@ static bool bounds_extract_cmp_exact_relation(ixs_bounds *b, ixs_node *cmp,
   if (constant_q != 1)
     return false;
 
-  positive = b->ctx->node_zero;
-  negative = b->ctx->node_zero;
-  for (i = 0; i < difference->u.add.nterms; i++) {
-    ixs_node *term = difference->u.add.terms[i].term;
-    ixs_node *coefficient = difference->u.add.terms[i].coeff;
-    ixs_node **side;
-    int64_t coefficient_p;
-    int64_t coefficient_q;
-    int sign;
-
-    ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
-    sign = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1);
-    if (sign == 0)
-      continue;
-    side = sign > 0 ? &positive : &negative;
-    if (!bounds_accumulate_exact_relation_term(b, term, coefficient, sign < 0,
-                                               side))
-      return false;
-  }
+  if (!bounds_partition_exact_relation(b, difference, &positive, &negative))
+    return false;
 
   if (ixs_node_is_zero(positive) || ixs_node_is_zero(negative))
     return false;
@@ -1921,8 +1959,17 @@ static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
   size_t index_capacity;
   size_t slot;
 
-  if (!b || !lhs || !rhs || lhs == rhs || b->oom ||
-      bounds_has_exact_relation(b, lhs, rhs, offset))
+  if (!b || !lhs || !rhs || b->oom)
+    return;
+  if (lhs == rhs) {
+    /* `expr == expr + k` has no satisfying defined value when k != 0.
+     * In particular, substitution can collapse two formerly distinct
+     * endpoints; do not silently discard the resulting contradiction. */
+    if (offset != 0)
+      bounds_mark_contradiction(b);
+    return;
+  }
+  if (bounds_has_exact_relation(b, lhs, rhs, offset))
     return;
   if (!bounds_get_or_create_equality_endpoint(b, lhs, &lhs_endpoint) ||
       !bounds_get_or_create_equality_endpoint(b, rhs, &rhs_endpoint) ||

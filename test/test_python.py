@@ -2560,6 +2560,22 @@ def test_fact_backed_exact_equality_relations() -> None:
     assert ctx.constant_difference(x, y, one_sided) is None
     assert ctx.equivalent(x, y + 4, one_sided) is None
 
+    d = ctx.sym("exact_binding_divisor")
+    witness = ctx.sym("exact_binding_witness")
+    self_offset = ctx.facts()
+    self_offset.assume(ctx.eq(x / d, y / d + 1))
+    self_offset.assume_range(witness, 5, 5)
+    collapsed = self_offset.subs(x, y)
+    assert ctx.range(witness, facts=collapsed) is None
+    collapsed_multi = self_offset.subs({x: z, y: z})
+    assert ctx.range(witness, facts=collapsed_multi) is None
+
+    self_zero = ctx.facts()
+    self_zero.assume(ctx.eq(x / d, y / d))
+    self_zero.assume_range(witness, 5, 5)
+    collapsed_zero = self_zero.subs(x, y)
+    assert ctx.range(witness, facts=collapsed_zero) == (5, 5)
+
 
 def test_fact_backed_exact_equality_projects_range_and_integrality() -> None:
     ctx = ixsimpl.Context()

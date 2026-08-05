@@ -2063,6 +2063,41 @@ static void test_public_exact_residual_relation_chain_and_boundaries(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_residual_wide_term_partition(void) {
+  enum { SIDE_TERMS = 192 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *lhs = ixs_int(ctx, 0);
+  ixs_node *rhs = ixs_int(ctx, 0);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result zero = {.has_lower = true,
+                           .has_upper = true,
+                           .lower_p = 0,
+                           .lower_q = 1,
+                           .upper_p = 0,
+                           .upper_q = 1};
+  int64_t delta;
+  unsigned i;
+
+  for (i = 0; i < SIDE_TERMS; i++) {
+    char lhs_name[48];
+    char rhs_name[48];
+    snprintf(lhs_name, sizeof(lhs_name), "wide_relation_lhs_%u", i);
+    snprintf(rhs_name, sizeof(rhs_name), "wide_relation_rhs_%u", i);
+    lhs = ixs_add(ctx, lhs, ixs_sym(ctx, lhs_name));
+    rhs = ixs_add(ctx, rhs, ixs_sym(ctx, rhs_name));
+  }
+
+  CHECK(ixs_facts_assume_pred(
+      facts,
+      ixs_cmp(ctx, lhs, IXS_CMP_EQ, ixs_add(ctx, rhs, ixs_int(ctx, 7)))));
+  CHECK(ixs_constant_difference_facts(facts, lhs, rhs, &delta));
+  CHECK(delta == 7);
+  CHECK(ixs_facts_assume_range(facts, rhs, &zero));
+  check_public_exact_integer_range(facts, lhs, 7);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void check_public_integer_range(ixs_facts *facts, ixs_node *expr,
                                        int64_t lower, int64_t upper) {
   ixs_range_result range;
@@ -3646,6 +3681,9 @@ static void test_public_facts_substitute_contradiction_and_extrema(void) {
   ixs_node *two_k = ixs_mul(ctx, ixs_int(ctx, 2), k);
   ixs_node *min_k = ixs_mul(ctx, ixs_int(ctx, INT64_MIN), k);
   ixs_node *min_offset = ixs_add(ctx, k, ixs_int(ctx, INT64_MIN));
+  ixs_node *witness = ixs_sym(ctx, "exact_self_offset_witness");
+  ixs_node *partial_x = ixs_div(ctx, x, k);
+  ixs_node *partial_y = ixs_div(ctx, y, k);
   ixs_facts *incompatible = ixs_facts_create(ctx);
   ixs_facts *contradictory = ixs_facts_create(ctx);
   ixs_facts *extreme_src = ixs_facts_create(ctx);
@@ -3656,6 +3694,10 @@ static void test_public_facts_substitute_contradiction_and_extrema(void) {
   ixs_facts *merge_dst = ixs_facts_create(ctx);
   ixs_facts *range_src = ixs_facts_create(ctx);
   ixs_facts *range_dst = ixs_facts_create(ctx);
+  ixs_facts *self_offset_src = ixs_facts_create(ctx);
+  ixs_facts *self_offset_dst = ixs_facts_create(ctx);
+  ixs_facts *self_zero_src = ixs_facts_create(ctx);
+  ixs_facts *self_zero_dst = ixs_facts_create(ctx);
   ixs_range_result input;
   ixs_range_result range;
   int64_t modulus;
@@ -3710,6 +3752,23 @@ static void test_public_facts_substitute_contradiction_and_extrema(void) {
   CHECK(ixs_range_facts(range_dst, min_offset, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 1 && range.upper_q == 1);
+
+  input.lower_p = 5;
+  input.upper_p = 5;
+  CHECK(ixs_facts_assume_pred(
+      self_offset_src, ixs_cmp(ctx, partial_x, IXS_CMP_EQ,
+                               ixs_add(ctx, partial_y, ixs_int(ctx, 1)))));
+  CHECK(ixs_facts_assume_range(self_offset_src, witness, &input));
+  CHECK(ixs_facts_substitute(self_offset_dst, self_offset_src, x, y));
+  CHECK(!ixs_range_facts(self_offset_dst, witness, &range));
+
+  /* Equality with zero offset does not itself prove a partial endpoint
+   * defined, and collapsing it during substitution is not contradictory. */
+  CHECK(ixs_facts_assume_pred(self_zero_src,
+                              ixs_cmp(ctx, partial_x, IXS_CMP_EQ, partial_y)));
+  CHECK(ixs_facts_assume_range(self_zero_src, witness, &input));
+  CHECK(ixs_facts_substitute(self_zero_dst, self_zero_src, x, y));
+  check_public_exact_integer_range(self_zero_dst, witness, 5);
 
   ixs_ctx_destroy(ctx);
 }
@@ -6245,6 +6304,7 @@ int main(void) {
   test_public_range_difference_constraint_propagation();
   test_public_exact_equality_relations();
   test_public_exact_residual_relation_chain_and_boundaries();
+  test_public_exact_residual_wide_term_partition();
   test_public_exact_equality_range_projection();
   test_public_exact_scaled_residual_range_projection();
   test_public_range_composite_predicate_fact();

@@ -1242,6 +1242,12 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   still requires an independent structural definedness proof. Conflicting,
   over-budget, unsupported, or unrepresentable results return unknown.
 
+  Extraction stable-partitions the already canonical ADD terms by coefficient
+  sign and builds each side in one canonical constructor call, linear in the
+  number of immediate terms. A nonzero self-offset such as `expr == expr + 1`,
+  including one exposed by substitution, marks the fact set contradictory; a
+  zero-offset self equality remains a no-op and does not prove `expr` defined.
+
   Equality never proves an endpoint defined. Before traversing an edge, both
   endpoints must pass independent structural definedness checks with equality
   projection disabled. Those checks and their domain-guard range queries use
