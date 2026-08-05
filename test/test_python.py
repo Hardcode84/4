@@ -2423,6 +2423,62 @@ def test_fact_backed_algebra_helpers() -> None:
     assert ctx.split_additive_constant(base + ctx.rat(1, 2), facts) is None
 
 
+def test_exact_quotient_decomposition_binding() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("quotient_binding_x")
+    y = ctx.sym("quotient_binding_y")
+    z = ctx.sym("quotient_binding_z")
+    i = ctx.sym("quotient_binding_i")
+    facts = ctx.facts()
+
+    product = ctx.rat(3, 4) * x * x / (y * y)
+    parts = ctx.decompose_exact_quotient(product, facts)
+    assert parts is not None
+    numerator, denominator = parts
+    assert ixsimpl.same_node(numerator, 3 * x * x)
+    assert ixsimpl.same_node(denominator, 4 * y * y)
+    assert ixsimpl.same_node(numerator / denominator, product)
+
+    common_denominator = 2 * y
+    common_sum = x / common_denominator + 3 * z / common_denominator + 5
+    parts = ctx.decompose_exact_quotient(common_sum, facts)
+    assert parts is not None
+    numerator, denominator = parts
+    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
+    assert ixsimpl.same_node(denominator, common_denominator)
+    assert ixsimpl.same_node((numerator / denominator).expand(), common_sum)
+
+    parts = ctx.decompose_exact_quotient(ctx.rat(-3, 4), facts)
+    assert parts is not None
+    numerator, denominator = parts
+    assert ixsimpl.same_node(numerator, ctx.int_(-3))
+    assert ixsimpl.same_node(denominator, ctx.int_(4))
+    assert ctx.decompose_exact_quotient(ctx.int_(3), facts) is None
+    assert ctx.decompose_exact_quotient(2 * x, facts) is None
+    assert ctx.decompose_exact_quotient(x / y + z / x, facts) is None
+    assert ctx.decompose_exact_quotient(x / 2 + z / 4, facts) is None
+
+    large_denominator = ctx.int_(1)
+    for _ in range(65):
+        large_denominator *= y
+    parts = ctx.decompose_exact_quotient(x / large_denominator, facts)
+    assert parts is not None
+    numerator, denominator = parts
+    assert ixsimpl.same_node(numerator, x)
+    assert ixsimpl.same_node(denominator, large_denominator)
+
+    condition = i >= 0
+    piecewise = ixsimpl.pw((common_sum, condition), (x, ctx.true_()))
+    assert ctx.decompose_exact_quotient(piecewise, facts) is None
+    nonnegative = ctx.facts()
+    nonnegative.assume(condition)
+    parts = ctx.decompose_exact_quotient(piecewise, nonnegative)
+    assert parts is not None
+    numerator, denominator = parts
+    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
+    assert ixsimpl.same_node(denominator, common_denominator)
+
+
 def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     ctx = ixsimpl.Context()
     i = ctx.sym("algebra_domain_i")
@@ -2465,6 +2521,10 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
     with pytest.raises(ValueError, match="different context"):
         ctx.affine_decompose(x, other.sym("x"), facts)
     with pytest.raises(ValueError, match="different context"):
+        ctx.decompose_exact_quotient(other.sym("x"), facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.decompose_exact_quotient(x, other.facts())
+    with pytest.raises(ValueError, match="different context"):
         ctx.finite_difference(x, x, other.sym("step"), facts)
     with pytest.raises(ValueError, match="different context"):
         ctx.split_additive_constant(other.sym("x"), facts)
@@ -2474,6 +2534,8 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
         ctx.constant_difference(sentinel, x, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.affine_decompose(sentinel, x, facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.decompose_exact_quotient(sentinel, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):

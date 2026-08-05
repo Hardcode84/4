@@ -4977,6 +4977,163 @@ static void test_public_affine_and_constant_difference(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_exact_quotient_decomposition(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "quotient_x");
+  ixs_node *y = ixs_sym(ctx, "quotient_y");
+  ixs_node *z = ixs_sym(ctx, "quotient_z");
+  ixs_node *w = ixs_sym(ctx, "quotient_w");
+  ixs_node *i = ixs_sym(ctx, "quotient_i");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *numerator = NULL;
+  ixs_node *denominator = NULL;
+  ixs_node *x_squared = ixs_mul(ctx, x, x);
+  ixs_node *y_squared = ixs_mul(ctx, y, y);
+  ixs_node *product =
+      ixs_mul(ctx, ixs_rat(ctx, 3, 4), ixs_div(ctx, x_squared, y_squared));
+  ixs_node *common_denominator = ixs_mul(ctx, ixs_int(ctx, 2), y);
+  ixs_node *sum = ixs_add(ctx,
+                          ixs_add(ctx, ixs_div(ctx, x, common_denominator),
+                                  ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, 3), z),
+                                          common_denominator)),
+                          ixs_int(ctx, 5));
+  ixs_node *expected_sum_numerator =
+      ixs_add(ctx, ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, 3), z)),
+              ixs_mul(ctx, ixs_int(ctx, 10), y));
+  ixs_node *condition = ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *values[2] = {sum, x};
+  ixs_node *conditions[2] = {condition, ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *different_denominators =
+      ixs_add(ctx, ixs_div(ctx, x, y), ixs_div(ctx, z, w));
+  ixs_node *different_rational_denominators = ixs_add(
+      ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), ixs_div(ctx, z, ixs_int(ctx, 4)));
+  ixs_mulfactor large_factor = {y, 65};
+  ixs_node *large_denominator = ixs_node_mul(ctx, one, 1, &large_factor);
+  ixs_node *large_quotient = ixs_div(ctx, x, large_denominator);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+
+  CHECK(ixs_decompose_exact_quotient_facts(empty, product, &numerator,
+                                           &denominator));
+  CHECK(ixs_same_node(numerator, ixs_mul(ctx, ixs_int(ctx, 3), x_squared)));
+  CHECK(ixs_same_node(denominator, ixs_mul(ctx, ixs_int(ctx, 4), y_squared)));
+  CHECK(ixs_same_node(ixs_div(ctx, numerator, denominator), product));
+
+  CHECK(
+      ixs_decompose_exact_quotient_facts(empty, sum, &numerator, &denominator));
+  CHECK(ixs_same_node(numerator, expected_sum_numerator));
+  CHECK(ixs_same_node(denominator, common_denominator));
+  CHECK(ixs_same_node(ixs_expand(ctx, ixs_div(ctx, numerator, denominator)),
+                      sum));
+
+  CHECK(ixs_decompose_exact_quotient_facts(empty, ixs_rat(ctx, -3, 4),
+                                           &numerator, &denominator));
+  CHECK(ixs_same_node(numerator, ixs_int(ctx, -3)));
+  CHECK(ixs_same_node(denominator, ixs_int(ctx, 4)));
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, ixs_int(ctx, 3), &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, piecewise, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(ixs_facts_assume_pred(nonnegative, condition));
+  CHECK(ixs_decompose_exact_quotient_facts(nonnegative, piecewise, &numerator,
+                                           &denominator));
+  CHECK(ixs_same_node(numerator, expected_sum_numerator));
+  CHECK(ixs_same_node(denominator, common_denominator));
+
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, different_denominators,
+                                            &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      empty, different_rational_denominators, &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      empty, ixs_mul(ctx, ixs_int(ctx, 2), x), &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  CHECK(ixs_decompose_exact_quotient_facts(empty, large_quotient, &numerator,
+                                           &denominator));
+  CHECK(ixs_same_node(numerator, x));
+  CHECK(ixs_same_node(denominator, large_denominator));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_exact_quotient_invalid_and_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "quotient_invalid_x");
+  ixs_node *y = ixs_sym(ctx, "quotient_invalid_y");
+  ixs_node *expr = ixs_mul(ctx, ixs_rat(ctx, 3, 4), ixs_div(ctx, x, y));
+  ixs_node *numerator = x;
+  ixs_node *denominator = y;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(!ixs_decompose_exact_quotient_facts(contradictory, expr, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  numerator = x;
+  denominator = y;
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      facts, ixs_sym(other, "quotient_other"), &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  numerator = x;
+  denominator = y;
+  CHECK(!ixs_decompose_exact_quotient_facts(facts, ctx->sentinel_error,
+                                            &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  numerator = x;
+  denominator = y;
+  CHECK(!ixs_decompose_exact_quotient_facts(facts, NULL, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  numerator = x;
+  CHECK(
+      !ixs_decompose_exact_quotient_facts(facts, expr, &numerator, &numerator));
+  CHECK(numerator == NULL);
+  denominator = y;
+  CHECK(!ixs_decompose_exact_quotient_facts(facts, expr, NULL, &denominator));
+  CHECK(denominator == NULL);
+  numerator = x;
+  denominator = y;
+  CHECK(!ixs_decompose_exact_quotient_facts(NULL, expr, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  numerator = x;
+  denominator = y;
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(!ixs_decompose_exact_quotient_facts(facts, expr, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_decompose_exact_quotient_facts(facts, expr, &numerator,
+                                           &denominator));
+  CHECK(numerator != NULL && denominator != NULL);
+
+  numerator = x;
+  denominator = y;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(!ixs_decompose_exact_quotient_facts(facts, expr, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_decompose_exact_quotient_facts(facts, expr, &numerator,
+                                           &denominator));
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_finite_difference_and_additive_split(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *i = ixs_sym(ctx, "difference_i");
@@ -6242,6 +6399,8 @@ int main(void) {
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();
   test_public_affine_and_constant_difference();
+  test_public_exact_quotient_decomposition();
+  test_public_exact_quotient_invalid_and_oom();
   test_public_finite_difference_and_additive_split();
   test_public_algebra_helpers_use_facts();
   test_public_algebra_helper_invalid_inputs();

@@ -179,6 +179,9 @@ if TYPE_CHECKING:
         def affine_decompose(
             self, expr: _Expr, symbol: _Expr, facts: Facts
         ) -> tuple[Expr, Expr] | None: ...
+        def decompose_exact_quotient(
+            self, expr: _Expr, facts: Facts
+        ) -> tuple[Expr, Expr] | None: ...
         def finite_difference(
             self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
         ) -> Expr | None: ...

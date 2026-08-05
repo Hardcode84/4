@@ -1650,6 +1650,27 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   contradictory facts, representation overflow, and bounded-walk or expansion
   limits fail conservatively. These helpers do not add relational, polyhedral,
   or SMT reasoning.
+- **Exact quotient decomposition** (`ixs_decompose_exact_quotient_facts`,
+  Python `Context.decompose_exact_quotient`, C++
+  `Facts::decompose_exact_quotient`): simplifies once under the supplied facts,
+  then splits a non-integral rational constant or canonical `MUL` into exact
+  numerator and denominator nodes. A canonical `ADD` matches only when every
+  scaled nonconstant term has the same pointer-identical denominator; its
+  additive constant is multiplied by that denominator and included in the
+  numerator. Dividing the returned numerator by the returned denominator and
+  expanding reconstructs the simplified input wherever that input is defined.
+  This is a structural identity, not a proof that either part is integral or
+  that the denominator is nonzero.
+
+  Product decomposition makes two linear passes over the already sorted factor
+  array, partitions it in scratch storage, and builds each result directly.
+  It neither recurses nor repeatedly multiplies powers, so every representable
+  positive exponent is supported; `INT32_MIN` cannot be negated into a
+  representable denominator exponent and does not match. Unequal denominators,
+  denominator-free shapes, invalid or contradictory facts, sentinels,
+  representation overflow, and OOM return false with both outputs NULL.
+  Output slots must be non-NULL and distinct. Scratch and fact-cache state are
+  restored transactionally on every exit.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -2117,6 +2138,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator);
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference);
@@ -2768,8 +2792,9 @@ Key properties:
   four-way status and a nullable `Expr` quotient; errors remain available
   through the owning `Context` diagnostics.
   `Facts::constant_difference()`, `affine_decompose()`,
-  `finite_difference()`, and `split_additive_constant()` mirror the narrow
-  fact-backed C helpers and fill their output references only on success.
+  `decompose_exact_quotient()`, `finite_difference()`, and
+  `split_additive_constant()` mirror the narrow fact-backed C helpers and fill
+  their output references only on success.
 - `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
   compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
@@ -2889,10 +2914,12 @@ Implementation:
   and `MemoryError` for OOM while preserving the session diagnostic.
 - `Context.constant_difference(lhs, rhs, facts)` returns an `int` or `None`;
   `Context.affine_decompose(expr, symbol, facts)` returns
-  `(coefficient, residual)` or `None`; `Context.finite_difference(...)`
+  `(coefficient, residual)` or `None`;
+  `Context.decompose_exact_quotient(expr, facts)` returns
+  `(numerator, denominator)` or `None`; `Context.finite_difference(...)`
   returns an `Expr` or `None`; and `Context.split_additive_constant(...)`
   returns `(residual, constant)` or `None`. Invalid contexts, sentinels, and
-  non-symbol affine targets raise `ValueError`; valid but unproved queries do
+  non-symbol affine targets raise `ValueError`; valid but unmatched queries do
   not add diagnostics.
 - `Context.check_predicate(predicate, facts)` and
   `Context.equivalent(lhs, rhs, facts)` expose conservative tri-state results
@@ -3209,6 +3236,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator);
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference);

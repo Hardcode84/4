@@ -67,8 +67,15 @@ int main() {
   ixs::Expr coefficient = zero;
   ixs::Expr residual = zero;
   ixs::Expr difference = zero;
+  ixs::Expr numerator = zero;
+  ixs::Expr denominator = zero;
+  ixs::Expr rational_product = ixs::Expr::rational(ctx, 3, 4) * x;
   if (!facts.constant_difference(x + eight, x + one, delta) || delta != 7 ||
       !facts.affine_decompose(twice_x + one, x, coefficient, residual) ||
+      !facts.decompose_exact_quotient(rational_product, numerator,
+                                      denominator) ||
+      !(numerator == ixs::Expr::integer(ctx, 3) * x) ||
+      !(denominator == ixs::Expr::integer(ctx, 4)) ||
       !facts.finite_difference(twice_x, x, one, difference) ||
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||
@@ -76,17 +83,23 @@ int main() {
       facts.check_congruent(x, 8, 0) != IXS_CHECK_TRUE)
     return 5;
 
+  numerator = one;
+  denominator = eight;
+  if (facts.decompose_exact_quotient(x, numerator, denominator) ||
+      !(numerator == one) || !(denominator == eight))
+    return 6;
+
   ixs::ExactDivideResult exact = facts.try_exact_divide(twice_x, 2);
   if (exact.status != IXS_EXACT_DIVIDE_PROVEN || exact.quotient.is_null())
-    return 6;
+    return 7;
 
   ixs::Facts transferred = ctx.facts();
   if (!transferred.substitute(facts, x, y))
-    return 7;
+    return 8;
   std::vector<ixs::Expr> targets = {x, y};
   std::vector<ixs::Expr> replacements = {y, x};
   if (!transferred.substitute_multi(facts, targets, replacements))
-    return 8;
+    return 9;
 
   std::vector<ixs::Expr> assoc_values = {x, y, one};
   ixs::Expr assoc_nodes[] = {

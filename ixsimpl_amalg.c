@@ -8164,6 +8164,39 @@ cleanup:
   return ok;
 }
 
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator) {
+  algebra_query_scope scope;
+  ixs_node *nodes[1] = {expr};
+  ixs_node *result_numerator = NULL;
+  ixs_node *result_denominator = NULL;
+  bool outputs_ok = numerator && denominator && numerator != denominator;
+  bool ok = false;
+  if (numerator)
+    *numerator = NULL;
+  if (denominator)
+    *denominator = NULL;
+  if (!algebra_query_begin(facts, nodes, 1, "exact quotient decomposition",
+                           outputs_ok, "outputs must be non-NULL and distinct",
+                           &scope))
+    return false;
+  algebra_query_start(&scope);
+  expr = simp_simplify_bounds(scope.ctx, expr, &facts->bounds);
+  if (!expr || ixs_node_is_sentinel(expr))
+    goto cleanup;
+  ok = simp_decompose_exact_quotient(scope.ctx, expr, &result_numerator,
+                                     &result_denominator);
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok) {
+    *numerator = result_numerator;
+    *denominator = result_denominator;
+  }
+  return ok;
+}
+
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference) {
@@ -21173,10 +21206,10 @@ static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
 }
 
 typedef enum {
-  FLOOR_PARTS_NO_MATCH,
-  FLOOR_PARTS_MATCH,
-  FLOOR_PARTS_ERROR
-} floor_parts_status;
+  QUOTIENT_PARTS_NO_MATCH,
+  QUOTIENT_PARTS_MATCH,
+  QUOTIENT_PARTS_ERROR
+} quotient_parts_status;
 
 typedef enum {
   FLOOR_SHIFT_UNPROVEN,
@@ -21184,95 +21217,180 @@ typedef enum {
   FLOOR_SHIFT_ERROR
 } floor_shift_status;
 
-static floor_parts_status quotient_mul_parts(ixs_ctx *ctx, ixs_node *arg,
-                                             ixs_node **numerator,
-                                             ixs_node **denominator) {
+static ixs_node *quotient_build_product(ixs_ctx *ctx, ixs_node *coefficient,
+                                        uint32_t nfactors,
+                                        const ixs_mulfactor *factors) {
+  if (nfactors == 0)
+    return coefficient;
+  if (nfactors == 1 && factors[0].exp == 1 && ixs_node_is_one(coefficient))
+    return factors[0].base;
+  return ixs_node_mul(ctx, coefficient, nfactors, factors);
+}
+
+/* Partition one canonical product in two linear passes.  Reusing the sorted
+ * factor array avoids repeated multiplication and supports every representable
+ * exponent magnitude. */
+static quotient_parts_status quotient_product_parts(ixs_ctx *ctx,
+                                                    ixs_node *expr,
+                                                    ixs_node **numerator,
+                                                    ixs_node **denominator) {
+  ixs_arena_mark mark;
+  ixs_mulfactor *factors;
+  ixs_mulfactor *positive;
+  ixs_mulfactor *negative;
+  ixs_node *num_coefficient;
+  ixs_node *denom_coefficient;
   ixs_node *num;
   ixs_node *denom;
   int64_t p, q;
+  uint32_t npositive = 0;
+  uint32_t nnegative = 0;
   uint32_t i;
-  bool has_denominator = false;
-  if (arg->tag != IXS_MUL)
-    return FLOOR_PARTS_NO_MATCH;
-  ixs_node_get_rat(arg->u.mul.coeff, &p, &q);
-  num = ixs_node_int(ctx, p);
-  denom = ixs_node_int(ctx, q);
-  if (!num || !denom)
-    return FLOOR_PARTS_ERROR;
-  has_denominator = q != 1;
-  for (i = 0; i < arg->u.mul.nfactors; i++) {
-    ixs_node *base = arg->u.mul.factors[i].base;
-    int32_t exponent = arg->u.mul.factors[i].exp;
-    int32_t magnitude;
-    if (exponent == INT32_MIN)
-      return FLOOR_PARTS_NO_MATCH;
-    magnitude = exponent < 0 ? -exponent : exponent;
-    if (magnitude > MAX_FOLD_EXP)
-      return FLOOR_PARTS_NO_MATCH;
-    if (exponent > 0) {
-      num = apply_pow(ctx, num, base, exponent);
-    } else {
-      denom = apply_pow(ctx, denom, base, -exponent);
-      has_denominator = true;
-    }
+
+  if (ixs_node_is_const(expr)) {
+    ixs_node_get_rat(expr, &p, &q);
+    if (q == 1)
+      return QUOTIENT_PARTS_NO_MATCH;
+    num = ixs_node_int(ctx, p);
+    denom = ixs_node_int(ctx, q);
     if (!num || !denom)
-      return FLOOR_PARTS_ERROR;
-    if (ixs_node_is_sentinel(num) || ixs_node_is_sentinel(denom))
-      return FLOOR_PARTS_NO_MATCH;
+      return QUOTIENT_PARTS_ERROR;
+    *numerator = num;
+    *denominator = denom;
+    return QUOTIENT_PARTS_MATCH;
   }
-  if (!has_denominator)
-    return FLOOR_PARTS_NO_MATCH;
+  if (expr->tag != IXS_MUL)
+    return QUOTIENT_PARTS_NO_MATCH;
+  ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    int32_t exponent = expr->u.mul.factors[i].exp;
+    if (exponent == INT32_MIN)
+      return QUOTIENT_PARTS_NO_MATCH;
+    if (exponent > 0)
+      npositive++;
+    else
+      nnegative++;
+  }
+  if (q == 1 && nnegative == 0)
+    return QUOTIENT_PARTS_NO_MATCH;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  factors = ixs_arena_alloc(
+      &ctx->scratch, expr->u.mul.nfactors * sizeof(*factors), sizeof(void *));
+  if (!factors) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return QUOTIENT_PARTS_ERROR;
+  }
+  positive = factors;
+  negative = factors + npositive;
+  npositive = 0;
+  nnegative = 0;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    ixs_mulfactor factor = expr->u.mul.factors[i];
+    if (factor.exp > 0) {
+      positive[npositive++] = factor;
+    } else {
+      factor.exp = -factor.exp;
+      negative[nnegative++] = factor;
+    }
+  }
+  num_coefficient = ixs_node_int(ctx, p);
+  denom_coefficient = ixs_node_int(ctx, q);
+  if (!num_coefficient || !denom_coefficient) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return QUOTIENT_PARTS_ERROR;
+  }
+  num = quotient_build_product(ctx, num_coefficient, npositive, positive);
+  denom = quotient_build_product(ctx, denom_coefficient, nnegative, negative);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!num || !denom)
+    return QUOTIENT_PARTS_ERROR;
   *numerator = num;
   *denominator = denom;
-  return FLOOR_PARTS_MATCH;
+  return QUOTIENT_PARTS_MATCH;
 }
 
-static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
-                                               ixs_node **numerator,
-                                               ixs_node **denominator) {
-  ixs_node *arg;
+static quotient_parts_status exact_quotient_parts(ixs_ctx *ctx, ixs_node *expr,
+                                                  ixs_node **numerator,
+                                                  ixs_node **denominator) {
   ixs_node *num;
   ixs_node *denom = NULL;
+  ixs_node *constant_numerator;
   uint32_t i;
-  if (floor->tag != IXS_FLOOR)
-    return FLOOR_PARTS_NO_MATCH;
-  arg = floor->u.unary.arg;
-  if (arg->tag == IXS_MUL)
-    return quotient_mul_parts(ctx, arg, numerator, denominator);
-  if (arg->tag != IXS_ADD || !ixs_node_is_zero(arg->u.add.coeff) ||
-      arg->u.add.nterms == 0)
-    return FLOOR_PARTS_NO_MATCH;
+
+  if (expr->tag != IXS_ADD)
+    return quotient_product_parts(ctx, expr, numerator, denominator);
+  if (expr->u.add.nterms == 0)
+    return QUOTIENT_PARTS_NO_MATCH;
   num = ixs_node_int(ctx, 0);
   if (!num)
-    return FLOOR_PARTS_ERROR;
-  for (i = 0; i < arg->u.add.nterms; i++) {
-    floor_parts_status status;
+    return QUOTIENT_PARTS_ERROR;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    quotient_parts_status status;
     ixs_node *scaled =
-        simp_mul(ctx, arg->u.add.terms[i].coeff, arg->u.add.terms[i].term);
+        simp_mul(ctx, expr->u.add.terms[i].coeff, expr->u.add.terms[i].term);
     ixs_node *term_numerator;
     ixs_node *term_denominator;
     if (!scaled)
-      return FLOOR_PARTS_ERROR;
+      return QUOTIENT_PARTS_ERROR;
     if (ixs_node_is_sentinel(scaled))
-      return FLOOR_PARTS_NO_MATCH;
+      return QUOTIENT_PARTS_NO_MATCH;
     status =
-        quotient_mul_parts(ctx, scaled, &term_numerator, &term_denominator);
-    if (status != FLOOR_PARTS_MATCH)
+        quotient_product_parts(ctx, scaled, &term_numerator, &term_denominator);
+    if (status != QUOTIENT_PARTS_MATCH)
       return status;
     if (denom && term_denominator != denom)
-      return FLOOR_PARTS_NO_MATCH;
+      return QUOTIENT_PARTS_NO_MATCH;
     denom = term_denominator;
     num = simp_add(ctx, num, term_numerator);
     if (!num)
-      return FLOOR_PARTS_ERROR;
+      return QUOTIENT_PARTS_ERROR;
     if (ixs_node_is_sentinel(num))
-      return FLOOR_PARTS_NO_MATCH;
+      return QUOTIENT_PARTS_NO_MATCH;
   }
   if (!denom)
-    return FLOOR_PARTS_NO_MATCH;
+    return QUOTIENT_PARTS_NO_MATCH;
+  constant_numerator = simp_mul(ctx, expr->u.add.coeff, denom);
+  if (!constant_numerator)
+    return QUOTIENT_PARTS_ERROR;
+  if (ixs_node_is_sentinel(constant_numerator))
+    return QUOTIENT_PARTS_NO_MATCH;
+  num = simp_add(ctx, num, constant_numerator);
+  if (!num)
+    return QUOTIENT_PARTS_ERROR;
+  if (ixs_node_is_sentinel(num))
+    return QUOTIENT_PARTS_NO_MATCH;
   *numerator = num;
   *denominator = denom;
-  return FLOOR_PARTS_MATCH;
+  return QUOTIENT_PARTS_MATCH;
+}
+
+IXS_STATIC bool simp_decompose_exact_quotient(ixs_ctx *ctx, ixs_node *expr,
+                                              ixs_node **numerator,
+                                              ixs_node **denominator) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_node *result_numerator = NULL;
+  ixs_node *result_denominator = NULL;
+  quotient_parts_status status =
+      exact_quotient_parts(ctx, expr, &result_numerator, &result_denominator);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (status != QUOTIENT_PARTS_MATCH)
+    return false;
+  *numerator = result_numerator;
+  *denominator = result_denominator;
+  return true;
+}
+
+static quotient_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
+                                                  ixs_node **numerator,
+                                                  ixs_node **denominator) {
+  ixs_node *arg;
+  if (floor->tag != IXS_FLOOR)
+    return QUOTIENT_PARTS_NO_MATCH;
+  arg = floor->u.unary.arg;
+  if (arg->tag == IXS_ADD && !ixs_node_is_zero(arg->u.add.coeff))
+    return QUOTIENT_PARTS_NO_MATCH;
+  return exact_quotient_parts(ctx, arg, numerator, denominator);
 }
 
 static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
@@ -21315,7 +21433,7 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
 }
 
 /* One linear scan plus a fixed number of candidate-pair proofs. Quotient
- * decomposition is bounded by MAX_FOLD_EXP and the normalized child counts. */
+ * decomposition is linear in the normalized top-level child counts. */
 static ixs_node *cancel_equal_floor_difference(ixs_ctx *ctx, ixs_bounds *bnds,
                                                ixs_node *add) {
   uint32_t i, j;
@@ -21323,18 +21441,18 @@ static ixs_node *cancel_equal_floor_difference(ixs_ctx *ctx, ixs_bounds *bnds,
   if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
     return add;
   for (i = 0; i < add->u.add.nterms; i++) {
-    floor_parts_status left_status;
+    quotient_parts_status left_status;
     ixs_node *left = add->u.add.terms[i].term;
     ixs_node *left_numerator;
     ixs_node *left_denominator;
     left_status =
         floor_quotient_parts(ctx, left, &left_numerator, &left_denominator);
-    if (left_status == FLOOR_PARTS_ERROR)
+    if (left_status == QUOTIENT_PARTS_ERROR)
       return NULL;
-    if (left_status != FLOOR_PARTS_MATCH)
+    if (left_status != QUOTIENT_PARTS_MATCH)
       continue;
     for (j = i + 1; j < add->u.add.nterms; j++) {
-      floor_parts_status right_status;
+      quotient_parts_status right_status;
       floor_shift_status proof;
       ixs_node *right = add->u.add.terms[j].term;
       ixs_node *right_numerator;
@@ -21347,9 +21465,9 @@ static ixs_node *cancel_equal_floor_difference(ixs_ctx *ctx, ixs_bounds *bnds,
         continue;
       right_status = floor_quotient_parts(ctx, right, &right_numerator,
                                           &right_denominator);
-      if (right_status == FLOOR_PARTS_ERROR)
+      if (right_status == QUOTIENT_PARTS_ERROR)
         return NULL;
-      if (right_status != FLOOR_PARTS_MATCH ||
+      if (right_status != QUOTIENT_PARTS_MATCH ||
           right_denominator != left_denominator)
         continue;
       shift = simp_sub(ctx, right_numerator, left_numerator);

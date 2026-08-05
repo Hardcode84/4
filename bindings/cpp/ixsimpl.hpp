@@ -316,6 +316,17 @@ public:
     residual = Expr(ctx_, session_, raw_residual);
     return true;
   }
+  bool decompose_exact_quotient(const Expr &expr, Expr &numerator,
+                                Expr &denominator) const {
+    const ixs_node *raw_numerator = nullptr;
+    const ixs_node *raw_denominator = nullptr;
+    if (!ixs_decompose_exact_quotient_facts(facts_, expr.raw(), &raw_numerator,
+                                            &raw_denominator))
+      return false;
+    numerator = Expr(ctx_, session_, raw_numerator);
+    denominator = Expr(ctx_, session_, raw_denominator);
+    return true;
+  }
   bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
                          Expr &difference) const {
     const ixs_node *raw_difference = nullptr;

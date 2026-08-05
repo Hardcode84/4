@@ -17,6 +17,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "check_predicate",
         "congruent",
         "constant_difference",
+        "decompose_exact_quotient",
         "defined",
         "divisible",
         "equivalent",
@@ -51,13 +52,15 @@ def _typecheck_package_surface(
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
+    quotient: tuple[ixsimpl.Expr, ixsimpl.Expr] | None
+    quotient = ctx.decompose_exact_quotient(expr, facts)
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
     transferred: ixsimpl.Facts = facts.subs({expr: expr})
-    _ = tri, equivalent, difference, exact, transferred
+    _ = tri, equivalent, difference, quotient, exact, transferred
 
 
 def _typecheck_extension_surface(
@@ -65,7 +68,9 @@ def _typecheck_extension_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    quotient: tuple[_ixsimpl._Expr, _ixsimpl._Expr] | None
+    quotient = ctx.decompose_exact_quotient(expr, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
-    _ = tri, equivalent
+    _ = tri, equivalent, quotient

@@ -1972,6 +1972,34 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
   return context_expr_pair(self, coefficient, residual);
 }
 
+static PyObject *Context_decompose_exact_quotient(ContextObject *self,
+                                                  PyObject *args,
+                                                  PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "facts", NULL};
+  PyObject *expr_obj;
+  PyObject *facts_obj;
+  const ixs_node *expr;
+  const ixs_node *numerator;
+  const ixs_node *denominator;
+  ixs_facts *facts;
+  size_t errors_before;
+  bool ok;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
+                                   &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  ok =
+      ixs_decompose_exact_quotient_facts(facts, expr, &numerator, &denominator);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "exact quotient decomposition:") < 0)
+    return NULL;
+  if (!ok)
+    Py_RETURN_NONE;
+  return context_expr_pair(self, numerator, denominator);
+}
+
 static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
                                            PyObject *kwargs) {
   static char *kwlist[] = {"expr", "symbol", "step", "facts", NULL};
@@ -2606,6 +2634,9 @@ static PyMethodDef Context_methods[] = {
     {"affine_decompose", (PyCFunction)Context_affine_decompose,
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
+    {"decompose_exact_quotient", (PyCFunction)Context_decompose_exact_quotient,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return an exact (numerator, denominator) pair, or None."},
     {"finite_difference", (PyCFunction)Context_finite_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return expr(symbol+step)-expr(symbol), or None."},
