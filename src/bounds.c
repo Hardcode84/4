@@ -6873,6 +6873,39 @@ cleanup:
   return ok;
 }
 
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator) {
+  algebra_query_scope scope;
+  ixs_node *nodes[1] = {expr};
+  ixs_node *result_numerator = NULL;
+  ixs_node *result_denominator = NULL;
+  bool outputs_ok = numerator && denominator && numerator != denominator;
+  bool ok = false;
+  if (numerator)
+    *numerator = NULL;
+  if (denominator)
+    *denominator = NULL;
+  if (!algebra_query_begin(facts, nodes, 1, "exact quotient decomposition",
+                           outputs_ok, "outputs must be non-NULL and distinct",
+                           &scope))
+    return false;
+  algebra_query_start(&scope);
+  expr = simp_simplify_bounds(scope.ctx, expr, &facts->bounds);
+  if (!expr || ixs_node_is_sentinel(expr))
+    goto cleanup;
+  ok = simp_decompose_exact_quotient(scope.ctx, expr, &result_numerator,
+                                     &result_denominator);
+
+cleanup:
+  ok = algebra_query_finish(&scope, ok);
+  if (ok) {
+    *numerator = result_numerator;
+    *denominator = result_denominator;
+  }
+  return ok;
+}
+
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference) {

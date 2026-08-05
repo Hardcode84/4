@@ -379,6 +379,12 @@ bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
                                 const ixs_node *symbol,
                                 const ixs_node **coefficient,
                                 const ixs_node **residual);
+/* Decompose a rational product or common-denominator sum exactly.  Facts
+ * simplify expr before matching.  This does not prove integer-valued parts or
+ * a nonzero denominator. */
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
+                                        const ixs_node **numerator,
+                                        const ixs_node **denominator);
 /* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
  * still reference symbol; callers decide whether it is loop invariant. */
 bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,

@@ -1543,6 +1543,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   contradictory facts, representation overflow, and bounded-walk or expansion
   limits fail conservatively. These helpers do not add relational, polyhedral,
   or SMT reasoning.
+- **Exact quotient decomposition** (`ixs_decompose_exact_quotient_facts`):
+  simplifies once under the supplied facts, then splits a canonical `MUL`
+  into exact numerator and denominator nodes when its rational coefficient or
+  a negative power supplies a denominator. A canonical `ADD` matches when
+  every scaled term has the same pointer-identical denominator; its constant
+  is multiplied into that denominator and included in the numerator. This is
+  a structural identity in the simplified fact domain. The API does not prove
+  integer-valued parts or a nonzero denominator. Traversal is iterative over
+  top-level factors and terms, repeated powers are capped at 64, and canonical
+  constructors retain their normalized-child bounds. Unsupported shapes,
+  unequal denominators, overflow, invalid facts, and OOM return false with
+  NULL outputs.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -2010,6 +2022,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator);
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference);
@@ -3098,6 +3113,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
+                                        ixs_node **numerator,
+                                        ixs_node **denominator);
 bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
                                  ixs_node *symbol, ixs_node *step,
                                  ixs_node **difference);

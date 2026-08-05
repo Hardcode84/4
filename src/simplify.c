@@ -5230,28 +5230,25 @@ static floor_parts_status quotient_mul_parts(ixs_ctx *ctx, ixs_node *arg,
   return FLOOR_PARTS_MATCH;
 }
 
-static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
+static floor_parts_status exact_quotient_parts(ixs_ctx *ctx, ixs_node *expr,
                                                ixs_node **numerator,
                                                ixs_node **denominator) {
-  ixs_node *arg;
   ixs_node *num;
   ixs_node *denom = NULL;
+  ixs_node *constant_numerator;
   uint32_t i;
-  if (floor->tag != IXS_FLOOR)
-    return FLOOR_PARTS_NO_MATCH;
-  arg = floor->u.unary.arg;
-  if (arg->tag == IXS_MUL)
-    return quotient_mul_parts(ctx, arg, numerator, denominator);
-  if (arg->tag != IXS_ADD || !ixs_node_is_zero(arg->u.add.coeff) ||
-      arg->u.add.nterms == 0)
+
+  if (expr->tag == IXS_MUL)
+    return quotient_mul_parts(ctx, expr, numerator, denominator);
+  if (expr->tag != IXS_ADD || expr->u.add.nterms == 0)
     return FLOOR_PARTS_NO_MATCH;
   num = ixs_node_int(ctx, 0);
   if (!num)
     return FLOOR_PARTS_ERROR;
-  for (i = 0; i < arg->u.add.nterms; i++) {
+  for (i = 0; i < expr->u.add.nterms; i++) {
     floor_parts_status status;
     ixs_node *scaled =
-        simp_mul(ctx, arg->u.add.terms[i].coeff, arg->u.add.terms[i].term);
+        simp_mul(ctx, expr->u.add.terms[i].coeff, expr->u.add.terms[i].term);
     ixs_node *term_numerator;
     ixs_node *term_denominator;
     if (!scaled)
@@ -5262,7 +5259,7 @@ static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
         quotient_mul_parts(ctx, scaled, &term_numerator, &term_denominator);
     if (status != FLOOR_PARTS_MATCH)
       return status;
-    if (denom && term_denominator != denom)
+    if (denom && denom != term_denominator)
       return FLOOR_PARTS_NO_MATCH;
     denom = term_denominator;
     num = simp_add(ctx, num, term_numerator);
@@ -5273,9 +5270,45 @@ static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
   }
   if (!denom)
     return FLOOR_PARTS_NO_MATCH;
+  constant_numerator = simp_mul(ctx, expr->u.add.coeff, denom);
+  if (!constant_numerator || ixs_node_is_sentinel(constant_numerator))
+    return FLOOR_PARTS_ERROR;
+  num = simp_add(ctx, num, constant_numerator);
+  if (!num)
+    return FLOOR_PARTS_ERROR;
+  if (ixs_node_is_sentinel(num))
+    return FLOOR_PARTS_NO_MATCH;
   *numerator = num;
   *denominator = denom;
   return FLOOR_PARTS_MATCH;
+}
+
+IXS_STATIC bool simp_decompose_exact_quotient(ixs_ctx *ctx, ixs_node *expr,
+                                              ixs_node **numerator,
+                                              ixs_node **denominator) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_node *result_numerator = NULL;
+  ixs_node *result_denominator = NULL;
+  floor_parts_status status =
+      exact_quotient_parts(ctx, expr, &result_numerator, &result_denominator);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (status != FLOOR_PARTS_MATCH)
+    return false;
+  *numerator = result_numerator;
+  *denominator = result_denominator;
+  return true;
+}
+
+static floor_parts_status floor_quotient_parts(ixs_ctx *ctx, ixs_node *floor,
+                                               ixs_node **numerator,
+                                               ixs_node **denominator) {
+  ixs_node *arg;
+  if (floor->tag != IXS_FLOOR)
+    return FLOOR_PARTS_NO_MATCH;
+  arg = floor->u.unary.arg;
+  if (arg->tag == IXS_ADD && !ixs_node_is_zero(arg->u.add.coeff))
+    return FLOOR_PARTS_NO_MATCH;
+  return exact_quotient_parts(ctx, arg, numerator, denominator);
 }
 
 static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,

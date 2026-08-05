@@ -2512,6 +2512,87 @@ static void test_exact_divide_fact_piecewise(void) {
   CHECK(result.quotient == NULL);
 }
 
+static void test_exact_quotient_decomposition(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_ctx *other = ctx_create_or_die();
+  ixs_node *x = ixs_sym(ctx, "quotient_x");
+  ixs_node *y = ixs_sym(ctx, "quotient_y");
+  ixs_node *z = ixs_sym(ctx, "quotient_z");
+  ixs_node *w = ixs_sym(ctx, "quotient_w");
+  ixs_node *i = ixs_sym(ctx, "quotient_i");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *numerator = NULL;
+  ixs_node *denominator = NULL;
+  ixs_node *x_squared = ixs_mul(ctx, x, x);
+  ixs_node *y_squared = ixs_mul(ctx, y, y);
+  ixs_node *product =
+      ixs_mul(ctx, ixs_rat(ctx, 3, 4), ixs_div(ctx, x_squared, y_squared));
+  ixs_node *common_denominator = ixs_mul(ctx, ixs_int(ctx, 2), y);
+  ixs_node *sum = ixs_add(ctx,
+                          ixs_add(ctx, ixs_div(ctx, x, common_denominator),
+                                  ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, 3), z),
+                                          common_denominator)),
+                          ixs_int(ctx, 5));
+  ixs_node *expected_sum_numerator =
+      ixs_add(ctx, ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, 3), z)),
+              ixs_mul(ctx, ixs_int(ctx, 10), y));
+  ixs_node *condition = ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *values[2] = {sum, x};
+  ixs_node *conditions[2] = {condition, ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+  ixs_node *different_denominators =
+      ixs_add(ctx, ixs_div(ctx, x, y), ixs_div(ctx, z, w));
+  ixs_node *different_rational_denominators = ixs_add(
+      ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), ixs_div(ctx, z, ixs_int(ctx, 4)));
+  ixs_node *large_power = one;
+  int exponent;
+
+  CHECK(ixs_decompose_exact_quotient_facts(empty, product, &numerator,
+                                           &denominator));
+  CHECK(ixs_same_node(numerator, ixs_mul(ctx, ixs_int(ctx, 3), x_squared)));
+  CHECK(ixs_same_node(denominator, ixs_mul(ctx, ixs_int(ctx, 4), y_squared)));
+
+  CHECK(
+      ixs_decompose_exact_quotient_facts(empty, sum, &numerator, &denominator));
+  CHECK(ixs_same_node(numerator, expected_sum_numerator));
+  CHECK(ixs_same_node(denominator, common_denominator));
+
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, piecewise, &numerator,
+                                            &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(ixs_facts_assume_pred(nonnegative, condition));
+  CHECK(ixs_decompose_exact_quotient_facts(nonnegative, piecewise, &numerator,
+                                           &denominator));
+  CHECK(ixs_same_node(numerator, expected_sum_numerator));
+  CHECK(ixs_same_node(denominator, common_denominator));
+
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, different_denominators,
+                                            &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      empty, different_rational_denominators, &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      empty, ixs_mul(ctx, ixs_int(ctx, 2), x), &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  for (exponent = 0; exponent < 65; exponent++)
+    large_power = ixs_mul(ctx, large_power, y);
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, ixs_div(ctx, x, large_power),
+                                            &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+
+  CHECK(!ixs_decompose_exact_quotient_facts(
+      empty, ixs_sym(other, "quotient_other"), &numerator, &denominator));
+  CHECK(numerator == NULL && denominator == NULL);
+  CHECK(!ixs_decompose_exact_quotient_facts(empty, sum, NULL, &denominator));
+  CHECK(denominator == NULL);
+
+  ixs_ctx_destroy(other);
+}
+
 static void test_fact_rewrite_constant_power(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *large = ixs_sym(ctx, "fact_power_large");
@@ -3966,6 +4047,7 @@ int main(void) {
   test_simplify_batch();
   test_fact_backed_simplification();
   test_exact_divide_fact_piecewise();
+  test_exact_quotient_decomposition();
   test_fact_rewrite_constant_power();
   test_compound_assumption_simplification();
   test_print_c();
