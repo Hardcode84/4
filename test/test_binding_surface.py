@@ -21,6 +21,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "defined",
         "divisible",
         "equivalent",
+        "equivalent_modulo_pow2",
         "equivalent_finite_domain",
         "finite_difference",
         "integer_range",
@@ -53,6 +54,7 @@ def _typecheck_package_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    equivalent_modulo: bool | None = ctx.equivalent_modulo_pow2(expr, expr, 32, facts)
     finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
     integer_range: tuple[int | None, int | None] | None
@@ -68,6 +70,7 @@ def _typecheck_package_surface(
     _ = (
         tri,
         equivalent,
+        equivalent_modulo,
         finite_equivalent,
         difference,
         integer_range,
@@ -82,6 +85,7 @@ def _typecheck_extension_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    equivalent_modulo: bool | None = ctx.equivalent_modulo_pow2(expr, expr, 32, facts)
     finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     integer_range: tuple[int | None, int | None] | None
     integer_range = ctx.integer_range(expr, facts=facts)
@@ -90,4 +94,11 @@ def _typecheck_extension_surface(
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
-    _ = tri, equivalent, finite_equivalent, integer_range, quotient
+    _ = (
+        tri,
+        equivalent,
+        equivalent_modulo,
+        finite_equivalent,
+        integer_range,
+        quotient,
+    )

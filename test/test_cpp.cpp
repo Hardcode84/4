@@ -79,6 +79,8 @@ int main() {
   ixs::Expr numerator = zero;
   ixs::Expr denominator = zero;
   ixs::Expr rational_product = ixs::Expr::rational(ctx, 3, 4) * x;
+  ixs::Expr wrapped_y =
+      ixs::mod(y, ixs::Expr::integer(ctx, INT64_C(4294967296)));
   if (!facts.constant_difference(x + eight, x + one, delta) || delta != 7 ||
       !facts.affine_decompose(twice_x + one, x, coefficient, residual) ||
       !facts.decompose_exact_quotient(rational_product, numerator,
@@ -89,6 +91,7 @@ int main() {
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||
       !facts.get_symbol_congruence(x, modulus, residue) || modulus != 8 ||
+      facts.equivalent_modulo_pow2(y, wrapped_y, 32) != IXS_CHECK_TRUE ||
       facts.check_congruent(x, 8, 0) != IXS_CHECK_TRUE)
     return 5;
 

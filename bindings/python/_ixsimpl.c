@@ -13,6 +13,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <ixsimpl.h>
+#include <limits.h>
 #include <string.h>
 
 /* Forward declarations */
@@ -1762,6 +1763,57 @@ static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
   return check_result_to_py(result);
 }
 
+static PyObject *Context_equivalent_modulo_pow2(ContextObject *self,
+                                                PyObject *args,
+                                                PyObject *kwargs) {
+  static char *kwlist[] = {"lhs", "rhs", "bits", "facts", NULL};
+  PyObject *lhs_obj;
+  PyObject *rhs_obj;
+  PyObject *bits_obj;
+  PyObject *facts_obj;
+  ixs_session *session = Context_session(self);
+  ixs_check_result result;
+  size_t errors_before;
+  long bits;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
+                                   &rhs_obj, &bits_obj, &facts_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
+      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
+    return NULL;
+  }
+  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
+      ((ExprObject *)rhs_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+  bits = PyLong_AsLong(bits_obj);
+  if ((bits == -1 && PyErr_Occurred()) || bits < 0 ||
+      (unsigned long)bits > (unsigned long)UINT_MAX) {
+    if (!PyErr_Occurred())
+      PyErr_SetString(PyExc_ValueError, "bits must be a nonnegative integer");
+    return NULL;
+  }
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_equivalent_modulo_pow2_facts(
+      ((FactsObject *)facts_obj)->facts, ((ExprObject *)lhs_obj)->node,
+      ((ExprObject *)rhs_obj)->node, (unsigned)bits);
+  if (raise_new_prefixed_error(session, errors_before,
+                               "modulo pow2 equivalence:") < 0)
+    return NULL;
+  return check_result_to_py(result);
+}
+
 static PyObject *Context_equivalent_finite_domain(ContextObject *self,
                                                   PyObject *args,
                                                   PyObject *kwargs) {
@@ -2816,6 +2868,9 @@ static PyMethodDef Context_methods[] = {
     {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
+    {"equivalent_modulo_pow2", (PyCFunction)Context_equivalent_modulo_pow2,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove total integer equivalence modulo 2**bits under a fact set."},
     {"equivalent_finite_domain", (PyCFunction)Context_equivalent_finite_domain,
      METH_VARARGS | METH_KEYWORDS,
      "Try ordinary equivalence, then finite-domain enumeration; return "

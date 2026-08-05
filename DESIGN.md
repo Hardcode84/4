@@ -1708,6 +1708,34 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
   inference uses the congruence depth limit and makes one structural pass over
   the visited expression. This API is not an unbounded theorem prover.
+- **Total fact-backed low-bit equivalence**
+  (`ixs_equivalent_modulo_pow2_facts`, Python
+  `Context.equivalent_modulo_pow2`, C++ `Facts::equivalent_modulo_pow2`):
+  proves `lhs == rhs (mod 2^bits)` only after both operands are defined and
+  integer-valued over the complete fact domain. Bit counts 0 through 63 are
+  supported; bit count zero is the modulus-one identity. Larger counts are
+  rejected with a diagnostic.
+
+  The query first uses ordinary exact and residue proofs. If those are
+  insufficient, it performs one query-local normalization in the quotient
+  ring. Integer-coefficient `ADD`, integer-coefficient `MUL` with positive
+  powers and integer factors, and integer `XOR`/`AND`/`OR` propagate the
+  requested low-bit relation. `Mod(a, m)` normalizes to `a` only when `m` is a
+  positive integer literal divisible by `2^bits`. Otherwise the complete Mod
+  is opaque: congruence of `a` modulo 4 does not pass through `Mod(a, 6)`.
+  Floor, ceiling, Piecewise, extrema, predicates, rational coefficients, and
+  reciprocal powers also remain opaque. Fact simplification or ordinary
+  equivalence may still prove identical opaque subtrees.
+
+  Normalization is path-sensitive, so a shared DAG node reached through an
+  opaque operation is never rewritten merely because another occurrence is
+  reachable through arithmetic. A 256-slot direct memo bounds repeated DAG
+  work. Rebuilding one supported associative node uses bounded quadratic
+  immediate-child substitution; it never descends into an opaque child.
+  Recursion depth is 64, total visits are 4096, and one associative node may
+  expose at most 1024 children. Reaching a limit, OOM, invalid input, or a
+  contradictory fact domain returns `UNKNOWN`. The proof walks only the two
+  queried DAGs and is independent of unrelated context state.
 - **Budgeted finite-domain equivalence**
   (`ixs_equivalent_finite_domain_facts`, Python
   `Context.equivalent_finite_domain`, C++
@@ -2257,6 +2285,8 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+ixs_check_result ixs_equivalent_modulo_pow2_facts(
+    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs, unsigned bits);
 ixs_check_result ixs_equivalent_finite_domain_facts(
     ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
     size_t *remaining_points);
@@ -2913,9 +2943,11 @@ Key properties:
   fact-backed transform and core proof query.
   `get_known_bits()`, `get_symbol_congruence()`, and `check_congruent()` expose
   the low-64 and query-specific modular interfaces without adding wrapper-side
-  reasoning. `Facts::substitute()` and `Facts::substitute_multi()` mutate a
-  destination wrapper from a source fact set and mirror the transactional C
-  transfer contract.
+  reasoning. `Facts::equivalent_modulo_pow2()` exposes semantic low-bit
+  equivalence without wrapper-side expression traversal.
+  `Facts::substitute()` and `Facts::substitute_multi()` mutate a destination
+  wrapper from a source fact set and mirror the transactional C transfer
+  contract.
   `Expr::simplify(const Facts&)` is the expression-oriented spelling.
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
@@ -3059,6 +3091,8 @@ Implementation:
 - `Context.check_predicate(predicate, facts)` and
   `Context.equivalent(lhs, rhs, facts)` expose conservative tri-state results
   as `True`, `False`, or `None`.
+  `Context.equivalent_modulo_pow2(lhs, rhs, bits, facts)` exposes the same
+  totality contract for equality of the requested low bits.
   `Context.equivalent_finite_domain(lhs, rhs, facts, remaining_points)` returns
   that result together with the updated remaining-point count.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
@@ -3376,6 +3410,8 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+ixs_check_result ixs_equivalent_modulo_pow2_facts(
+    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs, unsigned bits);
 ixs_check_result ixs_equivalent_finite_domain_facts(
     ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
     size_t *remaining_points);

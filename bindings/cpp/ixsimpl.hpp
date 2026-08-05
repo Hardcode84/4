@@ -311,6 +311,10 @@ public:
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
     return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
   }
+  ixs_check_result equivalent_modulo_pow2(const Expr &lhs, const Expr &rhs,
+                                          unsigned bits) const {
+    return ixs_equivalent_modulo_pow2_facts(facts_, lhs.raw(), rhs.raw(), bits);
+  }
   ixs_check_result equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
                                             size_t &remaining_points) const {
     return ixs_equivalent_finite_domain_facts(facts_, lhs.raw(), rhs.raw(),

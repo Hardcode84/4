@@ -386,6 +386,14 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
  * UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
+/* Prove total equivalence modulo 2^bits.  Both operands must be defined and
+ * integer-valued over the complete fact domain.  bits must be at most 63;
+ * invalid widths emit a diagnostic and return UNKNOWN.  The proof propagates
+ * only through operations that preserve the requested low bits. */
+ixs_check_result ixs_equivalent_modulo_pow2_facts(ixs_facts *facts,
+                                                  const ixs_node *lhs,
+                                                  const ixs_node *rhs,
+                                                  unsigned bits);
 /* Try ordinary equivalence first, then enumerate the Cartesian product of
  * finite integer symbol ranges still present in lhs-rhs.  Symbols without a
  * finite range remain symbolic at every point.  The complete product is

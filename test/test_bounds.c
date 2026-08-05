@@ -5932,6 +5932,155 @@ static void test_public_remainder_projection_limits(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_modulo_pow2_equivalence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "modulo_pow2_x");
+  ixs_node *y = ixs_sym(ctx, "modulo_pow2_y");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *wrap_modulus = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *wrapped_x = ixs_mod(ctx, x, wrap_modulus);
+  ixs_node *wrapped_y = ixs_mod(ctx, y, wrap_modulus);
+  ixs_node *targets[] = {x, y};
+  ixs_node *replacements[] = {wrapped_x, wrapped_y};
+  ixs_node *add = ixs_add(
+      ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), x), ixs_int(ctx, 7)),
+      ixs_mul(ctx, ixs_int(ctx, -5), y));
+  ixs_node *product = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 3)),
+                              ixs_add(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *bitwise = ixs_and(ctx, ixs_xor(ctx, x, ixs_int(ctx, 85)),
+                              ixs_or(ctx, y, ixs_int(ctx, 256)));
+  ixs_node *add_wrapped = ixs_subs_multi(ctx, add, 2, targets, replacements);
+  ixs_node *product_wrapped =
+      ixs_subs_multi(ctx, product, 2, targets, replacements);
+  ixs_node *bitwise_wrapped =
+      ixs_subs_multi(ctx, bitwise, 2, targets, replacements);
+  ixs_node *mod16 = ixs_mod(ctx, add, ixs_int(ctx, 16));
+  ixs_node *mod16_wrapped =
+      ixs_subs_multi(ctx, mod16, 2, targets, replacements);
+  ixs_node *mod12 = ixs_mod(ctx, add, ixs_int(ctx, 12));
+  ixs_node *mod12_wrapped =
+      ixs_subs_multi(ctx, mod12, 2, targets, replacements);
+  ixs_node *floor_x = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *floor_wrapped =
+      ixs_floor(ctx, ixs_div(ctx, wrapped_x, ixs_int(ctx, 3)));
+  ixs_node *ceil_x = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *ceil_wrapped =
+      ixs_ceil(ctx, ixs_div(ctx, wrapped_x, ixs_int(ctx, 3)));
+  ixs_node *shared_opaque_lhs = ixs_add(
+      ctx, wrapped_x, ixs_floor(ctx, ixs_div(ctx, wrapped_x, ixs_int(ctx, 3))));
+  ixs_node *shared_opaque_rhs = ixs_add(ctx, x, floor_x);
+  ixs_node *piecewise_values[] = {x, zero};
+  ixs_node *piecewise_conditions[] = {ixs_cmp(ctx, x, IXS_CMP_GE, zero),
+                                      ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, piecewise_values, piecewise_conditions);
+  ixs_node *piecewise_wrapped = ixs_subs(ctx, piecewise, x, wrapped_x);
+  ixs_node *mod6 = ixs_mod(ctx, x, ixs_int(ctx, 6));
+  ixs_node *wrapped4 = ixs_mod(ctx, x, ixs_int(ctx, 4));
+  ixs_node *mod6_wrapped = ixs_mod(ctx, wrapped4, ixs_int(ctx, 6));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *x_is_six = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_facts *deep_facts = ixs_facts_create(ctx);
+  ixs_node *deep = x;
+  unsigned i;
+
+  CHECK(ctx && other && x && y && zero && wrap_modulus && wrapped_x &&
+        wrapped_y && add && product && bitwise && add_wrapped &&
+        product_wrapped && bitwise_wrapped && mod16 && mod16_wrapped && mod12 &&
+        mod12_wrapped && floor_x && floor_wrapped && ceil_x && ceil_wrapped &&
+        shared_opaque_lhs && shared_opaque_rhs && piecewise &&
+        piecewise_wrapped && mod6 && wrapped4 && mod6_wrapped && facts &&
+        x_is_six && contradictory && deep_facts);
+
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x, wrapped_x, 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, add, add_wrapped, 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, product, product_wrapped, 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, bitwise, bitwise_wrapped, 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, mod16, mod16_wrapped, 4) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, mod12, mod12_wrapped, 2) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x, y, 0) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, zero,
+                                         ixs_int(ctx, INT64_C(4294967296)),
+                                         32) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, zero,
+                                         ixs_int(ctx, INT64_C(4294967297)),
+                                         32) == IXS_CHECK_FALSE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, zero, ixs_int(ctx, INT64_MIN),
+                                         63) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, zero, ixs_int(ctx, INT64_MAX),
+                                         63) == IXS_CHECK_FALSE);
+
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, floor_x, floor_x, 4) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, floor_x, floor_wrapped, 4) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, ceil_x, ceil_wrapped, 4) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, shared_opaque_lhs,
+                                         shared_opaque_rhs,
+                                         32) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, piecewise, piecewise_wrapped,
+                                         4) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, mod6, mod6_wrapped, 2) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(x_is_six,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 6))));
+  CHECK(ixs_equivalent_modulo_pow2_facts(x_is_six, mod6, mod6_wrapped, 2) ==
+        IXS_CHECK_FALSE);
+
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, ixs_rat(ctx, 1, 2),
+                                         ixs_rat(ctx, 1, 2),
+                                         1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_equivalent_modulo_pow2_facts(contradictory, x, x, 1) ==
+        IXS_CHECK_UNKNOWN);
+
+  for (i = 0; i < 70u; i++)
+    deep = ixs_mod(ctx, deep, ixs_int(ctx, 1000 - (int64_t)(2u * i)));
+  CHECK(deep != NULL);
+  CHECK(ixs_equivalent_modulo_pow2_facts(deep_facts, deep, x, 1) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x, wrapped_x, 32) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x, wrapped_x, 32) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x, wrapped_x, 64) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "bits") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, x,
+                                         ixs_sym(other, "modulo_pow2_x"),
+                                         32) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_modulo_pow2_facts(facts, ctx->sentinel_error,
+                                         ctx->sentinel_error,
+                                         32) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_finite_domain_equivalence(void) {
   static const char finite_text[] =
       "Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))";
@@ -7713,6 +7862,7 @@ int main(void) {
   test_public_truncating_remainder_equivalence();
   test_public_truncating_remainder_oom();
   test_public_remainder_projection_limits();
+  test_public_modulo_pow2_equivalence();
   test_public_finite_domain_equivalence();
   test_finite_domain_equivalence_growable_discovery();
   test_total_equivalence_new_proof_oom();

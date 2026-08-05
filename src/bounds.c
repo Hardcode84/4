@@ -8900,6 +8900,461 @@ restore:
   return result;
 }
 
+#define MODULO_POW2_DEPTH_LIMIT 64u
+#define MODULO_POW2_VISIT_LIMIT 4096u
+#define MODULO_POW2_CHILD_LIMIT 1024u
+#define MODULO_POW2_MEMO_SIZE 256u
+#define MODULO_POW2_MEMO_MASK (MODULO_POW2_MEMO_SIZE - 1u)
+
+typedef struct {
+  ixs_node *key;
+  ixs_node *value;
+} modulo_pow2_memo_slot;
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  unsigned bits;
+  size_t visited;
+  bool limited;
+  bool oom;
+  modulo_pow2_memo_slot memo[MODULO_POW2_MEMO_SIZE];
+} modulo_pow2_state;
+
+static bool modulo_pow2_stopped(const modulo_pow2_state *state) {
+  return state->limited || state->oom || state->bounds->oom;
+}
+
+static bool modulo_pow2_domain_proven(modulo_pow2_state *state,
+                                      ixs_node *expr) {
+  bool result =
+      ixs_bounds_check_defined(state->bounds, expr) == IXS_CHECK_TRUE &&
+      ixs_bounds_check_integer_valued(state->bounds, expr) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return result;
+}
+
+static size_t modulo_pow2_memo_index(ixs_node *node) {
+  uint32_t hash = node->hash;
+  return (size_t)((hash ^ (hash >> 8)) & MODULO_POW2_MEMO_MASK);
+}
+
+static ixs_node *modulo_pow2_normalize(modulo_pow2_state *state, ixs_node *expr,
+                                       unsigned depth);
+
+static bool modulo_pow2_integer_node(ixs_node *node) {
+  int64_t numerator;
+  int64_t denominator;
+  if (!node || (node->tag != IXS_INT && node->tag != IXS_RAT))
+    return false;
+  ixs_node_get_rat(node, &numerator, &denominator);
+  (void)numerator;
+  return denominator == 1;
+}
+
+static bool modulo_pow2_literal_divisible(ixs_node *node, unsigned bits) {
+  uint64_t mask;
+  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
+    return false;
+  if (bits == 0)
+    return true;
+  if (bits >= 63u)
+    return false;
+  mask = (UINT64_C(1) << bits) - UINT64_C(1);
+  return ((uint64_t)node->u.ival & mask) == 0;
+}
+
+static ixs_node *modulo_pow2_rebuild_terms(modulo_pow2_state *state,
+                                           ixs_node *expr,
+                                           ixs_node *const *targets,
+                                           ixs_node *const *replacements,
+                                           uint32_t count, bool changed) {
+  ixs_node *result;
+  if (!changed)
+    return expr;
+  /* Every target is an immediate child, so substitution cannot enter an
+   * opaque subtree.  Direct-match lookup makes this O(count^2), bounded by
+   * MODULO_POW2_CHILD_LIMIT independently of context size. */
+  result = simp_subs_multi(state->ctx, expr, count, targets, replacements);
+  if (!result)
+    state->oom = true;
+  if (result && ixs_node_is_sentinel(result))
+    return NULL;
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_add(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **targets;
+  ixs_node **replacements;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.add.nterms;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_integer_node(expr->u.add.coeff) ||
+      !modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (!modulo_pow2_integer_node(expr->u.add.terms[i].coeff) ||
+        !modulo_pow2_domain_proven(state, expr->u.add.terms[i].term))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  targets = ixs_arena_alloc(&state->ctx->scratch,
+                            (size_t)count * sizeof(*targets), sizeof(void *));
+  replacements =
+      ixs_arena_alloc(&state->ctx->scratch,
+                      (size_t)count * sizeof(*replacements), sizeof(void *));
+  if ((!targets || !replacements) && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    targets[i] = expr->u.add.terms[i].term;
+    replacements[i] = modulo_pow2_normalize(state, targets[i], depth + 1u);
+    if (!replacements[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || replacements[i] != targets[i];
+  }
+  result = modulo_pow2_rebuild_terms(state, expr, targets, replacements, count,
+                                     changed);
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_mul(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **targets;
+  ixs_node **replacements;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.mul.nfactors;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_integer_node(expr->u.mul.coeff) ||
+      !modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (expr->u.mul.factors[i].exp <= 0 ||
+        !modulo_pow2_domain_proven(state, expr->u.mul.factors[i].base))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  targets = ixs_arena_alloc(&state->ctx->scratch,
+                            (size_t)count * sizeof(*targets), sizeof(void *));
+  replacements =
+      ixs_arena_alloc(&state->ctx->scratch,
+                      (size_t)count * sizeof(*replacements), sizeof(void *));
+  if ((!targets || !replacements) && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    targets[i] = expr->u.mul.factors[i].base;
+    replacements[i] = modulo_pow2_normalize(state, targets[i], depth + 1u);
+    if (!replacements[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || replacements[i] != targets[i];
+  }
+  result = modulo_pow2_rebuild_terms(state, expr, targets, replacements, count,
+                                     changed);
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_assoc(modulo_pow2_state *state,
+                                             ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **args;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.assoc.nargs;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (!modulo_pow2_domain_proven(state, expr->u.assoc.args[i]))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  args = ixs_arena_alloc(&state->ctx->scratch, (size_t)count * sizeof(*args),
+                         sizeof(void *));
+  if (!args && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    args[i] = modulo_pow2_normalize(state, expr->u.assoc.args[i], depth + 1u);
+    if (!args[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || args[i] != expr->u.assoc.args[i];
+  }
+  if (!changed)
+    goto restore;
+  if (expr->tag == IXS_XOR)
+    result = simp_xor_many(state->ctx, count, args);
+  else if (expr->tag == IXS_AND)
+    result = simp_and_many(state->ctx, count, args);
+  else
+    result = simp_or_many(state->ctx, count, args);
+  if (!result)
+    state->oom = true;
+  if (result && ixs_node_is_sentinel(result))
+    result = NULL;
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+/* Mod(a, m) and a have the same low bits only when the requested 2^bits
+ * divides the positive literal m.  Otherwise the complete Mod stays opaque;
+ * congruence of its dividend alone is insufficient, for example modulo 4
+ * through Mod(a, 6). */
+static ixs_node *modulo_pow2_normalize_mod(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_node *dividend = expr->u.binary.lhs;
+  if (!modulo_pow2_literal_divisible(expr->u.binary.rhs, state->bits) ||
+      !modulo_pow2_domain_proven(state, expr) ||
+      !modulo_pow2_domain_proven(state, dividend))
+    return expr;
+  return modulo_pow2_normalize(state, dividend, depth + 1u);
+}
+
+/* Query-local normalization in Z/(2^bits). Recursion and total visits are
+ * fixed independently of context size. Unsupported operations stay opaque. */
+static ixs_node *modulo_pow2_normalize(modulo_pow2_state *state, ixs_node *expr,
+                                       unsigned depth) {
+  modulo_pow2_memo_slot *slot;
+  size_t index;
+  ixs_node *result;
+
+  if (!expr || modulo_pow2_stopped(state))
+    return NULL;
+  index = modulo_pow2_memo_index(expr);
+  slot = &state->memo[index];
+  if (slot->key == expr)
+    return slot->value;
+  if (depth >= MODULO_POW2_DEPTH_LIMIT ||
+      state->visited >= MODULO_POW2_VISIT_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  state->visited++;
+
+  switch (expr->tag) {
+  case IXS_ADD:
+    result = modulo_pow2_normalize_add(state, expr, depth);
+    break;
+  case IXS_MUL:
+    result = modulo_pow2_normalize_mul(state, expr, depth);
+    break;
+  case IXS_MOD:
+    result = modulo_pow2_normalize_mod(state, expr, depth);
+    break;
+  case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    result = modulo_pow2_normalize_assoc(state, expr, depth);
+    break;
+  default:
+    result = expr;
+    break;
+  }
+  if (result) {
+    slot->key = expr;
+    slot->value = result;
+  }
+  return result;
+}
+
+static int64_t modulo_pow2_signed_modulus(unsigned bits) {
+  if (bits == 63u)
+    return INT64_MIN;
+  return (int64_t)(UINT64_C(1) << bits);
+}
+
+static ixs_check_result modulo_pow2_point_difference(modulo_pow2_state *state,
+                                                     ixs_node *lhs,
+                                                     ixs_node *rhs) {
+  ixs_integer_range_result lhs_range;
+  ixs_integer_range_result rhs_range;
+  uint64_t mask;
+  uint64_t difference;
+  if (!ixs_bounds_get_integer_range(state->bounds, lhs, &lhs_range) ||
+      !ixs_bounds_get_integer_range(state->bounds, rhs, &rhs_range) ||
+      !lhs_range.has_lower || !lhs_range.has_upper ||
+      lhs_range.lower != lhs_range.upper || !rhs_range.has_lower ||
+      !rhs_range.has_upper || rhs_range.lower != rhs_range.upper)
+    return IXS_CHECK_UNKNOWN;
+  mask = (UINT64_C(1) << state->bits) - UINT64_C(1);
+  difference = (uint64_t)lhs_range.lower - (uint64_t)rhs_range.lower;
+  return (difference & mask) == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+}
+
+static ixs_check_result modulo_pow2_difference_impl(modulo_pow2_state *state,
+                                                    ixs_node *lhs,
+                                                    ixs_node *rhs) {
+  ixs_node *difference;
+  ixs_check_result point = modulo_pow2_point_difference(state, lhs, rhs);
+  if (point != IXS_CHECK_UNKNOWN)
+    return point;
+  difference = simp_sub(state->ctx, lhs, rhs);
+  if (!difference) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(difference))
+    return IXS_CHECK_UNKNOWN;
+  difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
+  if (!difference) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(difference) ||
+      ixs_bounds_check_defined(state->bounds, difference) != IXS_CHECK_TRUE)
+    return IXS_CHECK_UNKNOWN;
+  return ixs_bounds_check_congruent(state->bounds, difference,
+                                    modulo_pow2_signed_modulus(state->bits), 0);
+}
+
+/* Difference construction is an optional proof probe. Representation
+ * overflow must not add a user-visible diagnostic to a valid query. */
+static ixs_check_result modulo_pow2_difference(modulo_pow2_state *state,
+                                               ixs_node *lhs, ixs_node *rhs) {
+  ixs_arena_mark diag_mark = ixs_arena_save(&state->ctx->diag);
+  const char **saved_errors = state->ctx->errors;
+  size_t saved_nerrors = state->ctx->nerrors;
+  size_t saved_errors_cap = state->ctx->errors_cap;
+  ixs_check_result result = modulo_pow2_difference_impl(state, lhs, rhs);
+  ixs_arena_restore(&state->ctx->diag, diag_mark);
+  state->ctx->errors = saved_errors;
+  state->ctx->nerrors = saved_nerrors;
+  state->ctx->errors_cap = saved_errors_cap;
+  return result;
+}
+
+static ixs_check_result modulo_pow2_exact(modulo_pow2_state *state,
+                                          ixs_node *lhs, ixs_node *rhs) {
+  equivalence_state exact;
+  ixs_check_result result;
+  exact.ctx = state->ctx;
+  exact.bounds = state->bounds;
+  exact.visited = 0;
+  exact.limited = false;
+  exact.oom = false;
+  result = equivalence_core(&exact, lhs, rhs, 0);
+  if (exact.oom || state->bounds->oom)
+    state->oom = true;
+  return result == IXS_CHECK_TRUE ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result modulo_pow2_normalized_query(modulo_pow2_state *state,
+                                                     ixs_node *lhs,
+                                                     ixs_node *rhs) {
+  ixs_node *simplified_lhs =
+      simp_simplify_bounds(state->ctx, lhs, state->bounds);
+  ixs_node *simplified_rhs =
+      simp_simplify_bounds(state->ctx, rhs, state->bounds);
+  ixs_node *normalized_lhs;
+  ixs_node *normalized_rhs;
+  ixs_check_result result;
+  if (!simplified_lhs || !simplified_rhs) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(simplified_lhs) ||
+      ixs_node_is_sentinel(simplified_rhs))
+    return IXS_CHECK_UNKNOWN;
+  normalized_lhs = modulo_pow2_normalize(state, simplified_lhs, 0);
+  normalized_rhs = modulo_pow2_normalize(state, simplified_rhs, 0);
+  if (!normalized_lhs || !normalized_rhs || modulo_pow2_stopped(state))
+    return IXS_CHECK_UNKNOWN;
+  if (!modulo_pow2_domain_proven(state, normalized_lhs) ||
+      !modulo_pow2_domain_proven(state, normalized_rhs))
+    return IXS_CHECK_UNKNOWN;
+  if (normalized_lhs == normalized_rhs)
+    return IXS_CHECK_TRUE;
+  result = modulo_pow2_exact(state, normalized_lhs, normalized_rhs);
+  if (result == IXS_CHECK_TRUE || modulo_pow2_stopped(state))
+    return result;
+  return modulo_pow2_difference(state, normalized_lhs, normalized_rhs);
+}
+
+static ixs_check_result modulo_pow2_equivalence_query_bound(ixs_facts *facts,
+                                                            ixs_ctx *ctx,
+                                                            ixs_node *lhs,
+                                                            ixs_node *rhs,
+                                                            unsigned bits) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  modulo_pow2_state state;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool old_oom = facts->bounds.oom;
+
+  memset(&state, 0, sizeof(state));
+  state.ctx = ctx;
+  state.bounds = &facts->bounds;
+  state.bits = bits;
+  if (!modulo_pow2_domain_proven(&state, lhs) ||
+      !modulo_pow2_domain_proven(&state, rhs))
+    goto restore;
+  if (bits == 0u) {
+    result = IXS_CHECK_TRUE;
+    goto restore;
+  }
+
+  result = modulo_pow2_difference(&state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN || modulo_pow2_stopped(&state))
+    goto restore;
+
+  result = modulo_pow2_exact(&state, lhs, rhs);
+  if (result == IXS_CHECK_TRUE || modulo_pow2_stopped(&state))
+    goto restore;
+  result = modulo_pow2_normalized_query(&state, lhs, rhs);
+
+restore:
+  if (state.oom || state.limited || (!old_oom && facts->bounds.oom))
+    result = IXS_CHECK_UNKNOWN;
+  if (!old_oom && facts->bounds.oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 static bool
 finite_equivalence_count_points(const finite_equivalence_domains *domains,
                                 size_t remaining_points, size_t *point_count) {
@@ -9104,6 +9559,32 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
   if (ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
   result = equivalence_query_bound(facts, ctx, lhs, rhs, NULL);
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_check_result ixs_equivalent_modulo_pow2_facts(ixs_facts *facts,
+                                                  ixs_node *lhs, ixs_node *rhs,
+                                                  unsigned bits) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (!facts_ready(facts))
+    goto cleanup;
+  if (bits > 63u) {
+    ixs_ctx_push_error(ctx, "modulo pow2 equivalence: bits must be at most 63");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, lhs, "modulo pow2 equivalence") ||
+      !facts_query_node_ok(ctx, rhs, "modulo pow2 equivalence"))
+    goto cleanup;
+  if (ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  result = modulo_pow2_equivalence_query_bound(facts, ctx, lhs, rhs, bits);
 
 cleanup:
   ixs_session_unbind(&binding);

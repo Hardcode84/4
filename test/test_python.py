@@ -2626,6 +2626,59 @@ def test_equivalence_binding_invalid_inputs() -> None:
         ctx.check_predicate(sentinel, facts)
 
 
+def test_modulo_pow2_equivalence_binding() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("binding_modulo_pow2_x")
+    y = ctx.sym("binding_modulo_pow2_y")
+    facts = ctx.facts()
+    modulus = 2**32
+    wrapped_x = x % modulus
+    wrapped_y = y % modulus
+
+    add = 3 * x - 5 * y + 7
+    product = (x + 3) * (y + 5)
+    bitwise = ixsimpl.and_(ixsimpl.xor_(x, 85), ixsimpl.or_(y, 256))
+    mapping: dict[str | ixsimpl.Expr, ixsimpl.Expr | int] = {
+        x: wrapped_x,
+        y: wrapped_y,
+    }
+
+    assert ctx.equivalent_modulo_pow2(x, wrapped_x, 32, facts) is True
+    assert ctx.equivalent_modulo_pow2(add, add.subs(mapping), 32, facts) is True
+    assert ctx.equivalent_modulo_pow2(product, product.subs(mapping), 32, facts) is True
+    assert ctx.equivalent_modulo_pow2(bitwise, bitwise.subs(mapping), 32, facts) is True
+    assert ctx.equivalent_modulo_pow2(add % 16, add.subs(mapping) % 16, 4, facts) is True
+
+    assert ctx.equivalent_modulo_pow2(x, y, 0, facts) is True
+    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(modulus), 32, facts) is True
+    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(modulus + 1), 32, facts) is False
+    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(-(2**63)), 63, facts) is True
+
+    floor_x = ixsimpl.floor(x / 3)
+    floor_wrapped = ixsimpl.floor(wrapped_x / 3)
+    assert ctx.equivalent_modulo_pow2(floor_x, floor_x, 4, facts) is True
+    assert ctx.equivalent_modulo_pow2(floor_x, floor_wrapped, 4, facts) is None
+
+    mod6 = x % 6
+    mod6_wrapped = (x % 4) % 6
+    assert ctx.equivalent_modulo_pow2(mod6, mod6_wrapped, 2, facts) is None
+    x_is_six = ctx.facts()
+    x_is_six.assume(ctx.eq(x, 6))
+    assert ctx.equivalent_modulo_pow2(mod6, mod6_wrapped, 2, x_is_six) is False
+
+    assert ctx.equivalent_modulo_pow2(ctx.rat(1, 2), ctx.rat(1, 2), 1, facts) is None
+    with pytest.raises(ValueError, match="bits"):
+        ctx.equivalent_modulo_pow2(x, wrapped_x, 64, facts)
+    with pytest.raises(ValueError, match="nonnegative"):
+        ctx.equivalent_modulo_pow2(x, wrapped_x, -1, facts)
+
+    other = ixsimpl.Context()
+    with pytest.raises(ValueError, match="different context"):
+        ctx.equivalent_modulo_pow2(x, other.sym("x"), 32, facts)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.equivalent_modulo_pow2(x, wrapped_x, 32, other.facts())
+
+
 def test_modular_projection_proves_wave_wrapping_xor_packet() -> None:
     ctx = ixsimpl.Context()
     tile, lane, limit = (
