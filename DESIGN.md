@@ -1622,7 +1622,15 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   unequal thresholds prove equality only when the intervening integer gap is
   unreachable by the residual's range or congruence. This includes strict to
   non-strict normalization such as `x < 8` versus `x <= 7` without assuming a
-  machine width.
+  machine width. If that single-residue proof is insufficient, the query walks
+  only the two residual expression DAGs and collects the congruence moduli
+  attached to their symbols. For each candidate `d > 1`, `< 0` and `>= 0` use
+  the exact `floor(residual/d)` form, while `<= 0` and `> 0` use
+  `ceiling(residual/d)`. Fact-backed simplification can then canonicalize a
+  bounded union of reachable residue classes. The iterative walk visits each
+  query node once and uses growable, expected-O(1) candidate and node sets; it
+  has no semantic depth, visit, or candidate-count cutoff and never scans
+  unrelated context state.
 
   The same query proves `Mod(A + delta, D) == Mod(A, D) + delta` when both
   sides are total, `A` and `D` are integer-valued, `D` is positive, and the

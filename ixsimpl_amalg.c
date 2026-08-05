@@ -6166,7 +6166,7 @@ typedef struct {
   ixs_node **slots;
   size_t capacity;
   size_t count;
-} facts_node_set;
+} query_node_set;
 
 typedef union {
   void *align;
@@ -6307,7 +6307,7 @@ static bool facts_worklist_add_symbol(facts_worklist *work, size_t predicate,
   return true;
 }
 
-static bool facts_node_set_grow(ixs_arena *arena, facts_node_set *set) {
+static bool query_node_set_grow(ixs_arena *arena, query_node_set *set) {
   size_t new_capacity = set->capacity ? set->capacity * 2u : FACT_WORK_INIT_CAP;
   ixs_node **slots;
   size_t i;
@@ -6330,11 +6330,11 @@ static bool facts_node_set_grow(ixs_arena *arena, facts_node_set *set) {
   return true;
 }
 
-static bool facts_node_set_insert(ixs_arena *arena, facts_node_set *set,
+static bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
                                   ixs_node *node, bool *inserted) {
   size_t index;
   if (!set->capacity || set->count >= set->capacity / 2u) {
-    if (!facts_node_set_grow(arena, set))
+    if (!query_node_set_grow(arena, set))
       return false;
   }
   index = node->hash & (set->capacity - 1u);
@@ -6350,7 +6350,7 @@ static bool facts_node_set_insert(ixs_arena *arena, facts_node_set *set,
   return true;
 }
 
-static bool facts_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+static bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
                                   size_t *count, size_t *capacity,
                                   ixs_node *node) {
   if (*count >= *capacity) {
@@ -6373,7 +6373,7 @@ static bool facts_worklist_index_predicate(facts_worklist *work,
                                            size_t predicate, ixs_node *root) {
   facts_work_storage storage;
   ixs_arena traversal;
-  facts_node_set visited;
+  query_node_set visited;
   ixs_node **stack = NULL;
   size_t stack_capacity = 0;
   size_t stack_count = 0;
@@ -6381,7 +6381,7 @@ static bool facts_worklist_index_predicate(facts_worklist *work,
   ixs_arena_init_inline(&traversal, storage.bytes, sizeof(storage.bytes),
                         IXS_ARENA_DEFAULT_SIZE);
   memset(&visited, 0, sizeof(visited));
-  if (!facts_node_stack_push(&traversal, &stack, &stack_count, &stack_capacity,
+  if (!query_node_stack_push(&traversal, &stack, &stack_count, &stack_capacity,
                              root))
     goto cleanup;
   while (stack_count > 0) {
@@ -6389,7 +6389,7 @@ static bool facts_worklist_index_predicate(facts_worklist *work,
     uint32_t child_count;
     uint32_t i;
     bool inserted;
-    if (!facts_node_set_insert(&traversal, &visited, node, &inserted))
+    if (!query_node_set_insert(&traversal, &visited, node, &inserted))
       goto cleanup;
     if (!inserted)
       continue;
@@ -6398,7 +6398,7 @@ static bool facts_worklist_index_predicate(facts_worklist *work,
       goto cleanup;
     child_count = ixs_node_nchildren(node);
     for (i = 0; i < child_count; i++) {
-      if (!facts_node_stack_push(&traversal, &stack, &stack_count,
+      if (!query_node_stack_push(&traversal, &stack, &stack_count,
                                  &stack_capacity, ixs_node_child(node, i)))
         goto cleanup;
     }
@@ -7368,6 +7368,189 @@ static bool equivalence_ordered_cut(ixs_cmp_op op, bool *lower,
   }
 }
 
+typedef struct {
+  int64_t *slots;
+  size_t capacity;
+  size_t count;
+} equivalence_modulus_set;
+
+static size_t equivalence_modulus_hash(int64_t modulus) {
+  uint64_t x = (uint64_t)modulus;
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+/* Rehashing is amortized O(1), and storage grows only with distinct moduli in
+ * the two queried expression DAGs. */
+static bool equivalence_modulus_set_grow(ixs_arena *arena,
+                                         equivalence_modulus_set *set) {
+  size_t new_capacity = set->capacity ? set->capacity * 2u : 8u;
+  int64_t *slots;
+  size_t i;
+  if (new_capacity <= set->capacity || new_capacity > SIZE_MAX / sizeof(*slots))
+    return false;
+  slots = ixs_arena_alloc(arena, new_capacity * sizeof(*slots), sizeof(void *));
+  if (!slots)
+    return false;
+  memset(slots, 0, new_capacity * sizeof(*slots));
+  for (i = 0; i < set->capacity; i++) {
+    if (set->slots[i] != 0) {
+      size_t index =
+          equivalence_modulus_hash(set->slots[i]) & (new_capacity - 1u);
+      while (slots[index] != 0)
+        index = (index + 1u) & (new_capacity - 1u);
+      slots[index] = set->slots[i];
+    }
+  }
+  set->slots = slots;
+  set->capacity = new_capacity;
+  return true;
+}
+
+static bool equivalence_modulus_set_insert(ixs_arena *arena,
+                                           equivalence_modulus_set *set,
+                                           int64_t modulus) {
+  size_t index;
+  if (modulus <= 1)
+    return true;
+  if (!set->capacity || set->count >= set->capacity / 2u) {
+    if (!equivalence_modulus_set_grow(arena, set))
+      return false;
+  }
+  index = equivalence_modulus_hash(modulus) & (set->capacity - 1u);
+  while (set->slots[index] != 0 && set->slots[index] != modulus)
+    index = (index + 1u) & (set->capacity - 1u);
+  if (set->slots[index] == modulus)
+    return true;
+  set->slots[index] = modulus;
+  set->count++;
+  return true;
+}
+
+/* Discover congruence candidates by visiting each node in the two queried
+ * residual DAGs once. Growable query-local storage avoids semantic depth,
+ * visit, and candidate-count cutoffs without scanning unrelated context state.
+ */
+static bool equivalence_collect_congruences(equivalence_state *state,
+                                            ixs_node *lhs, ixs_node *rhs,
+                                            equivalence_modulus_set *moduli) {
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t stack_capacity = 0;
+  size_t stack_count = 0;
+
+  memset(&visited, 0, sizeof(visited));
+  if (!query_node_stack_push(&state->ctx->scratch, &stack, &stack_count,
+                             &stack_capacity, lhs) ||
+      !query_node_stack_push(&state->ctx->scratch, &stack, &stack_count,
+                             &stack_capacity, rhs))
+    goto oom;
+  while (stack_count > 0) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+    uint32_t i;
+    bool inserted;
+    if (!query_node_set_insert(&state->ctx->scratch, &visited, node, &inserted))
+      goto oom;
+    if (!inserted)
+      continue;
+    if (node->tag == IXS_SYM) {
+      int64_t modulus;
+      int64_t remainder;
+      bool known = ixs_bounds_get_modrem(state->bounds, node->u.name, &modulus,
+                                         &remainder);
+      if (state->bounds->oom)
+        goto oom;
+      if (known && !equivalence_modulus_set_insert(&state->ctx->scratch, moduli,
+                                                   modulus))
+        goto oom;
+      (void)remainder;
+    }
+    child_count = ixs_node_nchildren(node);
+    for (i = 0; i < child_count; i++) {
+      if (!query_node_stack_push(&state->ctx->scratch, &stack, &stack_count,
+                                 &stack_capacity, ixs_node_child(node, i)))
+        goto oom;
+    }
+  }
+  return true;
+
+oom:
+  state->oom = true;
+  return false;
+}
+
+static ixs_node *equivalence_build_rounded_ordered(equivalence_state *state,
+                                                   ixs_node *cmp,
+                                                   int64_t divisor) {
+  ixs_node *scale = ixs_node_int(state->ctx, divisor);
+  ixs_node *quotient;
+  ixs_node *rounded;
+  if (!scale)
+    return NULL;
+  quotient = simp_div(state->ctx, cmp->u.binary.lhs, scale);
+  if (!quotient)
+    return NULL;
+  switch (cmp->u.binary.cmp_op) {
+  case IXS_CMP_LT:
+  case IXS_CMP_GE:
+    rounded = simp_floor(state->ctx, quotient);
+    break;
+  case IXS_CMP_LE:
+  case IXS_CMP_GT:
+    rounded = simp_ceil(state->ctx, quotient);
+    break;
+  default:
+    return cmp;
+  }
+  if (!rounded)
+    return NULL;
+  return simp_cmp(state->ctx, rounded, cmp->u.binary.cmp_op,
+                  state->ctx->node_zero);
+}
+
+static ixs_check_result
+equivalence_ordered_congruence_forms(equivalence_state *state, ixs_node *lhs,
+                                     ixs_node *rhs) {
+  ixs_arena_mark mark = ixs_arena_save(&state->ctx->scratch);
+  equivalence_modulus_set moduli;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  size_t i;
+
+  memset(&moduli, 0, sizeof(moduli));
+  if (state->oom || state->limited ||
+      !equivalence_collect_congruences(state, lhs->u.binary.lhs,
+                                       rhs->u.binary.lhs, &moduli))
+    goto cleanup;
+  for (i = 0; i < moduli.capacity; i++) {
+    ixs_node *normalized[2];
+    if (moduli.slots[i] == 0)
+      continue;
+    normalized[0] =
+        equivalence_build_rounded_ordered(state, lhs, moduli.slots[i]);
+    normalized[1] =
+        equivalence_build_rounded_ordered(state, rhs, moduli.slots[i]);
+    if (!normalized[0] || !normalized[1] ||
+        !simp_simplify_batch_bounds(state->ctx, normalized, 2, state->bounds) ||
+        state->bounds->oom) {
+      state->oom = true;
+      goto cleanup;
+    }
+    if (!ixs_node_is_sentinel(normalized[0]) &&
+        !ixs_node_is_sentinel(normalized[1]) &&
+        normalized[0] == normalized[1]) {
+      result = IXS_CHECK_TRUE;
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
 static ixs_check_result
 equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
                                 ixs_node *rhs) {
@@ -7385,25 +7568,23 @@ equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
       ixs_bounds_check_integer_valued(state->bounds, lhs->u.binary.lhs) !=
           IXS_CHECK_TRUE ||
       ixs_bounds_check_integer_valued(state->bounds, rhs->u.binary.lhs) !=
-          IXS_CHECK_TRUE ||
-      !equivalence_integer_delta(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
-                                 &delta) ||
-      !ixs_safe_add(right_threshold, delta, &mapped_threshold))
+          IXS_CHECK_TRUE)
     return IXS_CHECK_UNKNOWN;
-  if (left_threshold == mapped_threshold)
-    return IXS_CHECK_TRUE;
-  lo = left_threshold < mapped_threshold ? left_threshold : mapped_threshold;
-  hi = left_threshold < mapped_threshold ? mapped_threshold : left_threshold;
-  if (left_lower) {
-    if (!ixs_safe_sub(hi, 1, &hi))
-      return IXS_CHECK_UNKNOWN;
-  } else {
-    if (!ixs_safe_add(lo, 1, &lo))
-      return IXS_CHECK_UNKNOWN;
+  if (equivalence_integer_delta(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
+                                &delta) &&
+      ixs_safe_add(right_threshold, delta, &mapped_threshold)) {
+    bool cut_valid;
+    if (left_threshold == mapped_threshold)
+      return IXS_CHECK_TRUE;
+    lo = left_threshold < mapped_threshold ? left_threshold : mapped_threshold;
+    hi = left_threshold < mapped_threshold ? mapped_threshold : left_threshold;
+    cut_valid =
+        left_lower ? ixs_safe_sub(hi, 1, &hi) : ixs_safe_add(lo, 1, &lo);
+    if (cut_valid &&
+        equivalence_no_reachable_integer(state, lhs->u.binary.lhs, lo, hi))
+      return IXS_CHECK_TRUE;
   }
-  return equivalence_no_reachable_integer(state, lhs->u.binary.lhs, lo, hi)
-             ? IXS_CHECK_TRUE
-             : IXS_CHECK_UNKNOWN;
+  return equivalence_ordered_congruence_forms(state, lhs, rhs);
 }
 
 static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
