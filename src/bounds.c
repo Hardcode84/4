@@ -2630,6 +2630,11 @@ static bool bounds_assoc_is_integer_with_divinfo(ixs_bounds *b,
   return true;
 }
 
+static bool bounds_mod_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
+  return ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) &&
+         ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs);
+}
+
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr) {
   if (!expr)
@@ -2651,6 +2656,9 @@ IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
 
   if (expr->tag == IXS_PIECEWISE)
     return bounds_piecewise_is_integer_with_divinfo(b, expr);
+
+  if (expr->tag == IXS_MOD)
+    return bounds_mod_is_integer_with_divinfo(b, expr);
 
   return false;
 }

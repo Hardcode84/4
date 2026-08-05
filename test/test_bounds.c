@@ -3631,6 +3631,79 @@ static void test_public_fact_integrality_piecewise(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_fact_integrality_nested_mod(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "nested_mod_x");
+  ixs_node *k = ixs_sym(ctx, "nested_mod_k");
+  ixs_node *d = ixs_sym(ctx, "nested_mod_d");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *inner = ixs_mod(ctx, k, ixs_int(ctx, 1024));
+  ixs_node *scaled = ixs_div(ctx, inner, eight);
+  ixs_node *nested = ixs_mod(ctx, scaled, two);
+  ixs_node *wave_inner =
+      ixs_mod(ctx, ixs_mul(ctx, eight, x), ixs_int(ctx, 1024));
+  ixs_node *wave_scaled = ixs_div(ctx, wave_inner, eight);
+  ixs_node *wave_nested = ixs_mod(ctx, wave_scaled, two);
+  ixs_node *dynamic_divisor = ixs_div(ctx, d, two);
+  ixs_node *dynamic = ixs_mod(ctx, scaled, dynamic_divisor);
+  ixs_node *k_multiple = ixs_cmp(ctx, ixs_mod(ctx, k, eight), IXS_CMP_EQ, zero);
+  ixs_node *d_even = ixs_cmp(ctx, ixs_mod(ctx, d, two), IXS_CMP_EQ, zero);
+  ixs_node *k_multiple_four =
+      ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 4)), IXS_CMP_EQ, zero);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *weak = ixs_facts_create(ctx);
+  ixs_facts *dividend_only = ixs_facts_create(ctx);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *range_only = ixs_facts_create(ctx);
+  ixs_facts *closed = ixs_facts_create(ctx);
+  ixs_range_result asserted_range;
+
+  CHECK(!ixs_node_is_integer_valued(scaled));
+  CHECK(!ixs_node_is_integer_valued(nested));
+  CHECK(!ixs_node_is_integer_valued(wave_scaled));
+  CHECK(!ixs_node_is_integer_valued(wave_nested));
+  CHECK(!ixs_node_is_integer_valued(dynamic));
+  CHECK(ixs_check_integer_valued_facts(empty, nested) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_integer_valued_facts(empty, wave_scaled) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(empty, wave_nested) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(weak, k_multiple_four));
+  CHECK(ixs_check_integer_valued_facts(weak, nested) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(dividend_only, k_multiple));
+  CHECK(ixs_check_integer_valued_facts(dividend_only, nested) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(dividend_only, dynamic) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(facts, k_multiple));
+  CHECK(ixs_facts_assume_pred(facts, d_even));
+  CHECK(ixs_check_integer_valued_facts(facts, scaled) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(facts, nested) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_integer_valued_facts(facts, dynamic) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined_facts(facts, dynamic) == IXS_CHECK_UNKNOWN);
+
+  asserted_range.has_lower = true;
+  asserted_range.has_upper = true;
+  asserted_range.lower_p = 0;
+  asserted_range.lower_q = 1;
+  asserted_range.upper_p = 7;
+  asserted_range.upper_q = 1;
+  CHECK(ixs_facts_assume_pred(range_only, k_multiple));
+  CHECK(ixs_facts_assume_pred(range_only, d_even));
+  CHECK(ixs_facts_assume_range(range_only, dynamic, &asserted_range));
+  CHECK(ixs_check_integer_valued_facts(range_only, dynamic) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined_facts(range_only, dynamic) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(closed, k_multiple));
+  CHECK(ixs_facts_assume_pred(closed, d_even));
+  CHECK(ixs_facts_assume_pred(closed,
+                              ixs_cmp(ctx, d, IXS_CMP_GE, ixs_int(ctx, 2))));
+  CHECK(ixs_check_defined_facts(closed, dynamic) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_fact_divisibility(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *k = ixs_sym(ctx, "K");
@@ -5689,6 +5762,7 @@ int main(void) {
   test_public_structural_and_assumption_integrality();
   test_public_fact_integrality_associative_many();
   test_public_fact_integrality_piecewise();
+  test_public_fact_integrality_nested_mod();
   test_public_fact_divisibility();
   test_public_fact_divisibility_rejects_reciprocal_factor();
   test_public_known_bits_propagation();

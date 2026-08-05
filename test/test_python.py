@@ -2132,6 +2132,53 @@ def test_integrality_queries_structural_assumption_and_facts() -> None:
     assert ctx.divisible(k, 64, facts) is None
 
 
+def test_integrality_query_recurses_through_nested_mod() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("nested_mod_x")
+    k, d = ctx.sym("nested_mod_k"), ctx.sym("nested_mod_d")
+    inner = k % 1024
+    scaled = inner / 8
+    nested = scaled % 2
+    wave_scaled = ((8 * x) % 1024) / 8
+    wave_nested = wave_scaled % 2
+    dynamic = scaled % (d / 2)
+    k_multiple = ctx.eq(k % 8, 0)
+    d_even = ctx.eq(d % 2, 0)
+
+    assert not scaled.is_integer_valued
+    assert not nested.is_integer_valued
+    assert not wave_scaled.is_integer_valued
+    assert not wave_nested.is_integer_valued
+    assert not dynamic.is_integer_valued
+    assert ctx.integer_valued(nested) is None
+    assert ctx.integer_valued(wave_scaled) is True
+    assert ctx.integer_valued(wave_nested) is True
+    assert ctx.integer_valued(nested, assumptions=[ctx.eq(k % 4, 0)]) is None
+    assert ctx.integer_valued(nested, assumptions=[k_multiple]) is True
+    assert ctx.integer_valued(dynamic, assumptions=[k_multiple]) is None
+
+    facts = ctx.facts()
+    facts.assume(k_multiple)
+    facts.assume(d_even)
+    assert ctx.integer_valued(scaled, facts=facts) is True
+    assert ctx.integer_valued(nested, facts=facts) is True
+    assert ctx.integer_valued(dynamic, facts=facts) is True
+    assert ctx.defined(dynamic, facts=facts) is None
+
+    range_only = ctx.facts()
+    range_only.assume(k_multiple)
+    range_only.assume(d_even)
+    range_only.assume_range(dynamic, 0, 7)
+    assert ctx.integer_valued(dynamic, facts=range_only) is True
+    assert ctx.defined(dynamic, facts=range_only) is None
+
+    closed = ctx.facts()
+    closed.assume(k_multiple)
+    closed.assume(d_even)
+    closed.assume(d >= 2)
+    assert ctx.defined(dynamic, facts=closed) is True
+
+
 def test_integrality_and_divisibility_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
