@@ -1677,8 +1677,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `ixs_check_integer_valued_facts` add interval and congruence reasoning, so
   `K/32` is proven integral under `Mod(K, 32) == 0`. A `Piecewise` is proven
   integral only when every branch not proven unreachable has an integral
-  value. `TRUE` and `FALSE` are universal proofs; a failed sufficient proof is
-  `UNKNOWN`, while an exact noninteger rational point may return `FALSE`.
+  value. `Mod(A, D)` applies the same fact-backed proof to both
+  operands, so a structurally rational but proven-integral dividend remains
+  integral through nested remainders. This says nothing about the operation's
+  domain: positivity of `D` is still a separate definedness obligation. `TRUE`
+  and `FALSE` are universal proofs; a failed sufficient proof is `UNKNOWN`,
+  while an exact noninteger rational point may return `FALSE`.
 - **Public definedness queries** (`ixs_check_defined`,
   `ixs_check_defined_facts`, Python `Context.defined`, C++
   `Expr::check_defined` and `Facts::check_defined`): prove domain safety for
