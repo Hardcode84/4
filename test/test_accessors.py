@@ -101,6 +101,29 @@ def test_cmp_constants_distinct() -> None:
     assert len(vals) == len(set(vals))
 
 
+def test_cmp_normalization_overflow_falls_back() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("x"), ctx.sym("y")
+    wrap_text = (
+        "-9223372036854775808 + Mod(4+x,4294967296) + "
+        "4294967296*Mod(2147483648+floor((4+x)/4294967296),4294967296)"
+    )
+
+    wrapped = ctx.parse_expr(wrap_text)
+    assert not wrapped.is_error
+    assert ctx.parse_expr(str(wrapped)) == wrapped
+    pred = ctx.eq(x, wrapped)
+    assert pred.tag == ixsimpl.CMP
+    assert pred.children == (x, wrapped)
+    assert ctx.errors == []
+
+    normalized = ctx.eq(x, y + 4)
+    assert normalized.tag == ixsimpl.CMP
+    assert normalized.child(1) == ctx.int_(0)
+    assert normalized.child(0) != x
+    assert ctx.errors == []
+
+
 def test_boolean_tag_constants_removed() -> None:
     assert not hasattr(ixsimpl, "TRUE")
     assert not hasattr(ixsimpl, "FALSE")
@@ -134,7 +157,7 @@ def test_variadic_associative_functions() -> None:
         assert all(child.tag != tag for child in direct.children)
         assert ixsimpl.same_node(func(a), a)
         with pytest.raises(TypeError):
-            func()  # type: ignore[call-arg]
+            func()
         with pytest.raises(ValueError, match="different context"):
             func(a, other.sym("foreign"))
 

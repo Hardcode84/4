@@ -3893,6 +3893,49 @@ static void test_cmp_identity(void) {
   CHECK(ixs_cmp(ctx, x, IXS_CMP_NE, x) == ixs_false(ctx));
 }
 
+static void test_cmp_normalization_overflow_fallback(void) {
+  static const char wrap_text[] =
+      "-9223372036854775808 + Mod(4+x,4294967296) + "
+      "4294967296*Mod(2147483648+floor((4+x)/4294967296),4294967296)";
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *y = ixs_sym(ctx, "y");
+  ixs_node *wrap = ixs_parse_expr(ctx, wrap_text, strlen(wrap_text));
+  ixs_node *domain_error;
+  ixs_node *pred;
+  ixs_node *normalized;
+
+  CHECK(wrap && !ixs_is_error(wrap));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  /* Keep diagnostics that predate the optional normalization attempt. */
+  domain_error = ixs_mod(ctx, x, ixs_int(ctx, 0));
+  CHECK(domain_error && ixs_is_domain_error(domain_error));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+
+  /* x-wrap needs +2^63 in its ADD constant, which is not representable. */
+  pred = ixs_cmp(ctx, x, IXS_CMP_EQ, wrap);
+  CHECK(pred && ixs_node_tag(pred) == IXS_CMP);
+  CHECK(ixs_node_binary_lhs(pred) == x);
+  CHECK(ixs_node_binary_rhs(pred) == wrap);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+
+  /* Operand errors are propagated before normalization and are not erased. */
+  CHECK(ixs_cmp(ctx, x, IXS_CMP_EQ, domain_error) == domain_error);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  ixs_ctx_clear_errors(ctx);
+
+  /* A representable difference still takes the canonical zero-RHS path. */
+  normalized = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_add(ctx, y, ixs_int(ctx, 4)));
+  CHECK(normalized && ixs_node_tag(normalized) == IXS_CMP);
+  CHECK(ixs_node_tag(ixs_node_binary_rhs(normalized)) == IXS_INT);
+  CHECK(ixs_node_int_val(ixs_node_binary_rhs(normalized)) == 0);
+  CHECK(ixs_node_binary_lhs(normalized) != x);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_cmp_bounds_resolve(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -4050,6 +4093,7 @@ int main(void) {
   test_min_bounds_collapse();
   test_cmp_const_fold();
   test_cmp_identity();
+  test_cmp_normalization_overflow_fallback();
   test_cmp_bounds_resolve();
   test_mod_scaled_bounds();
 
