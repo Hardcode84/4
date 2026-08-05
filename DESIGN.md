@@ -1583,6 +1583,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   domains, insufficient facts, unsupported reasoning, invalid input, detected
   contradiction, and OOM return `UNKNOWN`.
 
+  Expression ranges, including point ranges derived from equality assumptions,
+  constrain values only where their expression is defined. They never prove
+  definedness by themselves or bypass structural child and operation-domain
+  checks. Thus a range for `floor(x/d)` does not discharge the required proof
+  that `d != 0`; an independent divisor fact is still required.
+
   `Piecewise` follows first-match semantics. Conditions are checked before
   their values. Branch `i` is evaluated in a fork containing its condition and
   the negations of all earlier conditions, while the sibling continuation is

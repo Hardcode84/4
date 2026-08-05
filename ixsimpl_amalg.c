@@ -4864,7 +4864,6 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
                                 defined_frame *frame, unsigned pw_depth,
                                 ixs_check_result *direct, bool *has_direct) {
   ixs_node *node = frame->node;
-  ixs_interval asserted;
   *direct = IXS_CHECK_UNKNOWN;
   *has_direct = false;
 
@@ -4878,12 +4877,8 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
     return;
   }
 
-  asserted = bounds_get_expr_overrides(b, node);
-  if (asserted.valid && !ixs_interval_is_empty(asserted)) {
-    *direct = IXS_CHECK_TRUE;
-    *has_direct = true;
-    return;
-  }
+  /* A range constrains a node only where that node is defined. It cannot skip
+   * the structural walk or discharge an operation's domain guards. */
 
   switch (node->tag) {
   case IXS_INT:
