@@ -388,6 +388,11 @@ public:
   bool integer_range(const Expr &expr, ixs_integer_range_result &out) const {
     return ixs_integer_range_facts(facts_, expr.raw(), &out);
   }
+  ixs_check_result rational_intermediates_fit(const Expr &expr,
+                                              uint32_t word_bits) const {
+    return ixs_check_rational_intermediates_facts(facts_, expr.raw(),
+                                                  word_bits);
+  }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {
     return ixs_facts_substitute(facts_, source.raw(), target.raw(),

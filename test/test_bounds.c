@@ -7693,6 +7693,263 @@ static void test_deep_node_order_is_iterative(void) {
   free(chain_b);
 }
 
+static void rational_assume_integer_range(ixs_facts *facts, ixs_node *expr,
+                                          int64_t lower, int64_t upper) {
+  ixs_range_result range;
+  range.has_lower = true;
+  range.has_upper = true;
+  range.lower_p = lower;
+  range.lower_q = 1;
+  range.upper_p = upper;
+  range.upper_q = 1;
+  CHECK(ixs_facts_assume_range(facts, expr, &range));
+}
+
+static void test_public_rational_intermediate_boundaries(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_boundary_x");
+  ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *floor_half = ixs_floor(ctx, half);
+  ixs_node *ceil_half = ixs_ceil(ctx, half);
+  ixs_facts *signed_boundary = ixs_facts_create(ctx);
+  ixs_facts *word_boundary = ixs_facts_create(ctx);
+  ixs_facts *word_overflow = ixs_facts_create(ctx);
+  ixs_facts *partial_crossing = ixs_facts_create(ctx);
+  ixs_facts *ceil_overflow = ixs_facts_create(ctx);
+  ixs_facts *wide_word = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_node *rational_leaf = ixs_rat(ctx, 256, 3);
+  size_t errors;
+
+  rational_assume_integer_range(signed_boundary, x, -128, 127);
+  rational_assume_integer_range(word_boundary, x, 0, 255);
+  rational_assume_integer_range(word_overflow, x, 256, 256);
+  rational_assume_integer_range(partial_crossing, x, 0, 256);
+  rational_assume_integer_range(ceil_overflow, x, 255, 255);
+  rational_assume_integer_range(wide_word, x, 0, INT64_C(4611686018427387903));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
+
+  CHECK(ixs_check_rational_intermediates_facts(signed_boundary, floor_half,
+                                               8) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(word_boundary, floor_half, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(word_overflow, floor_half, 8) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(partial_crossing, floor_half,
+                                               8) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_rational_intermediates_facts(ceil_overflow, ceil_half, 8) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(wide_word, floor_half, 62) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(empty, x, 8) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(empty, rational_leaf, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(contradictory, floor_half, 8) ==
+        IXS_CHECK_UNKNOWN);
+
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(ixs_check_rational_intermediates_facts(word_boundary, floor_half, 1) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  ixs_ctx_clear_errors(ctx);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_compounds(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_compound_x");
+  ixs_node *y = ixs_sym(ctx, "rational_compound_y");
+  ixs_node *guard = ixs_sym(ctx, "rational_compound_guard");
+  ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *quarter_y = ixs_div(ctx, y, ixs_int(ctx, 4));
+  ixs_node *condition =
+      ixs_cmp(ctx, ixs_floor(ctx, ixs_div(ctx, guard, ixs_int(ctx, 2))),
+              IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *values[2] = {half_x, quarter_y};
+  ixs_node *conditions[2] = {condition, ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *sum = ixs_add(ctx, half_x, quarter_y);
+  ixs_node *product = ixs_mul(ctx, half_x, y);
+  ixs_node *bitwise = ixs_and(ctx, half_x, ixs_int(ctx, 7));
+  ixs_node *bitwise_island = ixs_add(ctx, bitwise, ixs_rat(ctx, 1, 2));
+  ixs_facts *sum_boundary = ixs_facts_create(ctx);
+  ixs_facts *sum_overflow = ixs_facts_create(ctx);
+  ixs_facts *product_boundary = ixs_facts_create(ctx);
+  ixs_facts *product_overflow = ixs_facts_create(ctx);
+  ixs_facts *piecewise_fit = ixs_facts_create(ctx);
+  ixs_facts *piecewise_overflow = ixs_facts_create(ctx);
+  ixs_facts *bitwise_fit = ixs_facts_create(ctx);
+  ixs_facts *bitwise_noninteger = ixs_facts_create(ctx);
+
+  rational_assume_integer_range(sum_boundary, x, 127, 127);
+  rational_assume_integer_range(sum_boundary, y, 1, 1);
+  rational_assume_integer_range(sum_overflow, x, 128, 128);
+  rational_assume_integer_range(sum_overflow, y, 0, 0);
+  rational_assume_integer_range(product_boundary, x, 255, 255);
+  rational_assume_integer_range(product_boundary, y, 1, 1);
+  rational_assume_integer_range(product_overflow, x, 128, 128);
+  rational_assume_integer_range(product_overflow, y, 2, 2);
+  rational_assume_integer_range(piecewise_fit, x, 0, 100);
+  rational_assume_integer_range(piecewise_fit, y, 0, 200);
+  rational_assume_integer_range(piecewise_overflow, x, 128, 128);
+  rational_assume_integer_range(piecewise_overflow, y, 0, 200);
+  rational_assume_integer_range(bitwise_fit, x, 0, 62);
+  CHECK(ixs_facts_assume_pred(bitwise_fit,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  rational_assume_integer_range(bitwise_noninteger, x, 0, 63);
+
+  /* Piecewise conditions do not materialize as value numerators.  No facts
+   * are needed for the rational expression nested in condition. */
+  CHECK(ixs_check_rational_intermediates_facts(sum_boundary, sum, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(sum_overflow, sum, 8) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(product_boundary, product, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(product_overflow, product, 8) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(piecewise_fit, piecewise, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(piecewise_overflow, piecewise,
+                                               8) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(bitwise_fit, bitwise_island,
+                                               8) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(
+            bitwise_noninteger, bitwise_island, 8) == IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_limits_and_shared_dag(void) {
+  enum { CASE_LIMIT = 1025, MEMO_CASES = 1024 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_limit_x");
+  ixs_node *guard = ixs_sym(ctx, "rational_limit_guard");
+  ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *floor_half = ixs_floor(ctx, half_x);
+  ixs_node *deep = half_x;
+  ixs_node *power_base = x;
+  ixs_node *power;
+  ixs_node *case_values[CASE_LIMIT];
+  ixs_node *case_conditions[CASE_LIMIT];
+  ixs_node *memo_values[MEMO_CASES];
+  ixs_node *memo_conditions[MEMO_CASES];
+  ixs_node *too_many_cases;
+  ixs_node *shared_piecewise;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  uint32_t i;
+
+  rational_assume_integer_range(facts, x, 0, 0);
+  for (i = 0; i < 70; i++)
+    deep = ixs_floor(ctx, ixs_div(ctx, deep, ixs_int(ctx, 2)));
+  CHECK(ixs_check_rational_intermediates_facts(facts, deep, 16) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
+        IXS_CHECK_TRUE);
+
+  for (i = 1; i < 65; i++)
+    power_base = ixs_mul(ctx, power_base, x);
+  power = ixs_floor(ctx, ixs_div(ctx, power_base, ixs_int(ctx, 2)));
+  CHECK(ixs_check_rational_intermediates_facts(facts, power, 16) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
+        IXS_CHECK_TRUE);
+
+  for (i = 0; i < CASE_LIMIT; i++) {
+    case_values[i] = ixs_add(ctx, half_x, ixs_rat(ctx, 2 * (int64_t)i + 1, 2));
+    case_conditions[i] =
+        i + 1u == CASE_LIMIT
+            ? ixs_true(ctx)
+            : ixs_cmp(ctx, guard, IXS_CMP_GT, ixs_int(ctx, (int64_t)i));
+  }
+  too_many_cases = ixs_pw(ctx, CASE_LIMIT, case_values, case_conditions);
+  CHECK(ixs_node_tag(too_many_cases) == IXS_PIECEWISE);
+  CHECK(ixs_check_rational_intermediates_facts(facts, too_many_cases, 16) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
+        IXS_CHECK_TRUE);
+
+  deep = half_x;
+  for (i = 0; i < 32; i++)
+    deep = ixs_floor(ctx, ixs_div(ctx, deep, ixs_int(ctx, 2)));
+  for (i = 0; i < MEMO_CASES; i++) {
+    memo_values[i] = ixs_add(ctx, deep, ixs_rat(ctx, 2 * (int64_t)i + 1, 2));
+    memo_conditions[i] =
+        i + 1u == MEMO_CASES
+            ? ixs_true(ctx)
+            : ixs_cmp(ctx, guard, IXS_CMP_GT, ixs_int(ctx, (int64_t)i));
+  }
+  shared_piecewise = ixs_pw(ctx, MEMO_CASES, memo_values, memo_conditions);
+  CHECK(ixs_node_tag(shared_piecewise) == IXS_PIECEWISE);
+  /* Rewalking the 32-level shared value for every case exceeds the visit
+   * budget.  A single memoized DAG analysis stays well below it. */
+  CHECK(ixs_check_rational_intermediates_facts(facts, shared_piecewise, 16) ==
+        IXS_CHECK_TRUE);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_mod_projection(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_mod_x");
+  ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *pow2_mod = ixs_mod(ctx, half_x, ixs_int(ctx, 4));
+  ixs_node *other_mod = ixs_mod(ctx, half_x, ixs_int(ctx, 3));
+  ixs_node *half = ixs_rat(ctx, 1, 2);
+  ixs_node *pow2_island = ixs_add(ctx, pow2_mod, half);
+  ixs_node *other_island = ixs_add(ctx, other_mod, half);
+  ixs_node *reciprocal_island =
+      ixs_div(ctx, half, ixs_mul(ctx, ixs_int(ctx, 2), x));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  rational_assume_integer_range(facts, x, 600, 600);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_check_rational_intermediates_facts(facts, pow2_island, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(facts, other_island, 8) ==
+        IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(facts, reciprocal_island, 8) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_oom_and_invalid(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_oom_x");
+  ixs_node *y = ixs_sym(ctx, "rational_oom_y");
+  ixs_node *guard = ixs_sym(ctx, "rational_oom_guard");
+  ixs_node *values[2] = {ixs_div(ctx, x, ixs_int(ctx, 2)),
+                         ixs_div(ctx, y, ixs_int(ctx, 4))};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, guard, IXS_CMP_GT, ixs_int(ctx, 0)),
+                             ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  size_t errors;
+
+  rational_assume_integer_range(facts, x, 0, 100);
+  rational_assume_integer_range(facts, y, 0, 200);
+  errors = ixs_ctx_nerrors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_check_rational_intermediates_facts(facts, piecewise, 8) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  CHECK(ixs_check_rational_intermediates_facts(facts, piecewise, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(
+            facts, ixs_sym(other, "rational_oom_foreign"), 8) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   /* Interval arithmetic */
   test_iv_add_basic();
@@ -7895,6 +8152,11 @@ int main(void) {
   test_same_bucket_floor_oom_is_conservative();
   test_associative_constructor_oom();
   test_deep_node_order_is_iterative();
+  test_public_rational_intermediate_boundaries();
+  test_public_rational_intermediate_compounds();
+  test_public_rational_intermediate_mod_projection();
+  test_public_rational_intermediate_oom_and_invalid();
+  test_public_rational_intermediate_limits_and_shared_dag();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

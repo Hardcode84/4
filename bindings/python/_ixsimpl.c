@@ -2268,6 +2268,31 @@ static PyObject *Context_congruent(ContextObject *self, PyObject *args,
   Py_RETURN_NONE;
 }
 
+static PyObject *Context_rational_intermediates_fit(ContextObject *self,
+                                                    PyObject *args,
+                                                    PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "word_bits", "facts", NULL};
+  PyObject *expr_obj;
+  PyObject *facts_obj;
+  ixs_session *session = Context_session(self);
+  const ixs_node *expr;
+  ixs_facts *facts;
+  ixs_check_result result;
+  unsigned int word_bits;
+  size_t errors_before;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OIO", kwlist, &expr_obj,
+                                   &word_bits, &facts_obj))
+    return NULL;
+  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_check_rational_intermediates_facts(facts, expr, word_bits);
+  if (raise_new_prefixed_error(session, errors_before,
+                               "rational intermediates:") < 0)
+    return NULL;
+  return check_result_to_py(result);
+}
+
 static PyObject *Context_try_exact_divide(ContextObject *self, PyObject *args,
                                           PyObject *kwargs) {
   static char *kwlist[] = {"expr", "divisor", "facts", NULL};
@@ -2901,6 +2926,10 @@ static PyMethodDef Context_methods[] = {
      "Return a symbol's stored (modulus, residue), or None."},
     {"congruent", (PyCFunction)Context_congruent, METH_VARARGS | METH_KEYWORDS,
      "Prove a requested congruence under a fact set; return bool or None."},
+    {"rational_intermediates_fit",
+     (PyCFunction)Context_rational_intermediates_fit,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove that canonical rational intermediates fit word_bits."},
     {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
      METH_VARARGS | METH_KEYWORDS,
      "Prove exact division under facts; return (status, quotient)."},

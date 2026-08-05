@@ -1585,6 +1585,40 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   congruence alignment that would overflow an `int64_t` endpoint retains the
   untightened endpoint only when the opposite side is unbounded. The
   congruence walk is depth-limited to 64 and visits only the queried DAG.
+- **Rational-intermediate fit query**
+  (`ixs_check_rational_intermediates_facts`, Python
+  `Context.rational_intermediates_fit`, C++
+  `Facts::rational_intermediates_fit`): discovers every rational
+  materialization island below one root and proves the exact canonical
+  numerator sequence safe for a requested machine-word width. ADD follows
+  canonical term order and checks both common-denominator scales and each
+  accumulated numerator. MUL follows canonical factor order and checks each
+  repeated positive-power product. Floor and ceiling check the source
+  numerator, signed range when nonnegativity is not proven, and the ceiling
+  bias. Piecewise forms one common denominator and checks every scaled branch
+  plus the selected numerator. Integral Mod and bitwise nodes retain their
+  domain obligations; a positive power-of-two Mod no wider than the word may
+  discard high dividend bits.
+
+  One memoized bottom-up analysis returns containment, island ownership, the
+  canonical proof, and aggregate island fit for each DAG node; there are no
+  separate discovery and proof walks. Shared nodes are analyzed once.
+  Piecewise conditions are deliberately excluded because only branch values
+  form rational materialization numerators. A bare rational literal has no
+  intermediate arithmetic and therefore succeeds vacuously; its proof payload
+  is used only when an enclosing island combines it.
+
+  Widths 2 through 62 are accepted. For `N` bits, ordinary arithmetic uses
+  the inclusive interval `[-2^(N-1), 2^N-1]`, matching one-word arithmetic
+  whose nonnegative values may use every bit. Signed rounded intermediates use
+  `[-2^(N-1), 2^(N-1)-1]`. TRUE requires every relevant expression to be
+  defined and integer-valued over the complete fact domain. A conclusive
+  disjoint integer range returns FALSE; missing facts, a partially crossing
+  over-approximation, unsupported shapes, contradiction, OOM, or a resource
+  limit returns UNKNOWN. Traversal depth is 64, the shared visit budget is
+  16384, Piecewise is capped at 1024 cases, and repeated powers are capped at
+  64. The query walks only the requested expression and allocates temporary
+  arrays from session scratch.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer
@@ -2326,6 +2360,8 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
 bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
                              ixs_integer_range_result *out);
+ixs_check_result ixs_check_rational_intermediates_facts(
+    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
@@ -2948,6 +2984,8 @@ Key properties:
   `Facts::substitute()` and `Facts::substitute_multi()` mutate a destination
   wrapper from a source fact set and mirror the transactional C transfer
   contract.
+  `Facts::rational_intermediates_fit()` exposes the one-root canonical
+  rational-materialization safety proof without wrapper-side traversal.
   `Expr::simplify(const Facts&)` is the expression-oriented spelling.
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
@@ -3079,6 +3117,9 @@ Implementation:
   `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
   Core `ERROR` results raise `ValueError` for domain/representation failures
   and `MemoryError` for OOM while preserving the session diagnostic.
+- `Context.rational_intermediates_fit(expr, word_bits, facts)` returns
+  `True`, `False`, or `None` for the complete rational-intermediate proof and
+  rejects widths outside 2 through 62.
 - `Context.constant_difference(lhs, rhs, facts)` returns an `int` or `None`;
   `Context.affine_decompose(expr, symbol, facts)` returns
   `(coefficient, residual)` or `None`;
@@ -3451,6 +3492,8 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
 bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
                              ixs_integer_range_result *out);
+ixs_check_result ixs_check_rational_intermediates_facts(
+    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
 
 ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,

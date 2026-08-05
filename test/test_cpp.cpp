@@ -19,6 +19,7 @@ int main() {
   ixs::Expr eight = ixs::Expr::integer(ctx, 8);
   ixs::Expr nonnegative = ixs::Expr::parse_pred(ctx, "x >= 0");
   ixs::Expr congruent = ixs::Expr::parse_pred(ctx, "Mod(x, 8) == 0");
+  ixs::Expr rational_floor = ixs::Expr::parse_expr(ctx, "floor(x/8)");
   ixs::Expr assumptions[1] = {nonnegative};
   ixs_range_result range = {};
   ixs_integer_range_result integer_range = {};
@@ -65,7 +66,8 @@ int main() {
       facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE ||
       !facts.range(x, range) || !facts.integer_range(x, integer_range) ||
       !integer_range.has_lower || integer_range.lower != 0 ||
-      !integer_range.has_upper || integer_range.upper != 56)
+      !integer_range.has_upper || integer_range.upper != 56 ||
+      facts.rational_intermediates_fit(rational_floor, 8) != IXS_CHECK_TRUE)
     return 4;
 
   int64_t delta = 0;

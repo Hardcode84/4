@@ -23,6 +23,7 @@ else()
         src/parser.c
         src/print.c
         src/rational.c
+        src/rational_intermediates.c
         src/serialize.c
         src/simplify.c
         src/walk.c

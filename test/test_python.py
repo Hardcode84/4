@@ -2265,6 +2265,27 @@ def test_known_bits_and_congruence_binding_failures() -> None:
         ctx.congruent(sentinel, 8, 0, facts)
 
 
+def test_rational_intermediates_fit_binding() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x = ctx.sym("rational_binding_x")
+    expr = ixsimpl.floor(x / 2)
+    fitting = ctx.facts()
+    fitting.assume_range(x, -128, 127)
+    overflow = ctx.facts()
+    overflow.assume_range(x, 256, 256)
+
+    assert ctx.rational_intermediates_fit(expr, 8, fitting) is True
+    assert ctx.rational_intermediates_fit(expr, 8, overflow) is False
+    assert ctx.rational_intermediates_fit(expr, 8, ctx.facts()) is None
+    with pytest.raises(ValueError, match="word_bits"):
+        ctx.rational_intermediates_fit(expr, 1, fitting)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.rational_intermediates_fit(other.sym("x"), 8, fitting)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.rational_intermediates_fit(expr, 8, other.facts())
+
+
 def test_predicate_tree_and_total_equivalence_bindings() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("binding_equiv_x")

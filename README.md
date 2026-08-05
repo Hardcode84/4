@@ -137,6 +137,7 @@ API. Key functions:
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
 | `ixs_check`, `ixs_range`, `ixs_integer_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
+| `ixs_check_rational_intermediates_facts` | Prove canonical rational numerators fit a machine word |
 | `ixs_facts_*` | First-class predicate and expression-range fact sets |
 | `ixs_equivalent_modulo_pow2_facts` | Total low-bit equivalence under facts |
 | `ixs_equivalent_finite_domain_facts` | Budgeted finite integer-domain equivalence |

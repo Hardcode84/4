@@ -472,6 +472,20 @@ bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
 bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
                              ixs_integer_range_result *out);
 
+/* Prove that every numerator produced by the canonical rational
+ * materialization of expr fits one machine word.  The query discovers every
+ * rational island below expr and checks scaled ADD operands, MUL products,
+ * Floor/Ceil numerators and ceil biases, Piecewise common-denominator
+ * numerators, and integral Mod/bitwise operands.  word_bits must be in
+ * [2, 62].  The ordinary word domain is [-2^(N-1), 2^N-1]; signed rounded
+ * intermediates additionally use [-2^(N-1), 2^(N-1)-1].  TRUE is a complete
+ * full-domain proof.  FALSE is returned only for a conclusive out-of-range
+ * intermediate.  Unsupported shapes, missing totality/integrality facts,
+ * contradictory facts, resource limits, and OOM return UNKNOWN. */
+ixs_check_result ixs_check_rational_intermediates_facts(ixs_facts *facts,
+                                                        const ixs_node *expr,
+                                                        uint32_t word_bits);
+
 /* --- Simplification ---------------------------------------------------- */
 
 /* Simplify expr under the shared assumption contract above.  Pass NULL/0 for

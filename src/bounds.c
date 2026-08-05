@@ -3,6 +3,7 @@
  */
 #include "bounds.h"
 #include "expand.h"
+#include "rational_intermediates.h"
 #include "simplify.h"
 #include <limits.h>
 #include <stdlib.h>
@@ -10471,6 +10472,24 @@ bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
     ok = ixs_bounds_get_integer_range(&facts->bounds, expr, out);
   ixs_session_unbind(&binding);
   return ok;
+}
+
+ixs_check_result ixs_check_rational_intermediates_facts(ixs_facts *facts,
+                                                        ixs_node *expr,
+                                                        uint32_t word_bits) {
+  algebra_query_scope scope;
+  ixs_node *nodes[1] = {expr};
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool width_ok = word_bits >= 2u && word_bits <= 62u;
+  if (!algebra_query_begin(facts, nodes, 1, "rational intermediates", width_ok,
+                           "word_bits must be in [2, 62]", &scope))
+    return IXS_CHECK_UNKNOWN;
+  algebra_query_start(&scope);
+  result = ixs_bounds_check_rational_intermediates(scope.ctx, &facts->bounds,
+                                                   expr, word_bits);
+  if (!algebra_query_finish(&scope, true))
+    result = IXS_CHECK_UNKNOWN;
+  return result;
 }
 
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
