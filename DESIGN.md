@@ -1218,6 +1218,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
   special case; `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`.
+- **Congruent range intersection**: finite symbol interval endpoints round
+  inward to the nearest value satisfying the stored congruence before range
+  propagation. Unrepresentable aligned endpoints retain the original bound.
 - **Modular entailment**: `ixs_check` uses the same congruence facts for
   `Mod(expr, m) == r` and `Mod(expr, m) != r` queries.  It proves exact
   symbol remainders when the stored modulus is a multiple of the query

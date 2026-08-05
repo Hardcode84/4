@@ -546,21 +546,64 @@ static bool interval_exact_int(const ixs_interval *iv, int64_t *value) {
   return true;
 }
 
+static int64_t integer_congruence_residue(int64_t value, int64_t modulus) {
+  int64_t residue = value % modulus;
+  return residue < 0 ? residue + modulus : residue;
+}
+
+static bool integer_align_congruence_up(int64_t value, int64_t modulus,
+                                        int64_t remainder, int64_t *out) {
+  int64_t current, delta;
+  if (modulus <= 0 || remainder < 0 || remainder >= modulus || !out)
+    return false;
+  current = integer_congruence_residue(value, modulus);
+  delta = remainder >= current ? remainder - current
+                               : modulus - (current - remainder);
+  return ixs_safe_add(value, delta, out);
+}
+
+static bool integer_align_congruence_down(int64_t value, int64_t modulus,
+                                          int64_t remainder, int64_t *out) {
+  int64_t current, delta;
+  if (modulus <= 0 || remainder < 0 || remainder >= modulus || !out)
+    return false;
+  current = integer_congruence_residue(value, modulus);
+  delta = current >= remainder ? current - remainder
+                               : modulus - (remainder - current);
+  return ixs_safe_sub(value, delta, out);
+}
+
+static ixs_interval interval_intersect_congruence(ixs_interval iv,
+                                                  int64_t modulus,
+                                                  int64_t remainder) {
+  int64_t aligned;
+  if (!iv.valid || modulus <= 0)
+    return iv;
+  if (!iv.lo_inf && integer_align_congruence_up(ixs_rat_ceil(iv.lo_p, iv.lo_q),
+                                                modulus, remainder, &aligned)) {
+    iv.lo_p = aligned;
+    iv.lo_q = 1;
+  }
+  if (!iv.hi_inf &&
+      integer_align_congruence_down(ixs_rat_floor(iv.hi_p, iv.hi_q), modulus,
+                                    remainder, &aligned)) {
+    iv.hi_p = aligned;
+    iv.hi_q = 1;
+  }
+  return iv;
+}
+
 static bool interval_has_congruent_integer(const ixs_interval *iv,
                                            int64_t modulus, int64_t remainder) {
-  int64_t lo, hi, current, delta, first;
+  int64_t lo, hi, first;
   if (!iv->valid || iv->lo_inf || iv->hi_inf || modulus <= 0)
     return true;
   lo = ixs_rat_ceil(iv->lo_p, iv->lo_q);
   hi = ixs_rat_floor(iv->hi_p, iv->hi_q);
   if (lo > hi)
     return false;
-  current = lo % modulus;
-  if (current < 0)
-    current += modulus;
-  delta = remainder >= current ? remainder - current
-                               : modulus - (current - remainder);
-  return ixs_safe_add(lo, delta, &first) && first <= hi;
+  return integer_align_congruence_up(lo, modulus, remainder, &first) &&
+         first <= hi;
 }
 
 static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
@@ -2843,11 +2886,6 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
   return result;
 }
 
-static inline ixs_interval bounds_get_symbol(ixs_bounds *b, ixs_node *expr) {
-  ixs_var_bound *v = find_var(b, expr->u.name);
-  return v ? v->iv : ixs_interval_unknown();
-}
-
 static ixs_interval bounds_get_proportional_range(ixs_bounds *b,
                                                   ixs_node *expr) {
   ixs_node *primitive, *canonical;
@@ -3320,8 +3358,6 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
     return ixs_interval_exact(expr->u.ival, 1);
   case IXS_RAT:
     return ixs_interval_exact(expr->u.rat.p, expr->u.rat.q);
-  case IXS_SYM:
-    return bounds_get_symbol(b, expr);
   case IXS_ADD:
     return bounds_get_add(b, expr);
   case IXS_MUL:
@@ -3350,18 +3386,27 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
   ixs_node *canon;
+  ixs_var_bound *var = NULL;
   if (!b)
     return ixs_interval_unknown();
   if (bounds_cacheable_expr(expr) && bounds_cache_lookup(b, expr, &iv))
     return iv;
 
-  iv = bounds_get_propagated(b, expr);
+  if (expr && expr->tag == IXS_SYM) {
+    /* Symbol lookup is linear; retain it through override intersection. */
+    var = find_var(b, expr->u.name);
+    iv = var ? var->iv : ixs_interval_unknown();
+  } else {
+    iv = bounds_get_propagated(b, expr);
+  }
   if (b->nexprs && expr) {
     iv = iv_intersect(iv, bounds_get_expr_overrides(b, expr));
     canon = bounds_canonical_expr(b, expr);
     if (canon && canon != expr)
       iv = iv_intersect(iv, bounds_get_expr_overrides(b, canon));
   }
+  if (var && var->modulus > 0)
+    iv = interval_intersect_congruence(iv, var->modulus, var->remainder);
   if (bounds_cacheable_expr(expr))
     bounds_cache_store(b, expr, iv);
   return iv;
