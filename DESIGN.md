@@ -1539,7 +1539,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   modulus and normalized residue for a symbol. It does not compute a strongest
   congruence for arbitrary expressions. The second answers one requested
   modulus/residue query using exact intervals, known low bits, stored symbol
-  facts, and bounded `ADD`/`MUL` propagation at that modulus. Negative moduli
+  facts, and bounded `ADD`/`MUL` propagation at that modulus. `XOR`, `AND`, and
+  `OR` propagate a requested residue only for a power-of-two modulus and only
+  when every operand has a complete residue at that modulus; this is exact
+  low-bit composition, not an arbitrary-modulus bitwise rule. Negative moduli
   and residues normalize without signed negation, including the `2^63`
   magnitude of `INT64_MIN`; modulus zero emits a diagnostic and returns
   `UNKNOWN`. Known conflicting residues return `FALSE`, incomplete evidence
@@ -1622,10 +1625,41 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   incoming fact domain, then simplify, expand, and simplify again in that same
   environment. Constant-difference queries also accept an exact integer point
   range for the normalized difference, including bounded transitive
-  unit-symbol relations. Constant differences and additive constants must fit
-  `int64_t`; affine coefficients may be exact rational nodes. Affine
-  decomposition accepts only one symbol and rejects any nonlinear occurrence
-  or residual reference to it. Finite difference substitutes
+  unit-symbol relations.
+
+  Constant differences additionally project pairs of equal-and-opposite
+  nonzero integer multiples of `Mod(A, M)` terms with one shared `M`. The query
+  recursively proves the exact difference between the dividends. For a
+  positive literal `M`, it intersects each Mod value's fact-backed integer
+  interval with its proven structural stride and residue, forms the sound
+  mathematical difference enclosure with portable signed-magnitude
+  arithmetic, and succeeds only when exactly one member of the residue class
+  lies in that enclosure and fits `int64_t`. This handles canonical
+  `offset + Mod(representative - offset, M)` fixed-width wraps without
+  exporting wrap relations or assuming machine overflow semantics. A wide
+  interval with two residue-class members remains unknown, even when one
+  candidate looks like the expected adjacent offset.
+
+  A shared dynamic `M` instead uses the same allocation-free no-wrap test as
+  equivalence: the base dividend has a known stride and residue, `M` is
+  divisible by that stride, both Mod terms are defined, `M` has a proven
+  strictly positive lower bound, and the dividend shift remains inside the
+  residue bucket. Zero, negative, or merely nonzero dynamic denominators are
+  rejected. The proven raw Mod delta is multiplied by the outer coefficient
+  with checked `int64_t` arithmetic before the residual is added. A
+  coefficient-negation, scale, or final-add overflow remains unknown.
+
+  Each projection removes one Mod pair. Recursion is capped at 32, the whole
+  proof visits at most 4096 normalized ADD terms, and each sign partition
+  retains at most 32 Mod candidates. Candidate matching is therefore bounded
+  independently of unrelated context state. Non-Mod differences still take
+  the existing exact-relation and simplified-singleton fast paths before one
+  linear top-level term scan.
+
+  Constant differences and additive constants must fit `int64_t`; affine
+  coefficients may be exact rational nodes. Affine decomposition accepts only
+  one symbol and rejects any nonlinear occurrence or residual reference to it.
+  Finite difference substitutes
   `symbol + step` once and may return a symbolic result such as `2*i + 1`;
   callers decide whether that result is loop invariant. A step referencing the
   target symbol is rejected. Unsupported shapes, undefined partitions,

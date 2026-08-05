@@ -2577,6 +2577,109 @@ def test_fact_backed_exact_equality_relations() -> None:
     assert ctx.range(witness, facts=collapsed_zero) == (5, 5)
 
 
+def test_modular_projection_proves_wave_wrapping_xor_packet() -> None:
+    ctx = ixsimpl.Context()
+    tile, lane, limit = (
+        ctx.sym(name)
+        for name in (
+            "modular_projection_tile",
+            "modular_projection_lane",
+            "modular_projection_limit",
+        )
+    )
+    bias = 2**31
+    modulus = 2**32
+    inner = (bias + 256 * tile) % modulus
+    value0 = (inner + ixsimpl.xor_(ctx.int_(64), 128 * lane)) % modulus - bias
+    value1 = (inner + ixsimpl.xor_(ctx.int_(65), 128 * lane)) % modulus - bias
+    facts = ctx.facts()
+    facts.assume_range(tile, -(2**31), 2**31 - 1)
+    facts.assume_range(lane, 0, 31)
+    facts.assume_range(limit, -(2**31), 2**31 - 1)
+    facts.assume(ctx.eq(limit % 4, 0))
+
+    assert ctx.constant_difference(value1, value0, facts) == 1
+    assert ctx.equivalent(value0 - limit < 0, value1 - limit < 0, facts) is True
+
+
+def test_modular_projection_requires_one_representable_delta() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("modular_projection_boundary_x")
+    wrapped0 = (x + 8) % 16 - 8
+    wrapped1 = (x + 9) % 16 - 8
+    wrapped2 = (x + 10) % 16 - 8
+
+    negative = ctx.facts()
+    negative.assume(ctx.eq(x % 4, 0))
+    assert ctx.constant_difference(wrapped1, wrapped0, negative) == 1
+    assert ctx.constant_difference(16 * wrapped1, 16 * wrapped0, negative) == 16
+    assert ctx.constant_difference((2**63 - 1) * wrapped2, (2**63 - 1) * wrapped0, negative) is None
+    assert (
+        ctx.constant_difference(wrapped1 + 8 + (-(2**63)), wrapped0 + 8, negative) == -(2**63) + 1
+    )
+
+    ambiguous = ctx.facts()
+    assert ctx.constant_difference(wrapped1, wrapped0, ambiguous) is None
+    assert ctx.equivalent(wrapped0 < 0, wrapped1 < 0, ambiguous) is None
+
+    boundary = ctx.facts()
+    boundary.assume_range(x, 7, 8)
+    assert ctx.constant_difference(wrapped1, wrapped0, boundary) is None
+
+    partial = ctx.facts()
+    partial.assume_range(wrapped0 + 8, 8, 15)
+    assert ctx.constant_difference(wrapped1, wrapped0, partial) is None
+
+
+def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("dynamic_modular_projection_x")
+    d = ctx.sym("dynamic_modular_projection_d")
+    bias = 2**31
+    modulus = 2**32
+
+    def value(offset: int) -> ixsimpl.Expr:
+        remainder = ((x + offset) % modulus) % (d % modulus)
+        return (bias + remainder) % modulus - bias
+
+    pair = ctx.facts()
+    pair.assume_range(x, 0, 1073741822)
+    pair.assume_range(d, 4, 1073741824)
+    pair.assume(ctx.eq(x % 2, 0))
+    pair.assume(ctx.eq(d % 4, 0))
+    assert ctx.constant_difference(value(1), value(0), pair) == 1
+    assert ctx.equivalent(value(1), value(0) + 1, pair) is True
+
+    vector = ctx.facts()
+    vector.assume_range(x, 0, 1073741816)
+    vector.assume_range(d, 16, 1073741824)
+    vector.assume(ctx.eq(x % 8, 0))
+    vector.assume(ctx.eq(d % 16, 0))
+    for offset in range(1, 8):
+        assert ctx.constant_difference(value(offset), value(0), vector) == offset
+        assert ctx.equivalent(value(offset), value(0) + offset, vector) is True
+        assert ctx.constant_difference(value(0), value(offset), vector) == -offset
+        assert ctx.equivalent(value(0), value(offset) - offset, vector) is True
+    assert ctx.constant_difference(value(8), value(0), vector) is None
+    assert ctx.constant_difference(value(0), value(8), vector) is None
+    assert ctx.equivalent(value(8), value(0) + 8, vector) is None
+    assert ctx.equivalent(value(0), value(8) - 8, vector) is None
+
+    direct0 = x % d
+    direct1 = (x + 1) % d
+    zero_denominator = ctx.facts()
+    zero_denominator.assume_range(x, 0, 1073741822)
+    zero_denominator.assume_range(d, 0, 0)
+    assert ctx.constant_difference(direct1, direct0, zero_denominator) is None
+    assert ctx.equivalent(direct1, direct0 + 1, zero_denominator) is None
+
+    negative_denominator = ctx.facts()
+    negative_denominator.assume_range(x, 0, 1073741822)
+    negative_denominator.assume_range(d, -16, -4)
+    assert ctx.constant_difference(direct1, direct0, negative_denominator) is None
+    assert ctx.equivalent(direct1, direct0 + 1, negative_denominator) is None
+
+
 def test_fact_backed_exact_equality_projects_range_and_integrality() -> None:
     ctx = ixsimpl.Context()
     s, d, x, y, z = (
