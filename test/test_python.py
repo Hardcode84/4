@@ -2370,10 +2370,7 @@ def test_equivalence_binding_invalid_inputs() -> None:
 
 def test_fact_backed_exact_equality_relations() -> None:
     ctx = ixsimpl.Context()
-    x, y, z = (
-        ctx.sym(name)
-        for name in ("exact_binding_x", "exact_binding_y", "exact_binding_z")
-    )
+    x, y, z = (ctx.sym(name) for name in ("exact_binding_x", "exact_binding_y", "exact_binding_z"))
 
     affine = 2 * x + 3
     affine_range = ctx.facts()

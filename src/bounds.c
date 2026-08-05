@@ -1687,21 +1687,94 @@ typedef struct {
   int64_t delta;
 } bounds_exact_difference_entry;
 
+typedef struct {
+  bounds_exact_difference_entry entries[DIFFERENCE_RELAX_LIMIT];
+  size_t head;
+  size_t nentries;
+  size_t visited;
+} bounds_exact_difference_walk;
+
+static bool bounds_exact_difference_record(bounds_exact_difference_walk *walk,
+                                           size_t var_index, int64_t delta) {
+  size_t i;
+  for (i = 0; i < walk->nentries && walk->entries[i].var_index != var_index;
+       i++)
+    ;
+  if (i < walk->nentries)
+    return walk->entries[i].delta == delta;
+  if (walk->nentries >= DIFFERENCE_RELAX_LIMIT)
+    return false;
+  walk->entries[walk->nentries].var_index = var_index;
+  walk->entries[walk->nentries].delta = delta;
+  walk->nentries++;
+  return true;
+}
+
+static bool bounds_exact_difference_visit(ixs_bounds *b,
+                                          bounds_exact_difference_walk *walk,
+                                          size_t current_index,
+                                          int64_t current_delta,
+                                          ixs_difference_constraint *edge,
+                                          ixs_difference_constraint **next) {
+  int64_t next_delta;
+  if (walk->visited >= DIFFERENCE_RELAX_LIMIT)
+    return false;
+  walk->visited++;
+  if (edge->lhs_var == current_index)
+    *next = edge->next_lhs;
+  else if (edge->rhs_var == current_index)
+    *next = edge->next_rhs;
+  else
+    return false;
+  if (edge->rhs_var != current_index ||
+      !bounds_difference_edge_is_exact(b, edge))
+    return true;
+  if (!ixs_safe_add(current_delta, edge->offset, &next_delta))
+    return false;
+  return bounds_exact_difference_record(walk, edge->lhs_var, next_delta);
+}
+
+static bool
+bounds_exact_difference_traverse(ixs_bounds *b,
+                                 bounds_exact_difference_walk *walk) {
+  while (walk->head < walk->nentries) {
+    size_t current_index = walk->entries[walk->head].var_index;
+    int64_t current_delta = walk->entries[walk->head].delta;
+    ixs_difference_constraint *edge = b->vars[current_index].difference_edges;
+    walk->head++;
+    while (edge) {
+      ixs_difference_constraint *next;
+      if (!bounds_exact_difference_visit(b, walk, current_index, current_delta,
+                                         edge, &next))
+        return false;
+      edge = next;
+    }
+  }
+  return true;
+}
+
+static bool
+bounds_exact_difference_result(const bounds_exact_difference_walk *walk,
+                               size_t lhs_index, int64_t *delta) {
+  size_t i;
+  for (i = 0; i < walk->nentries; i++) {
+    if (walk->entries[i].var_index == lhs_index) {
+      *delta = walk->entries[i].delta;
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Complementary constraints lhs <= rhs + k and rhs <= lhs - k establish
  * lhs == rhs + k. Traverse only those exact pairs, with a fixed work and
  * incident-edge budget, and reject inconsistent or unrepresentable paths. */
 static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
                                            ixs_node *rhs, int64_t *delta) {
-  bounds_exact_difference_entry entries[DIFFERENCE_RELAX_LIMIT];
+  bounds_exact_difference_walk walk = {0};
   ixs_var_bound *lhs_var;
   ixs_var_bound *rhs_var;
   size_t lhs_index;
-  size_t head = 0;
-  size_t nentries = 1;
-  size_t visited = 0;
-  size_t i;
-  bool found = false;
-  int64_t result = 0;
 
   if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
       lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
@@ -1717,62 +1790,12 @@ static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
   if (!lhs_var || !rhs_var)
     return false;
   lhs_index = (size_t)(lhs_var - b->vars);
-  entries[0].var_index = (size_t)(rhs_var - b->vars);
-  entries[0].delta = 0;
-
-  while (head < nentries) {
-    size_t current_index = entries[head].var_index;
-    int64_t current_delta = entries[head].delta;
-    ixs_difference_constraint *edge = b->vars[current_index].difference_edges;
-    head++;
-    while (edge) {
-      ixs_difference_constraint *next;
-      int64_t next_delta;
-      size_t next_index;
-      if (visited >= DIFFERENCE_RELAX_LIMIT)
-        return false;
-      visited++;
-      if (edge->lhs_var == current_index)
-        next = edge->next_lhs;
-      else if (edge->rhs_var == current_index)
-        next = edge->next_rhs;
-      else
-        return false;
-      if (edge->rhs_var != current_index ||
-          !bounds_difference_edge_is_exact(b, edge)) {
-        edge = next;
-        continue;
-      }
-      next_index = edge->lhs_var;
-      if (!ixs_safe_add(current_delta, edge->offset, &next_delta))
-        return false;
-      for (i = 0; i < nentries && entries[i].var_index != next_index; i++)
-        ;
-      if (i < nentries) {
-        if (entries[i].delta != next_delta)
-          return false;
-      } else {
-        if (nentries >= DIFFERENCE_RELAX_LIMIT)
-          return false;
-        entries[nentries].var_index = next_index;
-        entries[nentries].delta = next_delta;
-        nentries++;
-      }
-      edge = next;
-    }
-  }
-
-  for (i = 0; i < nentries; i++) {
-    if (entries[i].var_index == lhs_index) {
-      found = true;
-      result = entries[i].delta;
-      break;
-    }
-  }
-  if (!found)
+  walk.entries[0].var_index = (size_t)(rhs_var - b->vars);
+  walk.entries[0].delta = 0;
+  walk.nentries = 1;
+  if (!bounds_exact_difference_traverse(b, &walk))
     return false;
-  *delta = result;
-  return true;
+  return bounds_exact_difference_result(&walk, lhs_index, delta);
 }
 
 static void bounds_add_difference_range(ixs_bounds *b, ixs_node *expr,
