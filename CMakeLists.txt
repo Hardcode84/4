@@ -79,6 +79,10 @@ add_executable(test_parser test/test_parser.c)
 target_link_libraries(test_parser ixsimpl)
 add_test(NAME test_parser COMMAND test_parser)
 
+add_executable(test_relational_contract test/test_relational_contract.c)
+target_link_libraries(test_relational_contract ixsimpl)
+add_test(NAME test_relational_contract COMMAND test_relational_contract)
+
 # Stats-enabled build: test_simplify links this to collect rule hit counts.
 add_library(ixsimpl_stats STATIC ${LIB_SOURCES})
 target_include_directories(ixsimpl_stats
@@ -191,3 +195,6 @@ endif()
 
 add_executable(bench_corpus bench/bench_corpus.c)
 target_link_libraries(bench_corpus ixsimpl)
+
+add_executable(bench_relational_facts bench/bench_relational_facts.c)
+target_link_libraries(bench_relational_facts ixsimpl)

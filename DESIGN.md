@@ -1327,17 +1327,64 @@ conjunctions retain the existing unknown/no-result behavior.
 **Conflicting assumptions**: User-assumption validation and error reporting are
 **best-effort**. Direct contradictions are detected where the local domains can
 see them: empty interval intersections, eagerly merged expression bounds, and
-future bitfact conflicts such as a bit known both zero and one. Query APIs treat
+bitfact conflicts such as a bit known both zero and one. Query APIs treat
 detected contradictions as unknown/no-result rather than manufacturing a
 concrete answer. Simplification may return `IXS_ERROR` and append a diagnostic
 when the reporting path has enough context, but callers must not rely on every
 contradictory assumption set producing an error string.
 
-Not all contradictions are detectable. Cross-variable constraints like
-`x >= y, y >= x + 1` require relational constraint solving, which is out of
-scope. When a contradiction goes undetected, the result is undefined with
-respect to that inconsistent assumption set; passing consistent assumptions is
-the caller's responsibility.
+The current bounds payload does not connect separate symbols. A predicate such
+as `x - y <= 3` retains an expression bound, but it cannot project an endpoint
+from `y` to `x` or discover a cycle through a third symbol. This is the exact
+ownership boundary of the relational-facts port; the existing interval,
+congruence, bitfact, and expression-override domains remain unchanged.
+
+**Relational-facts acceptance contract**: Once unit-difference projection is
+enabled, every admitted constraint `x - y <= c` participates in one complete
+fact domain with these properties:
+
+- Feasibility is part of mutation, not a query-time option. A negative cycle
+  marks the candidate contradictory before commit. Range, predicate,
+  equivalence, definedness, integrality, divisibility, known-bit, congruence,
+  simplification, and algebra queries must then follow their existing
+  contradictory-domain result contract; an unrelated direct fact cannot leak
+  a concrete answer from the empty domain.
+- Arbitrarily long transitive chains are supported subject only to allocation
+  and checked-size failures. There is no semantic edge, node, round, or queue
+  limit. The same conjunction has the same closure in every insertion order.
+  Allocation or size failure makes the mutator fail and poisons the fact set;
+  it cannot truncate propagation and report success.
+- Exact `x = y + c` relations are independent of one-sided graph fan-out.
+  Adding inequalities that do not alter the equality component cannot change
+  range, equivalence, or constant-difference answers for that component.
+- Fork, transaction rollback, substitution, and OOM paths preserve the whole
+  relational payload or none of it. No graph edge may outlive the arena or
+  refer to a variable slot from another payload generation.
+
+The production witness is a compiler loop fact set with `0 <= iv`,
+`iv < trip`, and signed-32-bit bounds on `trip`. Relational projection must
+derive `iv <= 2147483646`; the derived upper bound proves that scaled index
+expressions cannot overflow their target address width. The 300-edge chain,
+the three-edge negative cycle, and exact equality hidden behind 300 one-sided
+edges are adversarial contract witnesses, not substitutes for this loop case.
+
+The accepted representation keeps two structures. A directed difference graph
+stores one-sided constraints and an expected-O(1) exact-edge index. A weighted
+equality forest stores only complementary exact pairs; exact queries do not
+walk inequality adjacency. Exact equalities are also present as two directed
+graph edges so feasibility has one authority. Both structures are fact-local,
+arena-owned, and copied transactionally. Incremental graph processing visits
+only the affected relation component, never the context or arena. Offset
+composition uses checked arithmetic; an unrepresentable mutation fails and
+poisons instead of weakening the domain.
+
+`bench_relational_facts` measures the production witness through public APIs
+and keeps every generated fact set alive so peak RSS exposes retained storage.
+The raw `my/facts-fix@106bbfd` result is the controlled baseline. A candidate is
+a no-go if its median release CPU time or retained-RSS slope is more than 25%
+above that baseline, or if doubling a late-anchored chain from 300 to 600 edges
+uses more than 2.2x memory or 2.5x CPU. Correctness failures are an unconditional
+no-go; a green build cannot override any contract witness.
 
 This enables rules like:
 
@@ -1655,7 +1702,8 @@ Propagation: `[1/128, 1/128] * [0, 127] * iv_recip([1, +inf))`
 = `[0, 127/128] * [0, 1]` = `[0, 127/128]`.
 Then `floor([0, 127/128]) = [0, 0]`, collapsing to constant `0`.
 
-**Limitation**: general interval propagation remains non-relational. For
+**Scope boundary**: interval propagation outside the admitted unit-difference
+graph remains non-relational. For
 `floor(x/K)` with `x < K-1, K >= 2`, the bounds engine sees
 `x ∈ [0, INT64_MAX]` and `K ∈ [2, INT64_MAX]` independently, so `x/K`
 has an unbounded interval. Targeted rules can query normalized comparisons for
@@ -2478,19 +2526,22 @@ ixsimpl/
 │   ├── test_serialize.c
 │   ├── test_introspect.c
 │   ├── test_bounds.c
+│   ├── test_relational_contract.c
 │   ├── test_simplify.c
 │   ├── test_expand.c
 │   ├── test_edge_cases.c
 │   ├── test_corpus.c
 │   ├── test_accessors.py
 │   ├── test_python.py
+│   ├── test_relational_contract.py
 │   ├── test_sympy_conv.py
 │   ├── conftest.py
 │   ├── corpus.txt
 │   ├── corpus_expected.txt
 │   └── corpus_assumptions.txt # shared assumption set for corpus tests
 ├── bench/
-│   └── bench_corpus.c       # benchmark: individual or batch corpus simplify
+│   ├── bench_corpus.c       # benchmark: individual or batch corpus simplify
+│   └── bench_relational_facts.c # relational production witness and RSS slope
 ├── scripts/
 │   ├── amalgamate.py        # generate ixsimpl_amalg.c
 │   ├── check_exports.py     # verify public symbol surface
