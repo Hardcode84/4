@@ -1692,6 +1692,134 @@ static void test_public_range_composite_predicate_fact(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_facts_batch_preserves_affine_range(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "batch_affine_x");
+  ixs_node *y = ixs_sym(ctx, "batch_affine_y");
+  ixs_node *values[2] = {x, ixs_int(ctx, 1)};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 1)),
+                             ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *e = ixs_add(ctx, y, piecewise);
+  ixs_node *twice_e = ixs_mul(ctx, ixs_int(ctx, 2), e);
+  ixs_node *r = ixs_add(ctx, ixs_int(ctx, 128), twice_e);
+  ixs_node *predicates[8] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, e, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, e, IXS_CMP_LE, ixs_int(ctx, 131064)),
+      ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, -1)),
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, 768), e), IXS_CMP_GE,
+              ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -74232), e), IXS_CMP_LE,
+              ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, 1536), twice_e), IXS_CMP_GE,
+              ixs_int(ctx, 0)),
+      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, -148464), twice_e), IXS_CMP_LE,
+              ixs_int(ctx, 0))};
+  ixs_node *reversed[8];
+  ixs_facts *forward = ixs_facts_create(ctx);
+  ixs_facts *backward = ixs_facts_create(ctx);
+  ixs_range_result range;
+  size_t i;
+
+  for (i = 0; i < 8; i++)
+    reversed[i] = predicates[7 - i];
+
+  CHECK(r->tag == IXS_ADD);
+  CHECK(ixs_facts_assume_preds(forward, predicates, 8));
+  CHECK(ixs_facts_assume_preds(backward, reversed, 8));
+  CHECK(ixs_range_facts(forward, e, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 74232 && range.upper_q == 1);
+  CHECK(ixs_range_facts(backward, e, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 74232 && range.upper_q == 1);
+  CHECK(ixs_range_facts(forward, r, &range));
+  CHECK(range.has_lower && range.lower_p == 128 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 148592 && range.upper_q == 1);
+  CHECK(ixs_range_facts(backward, r, &range));
+  CHECK(range.has_lower && range.lower_p == 128 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 148592 && range.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_proportional_add_edges(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "proportional_x");
+  ixs_node *y = ixs_sym(ctx, "proportional_y");
+  ixs_node *positive = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x),
+                               ixs_mul(ctx, ixs_int(ctx, 3), y));
+  ixs_node *positive_scaled =
+      ixs_add(ctx, ixs_int(ctx, 128),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 6), y),
+                      ixs_mul(ctx, ixs_int(ctx, 4), x)));
+  ixs_node *negative = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), x),
+                               ixs_mul(ctx, ixs_int(ctx, 3), y));
+  ixs_node *negative_scaled =
+      ixs_add(ctx, ixs_int(ctx, 5),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -9), y),
+                      ixs_mul(ctx, ixs_int(ctx, 6), x)));
+  ixs_node *rational = ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), x),
+                               ixs_mul(ctx, ixs_rat(ctx, 3, 4), y));
+  ixs_node *rational_scaled =
+      ixs_add(ctx, ixs_int(ctx, 1),
+              ixs_add(ctx, x, ixs_mul(ctx, ixs_rat(ctx, 3, 2), y)));
+  ixs_node *extreme = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MIN), x),
+                              ixs_mul(ctx, ixs_int(ctx, INT64_MIN), y));
+  ixs_node *extreme_half =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MIN / 2), x),
+              ixs_mul(ctx, ixs_int(ctx, INT64_MIN / 2), y));
+  ixs_facts *positive_facts = ixs_facts_create(ctx);
+  ixs_facts *negative_facts = ixs_facts_create(ctx);
+  ixs_facts *rational_facts = ixs_facts_create(ctx);
+  ixs_facts *extreme_facts = ixs_facts_create(ctx);
+  ixs_range_result input;
+  ixs_range_result range;
+
+  input.has_lower = true;
+  input.has_upper = true;
+  input.lower_q = 1;
+  input.upper_q = 1;
+
+  CHECK(!ixs_range_facts(positive_facts, positive_scaled, &range));
+  input.lower_p = 0;
+  input.upper_p = 100;
+  CHECK(ixs_facts_assume_range(positive_facts, positive, &input));
+  CHECK(ixs_range_facts(positive_facts, positive_scaled, &range));
+  CHECK(range.has_lower && range.lower_p == 128 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 328 && range.upper_q == 1);
+
+  input.lower_p = -4;
+  input.upper_p = 7;
+  CHECK(ixs_facts_assume_range(negative_facts, negative, &input));
+  CHECK(ixs_range_facts(negative_facts, negative_scaled, &range));
+  CHECK(range.has_lower && range.lower_p == -16 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 17 && range.upper_q == 1);
+
+  input.lower_p = -2;
+  input.upper_p = 5;
+  CHECK(ixs_facts_assume_range(rational_facts, rational, &input));
+  CHECK(ixs_range_facts(rational_facts, rational_scaled, &range));
+  CHECK(range.has_lower && range.lower_p == -3 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 11 && range.upper_q == 1);
+
+  input.lower_p = 0;
+  input.upper_p = 10;
+  CHECK(ixs_facts_assume_range(extreme_facts, extreme, &input));
+  CHECK(!ixs_range_facts(extreme_facts, extreme_half, &range));
+  CHECK(!ixs_range_facts(extreme_facts, extreme_half, &range));
+  CHECK(ixs_range_facts(extreme_facts, extreme, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 10 && range.upper_q == 1);
+
+  CHECK(ixs_facts_assume_pred(
+      negative_facts, ixs_cmp(ctx, negative, IXS_CMP_LE, ixs_int(ctx, -5))));
+  CHECK(!ixs_range_facts(negative_facts, negative_scaled, &range));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_shifted_add_range_oom_and_contradiction(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *u = ixs_sym(ctx, "shifted_oom_u");
@@ -4985,6 +5113,8 @@ int main(void) {
   test_public_range_mod_requires_positive_divisor();
   test_public_range_mod_congruence_intersection();
   test_public_range_composite_predicate_fact();
+  test_public_facts_batch_preserves_affine_range();
+  test_public_range_proportional_add_edges();
   test_shifted_add_range_oom_and_contradiction();
   test_public_facts_range_and_transfer();
   test_public_range_powers();

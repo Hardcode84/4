@@ -165,7 +165,8 @@ stack) keyed by node pointer to avoid exponential re-traversal of shared
 subexpressions; collisions only cause redundant work, never incorrect results.
 Successful deterministic node transforms use a context-local open-addressed
 cache keyed by source-node identity. Current slots memoize top-level expansion,
-removal of an ADD constant for shifted bounds, and bounds-canonical aliases.
+removal of an ADD constant for shifted bounds, proportional ADD primitives,
+and bounds-canonical aliases.
 Arena-backed storage stays at or below 75% load, so hits and inserts are
 expected O(1). A bounds-canonical miss costs expansion plus bounded-iteration,
 fact-free simplification of the expanded DAG; later queries hit the cache.
@@ -1196,10 +1197,14 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   `2*(A + 8*B)` and `2*A + 16*B` can prove the same range when both normalize
   to the same form.  Comparison
   assumptions over integer-valued expressions also materialize expression
-  range facts; for example `-C + expr <= 0` records `expr <= C`. ADD queries
-  also recover a stored range for their constant-free base and shift both
-  endpoints by the query constant. Thus normalized facts on `64*u+w` bound
-  `128+64*u+w` without requiring independent ranges for `u` and `w`.
+  range facts; for example `-C + expr <= 0` records `expr <= C`. ADD facts and
+  queries additionally normalize to `offset + scale * primitive`: the offset
+  is removed and every term coefficient is divided by the first canonical
+  term coefficient. The primitive is transform-cached, and its range is stored
+  in the existing pointer index. This lets a fact on `64*u+w` bound both
+  `128+64*u+w` and `128+2*(64*u+w)` without requiring independent ranges for
+  `u` and `w`. Rational overflow or an unrepresentable inverse conservatively
+  skips the proportional alias.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
@@ -1281,6 +1286,9 @@ offering two constructors whose predicates have different meanings.
 `ixs_facts_assume_preds` applies the whole array to one fork and commits only
 after every tree succeeds. It validates the full array, then simplifies and
 ingests each predicate in input order so later predicates see earlier facts.
+After that progressive closure pass, it ingests each original predicate once
+more. This preserves exact expression identities that a fact-conditioned
+rewrite may otherwise replace while retaining the same-batch consequences.
 An arena-backed open-addressed pointer set filters pointer-identical repeats in
 expected O(n), preserving each first input position. The table is sized once at
 no more than half load and does not grow during ingestion. Allocation failure
