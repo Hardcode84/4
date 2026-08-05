@@ -873,6 +873,10 @@ terms, `is_known_divisible` checks whether the denominator divides out.
 `round_extract_add` splits rational constants into integer + fractional
 parts (e.g. `65/32 → 2 + 1/32`) before testing the drop condition,
 so `floor(65/32 + 1/2*floor(x/16))` reduces to `2 + floor(1/2*floor(x/16))`.
+If the checked integer/fractional split is not representable and no other
+integer-valued addend can be extracted, the rule leaves the rounding node
+unchanged.  Its recursive tail is entered only after an integer constant or
+term was actually removed from the remainder.
 When bounds are available, `round_extract_add` uses `is_integer_with_divinfo`
 and `is_known_divisible` to extract addends with rational coefficients that
 are provably integer via congruence (e.g. `floor(x/3 + K/32)` ->

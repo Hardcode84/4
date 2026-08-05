@@ -16370,6 +16370,7 @@ static bool round_split_constant(ixs_ctx *ctx, ixs_node *coeff, int64_t rat_fl,
  */
 static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
                                    round_fn rnd) {
+  bool extracted;
   uint32_t i;
   uint32_t nk = 0;
   int64_t rat_fl;
@@ -16397,10 +16398,12 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
     ixs_arena_restore(&ctx->scratch, m);
     return NULL;
   }
+  extracted = !ixs_node_is_zero(int_sum);
 
   for (i = 0; i < x->u.add.nterms; i++) {
     if (addterm_is_integer_valued(bnds, x->u.add.terms[i].coeff,
                                   x->u.add.terms[i].term)) {
+      extracted = true;
       int_sum = simp_add(
           ctx, int_sum,
           simp_mul(ctx, x->u.add.terms[i].coeff, x->u.add.terms[i].term));
@@ -16411,6 +16414,14 @@ static ixs_node *round_extract_add(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x,
     } else {
       kept[nk++] = x->u.add.terms[i];
     }
+  }
+
+  /* A rational floor can be nonzero even when floor(p/q) * q does not fit
+   * int64_t.  In that case the split conservatively keeps the original
+   * coefficient.  Do not recursively round the unchanged ADD. */
+  if (!extracted) {
+    ixs_arena_restore(&ctx->scratch, m);
+    return x;
   }
 
   remainder = rem_coeff;
