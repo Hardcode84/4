@@ -7327,6 +7327,255 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   return equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
 }
 
+#define FINITE_EQUIVALENCE_SYMBOL_LIMIT 64u
+#define FINITE_EQUIVALENCE_STACK_LIMIT 1024u
+#define FINITE_EQUIVALENCE_VISIT_LIMIT 4096u
+
+typedef struct {
+  ixs_node *symbol;
+  int64_t lower;
+  int64_t upper;
+} finite_equivalence_domain;
+
+static bool finite_equivalence_insert_symbol(ixs_node **symbols,
+                                             size_t *nsymbols,
+                                             ixs_node *symbol) {
+  size_t at;
+  for (at = 0; at < *nsymbols; at++) {
+    int order;
+    if (symbols[at] == symbol)
+      return true;
+    order = strcmp(symbol->u.name, symbols[at]->u.name);
+    if (order == 0)
+      return true;
+    if (order < 0)
+      break;
+  }
+  if (*nsymbols >= FINITE_EQUIVALENCE_SYMBOL_LIMIT)
+    return false;
+  if (at < *nsymbols)
+    memmove(&symbols[at + 1u], &symbols[at],
+            (*nsymbols - at) * sizeof(*symbols));
+  symbols[at] = symbol;
+  (*nsymbols)++;
+  return true;
+}
+
+/* Walk only the queried expression. The fixed limits make symbol discovery
+ * independent of unrelated context state; sorted insertion fixes point order.
+ */
+static bool finite_equivalence_collect_symbols(ixs_node *root,
+                                               ixs_node **symbols,
+                                               size_t *nsymbols) {
+  defined_depth_frame stack[FINITE_EQUIVALENCE_STACK_LIMIT];
+  size_t depth = 0;
+  size_t visited = 1;
+  uint32_t nchildren;
+
+  *nsymbols = 0;
+  if (!root || !defined_child_count(root, &nchildren))
+    return false;
+  if (root->tag == IXS_SYM &&
+      !finite_equivalence_insert_symbol(symbols, nsymbols, root))
+    return false;
+  if (nchildren == 0)
+    return true;
+  stack[depth].node = root;
+  stack[depth].next_child = 0;
+  stack[depth].nchildren = nchildren;
+  depth++;
+
+  while (depth > 0) {
+    defined_depth_frame *frame = &stack[depth - 1u];
+    ixs_node *child;
+    if (frame->next_child >= frame->nchildren) {
+      depth--;
+      continue;
+    }
+    if (visited >= FINITE_EQUIVALENCE_VISIT_LIMIT)
+      return false;
+    child = defined_child_at(frame->node, frame->next_child++);
+    visited++;
+    if (!child || !defined_child_count(child, &nchildren))
+      return false;
+    if (child->tag == IXS_SYM &&
+        !finite_equivalence_insert_symbol(symbols, nsymbols, child))
+      return false;
+    if (nchildren == 0)
+      continue;
+    if (depth >= FINITE_EQUIVALENCE_STACK_LIMIT)
+      return false;
+    stack[depth].node = child;
+    stack[depth].next_child = 0;
+    stack[depth].nchildren = nchildren;
+    depth++;
+  }
+  return true;
+}
+
+static ixs_check_result equivalence_query_bound(ixs_facts *facts, ixs_ctx *ctx,
+                                                ixs_node *lhs, ixs_node *rhs) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  equivalence_state state;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool old_oom = facts->bounds.oom;
+
+  if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
+    goto restore;
+  state.ctx = ctx;
+  state.bounds = &facts->bounds;
+  state.visited = 0;
+  state.limited = false;
+  state.oom = false;
+  result = equivalence_core(&state, lhs, rhs, 0);
+  if (state.oom || state.limited || (!old_oom && facts->bounds.oom))
+    result = IXS_CHECK_UNKNOWN;
+
+restore:
+  if (!old_oom && facts->bounds.oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+static bool finite_equivalence_build_domains(
+    ixs_bounds *bounds, ixs_node *const *symbols, size_t nsymbols,
+    finite_equivalence_domain *domains, size_t *ndomains, size_t *point_count) {
+  size_t i;
+  *ndomains = 0;
+  *point_count = 1;
+  for (i = 0; i < nsymbols; i++) {
+    ixs_interval interval = ixs_bounds_get(bounds, symbols[i]);
+    int64_t lower;
+    int64_t upper;
+    uint64_t span;
+    size_t width;
+    if (!interval.valid || interval.lo_inf || interval.hi_inf)
+      continue;
+    lower = ixs_rat_ceil(interval.lo_p, interval.lo_q);
+    upper = ixs_rat_floor(interval.hi_p, interval.hi_q);
+    if (upper < lower)
+      return false;
+    span = (uint64_t)upper - (uint64_t)lower;
+    if (span >= (uint64_t)SIZE_MAX)
+      return false;
+    width = (size_t)span + 1u;
+    if (*point_count > SIZE_MAX / width)
+      return false;
+    *point_count *= width;
+    domains[*ndomains].symbol = symbols[i];
+    domains[*ndomains].lower = lower;
+    domains[*ndomains].upper = upper;
+    (*ndomains)++;
+  }
+  return !bounds->oom;
+}
+
+static bool
+finite_equivalence_prove_point(ixs_ctx *ctx, ixs_bounds *bounds,
+                               ixs_node *difference,
+                               const finite_equivalence_domain *domains,
+                               size_t ndomains, const int64_t *points) {
+  ixs_node *targets[FINITE_EQUIVALENCE_SYMBOL_LIMIT];
+  ixs_node *replacements[FINITE_EQUIVALENCE_SYMBOL_LIMIT];
+  ixs_node *specialized;
+  equivalence_state state;
+  size_t i;
+
+  for (i = 0; i < ndomains; i++) {
+    targets[i] = domains[i].symbol;
+    replacements[i] = ixs_node_int(ctx, points[i]);
+    if (!replacements[i])
+      return false;
+  }
+  specialized = simp_subs_multi(ctx, difference, (uint32_t)ndomains, targets,
+                                replacements);
+  if (!specialized || ixs_node_is_sentinel(specialized) ||
+      ixs_bounds_check_defined(bounds, specialized) != IXS_CHECK_TRUE)
+    return false;
+  state.ctx = ctx;
+  state.bounds = bounds;
+  state.visited = 0;
+  state.limited = false;
+  state.oom = false;
+  if (equivalence_core(&state, specialized, ctx->node_zero, 0) !=
+      IXS_CHECK_TRUE)
+    return false;
+  return !state.oom && !state.limited && !bounds->oom;
+}
+
+static void
+finite_equivalence_advance_point(const finite_equivalence_domain *domains,
+                                 size_t ndomains, int64_t *points) {
+  size_t i;
+  for (i = ndomains; i > 0; i--) {
+    size_t current = i - 1u;
+    if (points[current] != domains[current].upper) {
+      points[current]++;
+      return;
+    }
+    points[current] = domains[current].lower;
+  }
+}
+
+static ixs_check_result
+finite_equivalence_query_bound(ixs_facts *facts, ixs_ctx *ctx, ixs_node *lhs,
+                               ixs_node *rhs, size_t *remaining_points) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_node *symbols[FINITE_EQUIVALENCE_SYMBOL_LIMIT];
+  finite_equivalence_domain domains[FINITE_EQUIVALENCE_SYMBOL_LIMIT];
+  int64_t points[FINITE_EQUIVALENCE_SYMBOL_LIMIT];
+  ixs_node *difference;
+  size_t nsymbols;
+  size_t ndomains = 0;
+  size_t point_count = 1;
+  size_t point;
+  size_t i;
+  bool old_oom = facts->bounds.oom;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
+    goto restore;
+  difference = simp_sub(ctx, lhs, rhs);
+  if (!difference || ixs_node_is_sentinel(difference))
+    goto restore;
+  difference = simp_simplify_bounds(ctx, difference, &facts->bounds);
+  if (!difference || ixs_node_is_sentinel(difference) ||
+      ixs_bounds_check_defined(&facts->bounds, difference) != IXS_CHECK_TRUE)
+    goto restore;
+  if (!finite_equivalence_collect_symbols(difference, symbols, &nsymbols))
+    goto restore;
+  if (!finite_equivalence_build_domains(&facts->bounds, symbols, nsymbols,
+                                        domains, &ndomains, &point_count))
+    goto restore;
+  if (ndomains == 0 || point_count > *remaining_points)
+    goto restore;
+
+  /* Reservation is atomic. Later proof failure does not refund attempted
+   * work, so one caller-owned budget composes across independent queries. */
+  *remaining_points -= point_count;
+  for (i = 0; i < ndomains; i++)
+    points[i] = domains[i].lower;
+
+  for (point = 0; point < point_count; point++) {
+    if (!finite_equivalence_prove_point(ctx, &facts->bounds, difference,
+                                        domains, ndomains, points))
+      goto restore;
+    finite_equivalence_advance_point(domains, ndomains, points);
+  }
+  result = IXS_CHECK_TRUE;
+
+restore:
+  if (!old_oom && facts->bounds.oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate) {
   ixs_session_binding binding;
@@ -7369,10 +7618,7 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
                                       ixs_node *rhs) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
-  ixs_arena_mark mark;
-  equivalence_state state;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
-  bool old_oom;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
   if (!facts_ready(facts))
@@ -7382,26 +7628,38 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
     goto cleanup;
   if (ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  result = equivalence_query_bound(facts, ctx, lhs, rhs);
 
-  mark = ixs_arena_save(&ctx->scratch);
-  old_oom = facts->bounds.oom;
-  if (ixs_bounds_check_defined(&facts->bounds, lhs) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_defined(&facts->bounds, rhs) != IXS_CHECK_TRUE)
-    goto restore;
-  state.ctx = ctx;
-  state.bounds = &facts->bounds;
-  state.visited = 0;
-  state.limited = false;
-  state.oom = false;
-  result = equivalence_core(&state, lhs, rhs, 0);
-  if (state.oom || state.limited || (!old_oom && facts->bounds.oom))
-    result = IXS_CHECK_UNKNOWN;
+cleanup:
+  ixs_session_unbind(&binding);
+  return result;
+}
 
-restore:
-  if (!old_oom && facts->bounds.oom)
-    bounds_cache_clear(&facts->bounds);
-  facts->bounds.oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, mark);
+ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
+                                                    ixs_node *lhs,
+                                                    ixs_node *rhs,
+                                                    size_t *remaining_points) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (!facts_ready(facts))
+    goto cleanup;
+  if (!remaining_points) {
+    ixs_ctx_push_error(ctx, "finite equivalence: remaining_points is NULL");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, lhs, "finite equivalence") ||
+      !facts_query_node_ok(ctx, rhs, "finite equivalence"))
+    goto cleanup;
+  if (ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+
+  result = equivalence_query_bound(facts, ctx, lhs, rhs);
+  if (result == IXS_CHECK_UNKNOWN)
+    result =
+        finite_equivalence_query_bound(facts, ctx, lhs, rhs, remaining_points);
 
 cleanup:
   ixs_session_unbind(&binding);

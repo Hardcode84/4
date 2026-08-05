@@ -301,6 +301,11 @@ public:
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
     return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
   }
+  ixs_check_result equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
+                                            size_t &remaining_points) const {
+    return ixs_equivalent_finite_domain_facts(facts_, lhs.raw(), rhs.raw(),
+                                              &remaining_points);
+  }
   bool constant_difference(const Expr &lhs, const Expr &rhs,
                            int64_t &delta) const {
     return ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw(), &delta);

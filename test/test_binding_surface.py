@@ -20,6 +20,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "defined",
         "divisible",
         "equivalent",
+        "equivalent_finite_domain",
         "finite_difference",
         "integer_valued",
         "known_bits",
@@ -50,6 +51,7 @@ def _typecheck_package_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
@@ -57,7 +59,7 @@ def _typecheck_package_surface(
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
     transferred: ixsimpl.Facts = facts.subs({expr: expr})
-    _ = tri, equivalent, difference, exact, transferred
+    _ = tri, equivalent, finite_equivalent, difference, exact, transferred
 
 
 def _typecheck_extension_surface(
@@ -65,7 +67,8 @@ def _typecheck_extension_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
-    _ = tri, equivalent
+    _ = tri, equivalent, finite_equivalent
