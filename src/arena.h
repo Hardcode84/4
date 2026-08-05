@@ -38,6 +38,11 @@ IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
                                       size_t initial_size);
 IXS_STATIC void ixs_arena_destroy(ixs_arena *a);
 
+/* Release an input-scoped temporary arena. Cost is proportional to the
+ * temporary work allocated by one operation, never to retained context state.
+ */
+IXS_STATIC void ixs_arena_destroy_transient(ixs_arena *a);
+
 /* Test hook: permit count allocation/grow operations, then fail persistently.
  * Pass IXS_ARENA_FAILURE_DISABLED to disable injection. */
 #ifndef IXS_AMALGAMATED

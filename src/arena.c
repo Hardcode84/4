@@ -73,9 +73,7 @@ IXS_STATIC void ixs_arena_init_inline(ixs_arena *a, void *storage,
   a->fail_after = IXS_ARENA_FAILURE_DISABLED;
 }
 
-/* Frees every chunk on the list; cost is linear in live chunks. */
-/* scan: arena */
-IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
+static void arena_release_chunks(ixs_arena *a) {
   ixs_arena_chunk *c = a->current;
   while (c) {
     ixs_arena_chunk *next = c->next;
@@ -88,6 +86,16 @@ IXS_STATIC void ixs_arena_destroy(ixs_arena *a) {
   a->current = NULL;
   a->spare = NULL;
   a->fail_after = IXS_ARENA_FAILURE_DISABLED;
+}
+
+/* Frees every chunk on the list; cost is linear in live chunks. */
+/* scan: arena */
+IXS_STATIC void ixs_arena_destroy(ixs_arena *a) { arena_release_chunks(a); }
+
+/* This walk is bounded by one operation's input-sized temporary workspace,
+ * not by the retained arena or context state. */
+IXS_STATIC void ixs_arena_destroy_transient(ixs_arena *a) {
+  arena_release_chunks(a);
 }
 
 #ifndef IXS_AMALGAMATED

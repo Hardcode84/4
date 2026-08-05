@@ -1285,19 +1285,32 @@ This compatibility surface is intentionally C-only: C++ and Python `Facts`
 keep the sequential closure semantics of their mutation APIs instead of
 offering two constructors whose predicates have different meanings.
 `ixs_facts_assume_preds` applies the whole array to one fork and commits only
-after every tree succeeds. It validates the full array, then simplifies and
-ingests each predicate in input order so later predicates see earlier facts.
-After that progressive closure pass, it ingests each original predicate once
-more. This preserves exact expression identities that a fact-conditioned
-rewrite may otherwise replace while retaining the same-batch consequences.
-An arena-backed open-addressed pointer set filters pointer-identical repeats in
-expected O(n), preserving each first input position. The table is sized once at
-no more than half load and does not grow during ingestion. Allocation failure
-fails the transaction. Successful commits retain the set storage with the
-monotonic scratch segment; session reset reclaims it with the bounds payload.
-Store hash-consing makes structurally equal live nodes pointer-identical.
-Distinct pointers, including noncanonical predicates that later normalize to
-the same node, remain separate inputs and preserve sequential closure.
+after every tree succeeds. It validates the full array and ingests each
+original predicate once before fact-conditioned simplification. This preserves
+exact expression identities that a rewrite may otherwise replace. It then
+saturates the batch with a dependency worklist. Every first-position unique
+predicate is queued once; a semantic refinement requeues only predicates that
+share a syntactic symbol with the predicate that produced it. Simplification
+cannot introduce a symbol absent from the original predicate, so an unrelated
+predicate cannot observe that refinement. A symbol-free refinement
+conservatively requeues the whole batch. Closure ends when the queue is empty;
+there is no batch-size or round-count limit. Bounds domains are monotone, and a
+queue entry can create more work only when it strictly refines a fact.
+
+The dependency index uses iterative DAG traversal, a per-predicate node set,
+and an open-addressed interned-symbol table. Pointer-identical predicates are
+filtered in expected O(n), preserving each first input position. Hash tables
+are kept at no more than half load. For `v` input DAG nodes counted once per
+unique predicate and `e` predicate-symbol incidences, index construction is
+expected O(n + v + e). Reprocessing cost is proportional to dequeued
+predicates plus the symbol adjacency lists scheduled by actual refinements;
+independent predicates are not rescanned after another component changes.
+All queue, deduplication, traversal, and index storage lives in an
+input-scoped temporary arena and is released before return, including on a
+successful commit. Allocation failure fails the transaction. Store
+hash-consing makes structurally equal live nodes pointer-identical. Distinct
+pointers, including noncanonical predicates that later normalize to the same
+node, remain separate inputs and participate independently in closure.
 `ixs_facts_assume_pred` is its one-element form.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
 Rejection or OOM leaves the stored payload unchanged but poisons the fact set,
@@ -2366,9 +2379,10 @@ Adding a scan type is one line in `SCAN_TYPES` plus the tag above the
 function plus an update to this list, same commit. Tags with unregistered
 types fail the check, so a typo cannot silently pass.
 
-Amortized O(1) mechanisms are not scans: hash-table growth rehashes, and
-`ixs_arena_restore`, whose chunk walk is proportional to the work being
-rolled back rather than to `A`.
+Amortized O(1) mechanisms are not scans: hash-table growth rehashes;
+`ixs_arena_restore` walks only work allocated after its mark; and
+`ixs_arena_destroy_transient` releases only one operation's input-sized
+workspace. None depends on retained context state `A`.
 
 `scripts/check_hotpaths.py` enforces the invariant. It builds the static
 call graph of `src/*.[ch]` with tree-sitter-c, propagates scan-taint

@@ -67,7 +67,8 @@ typedef struct {
   bool empty_cache_valid;
   bool empty_cache_value;
   bool oom;
-  ixs_arena *scratch; /* borrowed; must outlive ixs_bounds */
+  bool *semantic_changed; /* optional fact-mutation observer */
+  ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
 struct ixs_facts {

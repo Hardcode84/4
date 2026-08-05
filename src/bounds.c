@@ -12,6 +12,7 @@
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
+#define FACT_WORK_INIT_CAP 64u
 #define RANGE_POWER_EXP_LIMIT 64u
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
@@ -22,9 +23,22 @@ static void bounds_empty_cache_invalidate(ixs_bounds *b) {
     b->empty_cache_valid = false;
 }
 
+static void bounds_mark_semantic_changed(ixs_bounds *b) {
+  if (b && b->semantic_changed)
+    *b->semantic_changed = true;
+}
+
 static void bounds_mark_contradiction(ixs_bounds *b) {
+  if (!b->contradiction)
+    bounds_mark_semantic_changed(b);
   b->contradiction = true;
   bounds_empty_cache_invalidate(b);
+}
+
+static bool bounds_intervals_equal(ixs_interval a, ixs_interval b) {
+  return a.lo_p == b.lo_p && a.lo_q == b.lo_q && a.hi_p == b.hi_p &&
+         a.hi_q == b.hi_q && a.lo_inf == b.lo_inf && a.hi_inf == b.hi_inf &&
+         a.valid == b.valid;
 }
 
 static void bounds_cache_clear(ixs_bounds *b) {
@@ -97,6 +111,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
   b->oom = false;
+  b->semantic_changed = NULL;
   if (b->vars)
     bounds_cache_alloc(b);
   return b->vars != NULL;
@@ -142,6 +157,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
   dst->oom = false;
+  dst->semantic_changed = NULL;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
         dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
@@ -212,6 +228,7 @@ static ixs_var_bound *get_or_create_var(ixs_bounds *b, const char *name) {
   v->bits.known_zero = 0;
   v->bits.known_one = 0;
   v->bits.pow2 = IXS_POW2_UNKNOWN;
+  bounds_mark_semantic_changed(b);
   return v;
 }
 
@@ -313,8 +330,11 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
   if (!v)
     return;
   bounds_empty_cache_invalidate(b);
-  if (v->bits.pow2 == IXS_POW2_OR_ZERO && interval_lower_at_least(&v->iv, 1, 1))
+  if (v->bits.pow2 == IXS_POW2_OR_ZERO &&
+      interval_lower_at_least(&v->iv, 1, 1)) {
     v->bits.pow2 = IXS_POW2_POSITIVE;
+    bounds_mark_semantic_changed(b);
+  }
   if ((v->bits.pow2 == IXS_POW2_OR_ZERO &&
        interval_upper_less_than(&v->iv, 0, 1)) ||
       (v->bits.pow2 == IXS_POW2_POSITIVE &&
@@ -340,10 +360,16 @@ static void refine_var_bit_consistency(ixs_bounds *b, ixs_var_bound *v) {
 
 static void apply_var_known_bits(ixs_bounds *b, ixs_var_bound *v,
                                  uint64_t known_zero, uint64_t known_one) {
+  uint64_t old_zero;
+  uint64_t old_one;
   if (!v)
     return;
+  old_zero = v->bits.known_zero;
+  old_one = v->bits.known_one;
   v->bits.known_zero |= known_zero;
   v->bits.known_one |= known_one;
+  if (old_zero != v->bits.known_zero || old_one != v->bits.known_one)
+    bounds_mark_semantic_changed(b);
   refine_var_bit_consistency(b, v);
 }
 
@@ -360,9 +386,11 @@ static void apply_pow2_fact(ixs_bounds *b, ixs_var_bound *v,
   if (pow2 == IXS_POW2_POSITIVE) {
     if (v->bits.pow2 == IXS_POW2_UNKNOWN || v->bits.pow2 == IXS_POW2_OR_ZERO) {
       v->bits.pow2 = IXS_POW2_POSITIVE;
+      bounds_mark_semantic_changed(b);
     }
   } else if (pow2 == IXS_POW2_OR_ZERO && v->bits.pow2 == IXS_POW2_UNKNOWN) {
     v->bits.pow2 = IXS_POW2_OR_ZERO;
+    bounds_mark_semantic_changed(b);
   }
   refine_var_bit_consistency(b, v);
 }
@@ -375,10 +403,15 @@ static void apply_exact_int_bits(ixs_bounds *b, ixs_var_bound *v, int64_t val) {
   if (val == 0) {
     if (v->bits.pow2 == IXS_POW2_POSITIVE)
       bounds_mark_contradiction(b);
-    else
+    else if (v->bits.pow2 != IXS_POW2_OR_ZERO) {
       v->bits.pow2 = IXS_POW2_OR_ZERO;
+      bounds_mark_semantic_changed(b);
+    }
   } else if (int64_is_positive_pow2(val)) {
-    v->bits.pow2 = IXS_POW2_POSITIVE;
+    if (v->bits.pow2 != IXS_POW2_POSITIVE) {
+      v->bits.pow2 = IXS_POW2_POSITIVE;
+      bounds_mark_semantic_changed(b);
+    }
   } else if (v->bits.pow2 == IXS_POW2_OR_ZERO ||
              v->bits.pow2 == IXS_POW2_POSITIVE) {
     bounds_mark_contradiction(b);
@@ -419,6 +452,7 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
   if (v->modulus == 0) {
     v->modulus = m;
     v->remainder = rem;
+    bounds_mark_semantic_changed(b);
     apply_congruence_known_bits(b, v);
     return;
   }
@@ -446,10 +480,14 @@ static void apply_modrem(ixs_bounds *b, const char *name, int64_t m,
       return;
     k = bounds_mul_mod(target, inverse, (uint64_t)m_div_g);
   }
-  v->modulus = new_mod;
   merged = bounds_mul_mod((uint64_t)old_mod, k, (uint64_t)new_mod);
   merged += (uint64_t)v->remainder;
-  v->remainder = (int64_t)(merged % (uint64_t)new_mod);
+  rem = (int64_t)(merged % (uint64_t)new_mod);
+  if (v->modulus != new_mod || v->remainder != rem) {
+    v->modulus = new_mod;
+    v->remainder = rem;
+    bounds_mark_semantic_changed(b);
+  }
   apply_congruence_known_bits(b, v);
 }
 
@@ -778,8 +816,10 @@ static void add_expr_integer_zero_cmp(ixs_bounds *b, ixs_node *expr,
 static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
                                 int64_t cp, int64_t cq) {
   ixs_var_bound *v = get_or_create_var(b, name);
+  ixs_interval old;
   if (!v)
     return;
+  old = v->iv;
   switch (op) {
   case IXS_CMP_GE:
     if (v->iv.lo_inf || ixs_rat_cmp(cp, cq, v->iv.lo_p, v->iv.lo_q) > 0) {
@@ -830,6 +870,8 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
   case IXS_CMP_NE:
     break;
   }
+  if (!bounds_intervals_equal(old, v->iv))
+    bounds_mark_semantic_changed(b);
   refine_var_bit_consistency(b, v);
 }
 
@@ -1001,8 +1043,10 @@ static void apply_pow2_or_zero(ixs_bounds *b, const char *name) {
   ixs_var_bound *v = get_or_create_var(b, name);
   if (!v)
     return;
-  if (v->bits.pow2 == IXS_POW2_UNKNOWN)
+  if (v->bits.pow2 == IXS_POW2_UNKNOWN) {
     v->bits.pow2 = IXS_POW2_OR_ZERO;
+    bounds_mark_semantic_changed(b);
+  }
   refine_var_bit_consistency(b, v);
   apply_sym_cmp_const(b, name, IXS_CMP_GE, 0, 1);
 }
@@ -1139,12 +1183,16 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
 
 /* Pointer hashing and bounded linear probing keep range lookup expected O(1).
  */
-static size_t bounds_expr_hash_ptr(const ixs_node *expr) {
-  uint64_t x = (uint64_t)(uintptr_t)expr;
+static size_t bounds_hash_ptr(const void *ptr) {
+  uint64_t x = (uint64_t)(uintptr_t)ptr;
   x ^= x >> 33;
   x *= UINT64_C(0xff51afd7ed558ccd);
   x ^= x >> 33;
   return (size_t)x;
+}
+
+static size_t bounds_expr_hash_ptr(const ixs_node *expr) {
+  return bounds_hash_ptr(expr);
 }
 
 static size_t bounds_expr_index_slot(const size_t *index, size_t capacity,
@@ -1223,8 +1271,13 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
                                   expr);
     if (b->expr_index[slot]) {
       ixs_expr_bound *bound = &b->exprs[b->expr_index[slot] - 1u];
-      if (bound->iv.valid)
-        bound->iv = iv_intersect(bound->iv, iv);
+      if (bound->iv.valid) {
+        ixs_interval refined = iv_intersect(bound->iv, iv);
+        if (!bounds_intervals_equal(bound->iv, refined)) {
+          bound->iv = refined;
+          bounds_mark_semantic_changed(b);
+        }
+      }
       bounds_cache_clear(b);
       return;
     }
@@ -1268,6 +1321,7 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   b->exprs[b->nexprs].iv = iv;
   b->expr_index[slot] = b->nexprs + 1u;
   b->nexprs++;
+  bounds_mark_semantic_changed(b);
   bounds_cache_clear(b);
 }
 
@@ -1327,6 +1381,7 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   bounds_empty_cache_invalidate(b);
   if (b->nnonzero < b->nonzero_cap) {
     b->nonzero[b->nnonzero++] = expr;
+    bounds_mark_semantic_changed(b);
     return;
   }
   new_cap = b->nonzero_cap ? b->nonzero_cap * 2u : 4u;
@@ -1344,6 +1399,7 @@ static void bounds_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   b->nonzero = grown;
   b->nonzero_cap = new_cap;
   b->nonzero[b->nnonzero++] = expr;
+  bounds_mark_semantic_changed(b);
 }
 
 /*
@@ -4473,6 +4529,7 @@ static bool facts_query_node_ok(ixs_ctx *ctx, ixs_node *node,
 
 static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
   ixs_var_bound *v = find_var(dst, src->name);
+  ixs_interval old;
   bounds_cache_clear(dst);
   if (!v) {
     v = get_or_create_var(dst, src->name);
@@ -4485,7 +4542,10 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
     return;
   }
 
+  old = v->iv;
   v->iv = iv_intersect(v->iv, src->iv);
+  if (!bounds_intervals_equal(old, v->iv))
+    bounds_mark_semantic_changed(dst);
   if (src->modulus > 0)
     apply_modrem(dst, src->name, src->modulus, src->remainder);
   apply_var_known_bits(dst, v, src->bits.known_zero, src->bits.known_one);
@@ -4727,6 +4787,425 @@ static bool facts_predicate_seen_or_insert(ixs_node **slots, size_t capacity,
   return false;
 }
 
+typedef struct {
+  const char *name;
+  size_t first_occurrence;
+} facts_symbol_slot;
+
+typedef struct {
+  const char *name;
+  size_t predicate;
+  size_t next_for_predicate;
+  size_t next_for_symbol;
+} facts_symbol_occurrence;
+
+typedef struct {
+  ixs_arena arena;
+  size_t n_predicates;
+  bool *active;
+  bool *queued;
+  size_t *queue;
+  size_t queue_head;
+  size_t queue_tail;
+  size_t queue_count;
+  size_t *predicate_occurrences;
+  facts_symbol_slot *symbols;
+  size_t symbol_capacity;
+  size_t symbol_count;
+  facts_symbol_occurrence *occurrences;
+  size_t occurrence_capacity;
+  size_t occurrence_count;
+  ixs_node **seen;
+  size_t seen_capacity;
+} facts_worklist;
+
+typedef struct {
+  ixs_node **slots;
+  size_t capacity;
+  size_t count;
+} facts_node_set;
+
+typedef union {
+  void *align;
+  unsigned char bytes[IXS_ARENA_DEFAULT_SIZE];
+} facts_work_storage;
+
+static bool facts_worklist_alloc_arrays(facts_worklist *work) {
+  size_t count = work->n_predicates;
+  size_t i;
+  if (count > SIZE_MAX / sizeof(*work->queue) ||
+      count > SIZE_MAX / sizeof(*work->predicate_occurrences))
+    return false;
+  work->active = ixs_arena_alloc(&work->arena, count * sizeof(*work->active),
+                                 sizeof(void *));
+  work->queued = ixs_arena_alloc(&work->arena, count * sizeof(*work->queued),
+                                 sizeof(void *));
+  work->queue = ixs_arena_alloc(&work->arena, count * sizeof(*work->queue),
+                                sizeof(void *));
+  work->predicate_occurrences = ixs_arena_alloc(
+      &work->arena, count * sizeof(*work->predicate_occurrences),
+      sizeof(void *));
+  if (!work->active || !work->queued || !work->queue ||
+      !work->predicate_occurrences)
+    return false;
+  memset(work->active, 0, count * sizeof(*work->active));
+  memset(work->queued, 0, count * sizeof(*work->queued));
+  for (i = 0; i < count; i++)
+    work->predicate_occurrences[i] = SIZE_MAX;
+  return true;
+}
+
+static bool facts_worklist_init(facts_worklist *work,
+                                facts_work_storage *storage,
+                                size_t n_predicates) {
+  memset(work, 0, sizeof(*work));
+  ixs_arena_init_inline(&work->arena, storage->bytes, sizeof(storage->bytes),
+                        IXS_ARENA_DEFAULT_SIZE);
+  work->n_predicates = n_predicates;
+  if (!facts_worklist_alloc_arrays(work) ||
+      !facts_predicate_set_init(&work->arena, n_predicates, &work->seen,
+                                &work->seen_capacity)) {
+    ixs_arena_destroy_transient(&work->arena);
+    return false;
+  }
+  return true;
+}
+
+static void facts_worklist_destroy(facts_worklist *work) {
+  ixs_arena_destroy_transient(&work->arena);
+}
+
+static facts_symbol_slot *facts_symbol_find(facts_worklist *work,
+                                            const char *name) {
+  size_t index;
+  if (!work->symbols)
+    return NULL;
+  index = bounds_hash_ptr(name) & (work->symbol_capacity - 1u);
+  while (work->symbols[index].name && work->symbols[index].name != name)
+    index = (index + 1u) & (work->symbol_capacity - 1u);
+  return &work->symbols[index];
+}
+
+static bool facts_symbol_table_grow(facts_worklist *work) {
+  size_t new_capacity =
+      work->symbol_capacity ? work->symbol_capacity * 2u : FACT_WORK_INIT_CAP;
+  facts_symbol_slot *symbols;
+  size_t i;
+  if (new_capacity <= work->symbol_capacity ||
+      new_capacity > SIZE_MAX / sizeof(*symbols))
+    return false;
+  symbols = ixs_arena_alloc(&work->arena, new_capacity * sizeof(*symbols),
+                            sizeof(void *));
+  if (!symbols)
+    return false;
+  memset(symbols, 0, new_capacity * sizeof(*symbols));
+  for (i = 0; i < work->symbol_capacity; i++) {
+    if (work->symbols[i].name) {
+      size_t index =
+          bounds_hash_ptr(work->symbols[i].name) & (new_capacity - 1u);
+      while (symbols[index].name)
+        index = (index + 1u) & (new_capacity - 1u);
+      symbols[index] = work->symbols[i];
+    }
+  }
+  work->symbols = symbols;
+  work->symbol_capacity = new_capacity;
+  return true;
+}
+
+static bool facts_occurrences_grow(facts_worklist *work) {
+  size_t new_capacity = work->occurrence_capacity
+                            ? work->occurrence_capacity * 2u
+                            : FACT_WORK_INIT_CAP;
+  facts_symbol_occurrence *occurrences;
+  if (new_capacity <= work->occurrence_capacity ||
+      new_capacity > SIZE_MAX / sizeof(*occurrences))
+    return false;
+  occurrences =
+      ixs_arena_grow(&work->arena, work->occurrences,
+                     work->occurrence_capacity * sizeof(*work->occurrences),
+                     new_capacity * sizeof(*work->occurrences), sizeof(void *));
+  if (!occurrences)
+    return false;
+  work->occurrences = occurrences;
+  work->occurrence_capacity = new_capacity;
+  return true;
+}
+
+static bool facts_worklist_add_symbol(facts_worklist *work, size_t predicate,
+                                      const char *name) {
+  facts_symbol_slot *slot;
+  facts_symbol_occurrence *occurrence;
+  size_t index;
+  if (!work->symbol_capacity ||
+      work->symbol_count >= work->symbol_capacity / 2u) {
+    if (!facts_symbol_table_grow(work))
+      return false;
+  }
+  if (work->occurrence_count >= work->occurrence_capacity &&
+      !facts_occurrences_grow(work))
+    return false;
+  slot = facts_symbol_find(work, name);
+  if (!slot)
+    return false;
+  if (!slot->name) {
+    slot->name = name;
+    slot->first_occurrence = SIZE_MAX;
+    work->symbol_count++;
+  }
+  index = work->occurrence_count++;
+  occurrence = &work->occurrences[index];
+  occurrence->name = name;
+  occurrence->predicate = predicate;
+  occurrence->next_for_predicate = work->predicate_occurrences[predicate];
+  occurrence->next_for_symbol = slot->first_occurrence;
+  work->predicate_occurrences[predicate] = index;
+  slot->first_occurrence = index;
+  return true;
+}
+
+static bool facts_node_set_grow(ixs_arena *arena, facts_node_set *set) {
+  size_t new_capacity = set->capacity ? set->capacity * 2u : FACT_WORK_INIT_CAP;
+  ixs_node **slots;
+  size_t i;
+  if (new_capacity <= set->capacity || new_capacity > SIZE_MAX / sizeof(*slots))
+    return false;
+  slots = ixs_arena_alloc(arena, new_capacity * sizeof(*slots), sizeof(void *));
+  if (!slots)
+    return false;
+  memset(slots, 0, new_capacity * sizeof(*slots));
+  for (i = 0; i < set->capacity; i++) {
+    if (set->slots[i]) {
+      size_t index = set->slots[i]->hash & (new_capacity - 1u);
+      while (slots[index])
+        index = (index + 1u) & (new_capacity - 1u);
+      slots[index] = set->slots[i];
+    }
+  }
+  set->slots = slots;
+  set->capacity = new_capacity;
+  return true;
+}
+
+static bool facts_node_set_insert(ixs_arena *arena, facts_node_set *set,
+                                  ixs_node *node, bool *inserted) {
+  size_t index;
+  if (!set->capacity || set->count >= set->capacity / 2u) {
+    if (!facts_node_set_grow(arena, set))
+      return false;
+  }
+  index = node->hash & (set->capacity - 1u);
+  while (set->slots[index] && set->slots[index] != node)
+    index = (index + 1u) & (set->capacity - 1u);
+  if (set->slots[index]) {
+    *inserted = false;
+    return true;
+  }
+  set->slots[index] = node;
+  set->count++;
+  *inserted = true;
+  return true;
+}
+
+static bool facts_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                  size_t *count, size_t *capacity,
+                                  ixs_node *node) {
+  if (*count >= *capacity) {
+    size_t new_capacity = *capacity ? *capacity * 2u : FACT_WORK_INIT_CAP;
+    ixs_node **grown;
+    if (new_capacity <= *capacity || new_capacity > SIZE_MAX / sizeof(**stack))
+      return false;
+    grown = ixs_arena_grow(arena, *stack, *capacity * sizeof(**stack),
+                           new_capacity * sizeof(**stack), sizeof(void *));
+    if (!grown)
+      return false;
+    *stack = grown;
+    *capacity = new_capacity;
+  }
+  (*stack)[(*count)++] = node;
+  return true;
+}
+
+static bool facts_worklist_index_predicate(facts_worklist *work,
+                                           size_t predicate, ixs_node *root) {
+  facts_work_storage storage;
+  ixs_arena traversal;
+  facts_node_set visited;
+  ixs_node **stack = NULL;
+  size_t stack_capacity = 0;
+  size_t stack_count = 0;
+  bool ok = false;
+  ixs_arena_init_inline(&traversal, storage.bytes, sizeof(storage.bytes),
+                        IXS_ARENA_DEFAULT_SIZE);
+  memset(&visited, 0, sizeof(visited));
+  if (!facts_node_stack_push(&traversal, &stack, &stack_count, &stack_capacity,
+                             root))
+    goto cleanup;
+  while (stack_count > 0) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+    uint32_t i;
+    bool inserted;
+    if (!facts_node_set_insert(&traversal, &visited, node, &inserted))
+      goto cleanup;
+    if (!inserted)
+      continue;
+    if (node->tag == IXS_SYM &&
+        !facts_worklist_add_symbol(work, predicate, node->u.name))
+      goto cleanup;
+    child_count = ixs_node_nchildren(node);
+    for (i = 0; i < child_count; i++) {
+      if (!facts_node_stack_push(&traversal, &stack, &stack_count,
+                                 &stack_capacity, ixs_node_child(node, i)))
+        goto cleanup;
+    }
+  }
+  ok = true;
+
+cleanup:
+  ixs_arena_destroy_transient(&traversal);
+  return ok;
+}
+
+static bool facts_worklist_enqueue(facts_worklist *work, size_t predicate) {
+  if (!work->active[predicate] || work->queued[predicate])
+    return true;
+  if (work->queue_count >= work->n_predicates)
+    return false;
+  work->queue[work->queue_tail] = predicate;
+  work->queue_tail = (work->queue_tail + 1u) % work->n_predicates;
+  work->queue_count++;
+  work->queued[predicate] = true;
+  return true;
+}
+
+static bool facts_worklist_build(facts_worklist *work,
+                                 ixs_node *const *predicates) {
+  size_t i;
+  for (i = 0; i < work->n_predicates; i++) {
+    if (work->seen && facts_predicate_seen_or_insert(
+                          work->seen, work->seen_capacity, predicates[i]))
+      continue;
+    work->active[i] = true;
+    if (!facts_worklist_index_predicate(work, i, predicates[i]) ||
+        !facts_worklist_enqueue(work, i))
+      return false;
+  }
+  return true;
+}
+
+static size_t facts_worklist_pop(facts_worklist *work) {
+  size_t predicate = work->queue[work->queue_head];
+  work->queue_head = (work->queue_head + 1u) % work->n_predicates;
+  work->queue_count--;
+  work->queued[predicate] = false;
+  return predicate;
+}
+
+static bool facts_worklist_enqueue_all(facts_worklist *work) {
+  size_t i;
+  for (i = 0; i < work->n_predicates; i++) {
+    if (!facts_worklist_enqueue(work, i))
+      return false;
+  }
+  return true;
+}
+
+static bool facts_worklist_enqueue_dependencies(facts_worklist *work,
+                                                size_t predicate) {
+  size_t occurrence_index = work->predicate_occurrences[predicate];
+  if (occurrence_index == SIZE_MAX)
+    return facts_worklist_enqueue_all(work);
+  while (occurrence_index != SIZE_MAX) {
+    facts_symbol_occurrence *occurrence = &work->occurrences[occurrence_index];
+    facts_symbol_slot *slot = facts_symbol_find(work, occurrence->name);
+    size_t dependent;
+    if (!slot || !slot->name)
+      return false;
+    dependent = slot->first_occurrence;
+    while (dependent != SIZE_MAX) {
+      if (!facts_worklist_enqueue(work, work->occurrences[dependent].predicate))
+        return false;
+      dependent = work->occurrences[dependent].next_for_symbol;
+    }
+    occurrence_index = occurrence->next_for_predicate;
+  }
+  return true;
+}
+
+static ixs_bounds_build_status
+facts_ingest_original_predicates(ixs_bounds *candidate,
+                                 ixs_node *const *predicates,
+                                 const facts_worklist *work) {
+  size_t i;
+  for (i = 0; i < work->n_predicates; i++) {
+    ixs_bounds_build_status status;
+    if (!work->active[i])
+      continue;
+    status = bounds_ingest_predicate(candidate, predicates[i]);
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+  }
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static ixs_bounds_build_status
+facts_process_predicate_worklist(ixs_ctx *ctx, ixs_bounds *candidate,
+                                 ixs_node *const *predicates,
+                                 facts_worklist *work) {
+  while (work->queue_count > 0) {
+    size_t predicate_index = facts_worklist_pop(work);
+    ixs_node *predicate;
+    ixs_bounds_build_status status;
+    bool changed = false;
+    candidate->semantic_changed = &changed;
+    predicate =
+        simp_simplify_bounds(ctx, predicates[predicate_index], candidate);
+    if (!predicate || candidate->oom) {
+      candidate->semantic_changed = NULL;
+      return IXS_BOUNDS_BUILD_OOM;
+    }
+    status = bounds_ingest_predicate(candidate, predicate);
+    candidate->semantic_changed = NULL;
+    if (status != IXS_BOUNDS_BUILD_OK)
+      return status;
+    if (candidate->contradiction || ixs_bounds_has_empty(candidate))
+      return IXS_BOUNDS_BUILD_OK;
+    if (changed && !facts_worklist_enqueue_dependencies(work, predicate_index))
+      return IXS_BOUNDS_BUILD_OOM;
+  }
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static ixs_bounds_build_status
+facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
+                               ixs_node *const *predicates,
+                               size_t n_predicates) {
+  facts_work_storage storage;
+  facts_worklist work;
+  ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OOM;
+  if (!facts_worklist_init(&work, &storage, n_predicates))
+    return IXS_BOUNDS_BUILD_OOM;
+  if (!facts_worklist_build(&work, predicates))
+    goto cleanup;
+
+  /* Preserve original expression identities before fact-conditioned
+   * rewrites. */
+  status = facts_ingest_original_predicates(candidate, predicates, &work);
+  if (status != IXS_BOUNDS_BUILD_OK || candidate->contradiction ||
+      ixs_bounds_has_empty(candidate))
+    goto cleanup;
+
+  /* A rewrite cannot introduce a symbol absent from its original predicate.
+   * Revisit only predicates that share a symbol with a semantic refinement. */
+  status = facts_process_predicate_worklist(ctx, candidate, predicates, &work);
+
+cleanup:
+  candidate->semantic_changed = NULL;
+  facts_worklist_destroy(&work);
+  return status;
+}
+
 ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
                                   size_t n_predicates) {
   ixs_session_binding binding;
@@ -4772,8 +5251,6 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_bounds_build_status status;
-  ixs_node **seen;
-  size_t seen_capacity;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts)) {
@@ -4798,42 +5275,9 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
     return false;
   }
   status = bounds_validate_predicates(&candidate, predicates, n_predicates);
-  if (status == IXS_BOUNDS_BUILD_OK &&
-      !facts_predicate_set_init(&ctx->scratch, n_predicates, &seen,
-                                &seen_capacity))
-    status = IXS_BOUNDS_BUILD_OOM;
-  if (status == IXS_BOUNDS_BUILD_OK) {
-    size_t i;
-    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
-      if (seen &&
-          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
-        continue;
-      ixs_node *simplified =
-          simp_simplify_bounds(ctx, predicates[i], &candidate);
-      if (!simplified || candidate.oom) {
-        status = IXS_BOUNDS_BUILD_OOM;
-        break;
-      }
-      status = bounds_ingest_predicate(&candidate, simplified);
-    }
-  }
-  if (status == IXS_BOUNDS_BUILD_OK) {
-    size_t i;
-    if (seen)
-      memset(seen, 0, seen_capacity * sizeof(*seen));
-    /*
-     * Progressive simplification establishes same-batch consequences, but
-     * the original predicates remain assumptions too. Re-ingest their raw
-     * forms after closure so fact-conditioned rewrites cannot erase the full
-     * expression identities needed by later range queries.
-     */
-    for (i = 0; status == IXS_BOUNDS_BUILD_OK && i < n_predicates; i++) {
-      if (seen &&
-          facts_predicate_seen_or_insert(seen, seen_capacity, predicates[i]))
-        continue;
-      status = bounds_ingest_predicate(&candidate, predicates[i]);
-    }
-  }
+  if (status == IXS_BOUNDS_BUILD_OK)
+    status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
+                                            n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {

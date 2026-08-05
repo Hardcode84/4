@@ -865,7 +865,7 @@ static void test_facts_assume_preds_order_and_identity(void) {
   first_position = ixs_facts_create(&s);
   CHECK(first_position != NULL);
   CHECK(ixs_facts_assume_preds(first_position, repeated, 3));
-  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_TRUE);
 
   distinct[0] = raw_predicate;
   distinct[1] = divisor_eight;
@@ -937,7 +937,7 @@ static void test_facts_assume_preds_duplicate_skip(void) {
     duplicates[i] = test_predicate;
   test_scratch = &ixs_session_get(&test_session)->scratch;
   before_batch = arena_test_mark(test_scratch);
-  test_scratch->fail_after = allocations + 1u;
+  test_scratch->fail_after = allocations;
   CHECK(ixs_facts_assume_preds(test_facts, duplicates, DUPLICATE_COUNT));
   CHECK(test_scratch->fail_after == 0);
   test_scratch->fail_after = IXS_ARENA_FAILURE_DISABLED;
