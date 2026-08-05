@@ -1375,9 +1375,18 @@ equality forest stores only complementary exact pairs; exact queries do not
 walk inequality adjacency. Exact equalities are also present as two directed
 graph edges so feasibility has one authority. Both structures are fact-local,
 arena-owned, and copied transactionally. Incremental graph processing visits
-only the affected relation component, never the context or arena. Offset
-composition uses checked arithmetic; an unrepresentable mutation fails and
-poisons instead of weakening the domain.
+only the affected relation component, never the context or arena.
+
+The equality forest has its own open-addressed map from stable graph-variable
+indices to a compact array containing only exact participants. Each weighted
+parent link stores `value(node) - value(parent)`. Complementary edges are found
+through the directed graph's edge index in expected O(1), then union by size
+merges their roots. Iterative path compression makes representable exact
+queries amortized inverse-Ackermann in the number of exact participants and
+independent of one-sided fan-out. A checked offset overflow leaves the roots
+unmerged and that composed query unknown; it cannot manufacture an equality.
+The two directed edges remain in the complete feasibility graph, so this loss
+of exact-query precision does not weaken contradiction detection.
 
 The directed graph uses immutable arena-owned edge records, separate incoming
 and outgoing adjacency heads, and append-stable variable indices. Adjacency,
@@ -1409,9 +1418,12 @@ Checked overflow while composing a feasibility potential is a representation
 failure: the public mutator rolls back, poisons the fact set, and returns
 false. Endpoint projection is conservative at an unrepresentable `int64_t`
 boundary, matching interval widening; other queued vertices are still
-processed. Allocation and checked-size failures follow the same transactional
-rollback contract. A contradiction is semantic rather than operational: it is
-committed and all queries return their established unknown/no-result form.
+processed. Exact-forest offset overflow is distinct: the graph mutation is
+representable and remains committed, while only the unrepresentable exact
+composition returns unknown. Allocation and checked-size failures follow the
+transactional rollback contract. A contradiction is semantic rather than
+operational: it is committed and all queries return their established
+unknown/no-result form.
 
 `bench_relational_facts` measures the production witness through public APIs
 and keeps every generated fact set alive so peak RSS exposes retained storage.
@@ -1614,9 +1626,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
-  constant difference or predicates with opposite proven truth values return
-  `FALSE`; other failed sufficient proofs return `UNKNOWN`. Contradictory
-  facts never prove equivalence. Recursive predicate-shape comparison has
+  exact difference or predicates with opposite proven truth values return
+  `FALSE`. An exact zero range for the normalized difference, including one
+  obtained from the weighted equality forest, returns `TRUE`; other failed
+  sufficient proofs return `UNKNOWN`. Contradictory facts never prove
+  equivalence. Recursive predicate-shape comparison has
   depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
   inference uses the congruence depth limit and makes one structural pass over
   the visited expression. This API is not an unbounded theorem prover.
@@ -1624,8 +1638,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
   incoming fact domain, then simplify, expand, and simplify again in that same
-  environment. Constant differences and additive constants must fit
-  `int64_t`; affine coefficients may be exact rational nodes. Affine
+  environment. Constant-difference queries also accept an exact integer point
+  range for the normalized difference, including a transitive weighted-forest
+  result. Constant differences and additive constants must fit `int64_t`;
+  affine coefficients may be exact rational nodes. Affine
   decomposition accepts only one symbol and rejects any nonlinear occurrence
   or residual reference to it. Finite difference substitutes
   `symbol + step` once and may return a symbolic result such as `2*i + 1`;

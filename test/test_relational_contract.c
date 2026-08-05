@@ -167,23 +167,29 @@ static void test_relational_exact_equality_noise_contract(void) {
     CHECK(written > 0 && (size_t)written < sizeof(names[i]));
     noise[i] = ixs_sym(ctx, names[i]);
     CHECK(noise[i] != NULL);
-    CHECK(assume_unit_difference_upper(ctx, loaded, x, noise[i], 0));
+    CHECK(
+        assume_unit_difference_upper(ctx, loaded, y, noise[i], (int64_t)i + 1));
   }
 
   base_equivalent = ixs_equivalent_facts(base, x, z);
   loaded_equivalent = ixs_equivalent_facts(loaded, x, z);
-  CHECK(base_equivalent == loaded_equivalent);
+  CHECK(base_equivalent == IXS_CHECK_TRUE);
+  CHECK(loaded_equivalent == IXS_CHECK_TRUE);
 
   base_delta_ok = ixs_constant_difference_facts(base, x, z, &base_delta);
   loaded_delta_ok = ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
-  CHECK(base_delta_ok == loaded_delta_ok);
-  if (base_delta_ok && loaded_delta_ok)
-    CHECK(base_delta == loaded_delta);
+  CHECK(base_delta_ok && base_delta == 0);
+  CHECK(loaded_delta_ok && loaded_delta == 0);
 
   base_range_ok = ixs_range_facts(base, difference, &base_range);
   loaded_range_ok = ixs_range_facts(loaded, difference, &loaded_range);
-  CHECK(public_ranges_equal(base_range_ok, &base_range, loaded_range_ok,
-                            &loaded_range));
+  CHECK(base_range_ok && base_range.has_lower && base_range.lower_p == 0 &&
+        base_range.lower_q == 1 && base_range.has_upper &&
+        base_range.upper_p == 0 && base_range.upper_q == 1);
+  CHECK(loaded_range_ok && loaded_range.has_lower &&
+        loaded_range.lower_p == 0 && loaded_range.lower_q == 1 &&
+        loaded_range.has_upper && loaded_range.upper_p == 0 &&
+        loaded_range.upper_q == 1);
 
   ixs_ctx_destroy(ctx);
 }

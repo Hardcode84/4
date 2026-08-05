@@ -36,6 +36,13 @@ typedef struct {
 } ixs_difference_var;
 
 typedef struct {
+  size_t var_index;
+  size_t parent;
+  size_t size;
+  int64_t offset;
+} ixs_exact_var;
+
+typedef struct {
   const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
   int64_t modulus;   /* 0 = no info, >0 = sym ≡ remainder (mod modulus) */
@@ -72,6 +79,11 @@ typedef struct {
   size_t difference_index_cap;
   size_t difference_var_cap;
   size_t difference_epoch;
+  ixs_exact_var *exact_vars;
+  size_t *exact_index;
+  size_t nexact_vars;
+  size_t exact_var_cap;
+  size_t exact_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;

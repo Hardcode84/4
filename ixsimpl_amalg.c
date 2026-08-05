@@ -249,6 +249,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #define BOUNDS_VAR_INDEX_INIT_CAP 8u
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_DIFFERENCE_INDEX_INIT_CAP 8u
+#define BOUNDS_EXACT_INDEX_INIT_CAP 8u
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
@@ -375,6 +376,11 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->difference_index_cap = 0;
   b->difference_var_cap = 0;
   b->difference_epoch = 0;
+  b->exact_vars = NULL;
+  b->exact_index = NULL;
+  b->nexact_vars = 0;
+  b->exact_var_cap = 0;
+  b->exact_index_cap = 0;
   b->nonzero = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
@@ -444,6 +450,34 @@ static bool bounds_fork_index_state(ixs_bounds *dst, const ixs_bounds *src) {
   return true;
 }
 
+static bool bounds_fork_exact_state(ixs_bounds *dst, const ixs_bounds *src) {
+  if (src->exact_var_cap) {
+    if (!src->exact_vars ||
+        src->exact_var_cap > SIZE_MAX / sizeof(*dst->exact_vars))
+      return false;
+    dst->exact_vars = ixs_arena_alloc(
+        dst->scratch, src->exact_var_cap * sizeof(*dst->exact_vars),
+        sizeof(void *));
+    if (!dst->exact_vars)
+      return false;
+    memcpy(dst->exact_vars, src->exact_vars,
+           src->exact_var_cap * sizeof(*src->exact_vars));
+  }
+  if (src->exact_index_cap) {
+    if (!src->exact_index ||
+        src->exact_index_cap > SIZE_MAX / sizeof(*dst->exact_index))
+      return false;
+    dst->exact_index = ixs_arena_alloc(
+        dst->scratch, src->exact_index_cap * sizeof(*dst->exact_index),
+        sizeof(void *));
+    if (!dst->exact_index)
+      return false;
+    memcpy(dst->exact_index, src->exact_index,
+           src->exact_index_cap * sizeof(*src->exact_index));
+  }
+  return true;
+}
+
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   if (!dst || !src || src->oom)
     return false;
@@ -471,6 +505,11 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->difference_index_cap = src->difference_index_cap;
   dst->difference_var_cap = src->difference_var_cap;
   dst->difference_epoch = src->difference_epoch;
+  dst->exact_vars = NULL;
+  dst->exact_index = NULL;
+  dst->nexact_vars = src->nexact_vars;
+  dst->exact_var_cap = src->exact_var_cap;
+  dst->exact_index_cap = src->exact_index_cap;
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
@@ -483,7 +522,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_value = false;
   dst->oom = false;
   dst->semantic_changed = NULL;
-  if (!bounds_fork_index_state(dst, src))
+  if (!bounds_fork_index_state(dst, src) || !bounds_fork_exact_state(dst, src))
     return false;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
@@ -1877,6 +1916,263 @@ static bool bounds_prepare_difference_vars(ixs_bounds *b, size_t count) {
   return true;
 }
 
+static size_t bounds_exact_hash(size_t var_index) {
+  uint64_t x = (uint64_t)var_index + UINT64_C(0x9e3779b97f4a7c15);
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+static size_t bounds_exact_index_slot(const size_t *index, size_t capacity,
+                                      const ixs_exact_var *vars,
+                                      size_t var_index) {
+  size_t slot = bounds_exact_hash(var_index) & (capacity - 1u);
+  while (index[slot] && vars[index[slot] - 1u].var_index != var_index)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static bool bounds_exact_lookup(const ixs_bounds *b, size_t var_index,
+                                size_t *exact_index) {
+  size_t slot;
+  if (!b->exact_index || !b->exact_index_cap)
+    return false;
+  slot = bounds_exact_index_slot(b->exact_index, b->exact_index_cap,
+                                 b->exact_vars, var_index);
+  if (!b->exact_index[slot])
+    return false;
+  *exact_index = b->exact_index[slot] - 1u;
+  return true;
+}
+
+/* Exact-index growth is amortized O(1) and touches only exact participants. */
+static bool bounds_prepare_exact_index(ixs_bounds *b, size_t count,
+                                       size_t **prepared,
+                                       size_t *prepared_capacity) {
+  size_t capacity = b->exact_index_cap;
+  size_t *index;
+  size_t i;
+
+  if (capacity && count <= capacity - capacity / 4u) {
+    *prepared = b->exact_index;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = BOUNDS_EXACT_INDEX_INIT_CAP;
+  while (count > capacity - capacity / 4u) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (capacity > SIZE_MAX / sizeof(*index))
+    return false;
+  index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  if (!index)
+    return false;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->nexact_vars; i++) {
+    size_t slot = bounds_exact_index_slot(index, capacity, b->exact_vars,
+                                          b->exact_vars[i].var_index);
+    index[slot] = i + 1u;
+  }
+  *prepared = index;
+  *prepared_capacity = capacity;
+  return true;
+}
+
+static bool bounds_prepare_exact_vars(ixs_bounds *b, size_t count,
+                                      ixs_exact_var **prepared,
+                                      size_t *prepared_capacity) {
+  ixs_exact_var *vars;
+  size_t capacity = b->exact_var_cap;
+  size_t old_bytes;
+  size_t new_bytes;
+
+  if (count <= capacity) {
+    *prepared = b->exact_vars;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = 2u;
+  while (capacity < count) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (b->exact_var_cap > SIZE_MAX / sizeof(*vars) ||
+      capacity > SIZE_MAX / sizeof(*vars))
+    return false;
+  old_bytes = b->exact_var_cap * sizeof(*vars);
+  new_bytes = capacity * sizeof(*vars);
+  vars = ixs_arena_grow(b->scratch, b->exact_vars, old_bytes, new_bytes,
+                        sizeof(void *));
+  if (!vars)
+    return false;
+  memset(vars + b->exact_var_cap, 0,
+         (capacity - b->exact_var_cap) * sizeof(*vars));
+  *prepared = vars;
+  *prepared_capacity = capacity;
+  return true;
+}
+
+static void bounds_exact_init_var(ixs_bounds *b, size_t var_index,
+                                  size_t *exact_index) {
+  size_t slot;
+  size_t id = b->nexact_vars++;
+  b->exact_vars[id].var_index = var_index;
+  b->exact_vars[id].parent = id;
+  b->exact_vars[id].size = 1u;
+  b->exact_vars[id].offset = 0;
+  slot = bounds_exact_index_slot(b->exact_index, b->exact_index_cap,
+                                 b->exact_vars, var_index);
+  b->exact_index[slot] = id + 1u;
+  *exact_index = id;
+}
+
+static bool bounds_prepare_exact_pair(ixs_bounds *b, size_t lhs_var,
+                                      size_t rhs_var, size_t *lhs_exact,
+                                      size_t *rhs_exact) {
+  ixs_exact_var *vars;
+  size_t *index;
+  size_t var_capacity;
+  size_t index_capacity;
+  size_t missing = 0;
+  bool have_lhs = bounds_exact_lookup(b, lhs_var, lhs_exact);
+  bool have_rhs = bounds_exact_lookup(b, rhs_var, rhs_exact);
+
+  if (!have_lhs)
+    missing++;
+  if (!have_rhs)
+    missing++;
+  if (b->nexact_vars > SIZE_MAX - missing ||
+      !bounds_prepare_exact_index(b, b->nexact_vars + missing, &index,
+                                  &index_capacity) ||
+      !bounds_prepare_exact_vars(b, b->nexact_vars + missing, &vars,
+                                 &var_capacity))
+    return false;
+
+  b->exact_vars = vars;
+  b->exact_var_cap = var_capacity;
+  b->exact_index = index;
+  b->exact_index_cap = index_capacity;
+  if (!have_lhs)
+    bounds_exact_init_var(b, lhs_var, lhs_exact);
+  if (!have_rhs)
+    bounds_exact_init_var(b, rhs_var, rhs_exact);
+  return true;
+}
+
+/* Weighted parent links use value(node) - value(parent). Union by size and
+ * path compression make representable exact queries amortized inverse-Ackermann
+ * in the number of exact participants, independent of inequality fan-out. */
+static bool bounds_exact_find(ixs_bounds *b, size_t id, size_t *root,
+                              int64_t *offset) {
+  size_t current = id;
+  int64_t total = 0;
+
+  while (b->exact_vars[current].parent != current) {
+    if (!ixs_safe_add(total, b->exact_vars[current].offset, &total))
+      return false;
+    current = b->exact_vars[current].parent;
+  }
+  *root = current;
+  *offset = total;
+
+  current = id;
+  while (b->exact_vars[current].parent != current) {
+    size_t parent = b->exact_vars[current].parent;
+    int64_t edge = b->exact_vars[current].offset;
+    int64_t remaining;
+    if (!ixs_safe_sub(total, edge, &remaining))
+      break;
+    b->exact_vars[current].parent = *root;
+    b->exact_vars[current].offset = total;
+    current = parent;
+    total = remaining;
+  }
+  return true;
+}
+
+/* Record lhs - rhs == offset. Overflow leaves the exact forest unchanged;
+ * the complete directed graph still owns and validates both inequalities. */
+static bool bounds_union_exact(ixs_bounds *b, size_t lhs_var, size_t rhs_var,
+                               int64_t offset) {
+  size_t lhs_exact;
+  size_t rhs_exact;
+  size_t lhs_root;
+  size_t rhs_root;
+  int64_t lhs_offset;
+  int64_t rhs_offset;
+  int64_t root_offset;
+  int64_t reverse_offset;
+
+  if (!bounds_prepare_exact_pair(b, lhs_var, rhs_var, &lhs_exact, &rhs_exact)) {
+    b->oom = true;
+    return false;
+  }
+  if (!bounds_exact_find(b, lhs_exact, &lhs_root, &lhs_offset) ||
+      !bounds_exact_find(b, rhs_exact, &rhs_root, &rhs_offset))
+    return true;
+  if (lhs_root == rhs_root) {
+    int64_t existing;
+    if (ixs_safe_sub(lhs_offset, rhs_offset, &existing) && existing != offset)
+      bounds_mark_contradiction(b);
+    return true;
+  }
+  if (!ixs_safe_sub(offset, lhs_offset, &root_offset) ||
+      !ixs_safe_add(root_offset, rhs_offset, &root_offset))
+    return true;
+
+  if (b->exact_vars[lhs_root].size <= b->exact_vars[rhs_root].size) {
+    b->exact_vars[lhs_root].parent = rhs_root;
+    b->exact_vars[lhs_root].offset = root_offset;
+    b->exact_vars[rhs_root].size += b->exact_vars[lhs_root].size;
+  } else {
+    if (!ixs_safe_neg(root_offset, &reverse_offset))
+      return true;
+    b->exact_vars[rhs_root].parent = lhs_root;
+    b->exact_vars[rhs_root].offset = reverse_offset;
+    b->exact_vars[lhs_root].size += b->exact_vars[rhs_root].size;
+  }
+  bounds_mark_semantic_changed(b);
+  bounds_cache_clear(b);
+  return true;
+}
+
+static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
+                                           ixs_node *rhs, int64_t *delta) {
+  ixs_var_bound *lhs_var;
+  ixs_var_bound *rhs_var;
+  size_t lhs_exact;
+  size_t rhs_exact;
+  size_t lhs_root;
+  size_t rhs_root;
+  int64_t lhs_offset;
+  int64_t rhs_offset;
+
+  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
+      lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
+    return false;
+  if (lhs == rhs) {
+    *delta = 0;
+    return true;
+  }
+  lhs_var = find_var(b, lhs->u.name);
+  rhs_var = find_var(b, rhs->u.name);
+  if (!lhs_var || !rhs_var ||
+      !bounds_exact_lookup(b, (size_t)(lhs_var - b->vars), &lhs_exact) ||
+      !bounds_exact_lookup(b, (size_t)(rhs_var - b->vars), &rhs_exact) ||
+      !bounds_exact_find(b, lhs_exact, &lhs_root, &lhs_offset) ||
+      !bounds_exact_find(b, rhs_exact, &rhs_root, &rhs_offset) ||
+      lhs_root != rhs_root)
+    return false;
+  return ixs_safe_sub(lhs_offset, rhs_offset, delta);
+}
+
 static bool bounds_difference_worklist_init(ixs_bounds *b,
                                             difference_worklist *work) {
   size_t count = b->ndifference_vars;
@@ -2182,6 +2478,19 @@ static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
                                             second_var != NULL);
 }
 
+static bool bounds_register_exact_reverse(
+    ixs_bounds *b, ixs_difference_constraint *const *index,
+    size_t index_capacity, ixs_node *lhs, ixs_node *rhs, size_t lhs_var,
+    size_t rhs_var, int64_t offset) {
+  int64_t reverse_offset;
+  size_t slot;
+  if (!ixs_safe_neg(offset, &reverse_offset))
+    return true;
+  slot = bounds_difference_index_slot(index, index_capacity, rhs, lhs,
+                                      reverse_offset);
+  return !index[slot] || bounds_union_exact(b, lhs_var, rhs_var, offset);
+}
+
 static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
                                              ixs_node *rhs, int64_t offset) {
   ixs_difference_constraint **index;
@@ -2243,6 +2552,10 @@ static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
   if (!bounds_validate_difference_edge(b, lhs_var, rhs_var, offset) ||
       b->contradiction)
     return;
+  if (!bounds_register_exact_reverse(b, index, index_capacity, lhs, rhs,
+                                     lhs_var, rhs_var, offset) ||
+      b->contradiction)
+    return;
   if (bounds_difference_edge_can_refine(b, edge))
     (void)bounds_propagate_difference_indices(b, lhs_var, rhs_var, true);
 }
@@ -2277,6 +2590,17 @@ static bool bounds_extract_unit_difference(ixs_node *expr, ixs_node **lhs,
     }
   }
   return *lhs && *rhs && *lhs != *rhs;
+}
+
+static bool bounds_exact_unit_difference_value(ixs_bounds *b, ixs_node *expr,
+                                               int64_t *value) {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  int64_t constant;
+  int64_t difference;
+  return bounds_extract_unit_difference(expr, &lhs, &rhs, &constant) &&
+         bounds_exact_symbol_difference(b, lhs, rhs, &difference) &&
+         ixs_safe_add(constant, difference, value);
 }
 
 static void bounds_add_difference_range(ixs_bounds *b, ixs_node *expr,
@@ -4090,15 +4414,16 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
 
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
-  ixs_node *canon;
+  ixs_node *canon = NULL;
   ixs_var_bound *var = NULL;
+  int64_t exact;
   if (!b)
     return ixs_interval_unknown();
   if (bounds_cacheable_expr(expr) && bounds_cache_lookup(b, expr, &iv))
     return iv;
 
   if (expr && expr->tag == IXS_SYM) {
-    /* Symbol lookup is linear; retain it through override intersection. */
+    /* Retain the indexed symbol result through override intersection. */
     var = find_var(b, expr->u.name);
     iv = var ? var->iv : ixs_interval_unknown();
   } else {
@@ -4112,9 +4437,30 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   }
   if (var && var->modulus > 0)
     iv = interval_intersect_congruence(iv, var->modulus, var->remainder);
+  if (bounds_exact_unit_difference_value(b, expr, &exact) ||
+      (canon && canon != expr &&
+       bounds_exact_unit_difference_value(b, canon, &exact)))
+    iv = iv_intersect(iv, ixs_interval_exact(exact, 1));
   if (bounds_cacheable_expr(expr))
     bounds_cache_store(b, expr, iv);
   return iv;
+}
+
+static bool bounds_exact_integer_difference(ixs_bounds *b, ixs_node *difference,
+                                            int64_t *delta) {
+  int64_t p;
+  int64_t q;
+  if (!b || !difference || !delta || b->oom || b->contradiction ||
+      ixs_node_is_sentinel(difference))
+    return false;
+  if (ixs_node_is_const(difference)) {
+    ixs_node_get_rat(difference, &p, &q);
+    if (q == 1) {
+      *delta = p;
+      return true;
+    }
+  }
+  return ixs_interval_is_point_int(ixs_bounds_get(b, difference), delta);
 }
 
 static bool bounds_interval_is_zero(ixs_interval iv) {
@@ -6794,19 +7140,10 @@ static ixs_check_result equivalence_core(equivalence_state *state,
                                          ixs_node *lhs, ixs_node *rhs,
                                          unsigned depth);
 
-static bool equivalence_constant_nonzero(ixs_node *node) {
-  int64_t p;
-  int64_t q;
-  if (!ixs_node_is_const(node))
-    return false;
-  ixs_node_get_rat(node, &p, &q);
-  (void)q;
-  return p != 0;
-}
-
 static ixs_check_result equivalence_difference(equivalence_state *state,
                                                ixs_node *lhs, ixs_node *rhs) {
   ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
+  int64_t delta;
   if (!difference) {
     state->oom = true;
     return IXS_CHECK_UNKNOWN;
@@ -6818,17 +7155,14 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
     state->oom = true;
     return IXS_CHECK_UNKNOWN;
   }
-  if (ixs_node_is_zero(difference))
-    return IXS_CHECK_TRUE;
-  if (equivalence_constant_nonzero(difference))
-    return IXS_CHECK_FALSE;
+  if (bounds_exact_integer_difference(state->bounds, difference, &delta))
+    return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
   return IXS_CHECK_UNKNOWN;
 }
 
 static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
                                       ixs_node *rhs, int64_t *delta) {
   ixs_node *difference = simp_sub(state->ctx, lhs, rhs);
-  int64_t p, q;
   if (!difference) {
     state->oom = true;
     return false;
@@ -6840,7 +7174,7 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
   }
   if (ixs_node_is_sentinel(difference))
     return false;
-  if (!ixs_node_is_const(difference)) {
+  if (!bounds_exact_integer_difference(state->bounds, difference, delta)) {
     difference = expand_impl(state->ctx, difference);
     if (!difference) {
       state->oom = true;
@@ -6853,16 +7187,8 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
       state->oom = true;
       return false;
     }
-    if (ixs_node_is_sentinel(difference))
-      return false;
   }
-  if (!ixs_node_is_const(difference))
-    return false;
-  ixs_node_get_rat(difference, &p, &q);
-  if (q != 1)
-    return false;
-  *delta = p;
-  return true;
+  return bounds_exact_integer_difference(state->bounds, difference, delta);
 }
 
 static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
@@ -7774,7 +8100,6 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   ixs_node *nodes[2] = {lhs, rhs};
   ixs_node *difference;
   int64_t result = 0;
-  int64_t q;
   bool ok = false;
   if (delta)
     *delta = 0;
@@ -7789,10 +8114,9 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   if (!difference || ixs_node_is_sentinel(difference))
     goto cleanup;
   difference = algebra_query_normalize(&scope, difference);
-  if (!difference || !ixs_node_is_const(difference))
+  if (!difference)
     goto cleanup;
-  ixs_node_get_rat(difference, &result, &q);
-  ok = q == 1;
+  ok = bounds_exact_integer_difference(&facts->bounds, difference, &result);
 
 cleanup:
   ok = algebra_query_finish(&scope, ok);

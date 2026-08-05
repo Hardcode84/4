@@ -83,11 +83,73 @@ def test_relational_exact_equality_noise_contract() -> None:
         facts.assume(ctx.eq(y, z))
     for i in range(RELATIONAL_CONTRACT_CHAIN_EDGES):
         noise = ctx.sym(f"relation_binding_noise_{i}")
-        loaded.assume(x - noise <= 0)
+        loaded.assume(y - noise <= i + 1)
 
-    assert ctx.equivalent(x, z, base) is ctx.equivalent(x, z, loaded)
-    assert ctx.constant_difference(x, z, base) == ctx.constant_difference(x, z, loaded)
-    assert ctx.range(x - z, facts=base) == ctx.range(x - z, facts=loaded)
+    assert ctx.equivalent(x, z, base) is True
+    assert ctx.equivalent(x, z, loaded) is True
+    assert ctx.constant_difference(x, z, base) == 0
+    assert ctx.constant_difference(x, z, loaded) == 0
+    assert ctx.range(x - z, facts=base) == (0, 0)
+    assert ctx.range(x - z, facts=loaded) == (0, 0)
+
+
+def test_relational_exact_equality_api_contract() -> None:
+    ctx = ixsimpl.Context()
+    x, y, z = (
+        ctx.sym(name)
+        for name in (
+            "relation_binding_api_x",
+            "relation_binding_api_y",
+            "relation_binding_api_z",
+        )
+    )
+
+    direct = ctx.facts()
+    direct.assume(ctx.eq(y, x + 4))
+    assert ctx.range(y - (x + 4), facts=direct) == (0, 0)
+    assert ctx.equivalent(y, x + 4, direct) is True
+    assert ctx.constant_difference(y, x, direct) == 4
+
+    complementary = ctx.facts()
+    complementary.assume(x - y <= 4)
+    complementary.assume(y - x <= -4)
+    assert ctx.range(x - y, facts=complementary) == (4, 4)
+    assert ctx.equivalent(x, y + 4, complementary) is True
+    assert ctx.constant_difference(x, y, complementary) == 4
+
+    nonaffine = ctx.facts()
+    nonaffine.assume(ctx.eq(x % 7, y % 5 + 4))
+    assert ctx.range(x % 7 - y % 5, facts=nonaffine) == (4, 4)
+    assert ctx.equivalent(x % 7, y % 5 + 4, nonaffine) is True
+    assert ctx.constant_difference(x % 7, y % 5, nonaffine) == 4
+
+    offset = ctx.facts()
+    offset.assume(ctx.eq(x, y + 3))
+    offset.assume(ctx.eq(y, z + 4))
+    assert ctx.range(x - z, facts=offset) == (7, 7)
+    assert ctx.equivalent(x, z + 7, offset) is True
+    assert ctx.constant_difference(x, z, offset) == 7
+
+    substituted = direct.subs({x: z})
+    assert ctx.range(y - (z + 4), facts=substituted) == (0, 0)
+    assert ctx.equivalent(y, z + 4, substituted) is True
+    assert ctx.constant_difference(y, z, substituted) == 4
+
+    one_sided = ctx.facts()
+    one_sided.assume(x <= y + 4)
+    assert ctx.equivalent(x, y + 4, one_sided) is None
+    assert ctx.constant_difference(x, y, one_sided) is None
+
+    scaled = ctx.facts()
+    scaled.assume(ctx.eq(2 * x, y))
+    assert ctx.equivalent(2 * x, y, scaled) is True
+    assert ctx.constant_difference(x, y, scaled) is None
+
+    overflow = ctx.facts()
+    overflow.assume(ctx.eq(x, y + (2**63 - 1)))
+    overflow.assume(ctx.eq(y, z + 1))
+    assert ctx.equivalent(x, z, overflow) is None
+    assert ctx.constant_difference(x, z, overflow) is None
 
 
 def test_relational_loop_bound_production_witness() -> None:
