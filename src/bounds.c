@@ -10,6 +10,8 @@
 #define BOUNDS_INIT_CAP 16
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_DIFFERENCE_INDEX_INIT_CAP 8u
+#define BOUNDS_EQUALITY_ENDPOINT_INDEX_INIT_CAP 8u
+#define BOUNDS_EQUALITY_INDEX_INIT_CAP 8u
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define ASSUMPTION_NODE_LIMIT 1024u
@@ -19,6 +21,8 @@
 #define RANGE_PW_CASE_LIMIT 1024u
 #define MOD_RANGE_ENUM_LIMIT 1024u
 #define DIFFERENCE_RELAX_LIMIT 256u
+#define EQUALITY_WALK_LIMIT 256u
+#define EQUALITY_QUERY_DEPTH_LIMIT 32u
 
 /* An immutable lhs <= rhs + offset edge. Variable indices survive append-only
  * growth and order-preserving forks, which safely share published edge nodes.
@@ -33,8 +37,30 @@ struct ixs_difference_constraint {
   int64_t offset;
 };
 
+/* Immutable arbitrary-expression equality edge. Endpoint indices survive
+ * append-only growth and order-preserving bounds forks. */
+struct ixs_equality_edge {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  ixs_equality_edge *next_lhs;
+  ixs_equality_edge *next_rhs;
+  size_t lhs_endpoint;
+  size_t rhs_endpoint;
+};
+
 static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
                                                const char *second);
+static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs);
+static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
+static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
+                                                              ixs_node *expr);
+static bool bounds_equality_walk_record(ixs_node **nodes, size_t *count,
+                                        ixs_node *expr);
+static bool bounds_equality_edge_neighbor(size_t endpoint_index,
+                                          ixs_equality_edge *edge,
+                                          ixs_node **neighbor,
+                                          ixs_equality_edge **next);
 
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
@@ -86,7 +112,8 @@ static bool bounds_cache_lookup(ixs_bounds *b, ixs_node *expr,
   if (!b || !expr || !out || !b->cache || b->cache_cap == BOUNDS_CACHE_DISABLED)
     return false;
   idx = expr->hash & (b->cache_cap - 1u);
-  if (b->cache[idx].expr != expr)
+  if (b->cache[idx].expr != expr ||
+      b->cache[idx].equality_disabled != (b->equality_disabled_depth != 0))
     return false;
   *out = b->cache[idx].iv;
   return true;
@@ -99,6 +126,7 @@ static void bounds_cache_store(ixs_bounds *b, ixs_node *expr, ixs_interval iv) {
   idx = expr->hash & (b->cache_cap - 1u);
   b->cache[idx].expr = expr;
   b->cache[idx].iv = iv;
+  b->cache[idx].equality_disabled = b->equality_disabled_depth != 0;
 }
 
 static bool bounds_cacheable_expr(ixs_node *expr) {
@@ -121,6 +149,14 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->difference_index = NULL;
   b->ndifferences = 0;
   b->difference_index_cap = 0;
+  b->equality_endpoints = NULL;
+  b->equality_endpoint_index = NULL;
+  b->nequality_endpoints = 0;
+  b->equality_endpoint_cap = 0;
+  b->equality_endpoint_index_cap = 0;
+  b->equality_index = NULL;
+  b->nequalities = 0;
+  b->equality_index_cap = 0;
   b->nonzero = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
@@ -132,6 +168,9 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
   b->oom = false;
+  b->equality_query_depth = 0;
+  b->equality_disabled_depth = 0;
+  memset(b->equality_query_stack, 0, sizeof(b->equality_query_stack));
   b->semantic_changed = NULL;
   if (b->vars)
     bounds_cache_alloc(b);
@@ -148,6 +187,46 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
 
 /* All bounds storage lives in the scratch arena; no per-object cleanup. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
+
+static bool bounds_fork_equalities(ixs_bounds *dst, const ixs_bounds *src) {
+  if (src->nequality_endpoints) {
+    dst->equality_endpoints = ixs_arena_alloc(
+        dst->scratch,
+        dst->equality_endpoint_cap * sizeof(*dst->equality_endpoints),
+        sizeof(void *));
+    if (!dst->equality_endpoints)
+      return false;
+    memcpy(dst->equality_endpoints, src->equality_endpoints,
+           src->nequality_endpoints * sizeof(*src->equality_endpoints));
+    if (!src->equality_endpoint_index || !src->equality_endpoint_index_cap ||
+        src->equality_endpoint_index_cap >
+            SIZE_MAX / sizeof(*dst->equality_endpoint_index))
+      return false;
+    dst->equality_endpoint_index =
+        ixs_arena_alloc(dst->scratch,
+                        dst->equality_endpoint_index_cap *
+                            sizeof(*dst->equality_endpoint_index),
+                        sizeof(void *));
+    if (!dst->equality_endpoint_index)
+      return false;
+    memcpy(dst->equality_endpoint_index, src->equality_endpoint_index,
+           src->equality_endpoint_index_cap *
+               sizeof(*src->equality_endpoint_index));
+  }
+  if (src->equality_index_cap) {
+    if (!src->equality_index ||
+        src->equality_index_cap > SIZE_MAX / sizeof(*dst->equality_index))
+      return false;
+    dst->equality_index = ixs_arena_alloc(
+        dst->scratch, src->equality_index_cap * sizeof(*dst->equality_index),
+        sizeof(void *));
+    if (!dst->equality_index)
+      return false;
+    memcpy(dst->equality_index, src->equality_index,
+           src->equality_index_cap * sizeof(*src->equality_index));
+  }
+  return true;
+}
 
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   if (!dst || !src || src->oom)
@@ -170,6 +249,16 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->difference_index = NULL;
   dst->ndifferences = src->ndifferences;
   dst->difference_index_cap = src->difference_index_cap;
+  dst->equality_endpoints = NULL;
+  dst->equality_endpoint_index = NULL;
+  dst->nequality_endpoints = src->nequality_endpoints;
+  dst->equality_endpoint_cap =
+      src->nequality_endpoints ? src->nequality_endpoints : 0;
+  dst->equality_endpoint_index_cap =
+      src->nequality_endpoints ? src->equality_endpoint_index_cap : 0;
+  dst->equality_index = NULL;
+  dst->nequalities = src->nequalities;
+  dst->equality_index_cap = src->equality_index_cap;
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
@@ -181,6 +270,10 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
   dst->oom = false;
+  dst->equality_query_depth = src->equality_query_depth;
+  dst->equality_disabled_depth = src->equality_disabled_depth;
+  memcpy(dst->equality_query_stack, src->equality_query_stack,
+         sizeof(dst->equality_query_stack));
   dst->semantic_changed = NULL;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
@@ -212,6 +305,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
     memcpy(dst->difference_index, src->difference_index,
            src->difference_index_cap * sizeof(*src->difference_index));
   }
+  if (!bounds_fork_equalities(dst, src))
+    return false;
   if (src->nnonzero) {
     dst->nonzero = ixs_arena_alloc(
         dst->scratch, dst->nonzero_cap * sizeof(*dst->nonzero), sizeof(void *));
@@ -1409,6 +1504,232 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_cache_clear(b);
 }
 
+static size_t
+bounds_equality_endpoint_slot(const size_t *index, size_t capacity,
+                              const ixs_equality_endpoint *endpoints,
+                              const ixs_node *expr) {
+  size_t slot = bounds_expr_hash_ptr(expr) & (capacity - 1u);
+  while (index[slot] && endpoints[index[slot] - 1u].expr != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static bool bounds_find_equality_endpoint(const ixs_bounds *b,
+                                          const ixs_node *expr,
+                                          size_t *endpoint_index) {
+  size_t slot;
+  if (!b || !expr || !endpoint_index || !b->equality_endpoint_index ||
+      !b->equality_endpoint_index_cap)
+    return false;
+  slot = bounds_equality_endpoint_slot(b->equality_endpoint_index,
+                                       b->equality_endpoint_index_cap,
+                                       b->equality_endpoints, expr);
+  if (!b->equality_endpoint_index[slot])
+    return false;
+  *endpoint_index = b->equality_endpoint_index[slot] - 1u;
+  return true;
+}
+
+/* Endpoint lookup is expected O(1); growth rehashes at 75% load. */
+static bool bounds_prepare_equality_endpoint_index(ixs_bounds *b, size_t count,
+                                                   size_t **prepared,
+                                                   size_t *prepared_capacity) {
+  size_t capacity = b->equality_endpoint_index_cap;
+  size_t *index;
+  size_t i;
+
+  if (capacity && count <= capacity - capacity / 4u) {
+    *prepared = b->equality_endpoint_index;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = BOUNDS_EQUALITY_ENDPOINT_INDEX_INIT_CAP;
+  while (count > capacity - capacity / 4u) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (capacity > SIZE_MAX / sizeof(*index))
+    return false;
+  index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  if (!index)
+    return false;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->nequality_endpoints; i++) {
+    size_t slot = bounds_equality_endpoint_slot(
+        index, capacity, b->equality_endpoints, b->equality_endpoints[i].expr);
+    index[slot] = i + 1u;
+  }
+  *prepared = index;
+  *prepared_capacity = capacity;
+  return true;
+}
+
+static bool bounds_get_or_create_equality_endpoint(ixs_bounds *b,
+                                                   ixs_node *expr,
+                                                   size_t *endpoint_index) {
+  ixs_equality_endpoint *endpoints;
+  size_t *index;
+  size_t endpoint_capacity;
+  size_t index_capacity;
+  size_t slot;
+
+  if (bounds_find_equality_endpoint(b, expr, endpoint_index))
+    return true;
+  if (b->nequality_endpoints == SIZE_MAX ||
+      !bounds_prepare_equality_endpoint_index(b, b->nequality_endpoints + 1u,
+                                              &index, &index_capacity))
+    return false;
+
+  endpoints = b->equality_endpoints;
+  endpoint_capacity = b->equality_endpoint_cap;
+  if (b->nequality_endpoints >= endpoint_capacity) {
+    if (endpoint_capacity > SIZE_MAX / 2u)
+      return false;
+    endpoint_capacity = endpoint_capacity ? endpoint_capacity * 2u : 4u;
+    if (endpoint_capacity > SIZE_MAX / sizeof(*endpoints))
+      return false;
+    endpoints = ixs_arena_alloc(
+        b->scratch, endpoint_capacity * sizeof(*endpoints), sizeof(void *));
+    if (!endpoints)
+      return false;
+    if (b->nequality_endpoints)
+      memcpy(endpoints, b->equality_endpoints,
+             b->nequality_endpoints * sizeof(*endpoints));
+  }
+
+  b->equality_endpoints = endpoints;
+  b->equality_endpoint_cap = endpoint_capacity;
+  b->equality_endpoint_index = index;
+  b->equality_endpoint_index_cap = index_capacity;
+  slot = bounds_equality_endpoint_slot(b->equality_endpoint_index,
+                                       b->equality_endpoint_index_cap,
+                                       b->equality_endpoints, expr);
+  b->equality_endpoints[b->nequality_endpoints].expr = expr;
+  b->equality_endpoints[b->nequality_endpoints].edges = NULL;
+  b->equality_endpoint_index[slot] = b->nequality_endpoints + 1u;
+  *endpoint_index = b->nequality_endpoints;
+  b->nequality_endpoints++;
+  return true;
+}
+
+static size_t bounds_equality_hash(ixs_node *lhs, ixs_node *rhs) {
+  uint64_t x = (uint64_t)bounds_expr_hash_ptr(lhs);
+  x ^= (uint64_t)bounds_expr_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
+       (x << 6) + (x >> 2);
+  x ^= x >> 33;
+  x *= UINT64_C(0xff51afd7ed558ccd);
+  x ^= x >> 33;
+  return (size_t)x;
+}
+
+static size_t bounds_equality_index_slot(ixs_equality_edge *const *index,
+                                         size_t capacity, ixs_node *lhs,
+                                         ixs_node *rhs) {
+  size_t slot = bounds_equality_hash(lhs, rhs) & (capacity - 1u);
+  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs))
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+/* Equality-edge lookup is expected O(1); growth rehashes at 75% load. */
+static bool bounds_prepare_equality_index(ixs_bounds *b, size_t count,
+                                          ixs_equality_edge ***prepared,
+                                          size_t *prepared_capacity) {
+  size_t capacity = b->equality_index_cap;
+  ixs_equality_edge **index;
+  size_t i;
+
+  if (capacity && count <= capacity - capacity / 4u) {
+    *prepared = b->equality_index;
+    *prepared_capacity = capacity;
+    return true;
+  }
+  if (!capacity)
+    capacity = BOUNDS_EQUALITY_INDEX_INIT_CAP;
+  while (count > capacity - capacity / 4u) {
+    if (capacity > SIZE_MAX / 2u)
+      return false;
+    capacity *= 2u;
+  }
+  if (capacity > SIZE_MAX / sizeof(*index))
+    return false;
+  index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  if (!index)
+    return false;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->equality_index_cap; i++) {
+    ixs_equality_edge *edge = b->equality_index[i];
+    size_t slot;
+    if (!edge)
+      continue;
+    slot = bounds_equality_index_slot(index, capacity, edge->lhs, edge->rhs);
+    index[slot] = edge;
+  }
+  *prepared = index;
+  *prepared_capacity = capacity;
+  return true;
+}
+
+static bool bounds_has_exact_equality(const ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs) {
+  size_t slot;
+  if (!b->equality_index || !b->equality_index_cap)
+    return false;
+  slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
+                                    lhs, rhs);
+  if (b->equality_index[slot])
+    return true;
+  slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
+                                    rhs, lhs);
+  return b->equality_index[slot] != NULL;
+}
+
+static void bounds_add_exact_equality(ixs_bounds *b, ixs_node *lhs,
+                                      ixs_node *rhs) {
+  ixs_equality_edge **index;
+  ixs_equality_edge *edge;
+  size_t lhs_endpoint;
+  size_t rhs_endpoint;
+  size_t index_capacity;
+  size_t slot;
+
+  if (!b || !lhs || !rhs || lhs == rhs || b->oom ||
+      bounds_has_exact_equality(b, lhs, rhs))
+    return;
+  if (!bounds_get_or_create_equality_endpoint(b, lhs, &lhs_endpoint) ||
+      !bounds_get_or_create_equality_endpoint(b, rhs, &rhs_endpoint) ||
+      b->nequalities == SIZE_MAX ||
+      !bounds_prepare_equality_index(b, b->nequalities + 1u, &index,
+                                     &index_capacity)) {
+    b->oom = true;
+    return;
+  }
+  edge = ixs_arena_alloc(b->scratch, sizeof(*edge), sizeof(void *));
+  if (!edge) {
+    b->oom = true;
+    return;
+  }
+  edge->lhs = lhs;
+  edge->rhs = rhs;
+  edge->lhs_endpoint = lhs_endpoint;
+  edge->rhs_endpoint = rhs_endpoint;
+  edge->next_lhs = b->equality_endpoints[lhs_endpoint].edges;
+  edge->next_rhs = b->equality_endpoints[rhs_endpoint].edges;
+  b->equality_endpoints[lhs_endpoint].edges = edge;
+  b->equality_endpoints[rhs_endpoint].edges = edge;
+  b->equality_index = index;
+  b->equality_index_cap = index_capacity;
+  slot = bounds_equality_index_slot(index, index_capacity, lhs, rhs);
+  index[slot] = edge;
+  b->nequalities++;
+  bounds_mark_semantic_changed(b);
+  bounds_cache_clear(b);
+}
+
 static size_t bounds_difference_hash(ixs_node *lhs, ixs_node *rhs,
                                      int64_t offset) {
   uint64_t x = (uint64_t)bounds_expr_hash_ptr(lhs);
@@ -1766,6 +2087,14 @@ bounds_exact_difference_result(const bounds_exact_difference_walk *walk,
   return false;
 }
 
+static bool bounds_exact_difference_query_valid(const ixs_bounds *b,
+                                                const ixs_node *lhs,
+                                                const ixs_node *rhs,
+                                                const int64_t *delta) {
+  return b && lhs && rhs && delta && !b->oom && !b->contradiction &&
+         lhs->tag == IXS_SYM && rhs->tag == IXS_SYM;
+}
+
 /* Complementary constraints lhs <= rhs + k and rhs <= lhs - k establish
  * lhs == rhs + k. Traverse only those exact pairs, with a fixed work and
  * incident-edge budget, and reject inconsistent or unrepresentable paths. */
@@ -1776,8 +2105,7 @@ static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
   ixs_var_bound *rhs_var;
   size_t lhs_index;
 
-  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
-      lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
+  if (!bounds_exact_difference_query_valid(b, lhs, rhs, delta))
     return false;
   if (lhs == rhs) {
     *delta = 0;
@@ -1975,6 +2303,8 @@ static bool bounds_add_affine_zero_cmp(ixs_bounds *b, ixs_node *lhs,
 }
 
 static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
+  ixs_node *equality_lhs;
+  ixs_node *equality_rhs;
   ixs_node *lhs;
   ixs_node *rhs;
   ixs_cmp_op op;
@@ -1989,6 +2319,10 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
   lhs = a->u.binary.lhs;
   rhs = a->u.binary.rhs;
   op = a->u.binary.cmp_op;
+
+  if (op == IXS_CMP_EQ &&
+      extract_cmp_node_equality(a, &equality_lhs, &equality_rhs))
+    bounds_add_exact_equality(b, equality_lhs, equality_rhs);
 
   if (op == IXS_CMP_NE) {
     if (ixs_node_is_zero(rhs))
@@ -2675,23 +3009,85 @@ static bool bounds_interval_point_rational(ixs_interval iv, int64_t *p,
   return true;
 }
 
-IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
-                                                            ixs_node *expr) {
+static ixs_check_result
+bounds_check_integer_valued_without_equality(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
-  int64_t p, q;
+  int64_t p;
+  int64_t q;
   bool proven;
-  if (!b || !expr || b->oom || ixs_bounds_has_empty(b))
-    return IXS_CHECK_UNKNOWN;
+  b->equality_disabled_depth++;
   proven = ixs_bounds_is_integer_with_divinfo(b, expr);
-  if (b->oom)
-    return IXS_CHECK_UNKNOWN;
-  if (proven)
+  if (proven) {
+    b->equality_disabled_depth--;
     return IXS_CHECK_TRUE;
-  iv = ixs_bounds_get(b, expr);
+  }
+  iv = bounds_get_intrinsic(b, expr);
+  b->equality_disabled_depth--;
   if (b->oom || !bounds_interval_point_rational(iv, &p, &q))
     return IXS_CHECK_UNKNOWN;
   (void)p;
   return q == 1 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+}
+
+static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
+                                                        ixs_node *expr) {
+  ixs_node *nodes[EQUALITY_WALK_LIMIT];
+  size_t head = 0;
+  size_t count = 0;
+  size_t visited_edges = 0;
+  size_t root_endpoint;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (!expr)
+    return IXS_CHECK_UNKNOWN;
+  result = bounds_check_integer_valued_without_equality(b, expr);
+  if (!b->nequalities ||
+      !bounds_find_equality_endpoint(b, expr, &root_endpoint) ||
+      bounds_check_defined_without_equality(b, expr) != IXS_CHECK_TRUE ||
+      !bounds_equality_walk_record(nodes, &count, expr))
+    return result;
+
+  while (head < count) {
+    ixs_node *current = nodes[head++];
+    size_t endpoint_index;
+    ixs_equality_edge *edge;
+    ixs_check_result current_result =
+        bounds_check_integer_valued_without_equality(b, current);
+    if (current_result != IXS_CHECK_UNKNOWN) {
+      if (result != IXS_CHECK_UNKNOWN && result != current_result)
+        return IXS_CHECK_UNKNOWN;
+      result = current_result;
+    }
+    if (!bounds_find_equality_endpoint(b, current, &endpoint_index))
+      continue;
+    edge = b->equality_endpoints[endpoint_index].edges;
+    while (edge) {
+      ixs_equality_edge *next;
+      ixs_node *neighbor;
+      size_t old_count = count;
+      if (visited_edges++ >= EQUALITY_WALK_LIMIT ||
+          !bounds_equality_edge_neighbor(endpoint_index, edge, &neighbor,
+                                         &next))
+        return IXS_CHECK_UNKNOWN;
+      edge = next;
+      if (!bounds_equality_walk_record(nodes, &count, neighbor))
+        return IXS_CHECK_UNKNOWN;
+      if (count == old_count)
+        continue;
+      if (bounds_check_defined_without_equality(b, neighbor) != IXS_CHECK_TRUE)
+        count--;
+    }
+  }
+  return result;
+}
+
+IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
+                                                            ixs_node *expr) {
+  if (!b || !expr || b->oom || ixs_bounds_has_empty(b))
+    return IXS_CHECK_UNKNOWN;
+  if (b->equality_disabled_depth != 0)
+    return bounds_check_integer_valued_without_equality(b, expr);
+  return bounds_project_equality_integer(b, expr);
 }
 
 static uint64_t bounds_int64_magnitude(int64_t value) {
@@ -3618,7 +4014,7 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
   }
 }
 
-IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
+static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
   ixs_node *canon;
   ixs_node *difference_lhs;
@@ -3627,9 +4023,11 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   int64_t constant;
   int64_t symbol_delta;
   int64_t exact;
+  bool cacheable;
   if (!b)
     return ixs_interval_unknown();
-  if (bounds_cacheable_expr(expr) && bounds_cache_lookup(b, expr, &iv))
+  cacheable = bounds_cacheable_expr(expr);
+  if (cacheable && bounds_cache_lookup(b, expr, &iv))
     return iv;
 
   iv = bounds_get_propagated(b, expr);
@@ -3650,9 +4048,143 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
                                      &symbol_delta) &&
       ixs_safe_add(constant, symbol_delta, &exact))
     iv = iv_intersect(iv, ixs_interval_exact(exact, 1));
-  if (bounds_cacheable_expr(expr))
+  if (cacheable)
     bounds_cache_store(b, expr, iv);
   return iv;
+}
+
+static ixs_interval bounds_get_without_equality(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval iv;
+  b->equality_disabled_depth++;
+  iv = bounds_get_intrinsic(b, expr);
+  b->equality_disabled_depth--;
+  return iv;
+}
+
+static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
+                                                              ixs_node *expr) {
+  ixs_check_result result;
+  b->equality_disabled_depth++;
+  result = ixs_bounds_check_defined(b, expr);
+  b->equality_disabled_depth--;
+  return result;
+}
+
+static bool bounds_equality_walk_record(ixs_node **nodes, size_t *count,
+                                        ixs_node *expr) {
+  size_t i;
+  for (i = 0; i < *count; i++) {
+    if (nodes[i] == expr)
+      return true;
+  }
+  if (*count >= EQUALITY_WALK_LIMIT)
+    return false;
+  nodes[(*count)++] = expr;
+  return true;
+}
+
+static bool bounds_equality_edge_neighbor(size_t endpoint_index,
+                                          ixs_equality_edge *edge,
+                                          ixs_node **neighbor,
+                                          ixs_equality_edge **next) {
+  if (edge->lhs_endpoint == endpoint_index) {
+    *neighbor = edge->rhs;
+    *next = edge->next_lhs;
+    return true;
+  }
+  if (edge->rhs_endpoint == endpoint_index) {
+    *neighbor = edge->lhs;
+    *next = edge->next_rhs;
+    return true;
+  }
+  return false;
+}
+
+/* Walk only the equality component incident to expr. Every edge is usable
+ * only after independent structural definedness proofs for both endpoints. */
+static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
+                                                  ixs_interval intrinsic) {
+  ixs_node *nodes[EQUALITY_WALK_LIMIT];
+  size_t head = 0;
+  size_t count = 0;
+  size_t visited_edges = 0;
+  size_t root_endpoint;
+  ixs_interval result = intrinsic;
+
+  if (!expr || !b->nequalities ||
+      !bounds_find_equality_endpoint(b, expr, &root_endpoint) ||
+      bounds_check_defined_without_equality(b, expr) != IXS_CHECK_TRUE ||
+      !bounds_equality_walk_record(nodes, &count, expr))
+    return intrinsic;
+
+  while (head < count) {
+    ixs_node *current = nodes[head++];
+    size_t endpoint_index;
+    ixs_equality_edge *edge;
+    if (!bounds_find_equality_endpoint(b, current, &endpoint_index))
+      continue;
+    edge = b->equality_endpoints[endpoint_index].edges;
+    while (edge) {
+      ixs_equality_edge *next;
+      ixs_node *neighbor;
+      ixs_interval peer;
+      ixs_interval merged;
+      size_t old_count = count;
+      if (visited_edges++ >= EQUALITY_WALK_LIMIT ||
+          !bounds_equality_edge_neighbor(endpoint_index, edge, &neighbor,
+                                         &next))
+        return intrinsic;
+      edge = next;
+      if (!bounds_equality_walk_record(nodes, &count, neighbor))
+        return intrinsic;
+      if (count == old_count)
+        continue;
+      if (bounds_check_defined_without_equality(b, neighbor) !=
+          IXS_CHECK_TRUE) {
+        count--;
+        continue;
+      }
+      peer = bounds_get_without_equality(b, neighbor);
+      if (!peer.valid)
+        continue;
+      merged = result.valid ? iv_intersect(result, peer) : peer;
+      if (ixs_interval_is_empty(merged))
+        return ixs_interval_unknown();
+      result = merged;
+    }
+  }
+  return result;
+}
+
+static bool bounds_equality_query_active(const ixs_bounds *b,
+                                         const ixs_node *expr) {
+  unsigned i;
+  for (i = 0; i < b->equality_query_depth; i++) {
+    if (b->equality_query_stack[i] == expr)
+      return true;
+  }
+  return false;
+}
+
+IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval result;
+  if (!b)
+    return ixs_interval_unknown();
+  if (!b->nequalities)
+    return bounds_get_intrinsic(b, expr);
+  if (b->equality_disabled_depth != 0)
+    return bounds_get_intrinsic(b, expr);
+  if (b->equality_query_depth >= EQUALITY_QUERY_DEPTH_LIMIT ||
+      bounds_equality_query_active(b, expr))
+    return bounds_get_without_equality(b, expr);
+
+  b->equality_query_stack[b->equality_query_depth++] = expr;
+  result = bounds_get_intrinsic(b, expr);
+  if (!b->oom)
+    result = bounds_project_equality_range(b, expr, result);
+  b->equality_query_depth--;
+  b->equality_query_stack[b->equality_query_depth] = NULL;
+  return result;
 }
 
 static bool bounds_exact_integer_difference(ixs_bounds *b, ixs_node *difference,
@@ -5595,6 +6127,27 @@ static bool bounds_transfer_substituted_exprs(ixs_bounds *dst,
   return true;
 }
 
+static bool bounds_transfer_substituted_equalities(
+    ixs_bounds *dst, const ixs_bounds *src, ixs_ctx *ctx, uint32_t nsubs,
+    ixs_node *const *targets, ixs_node *const *replacements) {
+  size_t i;
+  for (i = 0; i < src->equality_index_cap; i++) {
+    ixs_equality_edge *edge = src->equality_index[i];
+    ixs_node *lhs;
+    ixs_node *rhs;
+    if (!edge)
+      continue;
+    lhs = simp_subs_multi(ctx, edge->lhs, nsubs, targets, replacements);
+    rhs = simp_subs_multi(ctx, edge->rhs, nsubs, targets, replacements);
+    if (!lhs || !rhs || ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
+      return false;
+    bounds_add_exact_equality(dst, lhs, rhs);
+    if (dst->oom)
+      return false;
+  }
+  return true;
+}
+
 static bool bounds_transfer_substituted_vars(ixs_bounds *dst,
                                              const ixs_bounds *src,
                                              ixs_ctx *ctx, uint32_t nsubs,
@@ -5667,6 +6220,8 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
     bounds_mark_contradiction(&candidate);
   if (!bounds_transfer_substituted_exprs(&candidate, &src->bounds, ctx, nsubs,
                                          targets, replacements) ||
+      !bounds_transfer_substituted_equalities(&candidate, &src->bounds, ctx,
+                                              nsubs, targets, replacements) ||
       !bounds_transfer_substituted_vars(&candidate, &src->bounds, ctx, nsubs,
                                         targets, replacements) ||
       !bounds_transfer_substituted_nonzero(&candidate, &src->bounds, ctx, nsubs,

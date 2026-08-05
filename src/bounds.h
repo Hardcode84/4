@@ -29,6 +29,7 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
+typedef struct ixs_equality_edge ixs_equality_edge;
 
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
@@ -46,7 +47,13 @@ typedef struct {
 
 typedef struct {
   ixs_node *expr;
+  ixs_equality_edge *edges;
+} ixs_equality_endpoint;
+
+typedef struct {
+  ixs_node *expr;
   ixs_interval iv;
+  bool equality_disabled;
 } ixs_bounds_cache_entry;
 
 typedef struct {
@@ -62,6 +69,14 @@ typedef struct {
   ixs_difference_constraint **difference_index;
   size_t ndifferences;
   size_t difference_index_cap;
+  ixs_equality_endpoint *equality_endpoints;
+  size_t *equality_endpoint_index;
+  size_t nequality_endpoints;
+  size_t equality_endpoint_cap;
+  size_t equality_endpoint_index_cap;
+  ixs_equality_edge **equality_index;
+  size_t nequalities;
+  size_t equality_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;
@@ -73,6 +88,9 @@ typedef struct {
   bool empty_cache_valid;
   bool empty_cache_value;
   bool oom;
+  unsigned equality_query_depth;
+  unsigned equality_disabled_depth;
+  ixs_node *equality_query_stack[32];
   bool *semantic_changed; /* optional fact-mutation observer */
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;

@@ -1301,6 +1301,8 @@ static void test_bounds_check_mask_fact(void) {
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *assume = ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 15)), IXS_CMP_EQ,
                              ixs_int(ctx, 5));
+  ixs_node *self_mask = ixs_and(ctx, x, ixs_int(ctx, 87));
+  ixs_node *self_assume = ixs_cmp(ctx, self_mask, IXS_CMP_EQ, x);
 
   CHECK(ixs_check(ctx,
                   ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 7)), IXS_CMP_EQ,
@@ -1314,6 +1316,8 @@ static void test_bounds_check_mask_fact(void) {
                   ixs_cmp(ctx, ixs_and(ctx, x, ixs_int(ctx, 16)), IXS_CMP_EQ,
                           ixs_int(ctx, 0)),
                   &assume, 1) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check(ctx, ixs_cmp(ctx, self_mask, IXS_CMP_EQ, ixs_int(ctx, 1)),
+                  &self_assume, 1) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
 }
@@ -1969,6 +1973,132 @@ static void test_public_exact_equality_relations(void) {
       overflow, ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 1)))));
   CHECK(!ixs_constant_difference_facts(overflow, x, z, &delta));
   CHECK(ixs_equivalent_facts(overflow, x, z) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void check_public_integer_range(ixs_facts *facts, ixs_node *expr,
+                                       int64_t lower, int64_t upper) {
+  ixs_range_result range;
+  CHECK(ixs_range_facts(facts, expr, &range));
+  CHECK(range.has_lower && range.lower_p == lower && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == upper && range.upper_q == 1);
+}
+
+static void test_public_exact_equality_range_projection(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *s = ixs_sym(ctx, "equality_projection_s");
+  ixs_node *d = ixs_sym(ctx, "equality_projection_d");
+  ixs_node *x = ixs_sym(ctx, "equality_projection_x");
+  ixs_node *y = ixs_sym(ctx, "equality_projection_y");
+  ixs_node *z = ixs_sym(ctx, "equality_projection_z");
+  ixs_node *two32 = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_node *s_wrap32 = ixs_mod(ctx, s, two32);
+  ixs_node *s_wrap_d = ixs_mod(ctx, s, d);
+  ixs_node *wrap32_equality = ixs_cmp(ctx, s, IXS_CMP_EQ, s_wrap32);
+  ixs_node *dynamic_equality = ixs_cmp(ctx, s, IXS_CMP_EQ, s_wrap_d);
+  ixs_node *d_is_eight = ixs_cmp(ctx, d, IXS_CMP_EQ, eight);
+  ixs_node *forward_predicates[2] = {dynamic_equality, d_is_eight};
+  ixs_node *reverse_predicates[2] = {d_is_eight, dynamic_equality};
+  ixs_node *floored = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4)));
+  ixs_node *floored_wrap = ixs_mod(ctx, floored, sixteen);
+  ixs_node *first = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *second = ixs_ceil(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)));
+  ixs_node *second_wrap = ixs_mod(ctx, second, sixteen);
+  ixs_node *transitive_predicates[2] = {
+      ixs_cmp(ctx, first, IXS_CMP_EQ, second),
+      ixs_cmp(ctx, second, IXS_CMP_EQ, second_wrap)};
+  ixs_node *reverse_transitive_predicates[2] = {transitive_predicates[1],
+                                                transitive_predicates[0]};
+  ixs_node *partial = ixs_floor(ctx, ixs_div(ctx, x, d));
+  ixs_node *bounded = ixs_mod(ctx, y, eight);
+  ixs_node *partial_predicates[2] = {
+      ixs_cmp(ctx, s, IXS_CMP_EQ, partial),
+      ixs_cmp(ctx, partial, IXS_CMP_EQ, bounded)};
+  ixs_node *d_nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0));
+  ixs_node *ratio = ixs_div(ctx, x, d);
+  ixs_node *ratio_equality = ixs_cmp(ctx, ratio, IXS_CMP_EQ, z);
+  ixs_range_result half = {.has_lower = true,
+                           .has_upper = true,
+                           .lower_p = 1,
+                           .lower_q = 2,
+                           .upper_p = 1,
+                           .upper_q = 2};
+  ixs_facts *wrap32 = ixs_facts_create(ctx);
+  ixs_facts *forward = ixs_facts_create(ctx);
+  ixs_facts *reverse = ixs_facts_create(ctx);
+  ixs_facts *equality_first = ixs_facts_create(ctx);
+  ixs_facts *divisor_first = ixs_facts_create(ctx);
+  ixs_facts *arbitrary = ixs_facts_create(ctx);
+  ixs_facts *transitive = ixs_facts_create(ctx);
+  ixs_facts *reverse_transitive = ixs_facts_create(ctx);
+  ixs_facts *partial_facts = ixs_facts_create(ctx);
+  ixs_facts *integer_facts = ixs_facts_create(ctx);
+  ixs_facts *integer_conflict = ixs_facts_create(ctx);
+  ixs_facts *range_conflict = ixs_facts_create(ctx);
+  ixs_facts *substitution_source = ixs_facts_create(ctx);
+  ixs_facts *substitution_result = ixs_facts_create(ctx);
+  ixs_node *substituted_floored =
+      ixs_floor(ctx, ixs_div(ctx, z, ixs_int(ctx, 4)));
+  ixs_range_result range;
+
+  CHECK(ixs_facts_assume_pred(wrap32, wrap32_equality));
+  check_public_integer_range(wrap32, s, 0, INT64_C(4294967295));
+
+  CHECK(ixs_facts_assume_preds(forward, forward_predicates, 2));
+  CHECK(ixs_facts_assume_preds(reverse, reverse_predicates, 2));
+  check_public_integer_range(forward, s, 0, 7);
+  check_public_integer_range(reverse, s, 0, 7);
+
+  CHECK(ixs_facts_assume_pred(equality_first, dynamic_equality));
+  CHECK(!ixs_range_facts(equality_first, s, &range));
+  CHECK(ixs_facts_assume_pred(equality_first, d_is_eight));
+  check_public_integer_range(equality_first, s, 0, 7);
+  CHECK(ixs_facts_assume_pred(divisor_first, d_is_eight));
+  CHECK(ixs_facts_assume_pred(divisor_first, dynamic_equality));
+  check_public_integer_range(divisor_first, s, 0, 7);
+
+  CHECK(ixs_facts_assume_pred(arbitrary,
+                              ixs_cmp(ctx, floored, IXS_CMP_EQ, floored_wrap)));
+  check_public_integer_range(arbitrary, floored, 0, 15);
+
+  CHECK(ixs_facts_assume_pred(substitution_source,
+                              ixs_cmp(ctx, floored, IXS_CMP_EQ, floored_wrap)));
+  CHECK(ixs_facts_substitute(substitution_result, substitution_source, x, z));
+  check_public_integer_range(substitution_result, substituted_floored, 0, 15);
+
+  CHECK(ixs_facts_assume_preds(transitive, transitive_predicates, 2));
+  CHECK(ixs_facts_assume_preds(reverse_transitive,
+                               reverse_transitive_predicates, 2));
+  check_public_integer_range(transitive, first, 0, 15);
+  check_public_integer_range(reverse_transitive, first, 0, 15);
+
+  CHECK(ixs_facts_assume_preds(partial_facts, partial_predicates, 2));
+  CHECK(ixs_check_defined_facts(partial_facts, partial) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_range_facts(partial_facts, s, &range));
+  CHECK(ixs_facts_assume_pred(partial_facts, d_nonzero));
+  CHECK(ixs_check_defined_facts(partial_facts, partial) == IXS_CHECK_TRUE);
+  check_public_integer_range(partial_facts, s, 0, 7);
+
+  CHECK(ixs_facts_assume_pred(integer_facts, ratio_equality));
+  CHECK(ixs_check_integer_valued_facts(integer_facts, ratio) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(integer_facts, d_is_eight));
+  CHECK(ixs_check_integer_valued_facts(integer_facts, ratio) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(integer_conflict, ratio_equality));
+  CHECK(ixs_facts_assume_pred(integer_conflict, d_is_eight));
+  CHECK(ixs_facts_assume_range(integer_conflict, ratio, &half));
+  CHECK(ixs_check_integer_valued_facts(integer_conflict, ratio) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      range_conflict, ixs_cmp(ctx, s, IXS_CMP_EQ, ixs_mod(ctx, s, eight))));
+  CHECK(ixs_facts_assume_pred(range_conflict,
+                              ixs_cmp(ctx, s, IXS_CMP_EQ, sixteen)));
+  CHECK(!ixs_range_facts(range_conflict, s, &range));
 
   ixs_ctx_destroy(ctx);
 }
@@ -5884,6 +6014,7 @@ int main(void) {
   test_public_range_congruence_tightens_endpoints();
   test_public_range_difference_constraint_propagation();
   test_public_exact_equality_relations();
+  test_public_exact_equality_range_projection();
   test_public_range_composite_predicate_fact();
   test_public_facts_batch_preserves_affine_range();
   test_public_facts_batch_a4w4_order_independent();

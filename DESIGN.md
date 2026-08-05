@@ -1224,6 +1224,27 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   remain bounded independently of the total fact state. A one-sided edge is
   never treated as equality; inconsistent, over-budget, or unrepresentable
   paths fail conservatively.
+- **Arbitrary-expression equality classes**: exact comparison facts whose
+  canonical form is `a - b == 0` retain a bidirectional edge between the
+  hash-consed expression nodes `a` and `b`; neither endpoint has to be a
+  symbol. An open-addressed endpoint index provides expected O(1) adjacency
+  lookup, so range and integrality queries visit only the incident equality
+  component, never the complete fact state. A query inspects at most 256 edge
+  incidences and nests through at most 32 equality-aware range queries.
+  Ranges from independently defined members are intersected and integrality
+  is transferred with conservative tri-state agreement. This projects the
+  intrinsic `[0, 2^32-1]` range of `Mod(s, 2^32)` through the exact fact
+  `s == Mod(s, 2^32)`, including across transitive classes and regardless of
+  fact insertion order. Conflicting, over-budget, or unsupported classes
+  return unknown.
+
+  Equality never proves an endpoint defined. Before traversing an edge, both
+  endpoints must pass independent structural definedness checks with equality
+  projection disabled. Those checks and their domain-guard range queries use
+  separately tagged cache entries, so `s == Mod(s, m)` cannot recurse through
+  itself and an equality mentioning `floor(x/d)` cannot supply the missing
+  `d != 0` proof. Once that independent fact arrives, the retained edge becomes
+  usable without replaying older predicates.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
@@ -1669,12 +1690,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   contiguous known-low-bit prefix is treated as a congruence, and power-of-two
   state transfers only for `b == 0` with positive power-of-two `a`. Thus
   `8 | y` transferred through `y -> 2*K` proves `4 | K`, not `8 | K`.
-  Transferred ranges and nonzero constraints remain attached to the complete
-  substituted expression even when it is nonlinear; no symbol record is
-  guessed for unsupported congruence or bit facts. In-place transfer is additive:
-  original facts count as pre-existing destination facts. Validation or OOM
-  failure retains the old payload but poisons the destination, preventing
-  queries from observing a partially transferred set.
+  Transferred ranges, exact arbitrary-expression equality edges, and nonzero
+  constraints remain attached to the complete substituted expression even
+  when it is nonlinear; no symbol record is guessed for unsupported congruence
+  or bit facts. In-place transfer is additive: original facts count as
+  pre-existing destination facts. Validation or OOM failure retains the old
+  payload but poisons the destination, preventing queries from observing a
+  partially transferred set.
 
 The `IXS_MUL` propagation rule in `bounds_get_propagated`:
 

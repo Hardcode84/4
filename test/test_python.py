@@ -2533,6 +2533,81 @@ def test_fact_backed_exact_equality_relations() -> None:
     assert ctx.equivalent(x, y + 4, one_sided) is None
 
 
+def test_fact_backed_exact_equality_projects_range_and_integrality() -> None:
+    ctx = ixsimpl.Context()
+    s, d, x, y, z = (
+        ctx.sym(name)
+        for name in (
+            "equality_projection_s",
+            "equality_projection_d",
+            "equality_projection_x",
+            "equality_projection_y",
+            "equality_projection_z",
+        )
+    )
+
+    wrap32 = ctx.facts()
+    wrap32.assume(ctx.eq(s, s % (2**32)))
+    assert ctx.range(s, facts=wrap32) == (0, 2**32 - 1)
+
+    dynamic_equality = ctx.eq(s, s % d)
+    d_is_eight = ctx.eq(d, 8)
+    forward = ctx.facts()
+    reverse = ctx.facts()
+    forward.assume_many([dynamic_equality, d_is_eight])
+    reverse.assume_many([d_is_eight, dynamic_equality])
+    assert ctx.range(s, facts=forward) == (0, 7)
+    assert ctx.range(s, facts=reverse) == (0, 7)
+
+    sequential = ctx.facts()
+    sequential.assume(dynamic_equality)
+    assert ctx.range(s, facts=sequential) is None
+    sequential.assume(d_is_eight)
+    assert ctx.range(s, facts=sequential) == (0, 7)
+
+    floored = ixsimpl.floor(x / 4)
+    arbitrary = ctx.facts()
+    arbitrary.assume(ctx.eq(floored, floored % 16))
+    assert ctx.range(floored, facts=arbitrary) == (0, 15)
+    substituted = arbitrary.subs(x, z)
+    assert ctx.range(ixsimpl.floor(z / 4), facts=substituted) == (0, 15)
+
+    first = ixsimpl.floor(x / 2)
+    second = ixsimpl.ceil(y / 3)
+    transitive = ctx.facts()
+    reverse_transitive = ctx.facts()
+    transitive.assume_many([ctx.eq(first, second), ctx.eq(second, second % 16)])
+    reverse_transitive.assume_many([ctx.eq(second, second % 16), ctx.eq(first, second)])
+    assert ctx.range(first, facts=transitive) == (0, 15)
+    assert ctx.range(first, facts=reverse_transitive) == (0, 15)
+
+    partial = ixsimpl.floor(x / d)
+    partial_facts = ctx.facts()
+    partial_facts.assume_many([ctx.eq(s, partial), ctx.eq(partial, y % 8)])
+    assert ctx.defined(partial, facts=partial_facts) is None
+    assert ctx.range(s, facts=partial_facts) is None
+    partial_facts.assume(ctx.ne(d, 0))
+    assert ctx.defined(partial, facts=partial_facts) is True
+    assert ctx.range(s, facts=partial_facts) == (0, 7)
+
+    ratio = x / d
+    integer_facts = ctx.facts()
+    integer_facts.assume(ctx.eq(ratio, z))
+    assert ctx.integer_valued(ratio, facts=integer_facts) is None
+    integer_facts.assume(d_is_eight)
+    assert ctx.integer_valued(ratio, facts=integer_facts) is True
+
+    integer_conflict = ctx.facts()
+    integer_conflict.assume_many([ctx.eq(ratio, z), d_is_eight])
+    integer_conflict.assume_range(ratio, Fraction(1, 2), Fraction(1, 2))
+    assert ctx.integer_valued(ratio, facts=integer_conflict) is None
+
+    range_conflict = ctx.facts()
+    range_conflict.assume(ctx.eq(s, s % 8))
+    range_conflict.assume(ctx.eq(s, 16))
+    assert ctx.range(s, facts=range_conflict) is None
+
+
 def test_fact_backed_algebra_helpers() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("algebra_binding_x")
