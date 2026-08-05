@@ -2753,6 +2753,15 @@ static void test_round_extract_rat_split(void) {
                              ixs_div(ctx, fl_x16, ixs_int(ctx, 2))));
   ixs_node *expected_e = ixs_add(ctx, ixs_int(ctx, -3), inner_e);
   CHECK(e == expected_e);
+
+  /* The mathematical floor of INT64_MIN/3 is one below the representable
+   * product needed to split the rational constant.  Leave the rounding node
+   * intact when that checked split cannot be formed. */
+  ixs_node *extreme = ixs_add(ctx, ixs_rat(ctx, INT64_MIN, 3),
+                              ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *extreme_ceil = ixs_ceil(ctx, extreme);
+  CHECK(extreme_ceil && ixs_node_tag(extreme_ceil) == IXS_CEIL);
+  CHECK(ixs_node_unary_arg(extreme_ceil) == extreme);
 }
 
 static void test_floor_drop_const_sym(void) {
