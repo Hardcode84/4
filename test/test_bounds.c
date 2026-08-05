@@ -1456,6 +1456,90 @@ static void test_public_range_rational(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_integer_range(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "integer_range_x");
+  ixs_node *y = ixs_sym(ctx, "integer_range_y");
+  ixs_node *bounded[2];
+  ixs_node *composite = ixs_add(
+      ctx, ixs_mul(ctx, ixs_int(ctx, 2), ixs_mul(ctx, x, y)), ixs_int(ctx, 1));
+  ixs_node *x_mod_four = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), y);
+  ixs_range_result input = {true, true, 1, 2, 19, 2};
+  ixs_integer_range_result result;
+  ixs_facts *rounded = ixs_facts_create(ctx);
+  ixs_facts *one_sided = ixs_facts_create(ctx);
+  ixs_facts *aligned = ixs_facts_create(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *overflow = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  bounded[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_rat(ctx, 1, 2));
+  bounded[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_rat(ctx, 19, 2));
+  CHECK(ixs_integer_range(ctx, x, bounded, 2, &result));
+  CHECK(result.has_lower && result.lower == 1);
+  CHECK(result.has_upper && result.upper == 9);
+  CHECK(!ixs_integer_range(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), bounded, 2,
+                           &result));
+  CHECK(!result.has_lower && !result.has_upper);
+  CHECK(!ixs_integer_range(ctx, reciprocal, NULL, 0, &result));
+  CHECK(!result.has_lower && !result.has_upper);
+  CHECK(!ixs_integer_range(ctx, x, NULL, 0, NULL));
+
+  CHECK(ixs_facts_assume_range(rounded, x, &input));
+  CHECK(ixs_integer_range_facts(rounded, x, &result));
+  CHECK(result.has_lower && result.lower == 1);
+  CHECK(result.has_upper && result.upper == 9);
+
+  input.has_upper = false;
+  CHECK(ixs_facts_assume_range(one_sided, x, &input));
+  CHECK(ixs_integer_range_facts(one_sided, x, &result));
+  CHECK(result.has_lower && result.lower == 1);
+  CHECK(!result.has_upper);
+
+  input.has_upper = true;
+  input.lower_p = 0;
+  input.lower_q = 1;
+  input.upper_p = 10;
+  input.upper_q = 1;
+  CHECK(ixs_facts_assume_range(aligned, composite, &input));
+  CHECK(ixs_integer_range_facts(aligned, composite, &result));
+  CHECK(result.has_lower && result.lower == 1);
+  CHECK(result.has_upper && result.upper == 9);
+
+  input.lower_p = 1;
+  input.lower_q = 4;
+  input.upper_p = 3;
+  input.upper_q = 4;
+  CHECK(ixs_facts_assume_range(empty, x, &input));
+  CHECK(!ixs_integer_range_facts(empty, x, &result));
+  CHECK(!result.has_lower && !result.has_upper && result.lower == 0 &&
+        result.upper == 0);
+
+  input.has_upper = false;
+  input.lower_p = INT64_MAX;
+  input.lower_q = 1;
+  CHECK(ixs_facts_assume_range(overflow, x, &input));
+  CHECK(ixs_facts_assume_pred(overflow, x_mod_four));
+  CHECK(ixs_integer_range_facts(overflow, x, &result));
+  CHECK(result.has_lower && result.lower == INT64_MAX);
+  CHECK(!result.has_upper);
+
+  input.has_upper = true;
+  input.lower_p = INT64_MAX;
+  input.lower_q = 1;
+  input.upper_p = INT64_MAX;
+  input.upper_q = 1;
+  CHECK(ixs_facts_assume_range(contradictory, x, &input));
+  CHECK(ixs_facts_assume_pred(contradictory, x_mod_four));
+  CHECK(!ixs_integer_range_facts(contradictory, x, &result));
+  CHECK(!result.has_lower && !result.has_upper && result.lower == 0 &&
+        result.upper == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_unknown(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -6295,6 +6379,7 @@ int main(void) {
   test_public_range_basic();
   test_public_range_unbounded();
   test_public_range_rational();
+  test_public_integer_range();
   test_public_range_unknown();
   test_public_range_int64_extrema();
   test_public_range_mod_int64_min_step();

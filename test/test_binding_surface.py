@@ -22,6 +22,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "equivalent",
         "equivalent_finite_domain",
         "finite_difference",
+        "integer_range",
         "integer_valued",
         "known_bits",
         "pow2_fact",
@@ -53,13 +54,14 @@ def _typecheck_package_surface(
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
     finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
+    integer_range: tuple[int | None, int | None] | None = ctx.integer_range(expr, facts=facts)
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
     transferred: ixsimpl.Facts = facts.subs({expr: expr})
-    _ = tri, equivalent, finite_equivalent, difference, exact, transferred
+    _ = tri, equivalent, finite_equivalent, difference, integer_range, exact, transferred
 
 
 def _typecheck_extension_surface(

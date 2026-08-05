@@ -81,6 +81,12 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions,
                            ixs_range_result *out);
 
+/* Defined, integer-valued range inference with internal bound rounding. */
+IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions,
+                                   ixs_integer_range_result *out);
+
 /* Substitution: replace all occurrences of target with replacement. */
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement);

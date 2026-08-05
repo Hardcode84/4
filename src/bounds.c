@@ -6916,7 +6916,7 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
   return bounds_exact_integer_difference(state->bounds, difference, delta);
 }
 
-static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
+static uint64_t bounds_scale_stride(uint64_t stride, int64_t coefficient) {
   uint64_t magnitude = bounds_int64_magnitude(coefficient);
   if (stride == 0 || magnitude == 0)
     return 0;
@@ -6925,11 +6925,11 @@ static uint64_t equivalence_scale_stride(uint64_t stride, int64_t coefficient) {
   return stride;
 }
 
-static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
-                                     uint64_t *stride, unsigned depth);
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth);
 
-static bool equivalence_add_stride(equivalence_state *state, ixs_node *expr,
-                                   uint64_t *stride, unsigned depth) {
+static bool bounds_add_stride(ixs_bounds *bounds, ixs_node *expr,
+                              uint64_t *stride, unsigned depth) {
   uint64_t result = 0;
   int64_t cp, cq;
   uint32_t i;
@@ -6941,18 +6941,18 @@ static bool equivalence_add_stride(equivalence_state *state, ixs_node *expr,
     uint64_t term_stride;
     int64_t p, q;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q != 1 || !equivalence_known_stride(state, expr->u.add.terms[i].term,
-                                            &term_stride, depth - 1u))
+    if (q != 1 || !bounds_known_stride(bounds, expr->u.add.terms[i].term,
+                                       &term_stride, depth - 1u))
       return false;
-    term_stride = equivalence_scale_stride(term_stride, p);
+    term_stride = bounds_scale_stride(term_stride, p);
     result = bounds_u64_gcd(result, term_stride);
   }
   *stride = result;
   return true;
 }
 
-static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
-                                   uint64_t *stride, unsigned depth) {
+static bool bounds_mul_stride(ixs_bounds *bounds, ixs_node *expr,
+                              uint64_t *stride, unsigned depth) {
   uint64_t result;
   int64_t p, q;
   uint32_t i;
@@ -6964,10 +6964,10 @@ static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
     return true;
   }
   if (expr->u.mul.nfactors == 1 && expr->u.mul.factors[0].exp == 1) {
-    if (!equivalence_known_stride(state, expr->u.mul.factors[0].base, &result,
-                                  depth - 1u))
+    if (!bounds_known_stride(bounds, expr->u.mul.factors[0].base, &result,
+                             depth - 1u))
       return false;
-    *stride = equivalence_scale_stride(result, p);
+    *stride = bounds_scale_stride(result, p);
     return true;
   }
   for (i = 0; i < expr->u.mul.nfactors; i++) {
@@ -6985,9 +6985,9 @@ static bool equivalence_mul_stride(equivalence_state *state, ixs_node *expr,
 /* Stride inference is bounded by CONGRUENCE_DEPTH_LIMIT. Each ADD or MUL
  * level scans only its normalized immediate operands, so one proof is O(n)
  * in the visited expression rather than restarting integrality walks. */
-static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
-                                     uint64_t *stride, unsigned depth) {
-  if (!expr || !stride || depth == 0 || state->oom || state->limited)
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth) {
+  if (!bounds || !expr || !stride || depth == 0 || bounds->oom)
     return false;
   switch (expr->tag) {
   case IXS_INT:
@@ -6998,27 +6998,21 @@ static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
     return expr->u.rat.q == 1;
   case IXS_SYM: {
     int64_t modulus, remainder;
-    if (ixs_bounds_get_modrem(state->bounds, expr->u.name, &modulus,
-                              &remainder)) {
+    if (ixs_bounds_get_modrem(bounds, expr->u.name, &modulus, &remainder)) {
       (void)remainder;
       *stride = (uint64_t)modulus;
     } else {
       *stride = 1;
     }
-    if (state->bounds->oom) {
-      state->oom = true;
-      return false;
-    }
-    return true;
+    return !bounds->oom;
   }
   case IXS_ADD:
-    return equivalence_add_stride(state, expr, stride, depth);
+    return bounds_add_stride(bounds, expr, stride, depth);
   case IXS_MUL:
-    return equivalence_mul_stride(state, expr, stride, depth);
+    return bounds_mul_stride(bounds, expr, stride, depth);
   case IXS_MOD:
     if (expr->u.binary.rhs->tag == IXS_INT && expr->u.binary.rhs->u.ival > 0 &&
-        equivalence_known_stride(state, expr->u.binary.lhs, stride,
-                                 depth - 1u)) {
+        bounds_known_stride(bounds, expr->u.binary.lhs, stride, depth - 1u)) {
       *stride = bounds_u64_gcd(*stride, (uint64_t)expr->u.binary.rhs->u.ival);
       return true;
     }
@@ -7031,6 +7025,84 @@ static bool equivalence_known_stride(equivalence_state *state, ixs_node *expr,
     }
     return false;
   }
+}
+
+static void integer_range_result_clear(ixs_integer_range_result *out) {
+  out->has_lower = false;
+  out->has_upper = false;
+  out->lower = 0;
+  out->upper = 0;
+}
+
+static bool
+bounds_tighten_integer_range_congruence(ixs_bounds *bounds, ixs_node *expr,
+                                        ixs_integer_range_result *out) {
+  uint64_t stride;
+  uint64_t residue;
+  int64_t aligned;
+  bool lower_overflow = false;
+  bool upper_overflow = false;
+
+  if (!bounds_known_stride(bounds, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
+      stride <= 1u || stride > (uint64_t)INT64_MAX)
+    return !bounds->oom;
+  if (!bounds_known_residue_depth(bounds, expr, stride, &residue,
+                                  CONGRUENCE_DEPTH_LIMIT))
+    return !bounds->oom;
+  if (out->has_lower) {
+    if (integer_align_congruence_up(out->lower, (int64_t)stride,
+                                    (int64_t)residue, &aligned))
+      out->lower = aligned;
+    else
+      lower_overflow = true;
+  }
+  if (out->has_upper) {
+    if (integer_align_congruence_down(out->upper, (int64_t)stride,
+                                      (int64_t)residue, &aligned))
+      out->upper = aligned;
+    else
+      upper_overflow = true;
+  }
+
+  /* A one-sided interval can retain its untightened representable endpoint.
+   * With an opposite finite side, overflow proves no value can remain. */
+  if ((lower_overflow && out->has_upper) || (upper_overflow && out->has_lower))
+    return false;
+  return !out->has_lower || !out->has_upper || out->lower <= out->upper;
+}
+
+IXS_STATIC bool ixs_bounds_get_integer_range(ixs_bounds *bounds, ixs_node *expr,
+                                             ixs_integer_range_result *out) {
+  ixs_interval interval;
+
+  if (!out)
+    return false;
+  integer_range_result_clear(out);
+  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
+      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
+    return false;
+
+  interval = ixs_bounds_get(bounds, expr);
+  if (bounds->oom || !interval.valid || ixs_interval_is_empty(interval))
+    return false;
+  if (!interval.lo_inf) {
+    out->has_lower = true;
+    out->lower = ixs_rat_ceil(interval.lo_p, interval.lo_q);
+  }
+  if (!interval.hi_inf) {
+    out->has_upper = true;
+    out->upper = ixs_rat_floor(interval.hi_p, interval.hi_q);
+  }
+  if (out->has_lower && out->has_upper && out->lower > out->upper)
+    goto failure;
+  if (!bounds_tighten_integer_range_congruence(bounds, expr, out))
+    goto failure;
+  return true;
+
+failure:
+  integer_range_result_clear(out);
+  return false;
 }
 
 static bool equivalence_no_reachable_integer(equivalence_state *state,
@@ -7053,7 +7125,8 @@ static bool equivalence_no_reachable_integer(equivalence_state *state,
     if (!region.valid)
       return true;
   }
-  if (!equivalence_known_stride(state, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
+  if (!bounds_known_stride(state->bounds, expr, &stride,
+                           CONGRUENCE_DEPTH_LIMIT) ||
       stride <= 1u || stride > (uint64_t)INT64_MAX ||
       !bounds_known_residue_depth(state->bounds, expr, stride, &residue,
                                   CONGRUENCE_DEPTH_LIMIT)) {
@@ -7329,8 +7402,8 @@ static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
   uint64_t modulus;
   uint64_t residue;
   if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
-      !equivalence_known_stride(state, dividend, &modulus,
-                                CONGRUENCE_DEPTH_LIMIT) ||
+      !bounds_known_stride(state->bounds, dividend, &modulus,
+                           CONGRUENCE_DEPTH_LIMIT) ||
       modulus <= 1u || modulus > (uint64_t)INT64_MAX ||
       !bounds_known_residue_depth(state->bounds, dividend, modulus, &residue,
                                   CONGRUENCE_DEPTH_LIMIT) ||
@@ -8817,6 +8890,25 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out) {
   ok = true;
 
 cleanup:
+  ixs_session_unbind(&binding);
+  return ok;
+}
+
+bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
+                             ixs_integer_range_result *out) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  bool ok = false;
+  if (!out)
+    return false;
+  out->has_lower = false;
+  out->has_upper = false;
+  out->lower = 0;
+  out->upper = 0;
+  if (!facts_bind(facts, &binding, &ctx))
+    return false;
+  if (facts_ready(facts) && facts_node_ok(ctx, expr))
+    ok = ixs_bounds_get_integer_range(&facts->bounds, expr, out);
   ixs_session_unbind(&binding);
   return ok;
 }

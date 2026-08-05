@@ -218,6 +218,15 @@ class Context:
     ) -> tuple[int | Fraction | None, int | Fraction | None] | None:
         """Infer bounds through supported powers, XOR, and first-match Piecewise."""
 
+    def integer_range(
+        self,
+        expr: _Expr,
+        *,
+        assumptions: Sequence[_Expr] | None = None,
+        facts: Facts | None = None,
+    ) -> tuple[int | None, int | None] | None:
+        """Infer bounds after proving the expression total and integer-valued."""
+
     def simplify_batch(
         self,
         exprs: list[_BatchExpr],

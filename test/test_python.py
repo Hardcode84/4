@@ -3344,6 +3344,30 @@ def test_range_basic() -> None:
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
 
 
+def test_integer_range_normalizes_inside_ixsimpl() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("integer_range_x"), ctx.sym("integer_range_y")
+
+    assert ctx.integer_range(x, assumptions=[x >= ctx.rat(1, 2), x <= ctx.rat(19, 2)]) == (1, 9)
+    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 3]) is None
+    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 10, ctx.eq(x % 2, 0)]) == (1, 5)
+    assert ctx.integer_range(1 / y) is None
+
+    one_sided = ctx.facts()
+    one_sided.assume_range(x, Fraction(1, 2), None)
+    assert ctx.integer_range(x, facts=one_sided) == (1, None)
+
+    composite = 2 * x * y + 1
+    aligned = ctx.facts()
+    aligned.assume_range(composite, 0, 10)
+    assert ctx.range(composite, facts=aligned) == (0, 10)
+    assert ctx.integer_range(composite, facts=aligned) == (1, 9)
+
+    empty = ctx.facts()
+    empty.assume_range(x, Fraction(1, 4), Fraction(3, 4))
+    assert ctx.integer_range(x, facts=empty) is None
+
+
 def test_range_composite_predicate_fact() -> None:
     ctx = ixsimpl.Context()
     a, b = ctx.sym("A"), ctx.sym("B")
