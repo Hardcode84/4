@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import ixsimpl
 import pytest
 
@@ -140,7 +142,7 @@ def test_variadic_associative_functions() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
     a, b, c = (ctx.sym(name) for name in ("assoc_a", "assoc_b", "assoc_c"))
-    funcs_and_tags = [
+    funcs_and_tags: list[tuple[Callable[..., ixsimpl.Expr], int]] = [
         (ixsimpl.max_, ixsimpl.MAX),
         (ixsimpl.min_, ixsimpl.MIN),
         (ixsimpl.xor_, ixsimpl.XOR),
