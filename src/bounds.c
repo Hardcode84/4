@@ -5248,9 +5248,15 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
   case IXS_MIN:
     return bounds_get_extrema(b, expr, false);
   case IXS_AND:
-    return bounds_get_and_mask(b, expr);
+    return ixs_node_is_bool_valued(expr) ? ixs_interval_range(0, 1, 1, 1)
+                                         : bounds_get_and_mask(b, expr);
   case IXS_XOR:
     return bounds_get_xor(b, expr);
+  case IXS_CMP:
+  case IXS_NOT:
+  case IXS_OR:
+    return ixs_node_is_bool_valued(expr) ? ixs_interval_range(0, 1, 1, 1)
+                                         : ixs_interval_unknown();
   case IXS_PIECEWISE:
     return bounds_get_piecewise(b, expr);
   default:

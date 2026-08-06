@@ -1649,7 +1649,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   bias. Piecewise forms one common denominator and checks every scaled branch
   plus the selected numerator. Integral Mod and bitwise nodes retain their
   domain obligations; a positive power-of-two Mod no wider than the word may
-  discard high dividend bits.
+  discard high dividend bits. Comparisons and logical NOT terminate a rational
+  island at their 0/1 result while still checking rational islands in their
+  evaluated operands. Predicate-valued nodes contribute their intrinsic
+  `[0, 1]` interval to enclosing numerator arithmetic.
 
   One memoized bottom-up analysis returns containment, island ownership, the
   canonical proof, and aggregate island fit for each DAG node; there are no

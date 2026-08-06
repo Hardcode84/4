@@ -5486,9 +5486,15 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
   case IXS_MIN:
     return bounds_get_extrema(b, expr, false);
   case IXS_AND:
-    return bounds_get_and_mask(b, expr);
+    return ixs_node_is_bool_valued(expr) ? ixs_interval_range(0, 1, 1, 1)
+                                         : bounds_get_and_mask(b, expr);
   case IXS_XOR:
     return bounds_get_xor(b, expr);
+  case IXS_CMP:
+  case IXS_NOT:
+  case IXS_OR:
+    return ixs_node_is_bool_valued(expr) ? ixs_interval_range(0, 1, 1, 1)
+                                         : ixs_interval_unknown();
   case IXS_PIECEWISE:
     return bounds_get_piecewise(b, expr);
   default:
@@ -18532,6 +18538,29 @@ rational_analyze_bitwise(rational_intermediate_state *state, ixs_node *expr,
 }
 
 static rational_intermediate_analysis
+rational_analyze_predicate(rational_intermediate_state *state, ixs_node *expr,
+                           unsigned depth) {
+  rational_intermediate_analysis result = rational_empty_analysis();
+  rational_intermediate_analysis child;
+
+  if (expr->tag == IXS_CMP) {
+    child = rational_analyze(state, expr->u.binary.lhs, depth + 1u);
+    rational_merge_child(&result, child);
+    child = rational_analyze(state, expr->u.binary.rhs, depth + 1u);
+    rational_merge_child(&result, child);
+  } else {
+    child = rational_analyze(state, expr->u.unary_bool.arg, depth + 1u);
+    rational_merge_child(&result, child);
+  }
+  result.owns_materialization = false;
+  result.proof.numerator = expr;
+  result.proof.denominator = 1;
+  result.proof.fits = rational_word_fits(state, expr);
+  result.proof.valid = true;
+  return result;
+}
+
+static rational_intermediate_analysis
 rational_analyze_piecewise(rational_intermediate_state *state, ixs_node *expr,
                            unsigned depth) {
   rational_intermediate_analysis result = rational_empty_analysis();
@@ -18640,6 +18669,9 @@ rational_analyze_uncached(rational_intermediate_state *state, ixs_node *expr,
   case IXS_AND:
   case IXS_OR:
     return rational_analyze_bitwise(state, expr, depth);
+  case IXS_CMP:
+  case IXS_NOT:
+    return rational_analyze_predicate(state, expr, depth);
   case IXS_PIECEWISE:
     return rational_analyze_piecewise(state, expr, depth);
   default:

@@ -8566,6 +8566,73 @@ static void test_public_rational_intermediate_compounds(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_rational_intermediate_piecewise_selector(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *work = ixs_sym(ctx, "rational_piecewise_work");
+  ixs_node *lane = ixs_sym(ctx, "rational_piecewise_lane");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *condition = ixs_cmp(ctx, ixs_sub(ctx, work, one), IXS_CMP_LT, zero);
+  ixs_node *values[] = {work, one};
+  ixs_node *conditions[] = {condition, ixs_true(ctx)};
+  ixs_node *selector = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *quarter_selector = ixs_mul(ctx, ixs_rat(ctx, 1, 4), selector);
+  ixs_node *five_quarters_work = ixs_mul(ctx, ixs_rat(ctx, 5, 4), work);
+  ixs_node *tile =
+      ixs_floor(ctx, ixs_add(ctx, five_quarters_work, quarter_selector));
+  ixs_node *stream = ixs_add(ctx, lane, tile);
+  ixs_node *dma = ixs_add(ctx, lane, ixs_mul(ctx, ixs_int(ctx, 64), tile));
+  ixs_node *assumptions[] = {
+      ixs_cmp(ctx, work, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, ixs_sub(ctx, work, ixs_int(ctx, 2)), IXS_CMP_LE, zero),
+      ixs_cmp(ctx, lane, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, ixs_sub(ctx, lane, ixs_int(ctx, 63)), IXS_CMP_LE, zero),
+  };
+  ixs_facts *facts =
+      ixs_facts_create_preds(IXS_TEST_SESSION(ctx), assumptions, 4);
+  ixs_node *simplified_stream;
+  ixs_node *simplified_dma;
+
+  CHECK(facts != NULL);
+  simplified_stream = ixs_simplify_facts(facts, stream);
+  simplified_dma = ixs_simplify_facts(facts, dma);
+  CHECK(simplified_stream != NULL);
+  CHECK(simplified_dma != NULL);
+  CHECK(ixs_check_rational_intermediates_facts(facts, simplified_stream, 32) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(facts, simplified_dma, 32) ==
+        IXS_CHECK_TRUE);
+
+  {
+    ixs_node *predicate_source = ixs_sym(ctx, "rational_predicate_source");
+    ixs_node *half = ixs_div(ctx, predicate_source, ixs_int(ctx, 2));
+    ixs_node *predicate = ixs_cmp(ctx, half, IXS_CMP_GT, zero);
+    ixs_node *nonnegative = ixs_cmp(ctx, predicate_source, IXS_CMP_GE, zero);
+    ixs_node *conjunction = ixs_and(ctx, predicate, nonnegative);
+    ixs_node *disjunction = ixs_or(ctx, predicate, nonnegative);
+    ixs_facts *fitting = ixs_facts_create(ctx);
+    ixs_facts *overflow = ixs_facts_create(ctx);
+    rational_assume_integer_range(fitting, predicate_source, 0, 255);
+    rational_assume_integer_range(overflow, predicate_source, 256, 256);
+
+    CHECK(ixs_check_rational_intermediates_facts(fitting, predicate, 8) ==
+          IXS_CHECK_TRUE);
+    CHECK(ixs_check_rational_intermediates_facts(overflow, predicate, 8) ==
+          IXS_CHECK_FALSE);
+    CHECK(ixs_check_rational_intermediates_facts(
+              overflow, ixs_not(ctx, predicate), 8) == IXS_CHECK_FALSE);
+    CHECK(ixs_check_rational_intermediates_facts(fitting, conjunction, 8) ==
+          IXS_CHECK_TRUE);
+    CHECK(ixs_check_rational_intermediates_facts(fitting, disjunction, 8) ==
+          IXS_CHECK_TRUE);
+    CHECK(ixs_check_rational_intermediates_facts(overflow, conjunction, 8) ==
+          IXS_CHECK_FALSE);
+    CHECK(ixs_check_rational_intermediates_facts(overflow, disjunction, 8) ==
+          IXS_CHECK_FALSE);
+  }
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_rational_intermediate_limits_and_shared_dag(void) {
   enum { CASE_LIMIT = 1025, MEMO_CASES = 1024 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -8908,6 +8975,7 @@ int main(void) {
   test_deep_node_order_is_iterative();
   test_public_rational_intermediate_boundaries();
   test_public_rational_intermediate_compounds();
+  test_public_rational_intermediate_piecewise_selector();
   test_public_rational_intermediate_mod_projection();
   test_public_rational_intermediate_oom_and_invalid();
   test_public_rational_intermediate_limits_and_shared_dag();
