@@ -2535,6 +2535,170 @@ static void test_fact_backed_simplification(void) {
   ixs_ctx_destroy(other);
 }
 
+static void test_fact_backed_affine_truncating_remainder(void) {
+  enum { TRUNCATING_LIMIT_CASES = 33 };
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *a = ixs_sym(ctx, "glu_affine_a");
+  ixs_node *threshold = ixs_int(ctx, INT64_C(2147483650));
+  ixs_node *numerator = ixs_sub(ctx, a, threshold);
+  ixs_node *argument =
+      ixs_add(ctx, ixs_div(ctx, a, ixs_int(ctx, 3)), ixs_rat(ctx, 2, 3));
+  ixs_node *floor_value =
+      ixs_add(ctx, ixs_int(ctx, -715827884), ixs_floor(ctx, argument));
+  ixs_node *ceil_value =
+      ixs_add(ctx, ixs_int(ctx, -715827884), ixs_ceil(ctx, argument));
+  ixs_node *guard = ixs_cmp(ctx, a, IXS_CMP_GE, threshold);
+  ixs_node *values[2] = {floor_value, ceil_value};
+  ixs_node *conditions[2] = {guard, ixs_true(ctx)};
+  ixs_node *quotient = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *source =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(-18141941875200)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8448), a),
+                      ixs_mul(ctx, ixs_int(ctx, -25344), quotient)));
+  ixs_node *optimized_source =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(-36283883750400)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16896), a),
+                      ixs_mul(ctx, ixs_int(ctx, -50688), quotient)));
+  ixs_node *positive_mod = ixs_mod(ctx, numerator, ixs_int(ctx, 3));
+  ixs_node *negative_mod =
+      ixs_neg(ctx, ixs_mod(ctx, ixs_neg(ctx, numerator), ixs_int(ctx, 3)));
+  ixs_node *remainder_values[2] = {positive_mod, negative_mod};
+  ixs_node *remainder_conditions[2] = {
+      ixs_cmp(ctx, numerator, IXS_CMP_GE, ixs_int(ctx, 0)), ixs_true(ctx)};
+  ixs_node *signed_remainder =
+      ixs_pw(ctx, 2, remainder_values, remainder_conditions);
+  ixs_node *expected = ixs_mul(ctx, ixs_int(ctx, 8448), signed_remainder);
+  ixs_node *optimized_expected =
+      ixs_mul(ctx, ixs_int(ctx, 16896), signed_remainder);
+  ixs_facts *crossing = ixs_facts_create(ctx);
+  ixs_node *crossing_result;
+  ixs_node *batch[2] = {source, optimized_source};
+  ixs_node *bad_values[2];
+  ixs_node *bad_conditions[2];
+  ixs_node *bad_quotient;
+  ixs_node *bad_source;
+  ixs_facts *limited = ixs_facts_create(ctx);
+  ixs_node *wide = ixs_int(ctx, 0);
+  unsigned i;
+
+  CHECK(ixs_facts_assume_pred(crossing,
+                              ixs_cmp(ctx, a, IXS_CMP_GE, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_assume_pred(
+      crossing,
+      ixs_cmp(ctx, a, IXS_CMP_LE, ixs_int(ctx, INT64_C(4294967295)))));
+  crossing_result = ixs_simplify_facts(crossing, source);
+  CHECK(crossing_result == expected);
+  CHECK(ixs_subs(ctx, crossing_result, a, ixs_int(ctx, INT64_C(2147483649))) ==
+        ixs_int(ctx, -8448));
+  CHECK(ixs_subs(ctx, crossing_result, a, ixs_int(ctx, INT64_C(2147483650))) ==
+        ixs_int(ctx, 0));
+  CHECK(ixs_subs(ctx, crossing_result, a, ixs_int(ctx, INT64_C(2147483651))) ==
+        ixs_int(ctx, 8448));
+  ixs_simplify_batch_facts(crossing, batch, 2);
+  CHECK(batch[0] == expected);
+  CHECK(batch[1] == optimized_expected);
+
+  {
+    ixs_node *n = ixs_sym(ctx, "affine_negative_divisor_n");
+    ixs_node *d = ixs_sym(ctx, "affine_negative_divisor_d");
+    ixs_node *shifted =
+        ixs_div(ctx, ixs_sub(ctx, n, ixs_mul(ctx, ixs_int(ctx, 5), d)), d);
+    ixs_node *negative_floor =
+        ixs_add(ctx, ixs_int(ctx, 5), ixs_floor(ctx, shifted));
+    ixs_node *negative_ceil =
+        ixs_add(ctx, ixs_int(ctx, 5), ixs_ceil(ctx, shifted));
+    ixs_node *same_sign =
+        ixs_or(ctx,
+               ixs_and(ctx, ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, 0)),
+                       ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))),
+               ixs_and(ctx, ixs_cmp(ctx, n, IXS_CMP_LE, ixs_int(ctx, 0)),
+                       ixs_cmp(ctx, d, IXS_CMP_LT, ixs_int(ctx, 0))));
+    ixs_node *negative_values[2] = {negative_floor, negative_ceil};
+    ixs_node *negative_conditions[2] = {same_sign, ixs_true(ctx)};
+    ixs_node *negative_quotient =
+        ixs_pw(ctx, 2, negative_values, negative_conditions);
+    ixs_node *negative_source =
+        ixs_sub(ctx, n, ixs_mul(ctx, d, negative_quotient));
+    ixs_node *positive_modulus = ixs_neg(ctx, d);
+    ixs_node *negative_positive_mod = ixs_mod(ctx, n, positive_modulus);
+    ixs_node *negative_negative_mod =
+        ixs_neg(ctx, ixs_mod(ctx, ixs_neg(ctx, n), positive_modulus));
+    ixs_node *negative_remainder_values[2] = {negative_positive_mod,
+                                              negative_negative_mod};
+    ixs_node *negative_remainder_conditions[2] = {
+        ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, 0)), ixs_true(ctx)};
+    ixs_node *negative_expected = ixs_pw(ctx, 2, negative_remainder_values,
+                                         negative_remainder_conditions);
+    ixs_facts *negative_divisor = ixs_facts_create(ctx);
+    ixs_node *negative_result;
+    ixs_node *substituted;
+    CHECK(ixs_facts_assume_pred(
+        negative_divisor, ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, -20))));
+    CHECK(ixs_facts_assume_pred(negative_divisor,
+                                ixs_cmp(ctx, n, IXS_CMP_LE, ixs_int(ctx, 20))));
+    CHECK(ixs_facts_assume_pred(negative_divisor,
+                                ixs_cmp(ctx, d, IXS_CMP_EQ, ixs_int(ctx, -3))));
+    negative_expected = ixs_simplify_facts(negative_divisor, negative_expected);
+    negative_result = ixs_simplify_facts(negative_divisor, negative_source);
+    CHECK(ixs_equivalent_facts(negative_divisor, negative_source,
+                               negative_expected) == IXS_CHECK_TRUE);
+    substituted = ixs_subs(ctx, negative_result, n, ixs_int(ctx, -4));
+    CHECK(ixs_subs(ctx, substituted, d, ixs_int(ctx, -3)) == ixs_int(ctx, -1));
+    substituted = ixs_subs(ctx, negative_result, n, ixs_int(ctx, 0));
+    CHECK(ixs_subs(ctx, substituted, d, ixs_int(ctx, -3)) == ixs_int(ctx, 0));
+    substituted = ixs_subs(ctx, negative_result, n, ixs_int(ctx, 4));
+    CHECK(ixs_subs(ctx, substituted, d, ixs_int(ctx, -3)) == ixs_int(ctx, 1));
+  }
+
+  bad_values[0] = floor_value;
+  bad_values[1] = ixs_add(ctx, ceil_value, ixs_int(ctx, 1));
+  bad_conditions[0] = guard;
+  bad_conditions[1] = ixs_true(ctx);
+  bad_quotient = ixs_pw(ctx, 2, bad_values, bad_conditions);
+  bad_source =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(-18141941875200)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8448), a),
+                      ixs_mul(ctx, ixs_int(ctx, -25344), bad_quotient)));
+  CHECK(ixs_simplify_facts(crossing, bad_source) == bad_source);
+
+  bad_values[1] = ceil_value;
+  bad_conditions[0] =
+      ixs_cmp(ctx, a, IXS_CMP_GE, ixs_int(ctx, INT64_C(2147483649)));
+  bad_quotient = ixs_pw(ctx, 2, bad_values, bad_conditions);
+  bad_source =
+      ixs_add(ctx, ixs_int(ctx, INT64_C(-18141941875200)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8448), a),
+                      ixs_mul(ctx, ixs_int(ctx, -25344), bad_quotient)));
+  CHECK(ixs_simplify_facts(crossing, bad_source) == bad_source);
+
+  bad_values[0] = ixs_add(ctx, ixs_rat(ctx, 1, 2), ixs_floor(ctx, argument));
+  bad_values[1] = ixs_add(ctx, ixs_rat(ctx, 1, 2), ixs_ceil(ctx, argument));
+  bad_conditions[0] = guard;
+  bad_quotient = ixs_pw(ctx, 2, bad_values, bad_conditions);
+  CHECK(ixs_simplify_facts(crossing, bad_quotient) == bad_quotient);
+
+  for (i = 0; i < TRUNCATING_LIMIT_CASES; i++) {
+    char name[40];
+    ixs_node *n;
+    ixs_node *q;
+    ixs_node *case_values[2];
+    ixs_node *case_conditions[2];
+    snprintf(name, sizeof(name), "truncating_limit_%u", i);
+    n = ixs_sym(ctx, name);
+    q = ixs_div(ctx, n, ixs_int(ctx, 3));
+    case_values[0] = ixs_floor(ctx, q);
+    case_values[1] = ixs_ceil(ctx, q);
+    case_conditions[0] = ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, 0));
+    case_conditions[1] = ixs_true(ctx);
+    wide =
+        ixs_add(ctx, wide,
+                ixs_sub(ctx, n,
+                        ixs_mul(ctx, ixs_int(ctx, 3),
+                                ixs_pw(ctx, 2, case_values, case_conditions))));
+  }
+  CHECK(ixs_simplify_facts(limited, wide) == wide);
+}
+
 static void test_exact_divide_fact_piecewise(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *item = ixs_sym(ctx, "exact_pw_public_item");
@@ -4068,6 +4232,7 @@ int main(void) {
   test_floor_symbolic_denom_residue();
   test_simplify_batch();
   test_fact_backed_simplification();
+  test_fact_backed_affine_truncating_remainder();
   test_exact_divide_fact_piecewise();
   test_fact_rewrite_constant_power();
   test_compound_assumption_simplification();

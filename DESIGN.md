@@ -1707,18 +1707,20 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   expression DAG and exact residuals use the weighted equality forest rather
   than inequality adjacency or context-wide scans.
 
-  Numeric equivalence and constant-difference queries also project encoded
-  truncating quotients internally. The accepted `Piecewise` has exactly two
-  first-match arms: `floor(N/D)` under the exact same-sign predicate and
-  `ceiling(N/D)` under a final true condition. A fact-equivalent same-sign
-  predicate is accepted only over the complete query domain. Standalone
-  `floor(N/D)` and `ceiling(N/D)` forms require the quotient to be proven
-  nonnegative and nonpositive, respectively. Every form additionally requires
-  total operands, integer-valued `N` and `D`, a known sign for nonzero `D`, and
-  a known sign for `N`. The resulting signed remainder is projected to
-  `Mod(N, abs(D))` for nonnegative `N` or `-Mod(-N, abs(D))` for nonpositive
-  `N`. This is a private proof form; neither the rewritten expression nor a
-  remainder-relation list is exposed to callers.
+  Numeric equivalence, constant-difference, and reusable-fact simplification
+  project encoded truncating quotients. The accepted `Piecewise` has exactly
+  two first-match arms: `R + floor(Q)` under the exact same-sign predicate and
+  `R + ceiling(Q)` under a final true condition. `R` must be the same total,
+  integer-valued residual in both arms; the projected quotient is `Q + R`.
+  A fact-equivalent same-sign predicate is accepted only over the complete
+  query domain. Proof queries also accept standalone `floor(N/D)` and
+  `ceiling(N/D)` forms when the quotient is proven nonnegative and
+  nonpositive, respectively; reusable-fact simplification only projects the
+  complete `Piecewise` encoding. Every form additionally requires total
+  operands, integer-valued `N` and `D`, and a known nonzero sign for `D`. A
+  sign-known numerator projects to
+  `Mod(N, abs(D))` or `-Mod(-N, abs(D))`. A numerator spanning zero projects
+  to the exact two-arm signed-remainder `Piecewise` selected by `N >= 0`.
 
   After projection, the generic constant-difference proof described above
   carries the signed remainder relation through equal-and-opposite scales such
@@ -1727,11 +1729,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   uncovered `Piecewise` encodings, unknown divisor signs, zero divisors,
   noninteger parts, and shifts crossing a remainder boundary remain unknown.
   Candidate discovery is iterative, shares the equivalence query's 4096-node
-  visit budget, and admits at most 32 truncating forms total. A single bounded
-  pass returns immediately when neither operand has a usable form, so ordinary
-  no-truncation failures are not rebuilt or simplified by this strategy.
-  Interned nodes cache one private subtree-rounding property bit, making that
-  rejection an O(1) root check rather than an extra hot-path DAG walk.
+  visit budget, and admits at most 32 truncating forms total. Reusable-fact
+  simplification returns a projected candidate only when a bounded 4096-node
+  unique-DAG measurement proves that both the rounding-node count and total
+  node count decrease. Its open-addressed 8192-slot memo visits shared nodes
+  once; limit or allocation failure keeps the original expression. A single
+  bounded pass returns immediately when neither operand has a usable form, so
+  ordinary no-truncation failures are not rebuilt or simplified by this
+  strategy. Interned nodes cache private subtree-rounding and
+  subtree-Piecewise property bits. Proof queries reject a root without
+  rounding in O(1); reusable-fact simplification also rejects a root without
+  Piecewise in O(1), so ordinary floor-only expressions incur no DAG walk.
+
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
   exact difference or predicates with opposite proven truth values return
