@@ -21,13 +21,16 @@ int main() {
   ixs::Expr congruent = ixs::Expr::parse_pred(ctx, "Mod(x, 8) == 0");
   ixs::Expr assumptions[1] = {nonnegative};
   ixs_range_result range = {};
+  ixs_integer_range_result integer_range = {};
 
   if (nonnegative.check(assumptions, 1) != IXS_CHECK_TRUE ||
       x.check_integer_valued() != IXS_CHECK_TRUE ||
       x.check_defined() != IXS_CHECK_TRUE ||
       eight.get_pow2_fact() != IXS_POW2_POSITIVE ||
       !x.range(range, assumptions, 1) || !range.has_lower ||
-      (x * (y + one)).expand().is_null())
+      !x.integer_range(integer_range, assumptions, 1) ||
+      !integer_range.has_lower || integer_range.lower != 0 ||
+      integer_range.has_upper || (x * (y + one)).expand().is_null())
     return 1;
 
   const ixs::Expr &const_expr = x + one;
@@ -56,7 +59,10 @@ int main() {
       facts.check_predicate(nonnegative) != IXS_CHECK_TRUE ||
       facts.equivalent(x, x) != IXS_CHECK_TRUE ||
       facts.check_divisible(twice_x, 2) != IXS_CHECK_TRUE ||
-      facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE || !facts.range(x, range))
+      facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE ||
+      !facts.range(x, range) || !facts.integer_range(x, integer_range) ||
+      !integer_range.has_lower || integer_range.lower != 0 ||
+      !integer_range.has_upper || integer_range.upper != 56)
     return 4;
 
   int64_t delta = 0;

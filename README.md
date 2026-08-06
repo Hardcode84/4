@@ -136,7 +136,7 @@ API. Key functions:
 | `ixs_int`, `ixs_sym`, `ixs_add`, ... | Build expressions programmatically |
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
-| `ixs_check`, `ixs_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
+| `ixs_check`, `ixs_range`, `ixs_integer_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
 | `ixs_facts_*` | First-class predicate and expression-range fact sets |
 | `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |

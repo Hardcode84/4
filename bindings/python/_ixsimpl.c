@@ -2422,6 +2422,113 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   return result;
 }
 
+static PyObject *Context_integer_range(ContextObject *self, PyObject *args,
+                                       PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
+  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
+  Py_ssize_t i, n_assumptions = 0;
+  const ixs_node *expr, **assumptions = NULL;
+  ixs_session *session = Context_session(self);
+  size_t errors_before;
+  ixs_integer_range_result r;
+  bool ok;
+  PyObject *lo, *hi, *result;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
+                                   &assumptions_obj, &facts_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)expr_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  expr = ((ExprObject *)expr_obj)->node;
+
+  if (facts_obj && facts_obj != Py_None) {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: pass either assumptions or facts, not both");
+      return NULL;
+    }
+    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+      return NULL;
+    }
+    if (((FactsObject *)facts_obj)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: facts from different context");
+      return NULL;
+    }
+    if (!ixs_integer_range_facts(((FactsObject *)facts_obj)->facts, expr, &r))
+      Py_RETURN_NONE;
+  } else {
+    if (assumptions_obj && assumptions_obj != Py_None) {
+      n_assumptions = PySequence_Size(assumptions_obj);
+      if (n_assumptions < 0)
+        return NULL;
+      if (n_assumptions > 0) {
+        assumptions =
+            PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
+        if (!assumptions)
+          return PyErr_NoMemory();
+        for (i = 0; i < n_assumptions; i++) {
+          PyObject *item = PySequence_GetItem(assumptions_obj, i);
+          if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
+            Py_XDECREF(item);
+            PyMem_Free(assumptions);
+            PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
+            return NULL;
+          }
+          if (((ExprObject *)item)->ctx_obj != self) {
+            Py_DECREF(item);
+            PyMem_Free(assumptions);
+            PyErr_SetString(PyExc_ValueError,
+                            "ixsimpl: assumption from different context");
+            return NULL;
+          }
+          assumptions[i] = ((ExprObject *)item)->node;
+          Py_DECREF(item);
+        }
+      }
+    }
+    errors_before = ixs_session_nerrors(session);
+    ok = ixs_integer_range(session, expr, assumptions, (size_t)n_assumptions,
+                           &r);
+    PyMem_Free(assumptions);
+    if (raise_new_assumption_error(session, errors_before) < 0)
+      return NULL;
+    if (!ok)
+      Py_RETURN_NONE;
+  }
+
+  if (r.has_lower)
+    lo = PyLong_FromLongLong((long long)r.lower);
+  else {
+    lo = Py_None;
+    Py_INCREF(lo);
+  }
+  if (!lo)
+    return NULL;
+  if (r.has_upper)
+    hi = PyLong_FromLongLong((long long)r.upper);
+  else {
+    hi = Py_None;
+    Py_INCREF(hi);
+  }
+  if (!hi) {
+    Py_DECREF(lo);
+    return NULL;
+  }
+  result = PyTuple_Pack(2, lo, hi);
+  Py_DECREF(lo);
+  Py_DECREF(hi);
+  return result;
+}
+
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
   static char *kwlist[] = {"exprs", "assumptions", "facts", NULL};
@@ -2664,6 +2771,10 @@ static PyMethodDef Context_methods[] = {
      "Return an inclusive range or None, including supported powers, XOR, "
      "and first-match piecewise expressions. Assumptions accept CMP/boolean "
      "or AND predicates."},
+    {"integer_range", (PyCFunction)Context_integer_range,
+     METH_VARARGS | METH_KEYWORDS,
+     "Return a proved inclusive integer range or None. Rational bounds and "
+     "congruences are normalized internally."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS,
      "Simplify in-place with either assumptions or a reusable fact set."},

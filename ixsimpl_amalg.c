@@ -7364,32 +7364,93 @@ static uint64_t bounds_wide_integer_residue(bounds_wide_integer value,
   return residue;
 }
 
-static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
-                                     int64_t *lower, int64_t *upper) {
-  ixs_interval range;
+static void integer_range_result_clear(ixs_integer_range_result *out) {
+  out->has_lower = false;
+  out->has_upper = false;
+  out->lower = 0;
+  out->upper = 0;
+}
+
+static bool
+bounds_tighten_integer_range_congruence(ixs_bounds *bounds, ixs_node *expr,
+                                        ixs_integer_range_result *out) {
   uint64_t stride;
   uint64_t residue;
-  if (ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
-    return false;
-  range = ixs_bounds_get(bounds, expr);
-  if (!range.valid || range.lo_inf || range.hi_inf)
-    return false;
-  *lower = ixs_rat_ceil(range.lo_p, range.lo_q);
-  *upper = ixs_rat_floor(range.hi_p, range.hi_q);
-  if (*lower > *upper)
-    return false;
+  int64_t aligned;
+  bool lower_overflow = false;
+  bool upper_overflow = false;
+
   if (!bounds_known_stride(bounds, expr, &stride, CONGRUENCE_DEPTH_LIMIT) ||
       stride <= 1u || stride > (uint64_t)INT64_MAX)
     return !bounds->oom;
   if (!bounds_known_residue_depth(bounds, expr, stride, &residue,
                                   CONGRUENCE_DEPTH_LIMIT))
     return !bounds->oom;
-  return integer_align_congruence_up(*lower, (int64_t)stride, (int64_t)residue,
-                                     lower) &&
-         integer_align_congruence_down(*upper, (int64_t)stride,
-                                       (int64_t)residue, upper) &&
-         *lower <= *upper;
+  if (out->has_lower) {
+    if (integer_align_congruence_up(out->lower, (int64_t)stride,
+                                    (int64_t)residue, &aligned))
+      out->lower = aligned;
+    else
+      lower_overflow = true;
+  }
+  if (out->has_upper) {
+    if (integer_align_congruence_down(out->upper, (int64_t)stride,
+                                      (int64_t)residue, &aligned))
+      out->upper = aligned;
+    else
+      upper_overflow = true;
+  }
+
+  /* A one-sided interval can retain its untightened representable endpoint.
+   * With an opposite finite side, overflow proves no value can remain. */
+  if ((lower_overflow && out->has_upper) || (upper_overflow && out->has_lower))
+    return false;
+  return !out->has_lower || !out->has_upper || out->lower <= out->upper;
+}
+
+IXS_STATIC bool ixs_bounds_get_integer_range(ixs_bounds *bounds, ixs_node *expr,
+                                             ixs_integer_range_result *out) {
+  ixs_interval interval;
+
+  if (!out)
+    return false;
+  integer_range_result_clear(out);
+  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
+      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
+    return false;
+
+  interval = ixs_bounds_get(bounds, expr);
+  if (bounds->oom || !interval.valid || ixs_interval_is_empty(interval))
+    return false;
+  if (!interval.lo_inf) {
+    out->has_lower = true;
+    out->lower = ixs_rat_ceil(interval.lo_p, interval.lo_q);
+  }
+  if (!interval.hi_inf) {
+    out->has_upper = true;
+    out->upper = ixs_rat_floor(interval.hi_p, interval.hi_q);
+  }
+  if (out->has_lower && out->has_upper && out->lower > out->upper)
+    goto failure;
+  if (!bounds_tighten_integer_range_congruence(bounds, expr, out))
+    goto failure;
+  return true;
+
+failure:
+  integer_range_result_clear(out);
+  return false;
+}
+
+static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
+                                     int64_t *lower, int64_t *upper) {
+  ixs_integer_range_result range;
+  if (!ixs_bounds_get_integer_range(bounds, expr, &range) || !range.has_lower ||
+      !range.has_upper)
+    return false;
+  *lower = range.lower;
+  *upper = range.upper;
+  return true;
 }
 
 /* Each Mod result preserves its dividend modulo the positive literal divisor.
@@ -9455,6 +9516,22 @@ cleanup:
   return ok;
 }
 
+bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
+                             ixs_integer_range_result *out) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  bool ok = false;
+  if (!out)
+    return false;
+  integer_range_result_clear(out);
+  if (!facts_bind(facts, &binding, &ctx))
+    return false;
+  if (facts_ready(facts) && facts_node_ok(ctx, expr))
+    ok = ixs_bounds_get_integer_range(&facts->bounds, expr, out);
+  ixs_session_unbind(&binding);
+  return ok;
+}
+
 IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
                                       int64_t *mod, int64_t *rem) {
   ixs_var_bound *v;
@@ -10085,6 +10162,16 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   bool result = simp_range(ctx, expr, assumptions, n_assumptions, out);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+bool ixs_integer_range(ixs_session *s, ixs_node *expr,
+                       ixs_node *const *assumptions, size_t n_assumptions,
+                       ixs_integer_range_result *out) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  bool result = simp_integer_range(ctx, expr, assumptions, n_assumptions, out);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -22869,6 +22956,28 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
   ok = true;
 
 cleanup:
+  simp_bounds_scope_destroy(&scope);
+  return ok;
+}
+
+IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *const *assumptions,
+                                   size_t n_assumptions,
+                                   ixs_integer_range_result *out) {
+  simp_bounds_scope scope;
+  bool ok;
+
+  if (!out)
+    return false;
+  out->has_lower = false;
+  out->has_upper = false;
+  out->lower = 0;
+  out->upper = 0;
+  if (!ctx || !expr || ixs_node_is_sentinel(expr) ||
+      !ixs_ctx_owns_node(ctx, expr) ||
+      !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
+    return false;
+  ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
   simp_bounds_scope_destroy(&scope);
   return ok;
 }

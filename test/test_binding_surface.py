@@ -22,6 +22,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "divisible",
         "equivalent",
         "finite_difference",
+        "integer_range",
         "integer_valued",
         "known_bits",
         "pow2_fact",
@@ -52,6 +53,8 @@ def _typecheck_package_surface(
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
+    integer_range: tuple[int | None, int | None] | None
+    integer_range = ctx.integer_range(expr, facts=facts)
     quotient: tuple[ixsimpl.Expr, ixsimpl.Expr] | None
     quotient = ctx.decompose_exact_quotient(expr, facts)
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
@@ -60,7 +63,7 @@ def _typecheck_package_surface(
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
     transferred: ixsimpl.Facts = facts.subs({expr: expr})
-    _ = tri, equivalent, difference, quotient, exact, transferred
+    _ = tri, equivalent, difference, integer_range, quotient, exact, transferred
 
 
 def _typecheck_extension_surface(
@@ -68,9 +71,11 @@ def _typecheck_extension_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
+    integer_range: tuple[int | None, int | None] | None
+    integer_range = ctx.integer_range(expr, facts=facts)
     quotient: tuple[_ixsimpl._Expr, _ixsimpl._Expr] | None
     quotient = ctx.decompose_exact_quotient(expr, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
-    _ = tri, equivalent, quotient
+    _ = tri, equivalent, integer_range, quotient

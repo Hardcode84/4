@@ -3319,6 +3319,51 @@ def test_range_basic() -> None:
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
 
 
+def test_integer_range_normalizes_inside_ixsimpl() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    x, y = ctx.sym("integer_range_x"), ctx.sym("integer_range_y")
+
+    assert ctx.integer_range(x, assumptions=[x >= ctx.rat(1, 2), x <= ctx.rat(19, 2)]) == (1, 9)
+    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 3]) is None
+    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 10, ctx.eq(x % 2, 0)]) == (1, 5)
+    assert ctx.integer_range(1 / y) is None
+
+    lower_only = ctx.facts()
+    lower_only.assume_range(x, Fraction(1, 2), None)
+    assert ctx.integer_range(x, facts=lower_only) == (1, None)
+
+    upper_only = ctx.facts()
+    upper_only.assume_range(x, None, Fraction(19, 2))
+    assert ctx.integer_range(x, facts=upper_only) == (None, 9)
+
+    composite = 2 * x * y + 1
+    aligned = ctx.facts()
+    aligned.assume_range(composite, 0, 10)
+    assert ctx.range(composite, facts=aligned) == (0, 10)
+    assert ctx.integer_range(composite, facts=aligned) == (1, 9)
+
+    empty = ctx.facts()
+    empty.assume_range(x, Fraction(1, 4), Fraction(3, 4))
+    assert ctx.integer_range(x, facts=empty) is None
+
+    contradictory = ctx.facts()
+    contradictory.assume(x >= 2)
+    contradictory.assume(x <= 1)
+    assert ctx.integer_range(x, facts=contradictory) is None
+
+    with pytest.raises(TypeError, match="expr must be an Expr"):
+        ctx.integer_range(1)
+    with pytest.raises(ValueError, match="expression from different context"):
+        ctx.integer_range(other.sym("integer_range_x"))
+    with pytest.raises(ValueError, match="assumption from different context"):
+        ctx.integer_range(x, assumptions=[other.sym("integer_range_bound") >= 0])
+    with pytest.raises(ValueError, match="facts from different context"):
+        ctx.integer_range(x, facts=other.facts())
+    with pytest.raises(ValueError, match="either assumptions or facts"):
+        ctx.integer_range(x, assumptions=[x >= 0], facts=lower_only)
+
+
 def test_range_composite_predicate_fact() -> None:
     ctx = ixsimpl.Context()
     a, b = ctx.sym("A"), ctx.sym("B")

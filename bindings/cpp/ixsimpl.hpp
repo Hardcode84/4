@@ -147,6 +147,16 @@ public:
   bool range(ixs_range_result &out) const {
     return ixs_range(session_, node_, nullptr, 0, &out);
   }
+  bool integer_range(ixs_integer_range_result &out, const Expr *assumptions,
+                     size_t n) const {
+    std::vector<const ixs_node *> raw(n);
+    for (size_t i = 0; i < n; ++i)
+      raw[i] = assumptions[i].raw();
+    return ixs_integer_range(session_, node_, raw.data(), n, &out);
+  }
+  bool integer_range(ixs_integer_range_result &out) const {
+    return ixs_integer_range(session_, node_, nullptr, 0, &out);
+  }
   Expr expand() const {
     return Expr(session_ctx(), session_, ixs_expand(session_, node_));
   }
@@ -365,6 +375,9 @@ public:
   }
   bool range(const Expr &expr, ixs_range_result &out) const {
     return ixs_range_facts(facts_, expr.raw(), &out);
+  }
+  bool integer_range(const Expr &expr, ixs_integer_range_result &out) const {
+    return ixs_integer_range_facts(facts_, expr.raw(), &out);
   }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {

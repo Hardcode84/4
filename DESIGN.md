@@ -1573,6 +1573,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   reports unknown; if independent intervals lose correlations, the returned
   interval is conservative rather than the mathematical image of the full
   assumption set.
+- **Public integer range query** (`ixs_integer_range`,
+  `ixs_integer_range_facts`, Python `Context.integer_range`, C++
+  `Expr::integer_range` and `Facts::integer_range`): first proves the
+  expression defined and integer-valued over the complete fact domain. It
+  then converts the rational interval inward with `ceil(lower)` and
+  `floor(upper)`. The existing bounded structural stride/residue analysis
+  tightens finite endpoints to reachable congruent integers when available.
+  Empty integer intersections, contradictory facts, failed domain proofs,
+  and OOM return no result with cleared output. Unbounded sides remain absent;
+  congruence alignment that would overflow an `int64_t` endpoint retains the
+  untightened endpoint only when the opposite side is unbounded. The
+  congruence walk is depth-limited to 64 and visits only the queried DAG.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer
@@ -2155,6 +2167,14 @@ typedef struct {
 bool ixs_range(ixs_session *s, ixs_node *expr,
                ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
+typedef struct {
+    bool has_lower;
+    bool has_upper;
+    int64_t lower, upper;
+} ixs_integer_range_result;
+bool ixs_integer_range(ixs_session *s, ixs_node *expr,
+                       ixs_node *const *assumptions, size_t n_assumptions,
+                       ixs_integer_range_result *out);
 
 // Session-owned fact sets. The handle is a store-owned tombstone until ctx
 // destruction; its proof payload is usable only until session reset/destroy.
@@ -2215,6 +2235,8 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
                                            int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
+bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
+                             ixs_integer_range_result *out);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
@@ -2946,6 +2968,10 @@ Implementation:
   assumptions=[...])` returns `(lower, upper)` from the same interval engine,
   or `None` when unknown.  Endpoints are Python `int`,
   `fractions.Fraction`, or `None` for an unbounded side.
+- `Context.integer_range(expr, assumptions=[...])` and the alternative
+  `facts=...` form return integer or unbounded endpoints only after ixsimpl
+  proves totality and integrality, rounds rational bounds inward, and applies
+  any structural congruence it can prove.
 - `Context.integer_valued(expr, assumptions=[...])` and the alternative
   `facts=...` form expose tri-state integrality. `Context.divisible(expr,
   modulus, facts)` exposes fact-backed tri-state divisibility and raises
@@ -3256,6 +3282,14 @@ typedef struct {
 bool ixs_range(ixs_session *s, ixs_node *expr,
                ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
+typedef struct {
+  bool has_lower;
+  bool has_upper;
+  int64_t lower, upper;
+} ixs_integer_range_result;
+bool ixs_integer_range(ixs_session *s, ixs_node *expr,
+                       ixs_node *const *assumptions, size_t n_assumptions,
+                       ixs_integer_range_result *out);
 
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
@@ -3313,6 +3347,8 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
                                            int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
                      ixs_range_result *out);
+bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
+                             ixs_integer_range_result *out);
 
 ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,
