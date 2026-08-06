@@ -1351,6 +1351,15 @@ predicate cannot observe that refinement. A symbol-free refinement
 conservatively requeues the whole batch. Closure ends when the queue is empty;
 there is no batch-size or round-count limit. Bounds domains are monotone, and a
 queue entry can create more work only when it strictly refines a fact.
+Before committing, the batch API also proves every original predicate defined
+in the saturated domain. Exact equalities cannot supply their own endpoint
+definedness, so `floor(x/d) == 0` is rejected unless the same batch or the
+incoming fact set independently proves `d != 0`. `ixs_facts_assume_pred`
+remains the incremental form: it may retain that equality first and accept the
+guard in a later mutation. A contradictory saturated domain is empty and
+therefore accepted vacuously under the existing contradictory-query contract.
+The low-level `ixs_facts_create_preds` constructor continues importing an exact
+one-shot domain without this sequential mutation closure requirement.
 
 The dependency index uses iterative DAG traversal, a per-predicate node set,
 and an open-addressed interned-symbol table. Pointer-identical predicates are
@@ -1366,7 +1375,8 @@ successful commit. Allocation failure fails the transaction. Store
 hash-consing makes structurally equal live nodes pointer-identical. Distinct
 pointers, including noncanonical predicates that later normalize to the same
 node, remain separate inputs and participate independently in closure.
-`ixs_facts_assume_pred` is its one-element form.
+`ixs_facts_assume_pred` is the incremental single-predicate form and does not
+require each intermediate mutation to close the complete expression domain.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
 Rejection or OOM leaves the stored payload unchanged but poisons the fact set,
 so no caller can continue proving from a partial or silently weaker context.

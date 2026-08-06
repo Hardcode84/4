@@ -8058,6 +8058,8 @@ static void test_public_defined_expression_facts_do_not_close_domain(void) {
   ixs_facts *range_closed = ixs_facts_create(ctx);
   ixs_facts *equality_only = ixs_facts_create(ctx);
   ixs_facts *equality_closed = ixs_facts_create(ctx);
+  ixs_facts *batch_unclosed = ixs_facts_create(ctx);
+  ixs_facts *batch_closed = ixs_facts_create(ctx);
   ixs_range_result range;
 
   range.has_lower = true;
@@ -8081,6 +8083,15 @@ static void test_public_defined_expression_facts_do_not_close_domain(void) {
   CHECK(ixs_facts_assume_pred(equality_closed, divisor_nonzero));
   CHECK(ixs_check_defined_facts(equality_closed, floored) == IXS_CHECK_TRUE);
 
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(batch_unclosed, &self_equality, 1));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "closed domain") != NULL);
+  ixs_ctx_clear_errors(ctx);
+
+  CHECK(ixs_facts_assume_preds(batch_closed, closed_assumptions, 2));
+  CHECK(ixs_check_defined_facts(batch_closed, floored) == IXS_CHECK_TRUE);
+
   CHECK(ixs_check_defined(ctx, floored, &self_equality, 1) ==
         IXS_CHECK_UNKNOWN);
   CHECK(ixs_check_defined(ctx, floored, closed_assumptions, 2) ==
@@ -8090,6 +8101,98 @@ static void test_public_defined_expression_facts_do_not_close_domain(void) {
   CHECK(ixs_check_defined_facts(range_closed, floored) == IXS_CHECK_UNKNOWN);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   CHECK(ixs_check_defined_facts(range_closed, floored) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void check_bounds_payload_unchanged(const ixs_bounds *actual,
+                                           const ixs_bounds *before) {
+  CHECK(actual->vars == before->vars && actual->nvars == before->nvars &&
+        actual->cap == before->cap);
+  CHECK(actual->exprs == before->exprs && actual->nexprs == before->nexprs &&
+        actual->expr_cap == before->expr_cap);
+  CHECK(actual->difference_vars == before->difference_vars &&
+        actual->ndifference_vars == before->ndifference_vars &&
+        actual->difference_index == before->difference_index &&
+        actual->ndifferences == before->ndifferences);
+  CHECK(actual->exact_vars == before->exact_vars &&
+        actual->nexact_vars == before->nexact_vars &&
+        actual->exact_index == before->exact_index);
+  CHECK(actual->nonzero == before->nonzero &&
+        actual->nnonzero == before->nnonzero);
+  CHECK(actual->contradiction == before->contradiction &&
+        actual->oom == before->oom);
+}
+
+static void test_public_facts_closed_batch_contract(void) {
+  const size_t budget = 4096;
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "closed_batch_x");
+  ixs_node *d = ixs_sym(ctx, "closed_batch_d");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *floored = ixs_floor(ctx, ixs_div(ctx, x, d));
+  ixs_node *unclosed = ixs_cmp(ctx, floored, IXS_CMP_EQ, zero);
+  ixs_node *x_nonnegative = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
+  ixs_node *nested = make_nested_query_root(ctx, "closed_batch_nested");
+  ixs_node *nested_floor = ixs_floor(ctx, ixs_div(ctx, nested, d));
+  ixs_node *nested_unclosed =
+      ixs_cmp(ctx, nested_floor, IXS_CMP_EQ, zero);
+  ixs_node *contradictory_predicates[2] = {unclosed, ixs_false(ctx)};
+  ixs_facts *rejected = ixs_facts_create(ctx);
+  ixs_facts *calibration = ixs_facts_create(ctx);
+  ixs_facts *validation_oom = ixs_facts_create(ctx);
+  ixs_facts *nested_rejected = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_facts *created;
+  ixs_bounds before;
+  ixs_bounds observed;
+  size_t active_count;
+  size_t nesting;
+  size_t prefix_allocations;
+
+  CHECK(ixs_facts_assume_pred(rejected, x_nonnegative));
+  before = rejected->bounds;
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(rejected, &unclosed, 1));
+  CHECK(!rejected->usable);
+  check_bounds_payload_unchanged(&rejected->bounds, &before);
+  CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+        strstr(ixs_ctx_error(ctx, 0), "closed domain") != NULL);
+  CHECK(!ixs_facts_assume_pred(
+      rejected, ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_check_defined_facts(rejected, floored) == IXS_CHECK_UNKNOWN);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), budget);
+  CHECK(ixs_facts_assume_pred(calibration, unclosed));
+  prefix_allocations = budget - ixs_test_scratch(ctx)->fail_after;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(prefix_allocations > 0 && prefix_allocations < budget);
+  before = validation_oom->bounds;
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), prefix_allocations);
+  CHECK(!ixs_facts_assume_preds(validation_oom, &unclosed, 1));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!validation_oom->usable);
+  check_bounds_payload_unchanged(&validation_oom->bounds, &before);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  CHECK(nested && ixs_node_contains_nested_piecewise(nested_unclosed));
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(nested_rejected, &nested_unclosed, 1));
+  CHECK(ctx->bounds_query_state != NULL);
+  observed = nested_rejected->bounds;
+  observed.query_state = ctx->bounds_query_state;
+  ixs_bounds_query_stats(&observed, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                         &active_count, &nesting);
+  CHECK(observed.query_tracking_depth == 0 && active_count == 0 && nesting == 0);
+
+  CHECK(ixs_facts_assume_preds(contradictory, contradictory_predicates, 2));
+  CHECK(contradictory->usable);
+  CHECK(ixs_check_defined_facts(contradictory, floored) == IXS_CHECK_UNKNOWN);
+
+  created = ixs_facts_create_preds(IXS_TEST_SESSION(ctx), &unclosed, 1);
+  CHECK(created != NULL && created->usable);
+  CHECK(ixs_check_defined_facts(created, floored) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
 }
@@ -8966,6 +9069,7 @@ int main(void) {
   test_public_defined_facts_and_invalid();
   test_public_defined_total_memo_rejects_malformed_nodes();
   test_public_defined_expression_facts_do_not_close_domain();
+  test_public_facts_closed_batch_contract();
   test_public_defined_traversal_bounds_and_sharing();
   test_fact_simplify_session_lifetime_and_oom();
   test_batch_rewrite_cache_oom_is_atomic();

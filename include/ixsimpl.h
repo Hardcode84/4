@@ -322,11 +322,13 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, const ixs_node *const *preds,
  * only after a complete successful mutation, so no partial weaker context is
  * observable. */
 
-/* Import predicates under one transaction. n == 0 accepts a NULL array. */
+/* Import one closed predicate domain under one transaction. Every predicate
+ * must be provably defined after batch saturation. n == 0 accepts NULL. */
 bool ixs_facts_assume_preds(ixs_facts *facts, const ixs_node *const *preds,
                             size_t n_preds);
 
-/* Single-predicate form of ixs_facts_assume_preds. */
+/* Import one predicate for incremental fact construction. Unlike the batch
+ * form, this permits a later predicate to close the expression domain. */
 bool ixs_facts_assume_pred(ixs_facts *facts, const ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;

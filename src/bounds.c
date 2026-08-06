@@ -6491,11 +6491,14 @@ static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
 }
 
 static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
-                                                    ixs_node *expr, bool *oom) {
+                                                    ixs_node *expr, bool *oom,
+                                                    bool *limited) {
   defined_state state;
   ixs_check_result result;
   if (oom)
     *oom = false;
+  if (limited)
+    *limited = false;
   if (!b || !b->ctx || !b->scratch || !expr || b->oom ||
       ixs_bounds_has_empty(b))
     return IXS_CHECK_UNKNOWN;
@@ -6508,6 +6511,8 @@ static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
   result = defined_eval(&state, b, expr, 0);
   if (oom)
     *oom = state.oom || b->oom;
+  if (limited)
+    *limited = state.limited;
   if (state.oom || state.limited || b->oom)
     return IXS_CHECK_UNKNOWN;
   return result;
@@ -6515,7 +6520,7 @@ static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
 
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
                                                      ixs_node *expr) {
-  return bounds_check_defined_status(b, expr, NULL);
+  return bounds_check_defined_status(b, expr, NULL, NULL);
 }
 
 static ixs_bounds_build_status assumption_invalid(ixs_bounds *b,
@@ -7511,8 +7516,36 @@ ixs_facts *ixs_facts_create(ixs_session *s) {
   return ixs_facts_create_preds(s, NULL, 0);
 }
 
-bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
-                            size_t n_predicates) {
+static ixs_bounds_build_status facts_validate_closed_predicates(
+    ixs_bounds *candidate, ixs_node *const *predicates, size_t n_predicates) {
+  size_t i;
+  if (candidate->contradiction || ixs_bounds_has_empty(candidate))
+    return IXS_BOUNDS_BUILD_OK;
+  for (i = 0; i < n_predicates; i++) {
+    ixs_check_result defined;
+    bool oom = false;
+    bool limited = false;
+    bool query_held = false;
+    if (!ixs_bounds_query_hold_begin(candidate, predicates[i], &query_held))
+      return candidate->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_LIMIT;
+    defined = bounds_check_defined_status(candidate, predicates[i], &oom,
+                                          &limited);
+    if (query_held)
+      ixs_bounds_query_hold_end(candidate);
+    if (defined == IXS_CHECK_TRUE)
+      continue;
+    if (oom || candidate->oom)
+      return IXS_BOUNDS_BUILD_OOM;
+    if (limited)
+      return IXS_BOUNDS_BUILD_LIMIT;
+    return assumption_invalid(candidate, "batch does not form a closed domain");
+  }
+  return IXS_BOUNDS_BUILD_OK;
+}
+
+static bool facts_assume_predicates(ixs_facts *facts,
+                                    ixs_node *const *predicates,
+                                    size_t n_predicates, bool require_closed) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
   ixs_arena_mark mark;
@@ -7547,6 +7580,9 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
                                             n_predicates);
+  if (status == IXS_BOUNDS_BUILD_OK && require_closed)
+    status =
+        facts_validate_closed_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {
@@ -7559,8 +7595,13 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   return status == IXS_BOUNDS_BUILD_OK;
 }
 
+bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
+                            size_t n_predicates) {
+  return facts_assume_predicates(facts, predicates, n_predicates, true);
+}
+
 bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred) {
-  return ixs_facts_assume_preds(facts, &pred, 1);
+  return facts_assume_predicates(facts, &pred, 1, false);
 }
 
 bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
@@ -10341,9 +10382,9 @@ static ixs_check_result equivalence_query_bound(ixs_facts *facts, ixs_ctx *ctx,
   if (oom)
     *oom = false;
 
-  if (bounds_check_defined_status(&facts->bounds, lhs, &defined_oom) !=
+  if (bounds_check_defined_status(&facts->bounds, lhs, &defined_oom, NULL) !=
           IXS_CHECK_TRUE ||
-      bounds_check_defined_status(&facts->bounds, rhs, &defined_oom) !=
+      bounds_check_defined_status(&facts->bounds, rhs, &defined_oom, NULL) !=
           IXS_CHECK_TRUE) {
     query_oom = defined_oom;
     goto restore;
@@ -10905,9 +10946,9 @@ finite_equivalence_query_bound(ixs_facts *facts, ixs_ctx *ctx, ixs_node *lhs,
 
   memset(&domains, 0, sizeof(domains));
   *oom = false;
-  if (bounds_check_defined_status(&facts->bounds, lhs, &defined_oom) !=
+  if (bounds_check_defined_status(&facts->bounds, lhs, &defined_oom, NULL) !=
           IXS_CHECK_TRUE ||
-      bounds_check_defined_status(&facts->bounds, rhs, &defined_oom) !=
+      bounds_check_defined_status(&facts->bounds, rhs, &defined_oom, NULL) !=
           IXS_CHECK_TRUE) {
     query_oom = defined_oom;
     goto restore;
@@ -10926,8 +10967,8 @@ finite_equivalence_query_bound(ixs_facts *facts, ixs_ctx *ctx, ixs_node *lhs,
   }
   if (ixs_node_is_sentinel(difference))
     goto restore;
-  if (bounds_check_defined_status(&facts->bounds, difference, &defined_oom) !=
-      IXS_CHECK_TRUE) {
+  if (bounds_check_defined_status(&facts->bounds, difference, &defined_oom,
+                                  NULL) != IXS_CHECK_TRUE) {
     query_oom = defined_oom;
     goto restore;
   }
@@ -11755,7 +11796,8 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   }
   if (!ixs_node_is_known_total(input_expr)) {
     ixs_check_result defined =
-        bounds_check_defined_status(&facts->bounds, input_expr, &defined_oom);
+        bounds_check_defined_status(&facts->bounds, input_expr, &defined_oom,
+                                    NULL);
     if (defined_oom) {
       if (!old_bounds_oom && facts->bounds.oom) {
         bounds_cache_clear(&facts->bounds);
