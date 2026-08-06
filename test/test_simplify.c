@@ -2462,10 +2462,10 @@ static void test_simplify_batch(void) {
     ixs_node *empty_batch[] = {shared};
     CHECK(ixs_facts_assume_pred(bounded, lo));
     CHECK(ixs_facts_assume_pred(bounded, hi));
-    ixs_simplify_batch_facts(bounded, bounded_batch, 2);
+    test_ixs_simplify_batch_facts(bounded, bounded_batch, 2);
     CHECK(bounded_batch[0] == ixs_add(ctx, x, ixs_int(ctx, 1)));
     CHECK(bounded_batch[1] == ixs_mul(ctx, ixs_int(ctx, 2), x));
-    ixs_simplify_batch_facts(empty, empty_batch, 1);
+    test_ixs_simplify_batch_facts(empty, empty_batch, 1);
     CHECK(empty_batch[0] == shared);
   }
 }
@@ -2489,16 +2489,16 @@ static void test_fact_backed_simplification(void) {
 
   CHECK(ixs_facts_assume_pred(facts, lo));
   CHECK(ixs_facts_assume_pred(facts, hi));
-  CHECK(ixs_simplify_facts(facts, mod) ==
+  CHECK(test_ixs_simplify_facts(facts, mod) ==
         ixs_simplify(ctx, mod, assumptions, 2));
-  CHECK(ixs_simplify_facts(facts, mod) == x);
-  CHECK(ixs_simplify_facts(facts, floor) == ixs_int(ctx, 0));
-  CHECK(ixs_range_facts(facts, x, &range));
+  CHECK(test_ixs_simplify_facts(facts, mod) == x);
+  CHECK(test_ixs_simplify_facts(facts, floor) == ixs_int(ctx, 0));
+  CHECK(test_ixs_range_facts(facts, x, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 7 && range.upper_q == 1);
 
   ixs_simplify_batch(ctx, legacy_batch, 2, assumptions, 2);
-  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  test_ixs_simplify_batch_facts(facts, fact_batch, 2);
   CHECK(fact_batch[0] == legacy_batch[0]);
   CHECK(fact_batch[1] == legacy_batch[1]);
 
@@ -2514,7 +2514,7 @@ static void test_fact_backed_simplification(void) {
     range.upper_q = 16;
     CHECK(ixs_facts_assume_range(explicit_facts, ixs_node_child(expr, 0),
                                  &range));
-    CHECK(ixs_simplify_facts(explicit_facts, expr) == ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(explicit_facts, expr) == ixs_int(ctx, 0));
   }
 
   {
@@ -2531,7 +2531,7 @@ static void test_fact_backed_simplification(void) {
     range.upper_q = 1;
     CHECK(ixs_facts_assume_range(affine_facts, base, &range));
     CHECK(ixs_facts_derive_affine(affine_facts, base, 3, 2, derived));
-    CHECK(ixs_simplify_facts(affine_facts, expr) == ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(affine_facts, expr) == ixs_int(ctx, 0));
   }
 
   {
@@ -2550,7 +2550,7 @@ static void test_fact_backed_simplification(void) {
     CHECK(
         ixs_facts_assume_range(source, ixs_node_child(source_expr, 0), &range));
     CHECK(ixs_facts_substitute(substituted, source, base, replacement));
-    CHECK(ixs_simplify_facts(substituted, expr) == ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(substituted, expr) == ixs_int(ctx, 0));
   }
 
   {
@@ -2571,9 +2571,9 @@ static void test_fact_backed_simplification(void) {
     CHECK(ixs_facts_assume_pred(source, mod8_pred));
     CHECK(ixs_facts_substitute_multi(substituted, source, 2, targets,
                                      replacements));
-    CHECK(ixs_simplify_facts(substituted, mod4) == ixs_int(ctx, 0));
-    CHECK(ixs_simplify_facts(substituted, mod8) == mod8);
-    CHECK(ixs_simplify_facts(substituted, final_mod4) == final_mod4);
+    CHECK(test_ixs_simplify_facts(substituted, mod4) == ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(substituted, mod8) == mod8);
+    CHECK(test_ixs_simplify_facts(substituted, final_mod4) == final_mod4);
   }
 
   {
@@ -2585,28 +2585,28 @@ static void test_fact_backed_simplification(void) {
                                 ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
     CHECK(ixs_facts_assume_pred(contradictory,
                                 ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
-    CHECK(ixs_simplify_facts(contradictory, x) == x);
-    CHECK(ixs_simplify_facts(contradictory, contradictory_floor) ==
+    CHECK(test_ixs_simplify_facts(contradictory, x) == x);
+    CHECK(test_ixs_simplify_facts(contradictory, contradictory_floor) ==
           contradictory_floor);
-    ixs_simplify_batch_facts(contradictory, contradictory_batch, 2);
+    test_ixs_simplify_batch_facts(contradictory, contradictory_batch, 2);
     CHECK(contradictory_batch[0] == contradictory_floor);
     CHECK(contradictory_batch[1] == x);
   }
 
-  CHECK(ixs_simplify_facts(facts, domain_error) == domain_error);
-  CHECK(ixs_simplify_facts(facts, parse_error) == parse_error);
+  CHECK(test_ixs_simplify_facts(facts, domain_error) == domain_error);
+  CHECK(test_ixs_simplify_facts(facts, parse_error) == parse_error);
   CHECK(ixs_is_domain_error(
-      ixs_simplify_facts(facts, ixs_sym(other, "facts_simplify_x"))));
+      test_ixs_simplify_facts(facts, ixs_sym(other, "facts_simplify_x"))));
 
   fact_batch[0] = mod;
   fact_batch[1] = ixs_sym(other, "facts_simplify_y");
-  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  test_ixs_simplify_batch_facts(facts, fact_batch, 2);
   CHECK(ixs_is_domain_error(fact_batch[0]));
   CHECK(ixs_is_domain_error(fact_batch[1]));
 
   fact_batch[0] = domain_error;
   fact_batch[1] = floor;
-  ixs_simplify_batch_facts(facts, fact_batch, 2);
+  test_ixs_simplify_batch_facts(facts, fact_batch, 2);
   CHECK(fact_batch[0] == domain_error);
   CHECK(fact_batch[1] == ixs_int(ctx, 0));
 
@@ -2615,8 +2615,8 @@ static void test_fact_backed_simplification(void) {
     ixs_node *unsupported = ixs_or(ctx, lo, hi);
     CHECK(ixs_facts_assume_pred(rejected, lo));
     CHECK(!ixs_facts_assume_pred(rejected, unsupported));
-    CHECK(ixs_is_domain_error(ixs_simplify_facts(rejected, mod)));
-    CHECK(ixs_check_facts(rejected, lo) == IXS_CHECK_UNKNOWN);
+    CHECK(ixs_is_domain_error(test_ixs_simplify_facts(rejected, mod)));
+    CHECK(test_ixs_check_facts(rejected, lo) == IXS_CHECK_UNKNOWN);
   }
 
   ixs_ctx_destroy(other);
@@ -2673,7 +2673,7 @@ static void test_fact_backed_affine_truncating_remainder(void) {
   CHECK(ixs_facts_assume_pred(
       crossing,
       ixs_cmp(ctx, a, IXS_CMP_LE, ixs_int(ctx, INT64_C(4294967295)))));
-  crossing_result = ixs_simplify_facts(crossing, source);
+  crossing_result = test_ixs_simplify_facts(crossing, source);
   CHECK(crossing_result == expected);
   CHECK(ixs_subs(ctx, crossing_result, a, ixs_int(ctx, INT64_C(2147483649))) ==
         ixs_int(ctx, -8448));
@@ -2681,7 +2681,7 @@ static void test_fact_backed_affine_truncating_remainder(void) {
         ixs_int(ctx, 0));
   CHECK(ixs_subs(ctx, crossing_result, a, ixs_int(ctx, INT64_C(2147483651))) ==
         ixs_int(ctx, 8448));
-  ixs_simplify_batch_facts(crossing, batch, 2);
+  test_ixs_simplify_batch_facts(crossing, batch, 2);
   CHECK(batch[0] == expected);
   CHECK(batch[1] == optimized_expected);
 
@@ -2721,8 +2721,8 @@ static void test_fact_backed_affine_truncating_remainder(void) {
         ixs_pw(ctx, 2, shared_remainder_values, shared_remainder_conditions);
     ixs_facts *shared = ixs_facts_create(ctx);
 
-    shared_expected = ixs_simplify_facts(shared, shared_expected);
-    CHECK(ixs_simplify_facts(shared, shared_source) == shared_expected);
+    shared_expected = test_ixs_simplify_facts(shared, shared_expected);
+    CHECK(test_ixs_simplify_facts(shared, shared_source) == shared_expected);
   }
 
   {
@@ -2765,9 +2765,9 @@ static void test_fact_backed_affine_truncating_remainder(void) {
                                 ixs_cmp(ctx, n, IXS_CMP_LE, ixs_int(ctx, 20))));
     CHECK(ixs_facts_assume_pred(negative_divisor,
                                 ixs_cmp(ctx, d, IXS_CMP_EQ, ixs_int(ctx, -3))));
-    negative_expected = ixs_simplify_facts(negative_divisor, negative_expected);
-    negative_result = ixs_simplify_facts(negative_divisor, negative_source);
-    CHECK(ixs_equivalent_facts(negative_divisor, negative_source,
+    negative_expected = test_ixs_simplify_facts(negative_divisor, negative_expected);
+    negative_result = test_ixs_simplify_facts(negative_divisor, negative_source);
+    CHECK(test_ixs_equivalent_facts(negative_divisor, negative_source,
                                negative_expected) == IXS_CHECK_TRUE);
     substituted = ixs_subs(ctx, negative_result, n, ixs_int(ctx, -4));
     CHECK(ixs_subs(ctx, substituted, d, ixs_int(ctx, -3)) == ixs_int(ctx, -1));
@@ -2786,7 +2786,7 @@ static void test_fact_backed_affine_truncating_remainder(void) {
       ixs_add(ctx, ixs_int(ctx, INT64_C(-18141941875200)),
               ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8448), a),
                       ixs_mul(ctx, ixs_int(ctx, -25344), bad_quotient)));
-  CHECK(ixs_simplify_facts(crossing, bad_source) == bad_source);
+  CHECK(test_ixs_simplify_facts(crossing, bad_source) == bad_source);
 
   bad_values[1] = ceil_value;
   bad_conditions[0] =
@@ -2796,13 +2796,13 @@ static void test_fact_backed_affine_truncating_remainder(void) {
       ixs_add(ctx, ixs_int(ctx, INT64_C(-18141941875200)),
               ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8448), a),
                       ixs_mul(ctx, ixs_int(ctx, -25344), bad_quotient)));
-  CHECK(ixs_simplify_facts(crossing, bad_source) == bad_source);
+  CHECK(test_ixs_simplify_facts(crossing, bad_source) == bad_source);
 
   bad_values[0] = ixs_add(ctx, ixs_rat(ctx, 1, 2), ixs_floor(ctx, argument));
   bad_values[1] = ixs_add(ctx, ixs_rat(ctx, 1, 2), ixs_ceil(ctx, argument));
   bad_conditions[0] = guard;
   bad_quotient = ixs_pw(ctx, 2, bad_values, bad_conditions);
-  CHECK(ixs_simplify_facts(crossing, bad_quotient) == bad_quotient);
+  CHECK(test_ixs_simplify_facts(crossing, bad_quotient) == bad_quotient);
 
   for (i = 0; i < TRUNCATING_LIMIT_CASES; i++) {
     char name[40];
@@ -2823,7 +2823,7 @@ static void test_fact_backed_affine_truncating_remainder(void) {
                         ixs_mul(ctx, ixs_int(ctx, 3),
                                 ixs_pw(ctx, 2, case_values, case_conditions))));
   }
-  CHECK(ixs_simplify_facts(limited, wide) == wide);
+  CHECK(test_ixs_simplify_facts(limited, wide) == wide);
 }
 
 static void test_exact_divide_fact_piecewise(void) {
@@ -2890,7 +2890,7 @@ static void test_fact_rewrite_constant_power(void) {
       large_facts,
       ixs_cmp(ctx, large, IXS_CMP_EQ, ixs_int(ctx, (int64_t)1 << 40))));
   errors = ixs_ctx_nerrors(ctx);
-  result = ixs_simplify_facts(large_facts, square);
+  result = test_ixs_simplify_facts(large_facts, square);
   CHECK(result && !ixs_is_error(result));
   CHECK(ixs_ctx_nerrors(ctx) == errors);
   CHECK(ixs_node_tag(result) == IXS_MUL);
@@ -2899,7 +2899,7 @@ static void test_fact_rewrite_constant_power(void) {
   CHECK(ixs_node_int_val(ixs_node_mul_factor_base(result, 0)) ==
         ((int64_t)1 << 40));
   CHECK(ixs_node_mul_factor_exp(result, 0) == 2);
-  ixs_simplify_batch_facts(large_facts, large_batch, 1);
+  test_ixs_simplify_batch_facts(large_facts, large_batch, 1);
   CHECK(large_batch[0] == result);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
   result = ixs_add(ctx, ixs_mul(ctx, result, ixs_mod(ctx, raw0, modulus)),
@@ -2916,8 +2916,8 @@ static void test_fact_rewrite_constant_power(void) {
   CHECK(ixs_facts_assume_pred(
       facts, ixs_cmp(ctx, raw7, IXS_CMP_EQ, ixs_int(ctx, 128))));
 
-  CHECK(ixs_simplify_facts(facts, expr) == expected);
-  ixs_simplify_batch_facts(facts, batch, 2);
+  CHECK(test_ixs_simplify_facts(facts, expr) == expected);
+  test_ixs_simplify_batch_facts(facts, batch, 2);
   CHECK(batch[0] == expected);
   CHECK(batch[1] == expected);
 
@@ -2936,13 +2936,13 @@ static void test_fact_rewrite_constant_power(void) {
     ixs_facts *wide = ixs_facts_create(ctx);
     ixs_range_result range = {true, true, 127, 1, 128, 1};
     CHECK(ixs_facts_assume_range(wide, raw7, &range));
-    CHECK(ixs_simplify_facts(wide, quotient) == quotient);
+    CHECK(test_ixs_simplify_facts(wide, quotient) == quotient);
   }
 
   CHECK(ixs_facts_assume_pred(zero_facts,
                               ixs_cmp(ctx, zero, IXS_CMP_EQ, ixs_int(ctx, 0))));
   errors = ixs_ctx_nerrors(ctx);
-  result = ixs_simplify_facts(zero_facts, undefined);
+  result = test_ixs_simplify_facts(zero_facts, undefined);
   CHECK(result && ixs_is_domain_error(result));
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1);
   CHECK(strstr(ixs_ctx_error(ctx, errors), "division by zero") != NULL);

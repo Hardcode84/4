@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SIMPLIFY_ITER_LIMIT 64
 #define CONGRUENT_MOD_PAIR_LIMIT 256u
 #define EQUAL_FLOOR_PAIR_LIMIT 256u
 #define FLOOR_MOD_PAIR_LIMIT 256u
@@ -5891,16 +5890,21 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 
 static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
                                              ixs_bounds *bnds,
-                                             rewrite_shared_cache *shared) {
-  int iter;
+                                             rewrite_shared_cache *shared,
+                                             bool *limited) {
+  ixs_node **seen = NULL;
+  size_t seen_count = 0;
+  size_t seen_capacity = 0;
   rewrite_memo_slot memo[REWRITE_MEMO_SIZE];
 
+  (void)limited;
   if (!expr)
     return NULL;
   if (ixs_node_is_sentinel(expr))
     return expr;
 
-  for (iter = 0; iter < SIMPLIFY_ITER_LIMIT; iter++) {
+  for (;;) {
+    size_t i;
     ixs_node *prev = expr;
     memset(memo, 0, sizeof(memo));
     expr = rewrite(ctx, expr, bnds, memo, shared);
@@ -5913,10 +5917,29 @@ static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
     }
     if (expr == prev)
       break;
+    for (i = 0; i < seen_count; i++) {
+      if (seen[i] == expr) {
+        ixs_ctx_push_error(ctx, "simplify: rewrite cycle detected");
+        return ctx->sentinel_error;
+      }
+    }
+    if (seen_count == seen_capacity) {
+      size_t next_capacity = seen_capacity ? seen_capacity * 2u : 8u;
+      ixs_node **grown;
+      if (next_capacity < seen_capacity ||
+          next_capacity > SIZE_MAX / sizeof(*grown))
+        return NULL;
+      grown = ixs_arena_alloc(&ctx->scratch,
+                              next_capacity * sizeof(*grown), sizeof(void *));
+      if (!grown)
+        return NULL;
+      if (seen_count)
+        memcpy(grown, seen, seen_count * sizeof(*grown));
+      seen = grown;
+      seen_capacity = next_capacity;
+    }
+    seen[seen_count++] = expr;
   }
-
-  if (iter == SIMPLIFY_ITER_LIMIT)
-    ixs_ctx_push_error(ctx, "simplify: iteration limit reached");
 
   return expr;
 }
@@ -5946,12 +5969,11 @@ IXS_STATIC ixs_node *simp_simplify_bounds_status(ixs_ctx *ctx, ixs_node *expr,
   shared.grow_pending = false;
   if (!rewrite_shared_cache_grow(&shared)) {
     ixs_arena_restore(&ctx->scratch, mark);
-    result = simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
     if (query_held)
       ixs_bounds_query_hold_end(bnds);
-    return result;
+    return NULL;
   }
-  result = simp_simplify_bounds_cached(ctx, expr, bnds, &shared);
+  result = simp_simplify_bounds_cached(ctx, expr, bnds, &shared, limited);
   ixs_arena_restore(&ctx->scratch, mark);
   if (query_held)
     ixs_bounds_query_hold_end(bnds);
@@ -5977,6 +5999,7 @@ IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
     goto failed;
   for (i = 0; i < n; i++) {
     bool query_held = false;
+    bool limited = false;
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
     if (!ixs_bounds_query_hold_begin(bnds, exprs[i], &query_held)) {
@@ -5984,10 +6007,11 @@ IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
         goto failed;
       continue;
     }
-    exprs[i] = simp_simplify_bounds_cached(ctx, exprs[i], bnds, &shared);
+    exprs[i] =
+        simp_simplify_bounds_cached(ctx, exprs[i], bnds, &shared, &limited);
     if (query_held)
       ixs_bounds_query_hold_end(bnds);
-    if (!exprs[i])
+    if (!exprs[i] || limited)
       goto failed;
   }
   return true;

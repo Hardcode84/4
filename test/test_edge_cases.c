@@ -460,7 +460,7 @@ static void test_many_expression_ranges(void) {
 
   for (i = EXPR_COUNT; i > 0; i--) {
     size_t index = i - 1u;
-    CHECK(ixs_range_facts(facts, exprs[index], &result));
+    CHECK(test_ixs_range_facts(facts, exprs[index], &result));
     CHECK(result.has_lower && result.lower_p == (int64_t)index &&
           result.lower_q == 1);
     CHECK(result.has_upper && result.upper_p == (int64_t)index + 100 &&
@@ -470,7 +470,7 @@ static void test_many_expression_ranges(void) {
   input.lower_p = 20;
   input.upper_p = 80;
   CHECK(ixs_facts_assume_range(facts, exprs[0], &input));
-  CHECK(ixs_range_facts(facts, exprs[0], &result));
+  CHECK(test_ixs_range_facts(facts, exprs[0], &result));
   CHECK(result.has_lower && result.lower_p == 20 && result.lower_q == 1);
   CHECK(result.has_upper && result.upper_p == 80 && result.upper_q == 1);
 
@@ -483,13 +483,13 @@ static void test_many_expression_ranges(void) {
   input.lower_p = 0;
   input.upper_p = 0;
   CHECK(ixs_facts_assume_range(conflicting, conflict, &input));
-  CHECK(!ixs_range_facts(conflicting, conflict, &result));
+  CHECK(!test_ixs_range_facts(conflicting, conflict, &result));
 
   input.lower_p = 7;
   input.upper_p = 7;
   CHECK(ixs_facts_assume_range(substituted, replacement, &input));
   CHECK(ixs_facts_substitute(substituted, conflicting, conflict, replacement));
-  CHECK(!ixs_range_facts(substituted, replacement, &result));
+  CHECK(!test_ixs_range_facts(substituted, replacement, &result));
 
   ixs_ctx_destroy(ctx);
 }
@@ -513,13 +513,13 @@ static void test_product_nonzero_factors(void) {
   ixs_facts *negative_power_batch = ixs_facts_create(ctx);
 
   CHECK(ixs_facts_assume_preds(product, &scaled_nonzero, 1));
-  CHECK(ixs_check_defined_facts(product, reciprocal) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_defined_facts(product, reciprocal) == IXS_CHECK_TRUE);
 
   CHECK(ixs_facts_assume_pred(addition, sum_nonzero));
-  CHECK(ixs_check_defined_facts(addition, inverse) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_defined_facts(addition, inverse) == IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_facts_assume_pred(negative_power, inverse_nonzero));
-  CHECK(ixs_check_defined_facts(negative_power, inverse) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_defined_facts(negative_power, inverse) == IXS_CHECK_UNKNOWN);
   CHECK(!ixs_facts_assume_preds(negative_power_batch, &inverse_nonzero, 1));
 
   ixs_ctx_destroy(ctx);
@@ -543,13 +543,13 @@ static void test_congruence_proves_nonzero(void) {
   ixs_node *either = ixs_or(ctx, odd_nonzero, unknown);
   ixs_facts *facts = ixs_facts_create(ctx);
 
-  CHECK(ixs_check_facts(facts, odd_nonzero) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_facts(facts, odd_zero) == IXS_CHECK_FALSE);
-  CHECK(ixs_check_facts(facts, scaled_not_minus_one) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_facts(facts, scaled_minus_one) == IXS_CHECK_FALSE);
-  CHECK(ixs_check_predicate_facts(facts, either) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_facts(facts, scaled_nonzero) == IXS_CHECK_UNKNOWN);
-  CHECK(ixs_check_facts(facts, one_plus_x_nonzero) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, odd_nonzero) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, odd_zero) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_facts(facts, scaled_not_minus_one) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, scaled_minus_one) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(facts, either) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, scaled_nonzero) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, one_plus_x_nonzero) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
 }
@@ -567,11 +567,11 @@ static void test_opposite_max_nonzero_range(void) {
   ixs_facts *unconstrained = ixs_facts_create(ctx);
   ixs_facts *facts = ixs_facts_create(ctx);
 
-  CHECK(ixs_check_facts(unconstrained, nonnegative) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_facts(unconstrained, positive) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(unconstrained, nonnegative) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(unconstrained, positive) == IXS_CHECK_UNKNOWN);
   CHECK(ixs_facts_assume_pred(facts, nonzero));
-  CHECK(ixs_check_facts(facts, positive) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_defined_facts(facts, remainder) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, positive) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_defined_facts(facts, remainder) == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -595,8 +595,8 @@ static void test_truncating_remainder_excludes_signed_min(void) {
   CHECK(ixs_facts_assume_range(facts, x, &range));
   CHECK(ixs_facts_assume_range(facts, d, &range));
   CHECK(ixs_facts_assume_pred(facts, nonzero));
-  CHECK(ixs_check_predicate_facts(facts, not_min) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_predicate_facts(facts, is_min) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(facts, not_min) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(facts, is_min) == IXS_CHECK_FALSE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -623,19 +623,19 @@ static void test_truncating_remainder_intersects_explicit_range(void) {
 
   CHECK(ixs_facts_assume_pred(refined, d_is_four));
   CHECK(ixs_facts_assume_range(refined, remainder, &exact_zero));
-  CHECK(ixs_check_facts(refined, remainder_is_zero) == IXS_CHECK_TRUE);
-  CHECK(ixs_range_facts(refined, remainder, &range));
+  CHECK(test_ixs_check_facts(refined, remainder_is_zero) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_range_facts(refined, remainder, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
-  CHECK(ixs_integer_range_facts(refined, remainder, &integer_range));
+  CHECK(test_ixs_integer_range_facts(refined, remainder, &integer_range));
   CHECK(integer_range.has_lower && integer_range.lower == 0);
   CHECK(integer_range.has_upper && integer_range.upper == 0);
 
   CHECK(ixs_facts_assume_pred(disjoint, d_is_four));
   CHECK(ixs_facts_assume_range(disjoint, remainder, &exact_four));
-  CHECK(ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
-  CHECK(!ixs_range_facts(disjoint, remainder, &range));
-  CHECK(!ixs_integer_range_facts(disjoint, remainder, &integer_range));
+  CHECK(test_ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
+  CHECK(!test_ixs_range_facts(disjoint, remainder, &range));
+  CHECK(!test_ixs_integer_range_facts(disjoint, remainder, &integer_range));
 
   ixs_ctx_destroy(ctx);
 }

@@ -76,7 +76,8 @@ int main() {
     return 4;
   ixs::RationalMaterializationPlan plan =
       facts.plan_rational_materialization(rational_eighth, 8);
-  if (plan.status != IXS_CHECK_TRUE || plan.denominator != 8 ||
+  if (plan.status != IXS_FACT_QUERY_COMPLETE ||
+      plan.check != IXS_CHECK_TRUE || plan.denominator != 8 ||
       plan.numerator.str() != "x")
     return 4;
 

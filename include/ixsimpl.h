@@ -190,6 +190,35 @@ typedef enum {
   IXS_CHECK_UNKNOWN
 } ixs_check_result;
 
+/* Resource and input status for reusable-fact queries.  COMPLETE means the
+ * query ran to a semantic conclusion; its payload may still be UNKNOWN or
+ * unavailable when the facts do not prove the requested property.  LIMITED
+ * and OOM are retryable without changing the fact set.  INVALID is a hard
+ * caller or internal-contract failure and carries a session diagnostic when a
+ * live session is available. */
+typedef enum {
+  IXS_FACT_QUERY_COMPLETE,
+  IXS_FACT_QUERY_LIMITED,
+  IXS_FACT_QUERY_INVALID,
+  IXS_FACT_QUERY_OOM
+} ixs_fact_query_status;
+
+typedef struct {
+  ixs_fact_query_status status;
+  ixs_check_result check;
+} ixs_fact_check_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  const ixs_node *value;
+} ixs_simplify_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  int64_t difference;
+} ixs_constant_difference_result;
+
 typedef enum {
   IXS_GROUP_UNION_COMPLETE,
   /* The caller-supplied work counter could not reserve the next unit. */
@@ -235,6 +264,7 @@ typedef enum {
 typedef enum {
   IXS_FINITE_DOMAIN_COMPLETE,
   IXS_FINITE_DOMAIN_EXHAUSTED,
+  IXS_FINITE_DOMAIN_LIMITED,
   IXS_FINITE_DOMAIN_INVALID,
   IXS_FINITE_DOMAIN_OOM
 } ixs_finite_domain_status;
@@ -312,6 +342,7 @@ typedef enum {
 typedef enum {
   IXS_MODULO_RECURRENCE_PROVEN,
   IXS_MODULO_RECURRENCE_UNKNOWN,
+  IXS_MODULO_RECURRENCE_LIMITED,
   IXS_MODULO_RECURRENCE_INVALID,
   IXS_MODULO_RECURRENCE_OOM
 } ixs_modulo_recurrence_status;
@@ -330,7 +361,9 @@ typedef enum {
   IXS_EXACT_DIVIDE_PROVEN,
   IXS_EXACT_DIVIDE_NOT_EXACT,
   IXS_EXACT_DIVIDE_UNKNOWN,
-  IXS_EXACT_DIVIDE_ERROR
+  IXS_EXACT_DIVIDE_LIMITED,
+  IXS_EXACT_DIVIDE_INVALID,
+  IXS_EXACT_DIVIDE_OOM
 } ixs_exact_divide_status;
 
 typedef struct {
@@ -353,6 +386,16 @@ typedef struct {
 } ixs_known_bits;
 
 typedef struct {
+  ixs_fact_query_status status;
+  ixs_pow2_fact fact;
+} ixs_pow2_query_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  ixs_known_bits bits;
+} ixs_known_bits_query_result;
+
+typedef struct {
   bool has_lower;
   bool has_upper;
   int64_t lower_p;
@@ -368,6 +411,25 @@ typedef struct {
   int64_t upper;
 } ixs_integer_range_result;
 
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_range_result range;
+} ixs_range_query_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_integer_range_result range;
+} ixs_integer_range_query_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  int64_t modulus;
+  int64_t residue;
+} ixs_symbol_congruence_result;
+
 /* Proven decomposition
  *   expr = residual + scale * Mod(symbol + phase, modulus).
  * scale and modulus are positive, modulus is greater than one, and ring is
@@ -382,12 +444,46 @@ typedef struct {
   bool residual_bounded;
 } ixs_cyclic_decomposition;
 
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *coefficient;
+  const ixs_node *residual;
+} ixs_affine_decomposition_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *numerator;
+  const ixs_node *denominator;
+} ixs_exact_quotient_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *difference;
+} ixs_finite_difference_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_cyclic_decomposition decomposition;
+} ixs_cyclic_decomposition_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *residual;
+  int64_t constant;
+} ixs_additive_constant_result;
+
 /* Exact rational materialization plan returned by the width query.  Numerator
  * and denominator are populated only when status is TRUE.  The denominator
  * is always positive, and the proof does not depend on canonical child order.
  */
 typedef struct {
-  ixs_check_result status;
+  ixs_fact_query_status status;
+  ixs_check_result check;
   const ixs_node *numerator;
   int64_t denominator;
 } ixs_rational_materialization_plan;
@@ -522,45 +618,47 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
                                 const ixs_node *const *replacements);
 
 /* Simplify directly against an existing fact set without rebuilding bounds.
- * NULL reports OOM or an expired/reset session.  Sentinel input propagates;
- * invalid live input returns the fact set context's domain-error sentinel.
- * Detected contradictory facts return expr unchanged. */
-const ixs_node *ixs_simplify_facts(ixs_facts *facts, const ixs_node *expr);
+ * value is populated only for COMPLETE.  A fixed internal work ceiling is
+ * LIMITED, malformed or foreign input is INVALID, and allocation failure is
+ * OOM. Detected contradictory facts return COMPLETE with expr unchanged. */
+ixs_simplify_result ixs_simplify_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
 
-/* Fact-backed batch simplification.  On OOM or an expired/reset session all
- * entries become NULL.  Invalid live input replaces the entire batch with the
- * domain-error sentinel.  NULL and sentinel entries otherwise propagate;
- * detected contradictory facts leave every entry unchanged. */
-void ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs,
-                              size_t n);
+/* Fact-backed batch simplification.  The operation is transactional: entries
+ * are replaced only for COMPLETE and remain unchanged for LIMITED, INVALID,
+ * or OOM.  NULL and sentinel entries are invalid input.  Detected
+ * contradictory facts return COMPLETE with every entry unchanged. */
+ixs_fact_query_status ixs_simplify_batch_facts(ixs_facts *facts,
+                                               const ixs_node **exprs,
+                                               size_t n);
 
 /* Reusable-fact form of ixs_check with the same CMP or canonical
  * true/false input contract. */
-ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_facts(ixs_facts *facts,
+                                      const ixs_node *expr);
 /* Check a predicate tree against an existing fact set.  AND, OR, and NOT use
  * conservative three-valued logic.  Numeric bitwise AND/OR expressions are
  * rejected because they are not predicate trees. */
-ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
-                                           const ixs_node *predicate);
+ixs_fact_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                                const ixs_node *predicate);
 /* Report whether the reusable fact domain is nonempty.  TRUE means no
  * contradiction detectable by the fact engine, FALSE means a detected empty
  * domain, and UNKNOWN means the fact set is invalid, expired, or exhausted. */
-ixs_check_result ixs_check_consistent_facts(ixs_facts *facts);
+ixs_fact_check_result ixs_check_consistent_facts(ixs_facts *facts);
 /* Prove total equivalence over the full domain admitted by facts.  TRUE is
  * returned only after both operands are proved defined everywhere.  FALSE is
  * returned only for a universal proof of different values; insufficient
  * facts, contradictory facts, invalid input, and resource limits return
  * UNKNOWN. */
-ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
-                                      const ixs_node *rhs);
+ixs_fact_check_result ixs_equivalent_facts(ixs_facts *facts,
+                                           const ixs_node *lhs,
+                                           const ixs_node *rhs);
 /* Prove total equivalence modulo 2^bits.  Both operands must be defined and
  * integer-valued over the complete fact domain.  bits must be at most 63;
  * invalid widths emit a diagnostic and return UNKNOWN.  The proof propagates
  * only through operations that preserve the requested low bits. */
-ixs_check_result ixs_equivalent_modulo_pow2_facts(ixs_facts *facts,
-                                                  const ixs_node *lhs,
-                                                  const ixs_node *rhs,
-                                                  unsigned bits);
+ixs_fact_check_result ixs_equivalent_modulo_pow2_facts(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs, unsigned bits);
 /* Run one bounded finite-domain query. Equivalence first uses the ordinary
  * proof engine, then enumerates the finite integer ranges still present in
  * lhs-rhs. Relation queries exhaustively verify one typed candidate against an
@@ -617,8 +715,9 @@ ixs_finite_domain_status ixs_finite_domain_batch_facts(
     ixs_finite_domain_batch_result *results, size_t *remaining_work);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
-bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
-                                   const ixs_node *rhs, int64_t *delta);
+ixs_constant_difference_result
+ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
+                              const ixs_node *rhs);
 /* Prove and construct one fixed-width modulo recurrence. `value`, `reference`,
  * and `induction` are scalar signed-view fixed-width integer expressions;
  * semantic predicate values are invalid. The closed fact domain must prove all
@@ -672,21 +771,19 @@ ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
                        size_t *remaining_work);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an
  * exact rational constant and residual does not reference symbol. */
-bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
-                                const ixs_node *symbol,
-                                const ixs_node **coefficient,
-                                const ixs_node **residual);
+ixs_affine_decomposition_result
+ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
 /* Decompose a rational product or common-denominator sum exactly after
  * simplifying under facts.  This does not prove integer-valued parts or a
  * nonzero denominator. */
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
-                                        const ixs_node **numerator,
-                                        const ixs_node **denominator);
+ixs_exact_quotient_result
+ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr);
 /* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
  * still reference symbol; callers decide whether it is loop invariant. */
-bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
-                                 const ixs_node *symbol, const ixs_node *step,
-                                 const ixs_node **difference);
+ixs_finite_difference_result
+ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
+                            const ixs_node *symbol, const ixs_node *step);
 /* Recognize a direct Mod, a positive integral scalar multiple of Mod, or one
  * such term in an ADD.  The Mod dividend must be symbol plus an exactly
  * representable integer phase.  The exact residual must be defined,
@@ -694,24 +791,23 @@ bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
  * residual_bounded is true only when facts also prove
  * 0 <= residual < scale.  Loop step and target carry policy are not part of
  * this query. */
-bool ixs_decompose_cyclic_facts(ixs_facts *facts, const ixs_node *expr,
-                                const ixs_node *symbol,
-                                ixs_cyclic_decomposition *out);
+ixs_cyclic_decomposition_result
+ixs_decompose_cyclic_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
 /* Split expr into residual + constant with an exactly representable integer
  * constant. */
-bool ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr,
-                                       const ixs_node **residual,
-                                       int64_t *constant);
-ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
-                                                const ixs_node *expr);
-ixs_check_result ixs_check_defined_facts(ixs_facts *facts,
-                                         const ixs_node *expr);
+ixs_additive_constant_result
+ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
+ixs_fact_check_result ixs_check_defined_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
 /* Check divisibility by a nonzero signed modulus.  Negative moduli are
  * normalized by magnitude without overflowing INT64_MIN.  Modulus zero emits
  * a session diagnostic and returns UNKNOWN. */
-ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
-                                           const ixs_node *expr,
-                                           int64_t modulus);
+ixs_fact_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
  * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
@@ -721,28 +817,30 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    const ixs_node *expr,
                                                    int64_t divisor);
-ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_pow2_query_result ixs_get_pow2_fact_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
 /* Return sound low-64-bit facts.  True with zero masks means that the query
  * was valid but proved no bits.  Invalid input, contradictory facts, and OOM
  * return false and leave out initialized to the no-information value. */
-bool ixs_get_known_bits_facts(ixs_facts *facts, const ixs_node *expr,
-                              ixs_known_bits *out);
+ixs_known_bits_query_result ixs_get_known_bits_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
 /* Export the stored congruence record for a symbol.  Output pointers must be
  * non-NULL and distinct.  This deliberately does not synthesize a strongest
  * congruence for arbitrary expressions. */
-bool ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol,
-                                     int64_t *modulus, int64_t *residue);
+ixs_symbol_congruence_result
+ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol);
 /* Prove expr == residue (mod modulus).  Negative moduli are normalized by
  * magnitude without overflowing INT64_MIN.  Modulus zero emits a diagnostic
  * and returns UNKNOWN. */
-ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
-                                           const ixs_node *expr,
-                                           int64_t modulus, int64_t residue);
-bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
-                     ixs_range_result *out);
+ixs_fact_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus,
+                                                int64_t residue);
+ixs_range_query_result ixs_range_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
 /* Reusable-fact form of ixs_integer_range. */
-bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
-                             ixs_integer_range_result *out);
+ixs_integer_range_query_result ixs_integer_range_facts(
+    ixs_facts *facts, const ixs_node *expr);
 
 /* Prove that every arithmetic intermediate introduced while materializing the
  * rational islands of expr fits one machine word.  ADD and Piecewise choose
@@ -764,9 +862,8 @@ bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
  * contradictory facts, a cycle, allocation-size overflow, or OOM.  The
  * planner uses growable arena-backed iterative state and imposes no fixed
  * traversal depth, visit count, Piecewise case count, or exponent cap. */
-ixs_check_result ixs_check_rational_intermediates_facts(ixs_facts *facts,
-                                                        const ixs_node *expr,
-                                                        uint32_t word_bits);
+ixs_fact_check_result ixs_check_rational_intermediates_facts(
+    ixs_facts *facts, const ixs_node *expr, uint32_t word_bits);
 
 /* Return the exact numerator and denominator authorized by the
  * order-independent width proof above.  TRUE is the only status with a

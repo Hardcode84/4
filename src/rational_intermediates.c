@@ -1670,11 +1670,13 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
   rational_analysis analysis;
   ixs_rational_materialization_plan result;
   uint64_t signed_modulus;
-  result.status = IXS_CHECK_UNKNOWN;
+  result.status = IXS_FACT_QUERY_INVALID;
+  result.check = IXS_CHECK_UNKNOWN;
   result.numerator = NULL;
   result.denominator = 1;
   if (!ctx || !bounds || !expr || word_bits < 2u || word_bits > 64u)
     return result;
+  result.status = IXS_FACT_QUERY_COMPLETE;
   memset(&state, 0, sizeof(state));
   state.ctx = ctx;
   state.bounds = bounds;
@@ -1693,16 +1695,22 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
     state.signed_upper = (int64_t)(signed_modulus - UINT64_C(1));
   }
   analysis = rational_analyze(&state, expr);
-  if (state.oom || state.cycle || bounds->oom)
+  if (state.oom || bounds->oom) {
+    result.status = IXS_FACT_QUERY_OOM;
     return result;
-  result.status =
+  }
+  if (state.cycle) {
+    result.status = IXS_FACT_QUERY_INVALID;
+    return result;
+  }
+  result.check =
       analysis.contains_materialization ? analysis.full_fit : IXS_CHECK_TRUE;
   /* A TRUE plan is executable, not merely a statement that no rational leaf
    * happened to be found.  Unsupported and malformed roots remain UNKNOWN. */
-  if (result.status != IXS_CHECK_TRUE || !analysis.proof.valid ||
+  if (result.check != IXS_CHECK_TRUE || !analysis.proof.valid ||
       !analysis.proof.numerator || analysis.proof.denominator <= 0) {
-    if (result.status == IXS_CHECK_TRUE)
-      result.status = IXS_CHECK_UNKNOWN;
+    if (result.check == IXS_CHECK_TRUE)
+      result.check = IXS_CHECK_UNKNOWN;
     return result;
   }
   result.numerator = analysis.proof.numerator;

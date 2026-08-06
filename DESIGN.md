@@ -1326,11 +1326,12 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   their direct legacy path. Fact-backed simplification and public proof APIs
   hold one query scope across the complete root operation, including
   predicate ingestion and each truncating-remainder postpass. Tracking is
-  activated for nested-`Piecewise` roots, with nested holds joining an already
-  active scope. Arbitrary expression equalities are not projected into query
-  activation or memo keys; exact facts remain in the weighted
-  symbol-difference forest described above. This keeps unrelated batch roots
-  on the direct path. The cache is cleared between outer queries;
+  activated for nested-`Piecewise` roots and arbitrary exact-relation endpoint
+  roots, with nested holds joining an already active scope. Interval memo keys
+  distinguish normal projection from intrinsic endpoint proofs with equality
+  projection disabled. Symbol-only facts still take the weighted-forest fast
+  path, and unrelated batch roots retain the direct path. The cache is cleared
+  between outer queries;
   facts remain the only persistent proof input. Interned nodes also
   cache structural totality. Residue inference conservatively declines a
   syntactically non-total expression instead of launching a full recursive
@@ -1462,13 +1463,18 @@ expressions cannot overflow their target address width. The 300-edge chain,
 the three-edge negative cycle, and exact equality hidden behind 300 one-sided
 edges are adversarial contract witnesses, not substitutes for this loop case.
 
-The accepted representation keeps two structures. A directed difference graph
-stores one-sided constraints and an expected-O(1) exact-edge index. A weighted
-equality forest stores only complementary exact pairs; exact queries do not
-walk inequality adjacency. Exact equalities are also present as two directed
-graph edges so feasibility has one authority. Both structures are fact-local,
-arena-owned, and copied transactionally. Incremental graph processing visits
-only the affected relation component, never the context or arena.
+The accepted representation keeps three structures. A directed difference
+graph stores one-sided symbol constraints and an expected-O(1) exact-edge
+index. A weighted equality forest stores complementary exact symbol pairs and
+remains the inverse-Ackermann fast path for symbol-only queries. A separate
+exact-relation graph stores arbitrary hash-consed expression endpoints. Exact
+symbol equalities are recorded in both exact structures, so mixed
+expression-to-symbol chains stay connected without making symbol queries walk
+generic adjacency. Exact symbol equalities are also present as two directed
+difference-graph edges so feasibility has one authority. All three structures
+are fact-local, arena-owned, and copied transactionally. Incremental graph
+processing visits only the affected relation component, never the context or
+arena.
 
 The equality forest has its own open-addressed map from stable graph-variable
 indices to a compact array containing only exact participants. Each weighted
@@ -1481,16 +1487,39 @@ unmerged and that composed query unknown; it cannot manufacture an equality.
 The two directed edges remain in the complete feasibility graph, so this loss
 of exact-query precision does not weaken contradiction detection.
 
+The arbitrary-expression graph indexes endpoints by node identity and direct
+edges by `(lhs, rhs, offset)`. A canonical exact comparison residual is split
+in one pass into `constant + positive - negative == 0`, then retained as
+`positive == negative + offset`; the `INT64_MIN` constant uses the reverse
+orientation so the stored edge remains representable. Queries traverse only
+the independently defined component with a growable, nonrecursive scratch
+worklist. Signed-magnitude offsets preserve the temporary positive `2^63`
+needed by boundary chains. There is no edge, node, or depth cutoff. Allocation
+failure reports OOM, an unrepresentable final `int64_t` delta reports no proof,
+and conflicting paths report an invalid exact relation rather than selecting
+one path.
+
+Range and integrality projection evaluate each peer with exact-relation
+projection disabled. This prevents an equality from proving the domain of its
+own partial endpoint. The direct interval cache and dynamic query memo keys
+include that disabled mode, so an equality-derived cached interval cannot be
+reused by the intrinsic proof. A peer `node == root + offset` contributes its
+intrinsic range shifted by `-offset`; integer offsets transfer integer or
+non-integer point evidence. Conflicting peer evidence yields unknown.
+
 The directed graph uses immutable arena-owned edge records, separate incoming
 and outgoing adjacency heads, and append-stable variable indices. Adjacency,
 feasibility, and worklist state live in a lazily allocated parallel table, so a
 fact set without relational constraints retains no graph-variable payload.
 Forks copy the variable and graph-variable tables plus the exact-edge hash
-index while sharing only the immutable edge records; a new edge changes heads
-and feasibility potentials in the candidate generation alone. Substitution
-rebuilds graph constraints from the substituted expression facts, then
-transfers symbol endpoints and congruences through the rebuilt graph. Thus no
-edge contains a pointer to a variable slot from another generation.
+index. The arbitrary-expression graph additionally deep-copies every edge and
+rebuilds both endpoint adjacency lists and its hash index, so no fork retains
+topology owned by the source payload. Substitution replays each direct exact
+edge after simultaneous endpoint substitution; collapsing unequal endpoints
+with a nonzero offset marks the candidate contradictory. It then rebuilds
+difference constraints from substituted expression facts and transfers symbol
+endpoints and congruences. Thus no edge contains a pointer to a variable slot
+or graph generation owned by another payload.
 
 Each graph variable carries a feasible potential for the constraints already
 committed. Inserting an edge that violates those potentials starts an
@@ -1838,8 +1867,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   fixed-term semantic cutoff. Allocation or checked-size failure returns
   unknown. For `T` terms at one level, candidate matching is O(T^2) in the
   worst case and residual construction is O(T); it visits only the queried
-  expression DAG and exact residuals use the weighted equality forest rather
-  than inequality adjacency or context-wide scans.
+  expression DAG. Symbol-only exact residuals use the weighted equality forest;
+  arbitrary-expression residuals traverse only their exact-relation component,
+  never inequality adjacency or context-wide state.
 
   Numeric equivalence, constant-difference, and reusable-fact simplification
   project encoded truncating quotients. The accepted `Piecewise` has exactly
@@ -1887,7 +1917,8 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
   exact difference or predicates with opposite proven truth values return
   `FALSE`. An exact zero range for the normalized difference, including one
-  obtained from the weighted equality forest, returns `TRUE`; other failed
+  obtained from the symbol forest or arbitrary-expression relation graph,
+  returns `TRUE`; other failed
   sufficient proofs return `UNKNOWN`. Contradictory facts never prove
   equivalence. Recursive predicate-shape comparison has
   depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
@@ -2981,7 +3012,9 @@ types fail the check, so a typo cannot silently pass.
 Amortized O(1) mechanisms are not scans: hash-table growth rehashes;
 `ixs_arena_restore` walks only work allocated after its mark; and
 `ixs_arena_destroy_transient` releases only one operation's input-sized
-workspace. None depends on retained context state `A`.
+workspace. Query-local traversal of an exact-relation component is likewise
+bounded by the fact component reachable from the requested endpoint, not total
+retained context state `A`. None depends on unrelated arena or context state.
 
 `scripts/check_hotpaths.py` enforces the invariant. It builds the static
 call graph of `src/*.[ch]` with tree-sitter-c, propagates scan-taint

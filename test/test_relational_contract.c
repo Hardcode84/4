@@ -52,7 +52,7 @@ static void test_relational_negative_cycle_contract(void) {
 
   CHECK(assume_unit_difference_upper(ctx, capability, x, y, 0));
   CHECK(ixs_facts_assume_pred(capability, ixs_cmp(ctx, y, IXS_CMP_LE, zero)));
-  relation_support = ixs_check_facts(capability, x_nonpositive);
+  relation_support = test_ixs_check_facts(capability, x_nonpositive);
   CHECK(relation_support == IXS_CHECK_TRUE);
 
   CHECK(assume_unit_difference_upper(ctx, cycle, x, y, -1));
@@ -60,16 +60,16 @@ static void test_relational_negative_cycle_contract(void) {
   CHECK(assume_unit_difference_upper(ctx, cycle, z, x, 0));
   CHECK(ixs_facts_assume_pred(cycle, a_nonnegative));
 
-  CHECK(ixs_check_facts(cycle, a_nonnegative) == IXS_CHECK_UNKNOWN);
-  CHECK(!ixs_range_facts(cycle, a, &range));
-  CHECK(ixs_equivalent_facts(cycle, a, a) == IXS_CHECK_UNKNOWN);
-  CHECK(!ixs_constant_difference_facts(cycle, a, a, &delta));
+  CHECK(test_ixs_check_facts(cycle, a_nonnegative) == IXS_CHECK_UNKNOWN);
+  CHECK(!test_ixs_range_facts(cycle, a, &range));
+  CHECK(test_ixs_equivalent_facts(cycle, a, a) == IXS_CHECK_UNKNOWN);
+  CHECK(!test_ixs_constant_difference_facts(cycle, a, a, &delta));
 
   CHECK(assume_unit_difference_upper(ctx, zero_cycle, x, y, -1));
   CHECK(assume_unit_difference_upper(ctx, zero_cycle, y, z, 0));
   CHECK(assume_unit_difference_upper(ctx, zero_cycle, z, x, 1));
   CHECK(ixs_facts_assume_pred(zero_cycle, a_nonnegative));
-  CHECK(ixs_check_facts(zero_cycle, a_nonnegative) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(zero_cycle, a_nonnegative) == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -118,14 +118,14 @@ static void test_relational_chain_insertion_order_contract(void) {
                                        nodes[i], 0));
 
   late_check =
-      ixs_check_facts(late_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
+      test_ixs_check_facts(late_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
   early_check =
-      ixs_check_facts(early_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
+      test_ixs_check_facts(early_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
   CHECK(late_check == IXS_CHECK_TRUE);
   CHECK(early_check == IXS_CHECK_TRUE);
 
-  late_range_ok = ixs_range_facts(late_anchor, nodes[0], &late_range);
-  early_range_ok = ixs_range_facts(early_anchor, nodes[0], &early_range);
+  late_range_ok = test_ixs_range_facts(late_anchor, nodes[0], &late_range);
+  early_range_ok = test_ixs_range_facts(early_anchor, nodes[0], &early_range);
   CHECK(public_ranges_equal(late_range_ok, &late_range, early_range_ok,
                             &early_range));
   CHECK(late_range_ok && late_range.has_upper && late_range.upper_p == 0 &&
@@ -171,18 +171,18 @@ static void test_relational_exact_equality_noise_contract(void) {
         assume_unit_difference_upper(ctx, loaded, y, noise[i], (int64_t)i + 1));
   }
 
-  base_equivalent = ixs_equivalent_facts(base, x, z);
-  loaded_equivalent = ixs_equivalent_facts(loaded, x, z);
+  base_equivalent = test_ixs_equivalent_facts(base, x, z);
+  loaded_equivalent = test_ixs_equivalent_facts(loaded, x, z);
   CHECK(base_equivalent == IXS_CHECK_TRUE);
   CHECK(loaded_equivalent == IXS_CHECK_TRUE);
 
-  base_delta_ok = ixs_constant_difference_facts(base, x, z, &base_delta);
-  loaded_delta_ok = ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
+  base_delta_ok = test_ixs_constant_difference_facts(base, x, z, &base_delta);
+  loaded_delta_ok = test_ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
   CHECK(base_delta_ok && base_delta == 0);
   CHECK(loaded_delta_ok && loaded_delta == 0);
 
-  base_range_ok = ixs_range_facts(base, difference, &base_range);
-  loaded_range_ok = ixs_range_facts(loaded, difference, &loaded_range);
+  base_range_ok = test_ixs_range_facts(base, difference, &base_range);
+  loaded_range_ok = test_ixs_range_facts(loaded, difference, &loaded_range);
   CHECK(base_range_ok && base_range.has_lower && base_range.lower_p == 0 &&
         base_range.lower_q == 1 && base_range.has_upper &&
         base_range.upper_p == 0 && base_range.upper_q == 1);
@@ -208,7 +208,7 @@ static void test_relational_loop_bound_production_witness(void) {
   CHECK(
       ixs_facts_assume_pred(capability, ixs_cmp(ctx, trip, IXS_CMP_LE, zero)));
   relation_support =
-      ixs_check_facts(capability, ixs_cmp(ctx, iv, IXS_CMP_LE, zero));
+      test_ixs_check_facts(capability, ixs_cmp(ctx, iv, IXS_CMP_LE, zero));
   CHECK(relation_support == IXS_CHECK_TRUE);
 
   CHECK(assume_unit_difference_upper(ctx, facts, iv, trip, -1));
@@ -217,7 +217,7 @@ static void test_relational_loop_bound_production_witness(void) {
       facts, ixs_cmp(ctx, trip, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
   CHECK(ixs_facts_assume_pred(
       facts, ixs_cmp(ctx, trip, IXS_CMP_LE, ixs_int(ctx, INT32_MAX))));
-  CHECK(ixs_range_facts(facts, iv, &range));
+  CHECK(test_ixs_range_facts(facts, iv, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == INT64_C(2147483646) &&
         range.upper_q == 1);

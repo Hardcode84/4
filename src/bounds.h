@@ -26,6 +26,7 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
+typedef struct ixs_equality_edge ixs_equality_edge;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
 typedef struct {
@@ -57,8 +58,23 @@ typedef struct {
 } ixs_expr_bound;
 
 typedef struct {
+  uint64_t lo;
+  uint64_t hi;
+  bool negative;
+} ixs_wide_offset;
+
+typedef struct {
+  ixs_node *expr;
+  ixs_equality_edge *edges;
+  size_t parent;
+  size_t rank;
+  ixs_wide_offset offset;
+} ixs_equality_endpoint;
+
+typedef struct {
   ixs_node *expr;
   ixs_interval iv;
+  bool equality_disabled;
 } ixs_bounds_cache_entry;
 
 typedef struct {
@@ -86,6 +102,14 @@ typedef struct {
   size_t nexact_vars;
   size_t exact_var_cap;
   size_t exact_index_cap;
+  ixs_equality_endpoint *equality_endpoints;
+  size_t *equality_endpoint_index;
+  size_t nequality_endpoints;
+  size_t equality_endpoint_cap;
+  size_t equality_endpoint_index_cap;
+  ixs_equality_edge **equality_index;
+  size_t nequalities;
+  size_t equality_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;
@@ -103,9 +127,19 @@ typedef struct {
   ixs_arena query_arena;
   ixs_bounds_query_state *query_state;
   uint64_t query_owner;
+  /* Owner-local exact-component projection memo.  Persistent fact bounds reuse
+   * one table across scalar queries; forks use scratch-local transient tables
+   * and facts_commit reuses the destination's persistent allocation. */
+  void *equality_projection_cache;
+  size_t equality_projection_cache_count;
+  size_t equality_projection_cache_capacity;
   unsigned query_tracking_depth;
+  /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
+   * use the relation being justified to prove its own domain. */
+  unsigned equality_disabled_depth;
   bool query_state_owner;
   bool query_state_borrowed;
+  bool equality_projection_cache_transient;
   bool *semantic_changed; /* optional fact-mutation observer */
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
@@ -127,6 +161,10 @@ IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *cache_hits, size_t *cycle_blocks,
                                        size_t *limit_blocks,
                                        size_t *active_count, size_t *nesting);
+IXS_STATIC void ixs_bounds_equality_query_stats(
+    const ixs_bounds *b, size_t *walks, size_t *endpoint_visits,
+    size_t *edge_visits, size_t *defined_checks,
+    size_t *intrinsic_evaluations);
 /* Test hook: re-enter one active interval key and verify clean unwind. */
 IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
 #endif

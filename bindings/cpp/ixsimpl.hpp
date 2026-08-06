@@ -254,7 +254,8 @@ struct ExactDivideResult {
 };
 
 struct RationalMaterializationPlan {
-  ixs_check_result status;
+  ixs_fact_query_status status;
+  ixs_check_result check;
   Expr numerator;
   int64_t denominator;
 };
@@ -343,6 +344,24 @@ class Facts {
   ixs_session *session_;
   ixs_facts *facts_;
 
+  void require_complete(ixs_fact_query_status status,
+                        const char *operation) const {
+    if (status == IXS_FACT_QUERY_COMPLETE)
+      return;
+    if (status == IXS_FACT_QUERY_OOM)
+      throw std::bad_alloc();
+    std::string message = std::string("ixsimpl: ") + operation;
+    size_t count = ixs_session_nerrors(session_);
+    if (count != 0u) {
+      const char *detail = ixs_session_error(session_, count - 1u);
+      if (detail && *detail)
+        message = detail;
+    }
+    if (status == IXS_FACT_QUERY_INVALID)
+      throw std::invalid_argument(message);
+    throw std::runtime_error(message + ": proof resource limit reached");
+  }
+
 public:
   explicit Facts(Context &ctx)
       : ctx_(ctx.raw()), session_(ctx.session()),
@@ -370,38 +389,60 @@ public:
                                    derived.raw());
   }
   Expr simplify(const Expr &expr) const {
-    return Expr(ctx_, session_, ixs_simplify_facts(facts_, expr.raw()));
+    ixs_simplify_result result = ixs_simplify_facts(facts_, expr.raw());
+    require_complete(result.status, "simplify");
+    return Expr(ctx_, session_, result.value);
   }
   void simplify_batch(std::vector<Expr> &exprs) const {
     std::vector<const ixs_node *> raw;
     raw.reserve(exprs.size());
     for (const Expr &expr : exprs)
       raw.push_back(expr.raw());
-    ixs_simplify_batch_facts(facts_, raw.data(), raw.size());
+    ixs_fact_query_status status =
+        ixs_simplify_batch_facts(facts_, raw.data(), raw.size());
+    require_complete(status, "simplify batch");
     for (size_t i = 0; i < exprs.size(); ++i)
       exprs[i] = Expr(ctx_, session_, raw[i]);
   }
   ixs_check_result check(const Expr &expr) const {
-    return ixs_check_facts(facts_, expr.raw());
+    ixs_fact_check_result result = ixs_check_facts(facts_, expr.raw());
+    require_complete(result.status, "check");
+    return result.check;
   }
   ixs_check_result check_integer_valued(const Expr &expr) const {
-    return ixs_check_integer_valued_facts(facts_, expr.raw());
+    ixs_fact_check_result result =
+        ixs_check_integer_valued_facts(facts_, expr.raw());
+    require_complete(result.status, "integer-valued check");
+    return result.check;
   }
   ixs_check_result check_defined(const Expr &expr) const {
-    return ixs_check_defined_facts(facts_, expr.raw());
+    ixs_fact_check_result result = ixs_check_defined_facts(facts_, expr.raw());
+    require_complete(result.status, "definedness check");
+    return result.check;
   }
   ixs_check_result check_predicate(const Expr &predicate) const {
-    return ixs_check_predicate_facts(facts_, predicate.raw());
+    ixs_fact_check_result result =
+        ixs_check_predicate_facts(facts_, predicate.raw());
+    require_complete(result.status, "predicate check");
+    return result.check;
   }
   ixs_check_result check_consistent() const {
-    return ixs_check_consistent_facts(facts_);
+    ixs_fact_check_result result = ixs_check_consistent_facts(facts_);
+    require_complete(result.status, "consistency check");
+    return result.check;
   }
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
-    return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
+    ixs_fact_check_result result =
+        ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
+    require_complete(result.status, "equivalence");
+    return result.check;
   }
   ixs_check_result equivalent_modulo_pow2(const Expr &lhs, const Expr &rhs,
                                           unsigned bits) const {
-    return ixs_equivalent_modulo_pow2_facts(facts_, lhs.raw(), rhs.raw(), bits);
+    ixs_fact_check_result result =
+        ixs_equivalent_modulo_pow2_facts(facts_, lhs.raw(), rhs.raw(), bits);
+    require_complete(result.status, "modulo power-of-two equivalence");
+    return result.check;
   }
   FiniteDomainResult equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
                                               size_t &remaining_work) const {
@@ -487,7 +528,12 @@ public:
   }
   bool constant_difference(const Expr &lhs, const Expr &rhs,
                            int64_t &delta) const {
-    return ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw(), &delta);
+    ixs_constant_difference_result result =
+        ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw());
+    require_complete(result.status, "constant difference");
+    if (result.available)
+      delta = result.difference;
+    return result.available;
   }
   ModuloRecurrenceResult
   modulo_recurrence(const Expr &value, const Expr &reference,
@@ -501,91 +547,123 @@ public:
   }
   bool affine_decompose(const Expr &expr, const Expr &symbol, Expr &coefficient,
                         Expr &residual) const {
-    const ixs_node *raw_coefficient = nullptr;
-    const ixs_node *raw_residual = nullptr;
-    if (!ixs_affine_decompose_facts(facts_, expr.raw(), symbol.raw(),
-                                    &raw_coefficient, &raw_residual))
+    ixs_affine_decomposition_result result =
+        ixs_affine_decompose_facts(facts_, expr.raw(), symbol.raw());
+    require_complete(result.status, "affine decomposition");
+    if (!result.available)
       return false;
-    coefficient = Expr(ctx_, session_, raw_coefficient);
-    residual = Expr(ctx_, session_, raw_residual);
+    coefficient = Expr(ctx_, session_, result.coefficient);
+    residual = Expr(ctx_, session_, result.residual);
     return true;
   }
   bool decompose_exact_quotient(const Expr &expr, Expr &numerator,
                                 Expr &denominator) const {
-    const ixs_node *raw_numerator = nullptr;
-    const ixs_node *raw_denominator = nullptr;
-    if (!ixs_decompose_exact_quotient_facts(facts_, expr.raw(), &raw_numerator,
-                                            &raw_denominator))
+    ixs_exact_quotient_result result =
+        ixs_decompose_exact_quotient_facts(facts_, expr.raw());
+    require_complete(result.status, "exact quotient decomposition");
+    if (!result.available)
       return false;
-    numerator = Expr(ctx_, session_, raw_numerator);
-    denominator = Expr(ctx_, session_, raw_denominator);
+    numerator = Expr(ctx_, session_, result.numerator);
+    denominator = Expr(ctx_, session_, result.denominator);
     return true;
   }
   bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
                          Expr &difference) const {
-    const ixs_node *raw_difference = nullptr;
-    if (!ixs_finite_difference_facts(facts_, expr.raw(), symbol.raw(),
-                                     step.raw(), &raw_difference))
+    ixs_finite_difference_result result =
+        ixs_finite_difference_facts(facts_, expr.raw(), symbol.raw(), step.raw());
+    require_complete(result.status, "finite difference");
+    if (!result.available)
       return false;
-    difference = Expr(ctx_, session_, raw_difference);
+    difference = Expr(ctx_, session_, result.difference);
     return true;
   }
   bool decompose_cyclic(const Expr &expr, const Expr &symbol,
                         CyclicDecomposition &out) const {
-    ixs_cyclic_decomposition raw{};
-    if (!ixs_decompose_cyclic_facts(facts_, expr.raw(), symbol.raw(), &raw))
+    ixs_cyclic_decomposition_result result =
+        ixs_decompose_cyclic_facts(facts_, expr.raw(), symbol.raw());
+    require_complete(result.status, "cyclic decomposition");
+    if (!result.available)
       return false;
-    out = CyclicDecomposition{Expr(ctx_, session_, raw.residual),
-                              raw.scale,
-                              raw.modulus,
-                              raw.phase,
-                              raw.ring,
+    const ixs_cyclic_decomposition &raw = result.decomposition;
+    out = CyclicDecomposition{Expr(ctx_, session_, raw.residual), raw.scale,
+                              raw.modulus, raw.phase, raw.ring,
                               raw.residual_bounded};
     return true;
   }
   bool split_additive_constant(const Expr &expr, Expr &residual,
                                int64_t &constant) const {
-    const ixs_node *raw_residual = nullptr;
-    if (!ixs_split_additive_constant_facts(facts_, expr.raw(), &raw_residual,
-                                           &constant))
+    ixs_additive_constant_result result =
+        ixs_split_additive_constant_facts(facts_, expr.raw());
+    require_complete(result.status, "additive constant split");
+    if (!result.available)
       return false;
-    residual = Expr(ctx_, session_, raw_residual);
+    residual = Expr(ctx_, session_, result.residual);
+    constant = result.constant;
     return true;
   }
   ixs_check_result check_divisible(const Expr &expr, int64_t modulus) const {
-    return ixs_check_divisible_facts(facts_, expr.raw(), modulus);
+    ixs_fact_check_result result =
+        ixs_check_divisible_facts(facts_, expr.raw(), modulus);
+    require_complete(result.status, "divisibility check");
+    return result.check;
   }
   bool get_known_bits(const Expr &expr, ixs_known_bits &out) const {
-    return ixs_get_known_bits_facts(facts_, expr.raw(), &out);
+    ixs_known_bits_query_result result =
+        ixs_get_known_bits_facts(facts_, expr.raw());
+    require_complete(result.status, "known bits");
+    out = result.bits;
+    return true;
   }
   bool get_symbol_congruence(const Expr &symbol, int64_t &modulus,
                              int64_t &residue) const {
-    return ixs_get_symbol_congruence_facts(facts_, symbol.raw(), &modulus,
-                                           &residue);
+    ixs_symbol_congruence_result result =
+        ixs_get_symbol_congruence_facts(facts_, symbol.raw());
+    require_complete(result.status, "symbol congruence");
+    if (result.available) {
+      modulus = result.modulus;
+      residue = result.residue;
+    }
+    return result.available;
   }
   ixs_check_result check_congruent(const Expr &expr, int64_t modulus,
                                    int64_t residue) const {
-    return ixs_check_congruent_facts(facts_, expr.raw(), modulus, residue);
+    ixs_fact_check_result result =
+        ixs_check_congruent_facts(facts_, expr.raw(), modulus, residue);
+    require_complete(result.status, "congruence check");
+    return result.check;
   }
   ixs_pow2_fact get_pow2_fact(const Expr &expr) const {
-    return ixs_get_pow2_fact_facts(facts_, expr.raw());
+    ixs_pow2_query_result result = ixs_get_pow2_fact_facts(facts_, expr.raw());
+    require_complete(result.status, "power-of-two fact");
+    return result.fact;
   }
   bool range(const Expr &expr, ixs_range_result &out) const {
-    return ixs_range_facts(facts_, expr.raw(), &out);
+    ixs_range_query_result result = ixs_range_facts(facts_, expr.raw());
+    require_complete(result.status, "range");
+    if (result.available)
+      out = result.range;
+    return result.available;
   }
   bool integer_range(const Expr &expr, ixs_integer_range_result &out) const {
-    return ixs_integer_range_facts(facts_, expr.raw(), &out);
+    ixs_integer_range_query_result result =
+        ixs_integer_range_facts(facts_, expr.raw());
+    require_complete(result.status, "integer range");
+    if (result.available)
+      out = result.range;
+    return result.available;
   }
   ixs_check_result rational_intermediates_fit(const Expr &expr,
                                               uint32_t word_bits) const {
-    return ixs_check_rational_intermediates_facts(facts_, expr.raw(),
-                                                  word_bits);
+    ixs_fact_check_result result =
+        ixs_check_rational_intermediates_facts(facts_, expr.raw(), word_bits);
+    require_complete(result.status, "rational intermediate width");
+    return result.check;
   }
   RationalMaterializationPlan
   plan_rational_materialization(const Expr &expr, uint32_t word_bits) const {
     ixs_rational_materialization_plan result =
         ixs_plan_rational_materialization_facts(facts_, expr.raw(), word_bits);
-    return {result.status, Expr(ctx_, session_, result.numerator),
+    return {result.status, result.check, Expr(ctx_, session_, result.numerator),
             result.denominator};
   }
   bool substitute(const Facts &source, const Expr &target,
