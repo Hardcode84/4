@@ -1799,19 +1799,24 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   substitution pass in the truncation strategy. Malformed, overlapping, or
   uncovered `Piecewise` encodings, unknown divisor signs, zero divisors,
   noninteger parts, and shifts crossing a remainder boundary remain unknown.
-  Candidate discovery is iterative, shares the equivalence query's 4096-node
-  visit budget, and admits at most 32 truncating forms total. Selected targets
-  form an outermost antichain: when a matched target contains another match,
-  including through a shared DAG path, only the outer target is projected.
-  Pairwise containment walks are iterative and bounded to 1024 node visits.
-  Reusable-fact simplification returns a projected candidate only when a
-  bounded 4096-node unique-DAG measurement proves that both the rounding-node
-  count and total node count decrease. Its open-addressed 8192-slot memo visits
-  shared nodes once; limit or allocation failure keeps the original
-  expression. A single bounded pass returns immediately when neither operand
-  has a usable form, so ordinary no-truncation failures are not rebuilt or
-  simplified by this strategy. Interned nodes cache private subtree-rounding
-  and subtree-Piecewise property bits. Proof queries reject a root without
+  Candidate discovery is iterative, visits each rounding-bearing node in both
+  query DAGs once, and shares the equivalence query's 4096-node proof-work
+  budget. Its scratch-backed stack, visited set, and candidate vector grow with
+  the query instead of imposing separate depth or candidate-count cutoffs.
+  Selected targets form an outermost antichain: one multi-source unique-DAG
+  descendant traversal marks every match contained by another match, including
+  through shared diamonds and across the two operands. Selection is O(N + C)
+  expected for N candidate-descendant nodes and C candidates; it performs no
+  pairwise containment walks. Allocation or checked-size failure returns
+  unknown with both input roots untouched. Reusable-fact simplification returns
+  a projected candidate only when a bounded 4096-node unique-DAG measurement
+  proves that both the rounding-node count and total node count decrease. Its
+  open-addressed 8192-slot memo visits shared nodes once; limit or allocation
+  failure keeps the original expression. A single bounded pass returns
+  immediately when neither operand has a usable form, so ordinary
+  no-truncation failures are not rebuilt or simplified by this strategy.
+  Interned nodes cache private subtree-rounding and subtree-Piecewise property
+  bits. Proof queries reject a root without
   rounding in O(1); reusable-fact simplification also rejects a root without
   Piecewise in O(1), so ordinary floor-only expressions incur no DAG walk.
 

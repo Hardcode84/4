@@ -6562,7 +6562,7 @@ static void test_public_truncating_remainder_oom(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_remainder_projection_limits(void) {
+static void test_public_remainder_projection_candidate_growth(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_facts *facts = ixs_facts_create(ctx);
   ixs_node *wide = ixs_int(ctx, 0);
@@ -6602,13 +6602,94 @@ static void test_public_remainder_projection_limits(void) {
     wide = ixs_add(ctx, wide, round);
     projected = ixs_add(ctx, projected, modulo);
   }
-  CHECK(ixs_equivalent_facts(facts, wide, projected) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_facts(facts, wide, projected) == IXS_CHECK_TRUE);
 
   for (i = 0; i < 400u; i++) {
     snprintf(name, sizeof(name), "remainder_plain_%u", i);
     no_remainder = ixs_add(ctx, no_remainder, ixs_sym(ctx, name));
   }
   CHECK(ixs_equivalent_facts(facts, no_remainder, other) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_remainder_projection_large_candidate_set(void) {
+  enum { CANDIDATE_COUNT = 1050 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "remainder_many_x");
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *lhs = ixs_int(ctx, 0);
+  ixs_node *rhs = ixs_int(ctx, 0);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  unsigned i;
+
+  CHECK(ctx && x && four && lhs && rhs && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 100000))));
+  for (i = 0; i < CANDIDATE_COUNT; i++) {
+    ixs_node *numerator = ixs_add(ctx, x, ixs_int(ctx, (int64_t)i));
+    ixs_node *remainder = ixs_mod(ctx, numerator, four);
+    ixs_node *replacement =
+        ixs_div(ctx, ixs_sub(ctx, numerator, remainder), four);
+    lhs = ixs_add(ctx, lhs, ixs_floor(ctx, ixs_div(ctx, numerator, four)));
+    rhs = ixs_add(ctx, rhs, replacement);
+    CHECK(numerator && remainder && replacement && lhs && rhs);
+  }
+
+  CHECK(ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(facts, rhs, lhs) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_remainder_projection_shared_diamond(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *raw = ixs_sym(ctx, "remainder_diamond_raw");
+  ixs_node *inner_argument =
+      ixs_add(ctx, ixs_div(ctx, raw, ixs_int(ctx, 64)), ixs_rat(ctx, 63, 64));
+  ixs_node *inner_values[2] = {ixs_floor(ctx, inner_argument),
+                               ixs_ceil(ctx, inner_argument)};
+  ixs_node *inner_conditions[2] = {ixs_cmp(ctx,
+                                           ixs_add(ctx, raw, ixs_int(ctx, 63)),
+                                           IXS_CMP_GE, ixs_int(ctx, 0)),
+                                   ixs_true(ctx)};
+  ixs_node *inner = ixs_pw(ctx, 2, inner_values, inner_conditions);
+  ixs_node *outer_numerator = ixs_sub(ctx, inner, ixs_int(ctx, 2));
+  ixs_node *outer_argument =
+      ixs_add(ctx, ixs_div(ctx, inner, ixs_int(ctx, 3)), ixs_rat(ctx, 1, 3));
+  ixs_node *outer_values[2] = {
+      ixs_add(ctx, ixs_int(ctx, -1), ixs_floor(ctx, outer_argument)),
+      ixs_add(ctx, ixs_int(ctx, -1), ixs_ceil(ctx, outer_argument))};
+  ixs_node *outer_conditions[2] = {
+      ixs_cmp(ctx, outer_numerator, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_true(ctx)};
+  ixs_node *outer = ixs_pw(ctx, 2, outer_values, outer_conditions);
+  ixs_node *source =
+      ixs_sub(ctx, outer_numerator, ixs_mul(ctx, ixs_int(ctx, 3), outer));
+  ixs_node *positive_mod = ixs_mod(ctx, outer_numerator, ixs_int(ctx, 3));
+  ixs_node *negative_mod = ixs_neg(
+      ctx, ixs_mod(ctx, ixs_neg(ctx, outer_numerator), ixs_int(ctx, 3)));
+  ixs_node *expected_values[2] = {positive_mod, negative_mod};
+  ixs_node *expected_conditions[2] = {
+      ixs_cmp(ctx, outer_numerator, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_true(ctx)};
+  ixs_node *expected = ixs_pw(ctx, 2, expected_values, expected_conditions);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && raw && inner_argument && inner && outer_numerator &&
+        outer_argument && outer && source && positive_mod && negative_mod &&
+        expected && facts);
+  expected = ixs_simplify_facts(facts, expected);
+  CHECK(expected);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_equivalent_facts(facts, source, expected) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify_facts(facts, source) == expected);
+  CHECK(ixs_equivalent_facts(facts, source, expected) == IXS_CHECK_TRUE);
+  CHECK(ixs_equivalent_facts(facts, expected, source) == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -8135,8 +8216,7 @@ static void test_public_facts_closed_batch_contract(void) {
   ixs_node *x_nonnegative = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
   ixs_node *nested = make_nested_query_root(ctx, "closed_batch_nested");
   ixs_node *nested_floor = ixs_floor(ctx, ixs_div(ctx, nested, d));
-  ixs_node *nested_unclosed =
-      ixs_cmp(ctx, nested_floor, IXS_CMP_EQ, zero);
+  ixs_node *nested_unclosed = ixs_cmp(ctx, nested_floor, IXS_CMP_EQ, zero);
   ixs_node *contradictory_predicates[2] = {unclosed, ixs_false(ctx)};
   ixs_facts *rejected = ixs_facts_create(ctx);
   ixs_facts *calibration = ixs_facts_create(ctx);
@@ -8158,8 +8238,8 @@ static void test_public_facts_closed_batch_contract(void) {
   check_bounds_payload_unchanged(&rejected->bounds, &before);
   CHECK(ixs_ctx_nerrors(ctx) == 1 &&
         strstr(ixs_ctx_error(ctx, 0), "closed domain") != NULL);
-  CHECK(!ixs_facts_assume_pred(
-      rejected, ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(!ixs_facts_assume_pred(rejected,
+                               ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0))));
   CHECK(ixs_check_defined_facts(rejected, floored) == IXS_CHECK_UNKNOWN);
 
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), budget);
@@ -8184,7 +8264,8 @@ static void test_public_facts_closed_batch_contract(void) {
   observed.query_state = ctx->bounds_query_state;
   ixs_bounds_query_stats(&observed, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                          &active_count, &nesting);
-  CHECK(observed.query_tracking_depth == 0 && active_count == 0 && nesting == 0);
+  CHECK(observed.query_tracking_depth == 0 && active_count == 0 &&
+        nesting == 0);
 
   CHECK(ixs_facts_assume_preds(contradictory, contradictory_predicates, 2));
   CHECK(contradictory->usable);
@@ -9041,7 +9122,9 @@ int main(void) {
   test_public_total_equivalence();
   test_public_truncating_remainder_equivalence();
   test_public_truncating_remainder_oom();
-  test_public_remainder_projection_limits();
+  test_public_remainder_projection_candidate_growth();
+  test_public_remainder_projection_large_candidate_set();
+  test_public_remainder_projection_shared_diamond();
   test_public_modulo_pow2_equivalence();
   test_public_finite_domain_equivalence();
   test_finite_domain_equivalence_growable_discovery();

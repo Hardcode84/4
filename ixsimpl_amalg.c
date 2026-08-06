@@ -7766,8 +7766,8 @@ static ixs_bounds_build_status facts_validate_closed_predicates(
     bool query_held = false;
     if (!ixs_bounds_query_hold_begin(candidate, predicates[i], &query_held))
       return candidate->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_LIMIT;
-    defined = bounds_check_defined_status(candidate, predicates[i], &oom,
-                                          &limited);
+    defined =
+        bounds_check_defined_status(candidate, predicates[i], &oom, &limited);
     if (query_held)
       ixs_bounds_query_hold_end(candidate);
     if (defined == IXS_CHECK_TRUE)
@@ -9667,85 +9667,50 @@ static ixs_check_result equivalence_mod_shifts(equivalence_state *state,
   return equivalence_mod_shift_direction(state, rhs, lhs);
 }
 
-#define EQUIVALENCE_TRUNCATING_LIMIT 32u
-#define EQUIVALENCE_TRUNCATING_STACK_LIMIT 1024u
-
 typedef struct {
   ixs_node *target;
   ixs_node *replacement;
 } equivalence_truncating_substitution;
 
-static bool equivalence_truncating_contains(equivalence_state *state,
-                                            ixs_node *root, ixs_node *target,
-                                            bool *contains) {
-  ixs_node *stack[EQUIVALENCE_TRUNCATING_STACK_LIMIT];
-  size_t nstack = 1u;
-  size_t visited = 0;
+typedef struct {
+  equivalence_truncating_substitution *items;
+  size_t count;
+  size_t capacity;
+} equivalence_truncating_substitutions;
 
-  *contains = false;
-  stack[0] = root;
-  while (nstack > 0) {
-    ixs_node *node = stack[--nstack];
-    uint32_t nchildren;
-    uint32_t i;
-    if (node == target) {
-      *contains = true;
-      return true;
-    }
-    if (visited >= EQUIVALENCE_TRUNCATING_STACK_LIMIT) {
-      state->limited = true;
+static bool equivalence_truncating_substitutions_push(
+    ixs_arena *arena, equivalence_truncating_substitutions *substitutions,
+    ixs_node *target, ixs_node *replacement) {
+  if (substitutions->count >= substitutions->capacity) {
+    size_t new_capacity = substitutions->capacity ? substitutions->capacity * 2u
+                                                  : FACT_WORK_INIT_CAP;
+    equivalence_truncating_substitution *grown;
+    if (new_capacity <= substitutions->capacity ||
+        new_capacity > SIZE_MAX / sizeof(*substitutions->items))
       return false;
-    }
-    visited++;
-    if (!defined_child_count(node, &nchildren))
+    grown = ixs_arena_grow(
+        arena, substitutions->items,
+        substitutions->capacity * sizeof(*substitutions->items),
+        new_capacity * sizeof(*substitutions->items), sizeof(void *));
+    if (!grown)
       return false;
-    if ((size_t)nchildren > EQUIVALENCE_TRUNCATING_STACK_LIMIT - nstack) {
-      state->limited = true;
-      return false;
-    }
-    for (i = 0; i < nchildren; i++)
-      stack[nstack++] = defined_child_at(node, i);
+    substitutions->items = grown;
+    substitutions->capacity = new_capacity;
   }
+  substitutions->items[substitutions->count].target = target;
+  substitutions->items[substitutions->count].replacement = replacement;
+  substitutions->count++;
   return true;
 }
 
-/* Keep only outermost matches. A shared inner match may have been reached
- * through a sibling before its enclosing Piecewise, so opacity cannot be
- * enforced solely by stopping the collector at a matched node. */
-static bool equivalence_add_truncating_substitution(
-    equivalence_state *state,
-    equivalence_truncating_substitution *substitutions, size_t *nsubs,
-    ixs_node *target, ixs_node *replacement) {
-  size_t existing = 0;
-  while (existing < *nsubs) {
-    bool contains;
-    if (substitutions[existing].target == target)
-      return true;
-    if (!equivalence_truncating_contains(state, substitutions[existing].target,
-                                         target, &contains))
-      return false;
-    if (contains)
-      return true;
-    if (!equivalence_truncating_contains(
-            state, target, substitutions[existing].target, &contains))
-      return false;
-    if (!contains) {
-      existing++;
-      continue;
-    }
-    if (existing + 1u < *nsubs)
-      memmove(&substitutions[existing], &substitutions[existing + 1u],
-              (*nsubs - existing - 1u) * sizeof(*substitutions));
-    (*nsubs)--;
-  }
-  if (*nsubs >= EQUIVALENCE_TRUNCATING_LIMIT) {
-    state->limited = true;
+static bool query_node_set_contains(const query_node_set *set, ixs_node *node) {
+  size_t index;
+  if (!set->capacity)
     return false;
-  }
-  substitutions[*nsubs].target = target;
-  substitutions[*nsubs].replacement = replacement;
-  (*nsubs)++;
-  return true;
+  index = node->hash & (set->capacity - 1u);
+  while (set->slots[index] && set->slots[index] != node)
+    index = (index + 1u) & (set->capacity - 1u);
+  return set->slots[index] != NULL;
 }
 
 static bool equivalence_remainder_domain_proven(equivalence_state *state,
@@ -10062,22 +10027,37 @@ static bool equivalence_build_truncating_replacement(equivalence_state *state,
   return true;
 }
 
-/* Candidate discovery walks only the query DAG. Piecewise children are opaque
- * unless the complete two-arm truncation form matches. */
+/* Candidate discovery visits each rounding-bearing node in the two query DAGs
+ * once. Piecewise children are opaque to discovery even when malformed. */
 static bool equivalence_collect_truncating_substitutions(
-    equivalence_state *state, ixs_node *root, unsigned depth,
-    bool piecewise_only, equivalence_truncating_substitution *substitutions,
-    size_t *nsubs) {
-  ixs_node *stack[EQUIVALENCE_TRUNCATING_STACK_LIMIT];
-  size_t nstack = 1u;
-  stack[0] = root;
-  while (nstack > 0) {
-    ixs_node *node = stack[--nstack];
+    equivalence_state *state, ixs_node *lhs, ixs_node *rhs, unsigned depth,
+    bool piecewise_only, equivalence_truncating_substitutions *substitutions) {
+  ixs_arena *arena = &state->ctx->scratch;
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+
+  memset(&visited, 0, sizeof(visited));
+  if ((ixs_node_contains_rounding(rhs) &&
+       !query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
+                              rhs)) ||
+      (ixs_node_contains_rounding(lhs) &&
+       !query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
+                              lhs)))
+    goto oom;
+  while (stack_count > 0) {
+    ixs_node *node = stack[--stack_count];
     ixs_node *replacement;
     uint32_t nchildren;
     uint32_t i;
+    bool inserted;
     bool matched;
     if (!ixs_node_contains_rounding(node))
+      continue;
+    if (!query_node_set_insert(arena, &visited, node, &inserted))
+      goto oom;
+    if (!inserted)
       continue;
     if (state->visited >= EQUIVALENCE_VISIT_LIMIT) {
       state->limited = true;
@@ -10094,9 +10074,9 @@ static bool equivalence_collect_truncating_substitutions(
              (!piecewise_only &&
               (node->tag == IXS_FLOOR || node->tag == IXS_CEIL))) {
       if (matched) {
-        if (!equivalence_add_truncating_substitution(state, substitutions,
-                                                     nsubs, node, replacement))
-          return false;
+        if (!equivalence_truncating_substitutions_push(arena, substitutions,
+                                                       node, replacement))
+          goto oom;
         continue;
       }
       if (node->tag == IXS_PIECEWISE)
@@ -10104,33 +10084,121 @@ static bool equivalence_collect_truncating_substitutions(
     }
     if (!defined_child_count(node, &nchildren))
       return false;
-    if ((size_t)nchildren > EQUIVALENCE_TRUNCATING_STACK_LIMIT - nstack) {
-      state->limited = true;
-      return false;
-    }
-    for (i = 0; i < nchildren; i++)
-      stack[nstack++] = defined_child_at(node, i);
+    for (i = nchildren; i > 0; i--)
+      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
+                                 defined_child_at(node, i - 1u)))
+        goto oom;
   }
   return true;
+
+oom:
+  state->oom = true;
+  return false;
+}
+
+/* Mark every candidate reachable below another candidate in one multi-source
+ * traversal. Shared sub-DAGs are visited once, so selection is O(N + C)
+ * expected for N descendant nodes and C candidates instead of O(C^2 * N). */
+static bool equivalence_select_outermost_truncating_substitutions(
+    equivalence_state *state,
+    equivalence_truncating_substitutions *substitutions) {
+  ixs_arena *arena = &state->ctx->scratch;
+  query_node_set candidates;
+  query_node_set descendants;
+  query_node_set excluded;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+  size_t output = 0;
+  size_t i;
+
+  memset(&candidates, 0, sizeof(candidates));
+  memset(&descendants, 0, sizeof(descendants));
+  memset(&excluded, 0, sizeof(excluded));
+  for (i = 0; i < substitutions->count; i++) {
+    ixs_node *target = substitutions->items[i].target;
+    uint32_t nchildren;
+    uint32_t child;
+    bool inserted;
+    if (!query_node_set_insert(arena, &candidates, target, &inserted))
+      goto oom;
+    if (!inserted)
+      continue;
+    if (!defined_child_count(target, &nchildren))
+      return false;
+    /* Seed children, not candidate roots. Expression DAGs are acyclic, so a
+     * source cannot reach and exclude itself; only an enclosing match can. */
+    for (child = nchildren; child > 0; child--)
+      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
+                                 defined_child_at(target, child - 1u)))
+        goto oom;
+  }
+
+  while (stack_count > 0) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t nchildren;
+    uint32_t child;
+    bool inserted;
+    if (!query_node_set_insert(arena, &descendants, node, &inserted))
+      goto oom;
+    if (!inserted)
+      continue;
+    if (query_node_set_contains(&candidates, node) &&
+        !query_node_set_insert(arena, &excluded, node, &inserted))
+      goto oom;
+    if (!defined_child_count(node, &nchildren))
+      return false;
+    for (child = nchildren; child > 0; child--)
+      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
+                                 defined_child_at(node, child - 1u)))
+        goto oom;
+  }
+
+  for (i = 0; i < substitutions->count; i++) {
+    if (query_node_set_contains(&excluded, substitutions->items[i].target))
+      continue;
+    if (output != i)
+      substitutions->items[output] = substitutions->items[i];
+    output++;
+  }
+  substitutions->count = output;
+  return true;
+
+oom:
+  state->oom = true;
+  return false;
 }
 
 static bool equivalence_apply_truncating_substitutions(
     equivalence_state *state, ixs_node *root,
-    const equivalence_truncating_substitution *substitutions, size_t nsubs,
+    const equivalence_truncating_substitutions *substitutions,
     ixs_node **result) {
-  ixs_node *targets[EQUIVALENCE_TRUNCATING_LIMIT];
-  ixs_node *replacements[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_node **targets;
+  ixs_node **replacements;
+  size_t count = substitutions->count;
   size_t i;
-  if (nsubs == 0) {
+  if (count == 0) {
     *result = root;
     return true;
   }
-  for (i = 0; i < nsubs; i++) {
-    targets[i] = substitutions[i].target;
-    replacements[i] = substitutions[i].replacement;
+  if (count > UINT32_MAX || count > SIZE_MAX / sizeof(*targets)) {
+    state->oom = true;
+    return false;
+  }
+  targets = ixs_arena_alloc(&state->ctx->scratch, count * sizeof(*targets),
+                            sizeof(void *));
+  replacements = ixs_arena_alloc(&state->ctx->scratch,
+                                 count * sizeof(*replacements), sizeof(void *));
+  if (!targets || !replacements) {
+    state->oom = true;
+    return false;
+  }
+  for (i = 0; i < count; i++) {
+    targets[i] = substitutions->items[i].target;
+    replacements[i] = substitutions->items[i].replacement;
   }
   *result =
-      simp_subs_multi(state->ctx, root, (uint32_t)nsubs, targets, replacements);
+      simp_subs_multi(state->ctx, root, (uint32_t)count, targets, replacements);
   if (!*result) {
     state->oom = true;
     return false;
@@ -10144,29 +10212,35 @@ static bool equivalence_apply_truncating_substitutions(
 static bool equivalence_project_truncating_rounds(
     equivalence_state *state, ixs_node *lhs, ixs_node *rhs, unsigned depth,
     bool piecewise_only, ixs_node **projected_lhs, ixs_node **projected_rhs) {
-  equivalence_truncating_substitution
-      substitutions[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_arena_mark mark;
+  equivalence_truncating_substitutions substitutions;
   ixs_node *nodes[2] = {lhs, rhs};
-  size_t nsubstitutions = 0;
+  bool projected = false;
 
   *projected_lhs = lhs;
   *projected_rhs = rhs;
   if (!ixs_node_contains_rounding(lhs) && !ixs_node_contains_rounding(rhs))
     return false;
+  mark = ixs_arena_save(&state->ctx->scratch);
+  memset(&substitutions, 0, sizeof(substitutions));
   if (!equivalence_collect_truncating_substitutions(
-          state, lhs, depth, piecewise_only, substitutions, &nsubstitutions) ||
-      !equivalence_collect_truncating_substitutions(
-          state, rhs, depth, piecewise_only, substitutions, &nsubstitutions) ||
-      nsubstitutions == 0)
-    return false;
-  if (!equivalence_apply_truncating_substitutions(state, lhs, substitutions,
-                                                  nsubstitutions, &nodes[0]) ||
-      !equivalence_apply_truncating_substitutions(state, rhs, substitutions,
-                                                  nsubstitutions, &nodes[1]))
-    return false;
+          state, lhs, rhs, depth, piecewise_only, &substitutions) ||
+      substitutions.count == 0 ||
+      !equivalence_select_outermost_truncating_substitutions(state,
+                                                             &substitutions) ||
+      substitutions.count == 0 ||
+      !equivalence_apply_truncating_substitutions(state, lhs, &substitutions,
+                                                  &nodes[0]) ||
+      !equivalence_apply_truncating_substitutions(state, rhs, &substitutions,
+                                                  &nodes[1]))
+    goto cleanup;
   *projected_lhs = nodes[0];
   *projected_rhs = nodes[1];
-  return true;
+  projected = true;
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return projected;
 }
 
 #define FACT_TRUNCATING_COST_VISIT_LIMIT 4096u
@@ -12096,9 +12170,8 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
     goto cleanup;
   }
   if (!ixs_node_is_known_total(input_expr)) {
-    ixs_check_result defined =
-        bounds_check_defined_status(&facts->bounds, input_expr, &defined_oom,
-                                    NULL);
+    ixs_check_result defined = bounds_check_defined_status(
+        &facts->bounds, input_expr, &defined_oom, NULL);
     if (defined_oom) {
       if (!old_bounds_oom && facts->bounds.oom) {
         bounds_cache_clear(&facts->bounds);
