@@ -633,6 +633,48 @@ static void test_boolean(void) {
   }
 }
 
+static void test_boolean_piecewise(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "bool_piecewise_x");
+  ixs_node *zero = ixs_false(ctx);
+  ixs_node *one = ixs_true(ctx);
+  ixs_node *condition = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 4));
+  ixs_node *values[] = {one, zero};
+  ixs_node *conditions[] = {condition, one};
+  ixs_node *selector = ixs_pw(ctx, 2, values, conditions);
+
+  CHECK(selector == condition);
+  CHECK(ixs_cmp(ctx, selector, IXS_CMP_NE, zero) == condition);
+  CHECK(ixs_cmp(ctx, selector, IXS_CMP_EQ, zero) == ixs_not(ctx, condition));
+
+  {
+    ixs_node *nested_conditions[] = {selector, one};
+    ixs_node *nested = ixs_pw(ctx, 2, values, nested_conditions);
+    CHECK(nested == condition);
+    CHECK(ixs_cmp(ctx, nested, IXS_CMP_NE, zero) == condition);
+  }
+
+  {
+    ixs_node *inverted_values[] = {zero, one};
+    CHECK(ixs_pw(ctx, 2, inverted_values, conditions) ==
+          ixs_not(ctx, condition));
+  }
+
+  {
+    ixs_node *non_boolean_values[] = {ixs_int(ctx, 2), zero};
+    ixs_node *partial_values[] = {one};
+    ixs_node *partial_conditions[] = {condition};
+    ixs_node *non_boolean = ixs_pw(ctx, 2, non_boolean_values, conditions);
+    ixs_node *partial = ixs_pw(ctx, 1, partial_values, partial_conditions);
+    ixs_node *numeric_truth = ixs_cmp(ctx, x, IXS_CMP_NE, zero);
+
+    CHECK(ixs_node_tag(non_boolean) == IXS_PIECEWISE);
+    CHECK(ixs_node_tag(partial) == IXS_PIECEWISE);
+    CHECK(ixs_node_tag(numeric_truth) == IXS_CMP);
+    CHECK(numeric_truth != x);
+  }
+}
+
 static bool assoc_has_arg(ixs_node *node, ixs_node *arg) {
   uint32_t i;
   for (i = 0; i < ixs_node_assoc_nargs(node); i++) {
@@ -4220,6 +4262,7 @@ int main(void) {
   test_mod_extract_constant_residue();
   test_mod_divisor_contract();
   test_boolean();
+  test_boolean_piecewise();
   test_flat_associative_nodes();
   test_xor_nested_cancellation();
   test_xor_known_bit_simplification();

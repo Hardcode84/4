@@ -24442,6 +24442,19 @@ static ixs_node *rule_cmp_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
   return result ? ctx->node_true : ctx->node_false;
 }
 
+static ixs_node *rule_cmp_bool_zero(ixs_ctx *ctx, ixs_bounds *bnds,
+                                    ixs_node *n) {
+  ixs_node *lhs = n->u.binary.lhs;
+  (void)bnds;
+  if (!ixs_node_is_zero(n->u.binary.rhs) || !ixs_node_is_bool_valued(lhs))
+    return n;
+  if (n->u.binary.cmp_op == IXS_CMP_NE)
+    return lhs;
+  if (n->u.binary.cmp_op == IXS_CMP_EQ)
+    return simp_not(ctx, lhs);
+  return n;
+}
+
 static ixs_node *rule_cmp_identity(ixs_ctx *ctx, ixs_bounds *bnds,
                                    ixs_node *n) {
   if (n->u.binary.lhs != n->u.binary.rhs)
@@ -24481,6 +24494,7 @@ static ixs_node *rule_cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
  * resolution sees a consistent form. */
 static const ixs_rule cmp_rules[] = {
     {rule_cmp_const_fold, "cmp_const_fold", false},
+    {rule_cmp_bool_zero, "cmp_bool_zero", false},
     {rule_cmp_identity, "cmp_identity", false},
     {rule_cmp_normalize, "cmp_normalize", false},
     {rule_cmp_bounds_resolve, "cmp_bounds_resolve", true},
@@ -24916,6 +24930,24 @@ static int pw_merge_previous(ixs_ctx *ctx, ixs_pwcase *cases, uint32_t ncases,
   return ixs_node_is_known_true(cases[ncases - 1].cond) ? 2 : 1;
 }
 
+static ixs_node *pw_finish(ixs_ctx *ctx, uint32_t ncases, ixs_pwcase *cases) {
+  ixs_node *predicate;
+  bool direct;
+  bool inverted;
+
+  if (ncases != 2 || !ixs_node_is_known_true(cases[1].cond))
+    return ixs_node_pw(ctx, ncases, cases);
+  direct = ixs_node_is_one(cases[0].value) && ixs_node_is_zero(cases[1].value);
+  inverted =
+      ixs_node_is_zero(cases[0].value) && ixs_node_is_one(cases[1].value);
+  if (!direct && !inverted)
+    return ixs_node_pw(ctx, ncases, cases);
+  predicate = truthy_predicate(ctx, cases[0].cond);
+  if (!predicate)
+    return NULL;
+  return direct ? predicate : simp_not(ctx, predicate);
+}
+
 static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
                               ixs_node *const *conds) {
   size_t cap;
@@ -24988,7 +25020,7 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
   if (ncases == 1 && ixs_node_is_known_true(cases[0].cond))
     return cases[0].value;
 
-  return ixs_node_pw(ctx, ncases, cases);
+  return pw_finish(ctx, ncases, cases);
 }
 
 IXS_STATIC ixs_node *simp_pw(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,

@@ -1051,6 +1051,8 @@ Piecewise((v, True))                → v
 Piecewise((v, False), rest...)      → Piecewise(rest...)
 Piecewise((v, c), (v, d), rest...)  → Piecewise((v, c | d), rest...)
                                       (same value, merge conditions)
+Piecewise((1, c), (0, True))        → c != 0
+Piecewise((0, c), (1, True))        → ~(c != 0)
 Piecewise((a, c), (b, True))       where c evaluates to True → a
                                     where c evaluates to False → b
 
@@ -1174,6 +1176,8 @@ logical truthiness. Complement matching and its proof use one canonical key for
 #### 4.10 Comparison Simplification
 
 ```
+a != 0  → a       when a is 0/1-valued
+a == 0  → ~a      when a is 0/1-valued
 a > b   → (a - b) > 0   (normalize to compare against 0)
 ```
 
