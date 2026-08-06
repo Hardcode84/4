@@ -2660,6 +2660,46 @@ static void test_fact_backed_affine_truncating_remainder(void) {
   CHECK(batch[1] == optimized_expected);
 
   {
+    ixs_node *raw = ixs_sym(ctx, "shared_truncating_raw");
+    ixs_node *inner_argument =
+        ixs_add(ctx, ixs_div(ctx, raw, ixs_int(ctx, 64)), ixs_rat(ctx, 63, 64));
+    ixs_node *inner_values[2] = {ixs_floor(ctx, inner_argument),
+                                 ixs_ceil(ctx, inner_argument)};
+    ixs_node *inner_conditions[2] = {
+        ixs_cmp(ctx, ixs_add(ctx, raw, ixs_int(ctx, 63)), IXS_CMP_GE,
+                ixs_int(ctx, 0)),
+        ixs_true(ctx)};
+    ixs_node *inner = ixs_pw(ctx, 2, inner_values, inner_conditions);
+    ixs_node *outer_numerator = ixs_sub(ctx, inner, ixs_int(ctx, 2));
+    ixs_node *outer_argument =
+        ixs_add(ctx, ixs_div(ctx, inner, ixs_int(ctx, 3)), ixs_rat(ctx, 1, 3));
+    ixs_node *outer_values[2] = {
+        ixs_add(ctx, ixs_int(ctx, -1), ixs_floor(ctx, outer_argument)),
+        ixs_add(ctx, ixs_int(ctx, -1), ixs_ceil(ctx, outer_argument))};
+    ixs_node *outer_conditions[2] = {
+        ixs_cmp(ctx, outer_numerator, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_true(ctx)};
+    ixs_node *outer = ixs_pw(ctx, 2, outer_values, outer_conditions);
+    ixs_node *shared_source =
+        ixs_sub(ctx, outer_numerator, ixs_mul(ctx, ixs_int(ctx, 3), outer));
+    ixs_node *shared_positive_mod =
+        ixs_mod(ctx, outer_numerator, ixs_int(ctx, 3));
+    ixs_node *shared_negative_mod = ixs_neg(
+        ctx, ixs_mod(ctx, ixs_neg(ctx, outer_numerator), ixs_int(ctx, 3)));
+    ixs_node *shared_remainder_values[2] = {shared_positive_mod,
+                                            shared_negative_mod};
+    ixs_node *shared_remainder_conditions[2] = {
+        ixs_cmp(ctx, outer_numerator, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_true(ctx)};
+    ixs_node *shared_expected =
+        ixs_pw(ctx, 2, shared_remainder_values, shared_remainder_conditions);
+    ixs_facts *shared = ixs_facts_create(ctx);
+
+    shared_expected = ixs_simplify_facts(shared, shared_expected);
+    CHECK(ixs_simplify_facts(shared, shared_source) == shared_expected);
+  }
+
+  {
     ixs_node *n = ixs_sym(ctx, "affine_negative_divisor_n");
     ixs_node *d = ixs_sym(ctx, "affine_negative_divisor_d");
     ixs_node *shifted =

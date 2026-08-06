@@ -9437,6 +9437,79 @@ typedef struct {
   ixs_node *replacement;
 } equivalence_truncating_substitution;
 
+static bool equivalence_truncating_contains(equivalence_state *state,
+                                            ixs_node *root, ixs_node *target,
+                                            bool *contains) {
+  ixs_node *stack[EQUIVALENCE_TRUNCATING_STACK_LIMIT];
+  size_t nstack = 1u;
+  size_t visited = 0;
+
+  *contains = false;
+  stack[0] = root;
+  while (nstack > 0) {
+    ixs_node *node = stack[--nstack];
+    uint32_t nchildren;
+    uint32_t i;
+    if (node == target) {
+      *contains = true;
+      return true;
+    }
+    if (visited >= EQUIVALENCE_TRUNCATING_STACK_LIMIT) {
+      state->limited = true;
+      return false;
+    }
+    visited++;
+    if (!defined_child_count(node, &nchildren))
+      return false;
+    if ((size_t)nchildren > EQUIVALENCE_TRUNCATING_STACK_LIMIT - nstack) {
+      state->limited = true;
+      return false;
+    }
+    for (i = 0; i < nchildren; i++)
+      stack[nstack++] = defined_child_at(node, i);
+  }
+  return true;
+}
+
+/* Keep only outermost matches. A shared inner match may have been reached
+ * through a sibling before its enclosing Piecewise, so opacity cannot be
+ * enforced solely by stopping the collector at a matched node. */
+static bool equivalence_add_truncating_substitution(
+    equivalence_state *state,
+    equivalence_truncating_substitution *substitutions, size_t *nsubs,
+    ixs_node *target, ixs_node *replacement) {
+  size_t existing = 0;
+  while (existing < *nsubs) {
+    bool contains;
+    if (substitutions[existing].target == target)
+      return true;
+    if (!equivalence_truncating_contains(state, substitutions[existing].target,
+                                         target, &contains))
+      return false;
+    if (contains)
+      return true;
+    if (!equivalence_truncating_contains(
+            state, target, substitutions[existing].target, &contains))
+      return false;
+    if (!contains) {
+      existing++;
+      continue;
+    }
+    if (existing + 1u < *nsubs)
+      memmove(&substitutions[existing], &substitutions[existing + 1u],
+              (*nsubs - existing - 1u) * sizeof(*substitutions));
+    (*nsubs)--;
+  }
+  if (*nsubs >= EQUIVALENCE_TRUNCATING_LIMIT) {
+    state->limited = true;
+    return false;
+  }
+  substitutions[*nsubs].target = target;
+  substitutions[*nsubs].replacement = replacement;
+  (*nsubs)++;
+  return true;
+}
+
 static bool equivalence_remainder_domain_proven(equivalence_state *state,
                                                 ixs_node *node) {
   bool proven = ixs_bounds_check_defined(state->bounds, node) == IXS_CHECK_TRUE;
@@ -9766,7 +9839,6 @@ static bool equivalence_collect_truncating_substitutions(
     uint32_t nchildren;
     uint32_t i;
     bool matched;
-    size_t existing;
     if (!ixs_node_contains_rounding(node))
       continue;
     if (state->visited >= EQUIVALENCE_VISIT_LIMIT) {
@@ -9784,18 +9856,9 @@ static bool equivalence_collect_truncating_substitutions(
              (!piecewise_only &&
               (node->tag == IXS_FLOOR || node->tag == IXS_CEIL))) {
       if (matched) {
-        for (existing = 0; existing < *nsubs; existing++)
-          if (substitutions[existing].target == node)
-            break;
-        if (existing == *nsubs) {
-          if (*nsubs >= EQUIVALENCE_TRUNCATING_LIMIT) {
-            state->limited = true;
-            return false;
-          }
-          substitutions[*nsubs].target = node;
-          substitutions[*nsubs].replacement = replacement;
-          (*nsubs)++;
-        }
+        if (!equivalence_add_truncating_substitution(state, substitutions,
+                                                     nsubs, node, replacement))
+          return false;
         continue;
       }
       if (node->tag == IXS_PIECEWISE)

@@ -1800,15 +1800,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   uncovered `Piecewise` encodings, unknown divisor signs, zero divisors,
   noninteger parts, and shifts crossing a remainder boundary remain unknown.
   Candidate discovery is iterative, shares the equivalence query's 4096-node
-  visit budget, and admits at most 32 truncating forms total. Reusable-fact
-  simplification returns a projected candidate only when a bounded 4096-node
-  unique-DAG measurement proves that both the rounding-node count and total
-  node count decrease. Its open-addressed 8192-slot memo visits shared nodes
-  once; limit or allocation failure keeps the original expression. A single
-  bounded pass returns immediately when neither operand has a usable form, so
-  ordinary no-truncation failures are not rebuilt or simplified by this
-  strategy. Interned nodes cache private subtree-rounding and
-  subtree-Piecewise property bits. Proof queries reject a root without
+  visit budget, and admits at most 32 truncating forms total. Selected targets
+  form an outermost antichain: when a matched target contains another match,
+  including through a shared DAG path, only the outer target is projected.
+  Pairwise containment walks are iterative and bounded to 1024 node visits.
+  Reusable-fact simplification returns a projected candidate only when a
+  bounded 4096-node unique-DAG measurement proves that both the rounding-node
+  count and total node count decrease. Its open-addressed 8192-slot memo visits
+  shared nodes once; limit or allocation failure keeps the original
+  expression. A single bounded pass returns immediately when neither operand
+  has a usable form, so ordinary no-truncation failures are not rebuilt or
+  simplified by this strategy. Interned nodes cache private subtree-rounding
+  and subtree-Piecewise property bits. Proof queries reject a root without
   rounding in O(1); reusable-fact simplification also rejects a root without
   Piecewise in O(1), so ordinary floor-only expressions incur no DAG walk.
 
