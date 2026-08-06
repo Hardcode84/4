@@ -99,6 +99,10 @@ static void test_unary_accessors(void) {
   CHECK(ixs_node_tag(ce) == IXS_CEIL);
   CHECK(ixs_same_node(ixs_node_unary_arg(ce), arg));
 
+  ixs_node *tr = ixs_trunc(ctx, arg);
+  CHECK(ixs_node_tag(tr) == IXS_TRUNC);
+  CHECK(ixs_same_node(ixs_node_unary_arg(tr), arg));
+
   ixs_node *xr = ixs_xor(ctx, ixs_sym(ctx, "a"), ixs_sym(ctx, "b"));
   ixs_node *nt = ixs_not(ctx, xr);
   CHECK(ixs_node_tag(nt) == IXS_NOT);

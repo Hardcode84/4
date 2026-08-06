@@ -26,6 +26,10 @@
 #define INT64_MAX 9223372036854775807LL
 #endif
 
+static ixs_finite_domain_result
+finite_domain_equivalent(ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
+                         size_t *remaining_work);
+
 /* ------------------------------------------------------------------ */
 /*  Interval arithmetic                                               */
 /* ------------------------------------------------------------------ */
@@ -1450,7 +1454,7 @@ static void test_nested_piecewise_public_query_tracking(void) {
   nested = make_nested_query_root(ctx, "finite_tracking");
   budget = 4;
   CHECK(ctx->bounds_query_state == NULL);
-  (void)ixs_equivalent_finite_domain_facts(facts, flat, nested, &budget);
+  (void)finite_domain_equivalent(facts, flat, nested, &budget);
   check_nested_query_tracking_clean(ctx, facts);
   ixs_ctx_destroy(ctx);
 
@@ -2206,6 +2210,28 @@ static void test_bounds_check_non_cmp(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_fact_consistency(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *raw = ixs_sym(ctx, "raw");
+  ixs_node *shifted = ixs_add(ctx, ixs_int(ctx, 63), raw);
+  ixs_node *fraction = ixs_div(ctx, shifted, ixs_int(ctx, 64));
+  ixs_node *values[2] = {ixs_floor(ctx, fraction), ixs_ceil(ctx, fraction)};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, shifted, IXS_CMP_GE, ixs_int(ctx, 0)),
+                             ixs_true(ctx)};
+  ixs_node *quotient = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *contradiction[2] = {
+      ixs_cmp(ctx, quotient, IXS_CMP_GE, ixs_int(ctx, 2)),
+      ixs_cmp(ctx, shifted, IXS_CMP_LT, ixs_int(ctx, 0))};
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_check_consistent_facts(NULL) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_consistent_facts(facts) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_preds(facts, contradiction, 2));
+  CHECK(ixs_check_consistent_facts(facts) == IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Bounds: public range API                                          */
 /* ------------------------------------------------------------------ */
@@ -2496,6 +2522,38 @@ static void test_public_range_mod_requires_positive_divisor(void) {
   mixed[0] = ixs_cmp(ctx, m, IXS_CMP_GE, ixs_int(ctx, -1));
   mixed[1] = ixs_cmp(ctx, m, IXS_CMP_LE, ixs_int(ctx, 8));
   CHECK(!ixs_range(ctx, expr, mixed, 2, &r));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_range_mod_nonnegative_dividend_cap(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "mod_dividend_cap_x");
+  ixs_node *d = ixs_sym(ctx, "mod_dividend_cap_d");
+  ixs_node *remainder = ixs_mod(ctx, x, d);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+  ixs_facts *crossing = ixs_facts_create(ctx);
+  ixs_range_result input = {true, true, 0, 1, 100, 1};
+  ixs_integer_range_result result;
+
+  CHECK(ctx && x && d && remainder && nonnegative && crossing);
+  CHECK(ixs_facts_assume_range(nonnegative, x, &input));
+  input.lower_p = 4;
+  input.upper_p = 1000;
+  CHECK(ixs_facts_assume_range(nonnegative, d, &input));
+  CHECK(ixs_integer_range_facts(nonnegative, remainder, &result));
+  CHECK(result.has_lower && result.lower == 0);
+  CHECK(result.has_upper && result.upper == 100);
+
+  input.lower_p = -100;
+  input.upper_p = 100;
+  CHECK(ixs_facts_assume_range(crossing, x, &input));
+  input.lower_p = 4;
+  input.upper_p = 1000;
+  CHECK(ixs_facts_assume_range(crossing, d, &input));
+  CHECK(ixs_integer_range_facts(crossing, remainder, &result));
+  CHECK(result.has_lower && result.lower == 0);
+  CHECK(result.has_upper && result.upper == 999);
 
   ixs_ctx_destroy(ctx);
 }
@@ -2960,6 +3018,61 @@ static ixs_node *test_unsigned_remainder_wrap(ixs_ctx *ctx, ixs_node *value,
   ixs_node *remainder = ixs_mod(ctx, unsigned_value, unsigned_divisor);
   return test_signed_wrap(ctx, remainder, INT64_C(2147483648),
                           INT64_C(4294967296));
+}
+
+static ixs_node *test_fixed_width_scaled_signed_remainder(ixs_ctx *ctx,
+                                                          ixs_node *value,
+                                                          ixs_node *divisor) {
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *bias = ixs_int(ctx, INT64_C(2147483648));
+  ixs_node *modulus = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *remainder = test_unsigned_remainder_wrap(ctx, value, divisor, 0);
+  ixs_node *biased = ixs_add(ctx, bias, remainder);
+  ixs_node *low = ixs_mod(ctx, ixs_mul(ctx, two, remainder), modulus);
+  ixs_node *sign = ixs_mod(ctx,
+                           ixs_add(ctx, ixs_int(ctx, INT64_C(4294967295)),
+                                   ixs_floor(ctx, ixs_div(ctx, biased, bias))),
+                           modulus);
+  ixs_node *values[2] = {ixs_sub(ctx, sign, modulus), sign};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, sign, IXS_CMP_GE, bias),
+                             ixs_true(ctx)};
+  ixs_node *extension = ixs_pw(ctx, 2, values, conditions);
+  return ixs_add(ctx, low, ixs_mul(ctx, modulus, extension));
+}
+
+static void test_public_range_nonnegative_signed_remainder_packet(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "signed_remainder_packet_x");
+  ixs_node *d = ixs_sym(ctx, "signed_remainder_packet_d");
+  ixs_node *packet = test_fixed_width_scaled_signed_remainder(ctx, x, d);
+  ixs_node *simplified;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result input = {true, true, 0, 1, 1073741822, 1};
+  ixs_integer_range_result result;
+
+  CHECK(ctx && x && d && packet && facts);
+  CHECK(ixs_facts_assume_range(facts, x, &input));
+  input.lower_p = 4;
+  input.upper_p = INT32_MAX;
+  CHECK(ixs_facts_assume_range(facts, d, &input));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, 4)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+
+  CHECK(ixs_integer_range_facts(facts, packet, &result));
+  CHECK(result.has_lower && result.lower == 0);
+  CHECK(result.has_upper && result.upper == INT64_C(2147483644));
+
+  simplified = ixs_simplify_facts(facts, packet);
+  CHECK(simplified && !ixs_is_error(simplified));
+  CHECK(ixs_integer_range_facts(facts, simplified, &result));
+  CHECK(result.has_lower && result.lower == 0);
+  CHECK(result.has_upper && result.upper == INT64_C(2147483644));
+
+  ixs_ctx_destroy(ctx);
 }
 
 static void test_public_dynamic_modular_projection_difference(void) {
@@ -6308,6 +6421,42 @@ static ixs_node *parse_bounds_pred(ixs_ctx *ctx, const char *text) {
   return ixs_parse_pred(ctx, text, strlen(text));
 }
 
+static void test_public_trunc_primitive_constant_difference(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "trunc_primitive_x");
+  ixs_node *d = ixs_sym(ctx, "trunc_primitive_d");
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_node *base =
+      ixs_sub(ctx, x, ixs_mul(ctx, d, ixs_trunc(ctx, ixs_div(ctx, x, d))));
+  ixs_node *scaled_base = ixs_mul(ctx, sixteen, base);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  int64_t offset;
+  int64_t delta = 0;
+
+  CHECK(ctx && x && d && sixteen && scaled_base && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts, ixs_cmp(ctx, ixs_mod(ctx, d, sixteen),
+                                             IXS_CMP_EQ, ixs_int(ctx, 0))));
+
+  for (offset = 1; offset <= 7; offset++) {
+    ixs_node *numerator = ixs_add(ctx, x, ixs_int(ctx, offset));
+    ixs_node *remainder =
+        ixs_sub(ctx, numerator,
+                ixs_mul(ctx, d, ixs_trunc(ctx, ixs_div(ctx, numerator, d))));
+    ixs_node *scaled = ixs_mul(ctx, sixteen, remainder);
+    CHECK(ixs_constant_difference_facts(facts, scaled, scaled_base, &delta));
+    CHECK(delta == 16 * offset);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_truncating_remainder_equivalence(void) {
   static const char scaled_zero[] = "16*x - 16*d*Piecewise((floor(x/d), "
                                     "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
@@ -6843,6 +6992,16 @@ static void test_public_modulo_pow2_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_finite_domain_result
+finite_domain_equivalent(ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
+                         size_t *remaining_work) {
+  ixs_finite_domain_query query;
+  query.kind = IXS_FINITE_DOMAIN_EQUIVALENCE;
+  query.as.equivalence.lhs = lhs;
+  query.as.equivalence.rhs = rhs;
+  return ixs_finite_domain_facts(facts, &query, remaining_work);
+}
+
 static void test_public_finite_domain_equivalence(void) {
   static const char finite_text[] =
       "Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))";
@@ -6861,6 +7020,7 @@ static void test_public_finite_domain_equivalence(void) {
   ixs_facts *range_five = ixs_facts_create(ctx);
   ixs_facts *x_range = ixs_facts_create(ctx);
   ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_finite_domain_result result;
   size_t budget;
 
   CHECK(ctx && other && x && finite_x && finite && unbounded && range_four &&
@@ -6879,41 +7039,66 @@ static void test_public_finite_domain_equivalence(void) {
 
   CHECK(ixs_equivalent_facts(range_four, finite, one) == IXS_CHECK_UNKNOWN);
   budget = 4;
-  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
-        IXS_CHECK_TRUE);
+  result = finite_domain_equivalent(range_four, finite, one, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL);
   CHECK(budget == 0);
 
   budget = 4;
-  CHECK(ixs_equivalent_finite_domain_facts(range_four, unbounded, zero,
-                                           &budget) == IXS_CHECK_TRUE);
+  result = finite_domain_equivalent(range_four, unbounded, zero, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL);
   CHECK(budget == 0);
 
   budget = 4;
-  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, one, &budget) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(range_five, finite, one, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 4);
   budget = 5;
-  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, one, &budget) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(range_five, finite, one, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 0);
   budget = 5;
-  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, ixs_int(ctx, 2),
-                                           &budget) == IXS_CHECK_UNKNOWN);
+  result =
+      finite_domain_equivalent(range_five, finite, ixs_int(ctx, 2), &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 0);
 
   budget = 7;
-  CHECK(ixs_equivalent_finite_domain_facts(x_range, x, x, &budget) ==
-        IXS_CHECK_TRUE);
+  result = finite_domain_equivalent(x_range, x, x, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL);
   CHECK(budget == 7);
-  CHECK(ixs_equivalent_finite_domain_facts(x_range, zero, one, &budget) ==
-        IXS_CHECK_FALSE);
+  result = finite_domain_equivalent(x_range, zero, one, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_FALSE && result.value == NULL);
   CHECK(budget == 7);
 
   budget = 3;
-  CHECK(ixs_equivalent_finite_domain_facts(
-            empty, ixs_mul(ctx, x, ixs_sub(ctx, x, one)), zero, &budget) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(
+      empty, ixs_mul(ctx, x, ixs_sub(ctx, x, one)), zero, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 3);
+
+  {
+    enum { SYMBOLS = 65 };
+    ixs_node *wide = zero;
+    size_t symbol;
+    for (symbol = 0; symbol < SYMBOLS; symbol++) {
+      char name[48];
+      snprintf(name, sizeof(name), "finite_equivalence_wide_%zu", symbol);
+      wide = ixs_add(ctx, wide, ixs_sym(ctx, name));
+    }
+    budget = 1000;
+    result = finite_domain_equivalent(x_range, wide, zero, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 1000);
+  }
 
   {
     ixs_node *a = ixs_sym(ctx, "finite_equivalence_a");
@@ -6932,42 +7117,45 @@ static void test_public_finite_domain_equivalence(void) {
     CHECK(ixs_facts_assume_pred(product_facts,
                                 ixs_cmp(ctx, b, IXS_CMP_LE, ixs_int(ctx, 2))));
     budget = 5;
-    CHECK(ixs_equivalent_finite_domain_facts(product_facts, product_identity,
-                                             zero,
-                                             &budget) == IXS_CHECK_UNKNOWN);
+    result = finite_domain_equivalent(product_facts, product_identity, zero,
+                                      &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
     CHECK(budget == 5);
     budget = 6;
-    CHECK(ixs_equivalent_finite_domain_facts(product_facts, product_identity,
-                                             zero, &budget) == IXS_CHECK_TRUE);
+    result = finite_domain_equivalent(product_facts, product_identity, zero,
+                                      &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value == NULL);
     CHECK(budget == 0);
   }
 
   ixs_ctx_clear_errors(ctx);
-  CHECK(ixs_equivalent_finite_domain_facts(x_range, x, x, NULL) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(x_range, x, x, NULL);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(ixs_ctx_nerrors(ctx) == 1);
-  CHECK(strstr(ixs_ctx_error(ctx, 0), "remaining_points") != NULL);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "remaining_work") != NULL);
   ixs_ctx_clear_errors(ctx);
   budget = 3;
-  CHECK(ixs_equivalent_finite_domain_facts(
-            x_range, x, ixs_sym(other, "finite_equivalence_x"), &budget) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(
+      x_range, x, ixs_sym(other, "finite_equivalence_x"), &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 3);
   CHECK(ixs_ctx_nerrors(ctx) == 1);
   CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
 
-  ixs_ctx_clear_errors(ctx);
   budget = 4;
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
-  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
-        IXS_CHECK_UNKNOWN);
+  result = finite_domain_equivalent(range_four, finite, one, &budget);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
   CHECK(budget == 4);
-  CHECK(ixs_ctx_nerrors(ctx) == 1);
-  CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
-  ixs_ctx_clear_errors(ctx);
-  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
-        IXS_CHECK_TRUE);
+  result = finite_domain_equivalent(range_four, finite, one, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL);
   CHECK(budget == 0);
 
   ixs_ctx_destroy(other);
@@ -6985,6 +7173,7 @@ static void test_finite_domain_equivalence_growable_discovery(void) {
   ixs_node *wide;
   ixs_node *difference;
   ixs_range_result singleton_integer = {true, true, -1, 4, 1, 4};
+  ixs_finite_domain_result result;
   char name[64];
   size_t budget = 1;
   size_t i;
@@ -7014,8 +7203,894 @@ static void test_finite_domain_equivalence_growable_discovery(void) {
 
   CHECK(wide && difference);
   CHECK(ixs_equivalent_facts(facts, difference, zero) == IXS_CHECK_UNKNOWN);
-  CHECK(ixs_equivalent_finite_domain_facts(facts, difference, zero, &budget) ==
-        IXS_CHECK_TRUE);
+  result = finite_domain_equivalent(facts, difference, zero, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL);
+  CHECK(budget == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static ixs_finite_domain_result
+finite_domain_synthesize(ixs_facts *facts, ixs_finite_domain_query_kind kind,
+                         ixs_node *symbol, const int64_t *points,
+                         ixs_node *const *values, size_t npoints,
+                         size_t *remaining_work) {
+  ixs_finite_domain_query query;
+  query.kind = kind;
+  query.as.synthesis.symbol = symbol;
+  query.as.synthesis.points = points;
+  query.as.synthesis.values = values;
+  query.as.synthesis.npoints = npoints;
+  return ixs_finite_domain_facts(facts, &query, remaining_work);
+}
+
+static void test_public_finite_domain_synthesis(void) {
+  const int64_t points[4] = {4, 5, 6, 7};
+  const int64_t noncontiguous[4] = {4, 5, 7, 8};
+  const int64_t unordered[4] = {4, 5, 5, 8};
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "finite_synthesis_item");
+  ixs_node *base = ixs_sym(ctx, "finite_synthesis_base");
+  ixs_node *limit = ixs_sym(ctx, "finite_synthesis_limit");
+  ixs_node *additive[4];
+  ixs_node *gf2[4];
+  ixs_node *unsupported[4];
+  ixs_node *comparisons[4];
+  ixs_node *nested[4];
+  ixs_node *predicate_piecewise;
+  ixs_node *predicate_piecewise_values[4];
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_finite_domain_result result;
+  ixs_node *additive_candidate;
+  ixs_node *predicate_candidate;
+  size_t budget;
+  size_t i;
+
+  CHECK(ctx && other && item && base && limit && facts && contradictory);
+  for (i = 0; i < 4u; i++) {
+    static const int64_t additive_delta[4] = {0, 4, 8, 12};
+    static const int64_t gf2_delta[4] = {0, 1, 1, 0};
+    static const int64_t unsupported_delta[4] = {0, 1, 2, 4};
+    ixs_node *greater;
+    ixs_node *different;
+    additive[i] = ixs_add(ctx, base, ixs_int(ctx, additive_delta[i]));
+    gf2[i] = ixs_add(ctx, base, ixs_int(ctx, gf2_delta[i]));
+    unsupported[i] = ixs_add(ctx, base, ixs_int(ctx, unsupported_delta[i]));
+    greater = ixs_cmp(ctx, additive[i], IXS_CMP_GE, limit);
+    different = ixs_not(ctx, ixs_cmp(ctx, gf2[i], IXS_CMP_EQ, limit));
+    comparisons[i] = greater;
+    nested[i] = ixs_and(ctx, greater, different);
+    CHECK(additive[i] && gf2[i] && unsupported[i] && comparisons[i] &&
+          nested[i]);
+  }
+  {
+    const ixs_node *values[2] = {comparisons[0], nested[1]};
+    const ixs_node *conditions[2] = {ixs_cmp(ctx, item, IXS_CMP_LT, base),
+                                     ixs_true(ctx)};
+    predicate_piecewise = (ixs_node *)ixs_pw(ctx, 2, values, conditions);
+    CHECK(predicate_piecewise && predicate_piecewise->tag == IXS_PIECEWISE &&
+          ixs_node_is_pred_kind(predicate_piecewise));
+    for (i = 0; i < 4u; i++)
+      predicate_piecewise_values[i] = predicate_piecewise;
+  }
+
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+  additive_candidate = (ixs_node *)result.value;
+
+  {
+    ixs_finite_domain_query relation;
+    relation.kind = IXS_FINITE_DOMAIN_EXPR_RELATION;
+    relation.as.relation.symbol = item;
+    relation.as.relation.points = points;
+    relation.as.relation.values = additive;
+    relation.as.relation.npoints = 4;
+    relation.as.relation.candidate = additive_candidate;
+    budget = 4;
+    result = ixs_finite_domain_facts(facts, &relation, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value == NULL);
+    CHECK(budget == 0);
+    relation.as.relation.candidate = base;
+    budget = 4;
+    result = ixs_finite_domain_facts(facts, &relation, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 0);
+    {
+      ixs_node *reciprocal_values[4] = {ixs_rat(ctx, 1, 4), ixs_rat(ctx, 1, 5),
+                                        ixs_rat(ctx, 1, 6), ixs_rat(ctx, 1, 7)};
+      ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), item);
+      CHECK(reciprocal_values[0] && reciprocal_values[1] &&
+            reciprocal_values[2] && reciprocal_values[3] && reciprocal);
+      relation.as.relation.values = reciprocal_values;
+      relation.as.relation.candidate = reciprocal;
+      budget = 4;
+      result = ixs_finite_domain_facts(facts, &relation, &budget);
+      CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+            result.check == IXS_CHECK_TRUE && result.value == NULL);
+      CHECK(budget == 0);
+      relation.as.relation.values = additive;
+    }
+    relation.as.relation.candidate = additive_candidate;
+    budget = 4;
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+    result = ixs_finite_domain_facts(facts, &relation, &budget);
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+    CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 0);
+    ixs_ctx_clear_errors(ctx);
+    relation.as.relation.candidate = predicate_piecewise;
+    budget = 4;
+    result = ixs_finite_domain_facts(facts, &relation, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 4 && ixs_ctx_nerrors(ctx) == 1);
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "candidate kind mismatch") != NULL);
+  }
+
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, gf2, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, unsupported, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 0);
+
+  budget = 7;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 7);
+
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, noncontiguous, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 0);
+  budget = 6;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 3, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, unordered, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8);
+
+  budget = 24;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_PRED_SYNTHESIS,
+                                    item, points, comparisons, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+  predicate_candidate = (ixs_node *)result.value;
+  {
+    ixs_finite_domain_query relation;
+    relation.kind = IXS_FINITE_DOMAIN_PRED_RELATION;
+    relation.as.relation.symbol = item;
+    relation.as.relation.points = points;
+    relation.as.relation.values = comparisons;
+    relation.as.relation.npoints = 4;
+    relation.as.relation.candidate = predicate_candidate;
+    budget = 4;
+    result = ixs_finite_domain_facts(facts, &relation, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value == NULL);
+    CHECK(budget == 0);
+  }
+
+  ixs_ctx_clear_errors(ctx);
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, comparisons, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8 && ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "expression value") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  budget = 8;
+  result =
+      finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS, item,
+                               points, predicate_piecewise_values, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8 && ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "expression value") != NULL);
+
+  budget = 64;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_PRED_SYNTHESIS,
+                                    item, points, nested, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 8);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, base, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, base, IXS_CMP_LE, ixs_int(ctx, 0))));
+  budget = 8;
+  result =
+      finite_domain_synthesize(contradictory, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                               item, points, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8);
+
+  {
+    ixs_finite_domain_query malformed;
+    malformed.kind = IXS_FINITE_DOMAIN_EXPR_RELATION;
+    malformed.as.relation = (ixs_finite_domain_relation_query){
+        item, NULL, additive, 4, additive_candidate};
+    budget = 0;
+    result = ixs_finite_domain_facts(facts, &malformed, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0);
+    result = ixs_finite_domain_facts(contradictory, &malformed, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0);
+
+    malformed.kind = IXS_FINITE_DOMAIN_EXPR_SYNTHESIS;
+    malformed.as.synthesis =
+        (ixs_finite_domain_synthesis_query){item, NULL, additive, 4};
+    result = ixs_finite_domain_facts(facts, &malformed, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0);
+    result = ixs_finite_domain_facts(contradictory, &malformed, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0);
+  }
+
+  ixs_ctx_clear_errors(ctx);
+  budget = 8;
+  result = ixs_finite_domain_facts(facts, NULL, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8 && ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "query is NULL") != NULL);
+
+  {
+    ixs_finite_domain_query invalid;
+    memset(&invalid, 0, sizeof(invalid));
+    invalid.kind = (ixs_finite_domain_query_kind)99;
+    ixs_ctx_clear_errors(ctx);
+    budget = 8;
+    result = ixs_finite_domain_facts(facts, &invalid, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 8 && ixs_ctx_nerrors(ctx) == 1);
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "invalid query kind") != NULL);
+  }
+
+  {
+    ixs_finite_domain_query hostile;
+    size_t hostile_npoints = SIZE_MAX / sizeof(uint64_t) + 1u;
+    const int64_t *hostile_points = (const int64_t *)(uintptr_t)1;
+    const ixs_node *const *hostile_values =
+        (const ixs_node *const *)(uintptr_t)1;
+    memset(&hostile, 0, sizeof(hostile));
+    hostile.kind = IXS_FINITE_DOMAIN_EXPR_RELATION;
+    hostile.as.relation.symbol = item;
+    hostile.as.relation.points = hostile_points;
+    hostile.as.relation.values = hostile_values;
+    hostile.as.relation.npoints = hostile_npoints;
+    hostile.as.relation.candidate = additive_candidate;
+    budget = SIZE_MAX;
+    result = ixs_finite_domain_facts(facts, &hostile, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == SIZE_MAX);
+
+    hostile.kind = IXS_FINITE_DOMAIN_EXPR_SYNTHESIS;
+    hostile.as.synthesis.symbol = item;
+    hostile.as.synthesis.points = hostile_points;
+    hostile.as.synthesis.values = hostile_values;
+    hostile.as.synthesis.npoints = hostile_npoints;
+    budget = SIZE_MAX;
+    result = ixs_finite_domain_facts(facts, &hostile, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == SIZE_MAX);
+
+    hostile.kind = IXS_FINITE_DOMAIN_EXPR_RELATION;
+    hostile.as.relation.symbol = item;
+    hostile.as.relation.points = hostile_points;
+    hostile.as.relation.values = hostile_values;
+    hostile.as.relation.npoints = 2;
+    hostile.as.relation.candidate = additive_candidate;
+    budget = 0;
+    result = ixs_finite_domain_facts(facts, &hostile, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 0);
+
+    hostile.kind = IXS_FINITE_DOMAIN_EXPR_SYNTHESIS;
+    hostile.as.synthesis.symbol = item;
+    hostile.as.synthesis.points = hostile_points;
+    hostile.as.synthesis.values = hostile_values;
+    hostile.as.synthesis.npoints = 4;
+    budget = 1;
+    result = ixs_finite_domain_facts(facts, &hostile, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+    CHECK(budget == 1);
+  }
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 4, &budget);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 0);
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+
+  ixs_ctx_clear_errors(ctx);
+  additive[1] = ixs_sym(other, "finite_synthesis_foreign");
+  budget = 8;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, points, additive, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL);
+  CHECK(budget == 8 && ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_finite_domain_batch(void) {
+  const int64_t block_points[2] = {0, 1};
+  const int64_t item_points[2] = {2, 4};
+  const int64_t slot_points[2] = {5, 6};
+  const int64_t unordered_points[2] = {1, 1};
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *block = ixs_sym(ctx, "finite_batch_block");
+  ixs_node *item = ixs_sym(ctx, "finite_batch_item");
+  ixs_node *slot = ixs_sym(ctx, "finite_batch_slot");
+  ixs_node *unknown = ixs_sym(ctx, "finite_batch_unknown");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *five = ixs_int(ctx, 5);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *partial = ixs_div(ctx, one, ixs_sub(ctx, slot, five));
+  ixs_node *query_partial = ixs_div(ctx, one, unknown);
+  ixs_node *fraction = ixs_div(ctx, block, two);
+  ixs_node *true_pred = ixs_cmp(ctx, block, IXS_CMP_GE, zero);
+  ixs_node *slot_is_five = ixs_cmp(ctx, slot, IXS_CMP_EQ, five);
+  ixs_node *unknown_pred = ixs_cmp(ctx, unknown, IXS_CMP_EQ, zero);
+  ixs_node *late_false =
+      ixs_and(ctx, unknown_pred, ixs_cmp(ctx, block, IXS_CMP_EQ, zero));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  const ixs_node *false_predicate[1] = {ixs_false(ctx)};
+  ixs_facts *contradictory_facts =
+      ixs_facts_create_preds(IXS_TEST_SESSION(ctx), false_predicate, 1);
+  ixs_finite_integer_domain domains[3];
+  ixs_finite_domain_batch_query queries[7];
+  ixs_finite_domain_batch_result results[7];
+  ixs_finite_domain_status status;
+  size_t budget;
+
+  CHECK(ctx && other && block && item && slot && unknown && zero && one &&
+        five && two && partial && query_partial && fraction && true_pred &&
+        slot_is_five && unknown_pred && late_false && facts &&
+        contradictory_facts);
+  domains[0] = (ixs_finite_integer_domain){block, block_points, 2};
+  domains[1] = (ixs_finite_integer_domain){item, item_points, 2};
+  domains[2] = (ixs_finite_integer_domain){slot, slot_points, 2};
+  queries[0] = (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                               true_pred};
+  queries[1] = (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                               slot_is_five};
+  queries[2] = (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                               unknown_pred};
+  queries[3] =
+      (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_DEFINED, partial};
+  queries[4] = (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_INTEGER_VALUED,
+                                               fraction};
+  queries[5] =
+      (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_DEFINED, fraction};
+  queries[6] = (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                               late_false};
+
+  budget = 55;
+  status = ixs_finite_domain_batch_facts(facts, domains, 3, queries, 7, results,
+                                         &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_EXHAUSTED && budget == 55);
+  for (size_t query = 0; query < 7; query++)
+    CHECK(results[query].check == IXS_CHECK_UNKNOWN &&
+          results[query].witness == SIZE_MAX);
+
+  results[0].check = IXS_CHECK_TRUE;
+  results[0].witness = 0;
+  budget = 1;
+  status = ixs_finite_domain_batch_facts(facts, domains, 0, queries, 1, results,
+                                         &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 1);
+  CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+        results[0].witness == SIZE_MAX);
+  results[0].check = IXS_CHECK_TRUE;
+  results[0].witness = 0;
+  budget = 0;
+  status = ixs_finite_domain_batch_facts(contradictory_facts, domains, 0,
+                                         queries, 1, results, &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 0);
+  CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+        results[0].witness == SIZE_MAX);
+
+  budget = 56;
+  status = ixs_finite_domain_batch_facts(facts, domains, 3, queries, 7, results,
+                                         &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0);
+  CHECK(results[0].check == IXS_CHECK_TRUE && results[0].witness == SIZE_MAX);
+  CHECK(results[1].check == IXS_CHECK_FALSE && results[1].witness == 1);
+  CHECK(results[2].check == IXS_CHECK_UNKNOWN && results[2].witness == 0);
+  CHECK(results[3].check != IXS_CHECK_TRUE && results[3].witness == 0);
+  CHECK(results[4].check == IXS_CHECK_FALSE && results[4].witness == 4);
+  CHECK(results[5].check == IXS_CHECK_TRUE && results[5].witness == SIZE_MAX);
+  CHECK(results[6].check == IXS_CHECK_FALSE && results[6].witness == 0);
+
+  for (size_t query = 0; query < 7; query++) {
+    results[query].check = IXS_CHECK_TRUE;
+    results[query].witness = 0;
+  }
+  budget = 0;
+  status = ixs_finite_domain_batch_facts(contradictory_facts, domains, 3,
+                                         queries, 7, results, &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0);
+  for (size_t query = 0; query < 7; query++)
+    CHECK(results[query].check == IXS_CHECK_UNKNOWN &&
+          results[query].witness == SIZE_MAX);
+
+  {
+    ixs_finite_integer_domain bad_domains[3] = {domains[0], domains[1],
+                                                domains[2]};
+    bad_domains[2].points = unordered_points;
+    results[0].check = IXS_CHECK_TRUE;
+    results[0].witness = 0;
+    budget = 56;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, bad_domains, 3, queries, 7,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 56);
+    CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+          results[0].witness == SIZE_MAX);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "points are not ordered") != NULL);
+
+    bad_domains[1] = domains[0];
+    bad_domains[2] = domains[2];
+    budget = 56;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, bad_domains, 3, queries, 7,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 56);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "not distinct") != NULL);
+  }
+
+  {
+    ixs_finite_domain_batch_query bad = {IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                         block};
+    budget = 8;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, domains, 3, &bad, 1, results,
+                                           &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 8);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "kind mismatch") != NULL);
+
+    bad.kind = (ixs_finite_domain_batch_query_kind)99;
+    budget = 8;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, domains, 3, &bad, 1, results,
+                                           &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 8);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "invalid query kind") != NULL);
+
+    bad.kind = IXS_FINITE_DOMAIN_DEFINED;
+    bad.value = ixs_sym(other, "finite_batch_foreign");
+    budget = 8;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, domains, 3, &bad, 1, results,
+                                           &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 8);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  }
+
+  {
+    const int64_t points[2] = {0, 1};
+    ixs_node *values[2] = {slot_is_five, unknown_pred};
+    ixs_node *conditions[2] = {ixs_cmp(ctx, block, IXS_CMP_EQ, zero),
+                               ixs_true(ctx)};
+    ixs_node *predicate_piecewise = ixs_pw(ctx, 2, values, conditions);
+    ixs_finite_integer_domain domain = {block, points, 2};
+    ixs_finite_domain_batch_query predicate_queries[2] = {
+        {IXS_FINITE_DOMAIN_DEFINED, predicate_piecewise},
+        {IXS_FINITE_DOMAIN_INTEGER_VALUED, predicate_piecewise}};
+    CHECK(predicate_piecewise &&
+          ixs_node_tag(predicate_piecewise) == IXS_PIECEWISE &&
+          ixs_node_is_pred_kind(predicate_piecewise));
+    budget = 4;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, predicate_queries,
+                                           2, results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0);
+    CHECK(results[0].check == IXS_CHECK_TRUE && results[0].witness == SIZE_MAX);
+    CHECK(results[1].check == IXS_CHECK_TRUE && results[1].witness == SIZE_MAX);
+  }
+
+  {
+    const int64_t point[1] = {0};
+    ixs_node *deep = ixs_rat(ctx, 1, 2);
+    ixs_finite_integer_domain domain = {block, point, 1};
+    ixs_finite_domain_batch_query query;
+    unsigned depth;
+    for (depth = 0; depth < 40u; depth++) {
+      char name[64];
+      ixs_pwcase cases[2];
+      snprintf(name, sizeof(name), "finite_batch_limit_%u", depth);
+      cases[0].value = deep;
+      cases[0].cond = ixs_cmp(ctx, ixs_sym(ctx, name), IXS_CMP_GT, zero);
+      cases[1].value = ixs_rat(ctx, (int64_t)(2u * depth + 3u), 2);
+      cases[1].cond = ixs_true(ctx);
+      deep = ixs_node_pw(ctx, 2, cases);
+      CHECK(deep != NULL);
+    }
+    CHECK(ixs_node_contains_nested_piecewise(deep));
+    query =
+        (ixs_finite_domain_batch_query){IXS_FINITE_DOMAIN_INTEGER_VALUED, deep};
+    results[0].check = IXS_CHECK_TRUE;
+    results[0].witness = 0;
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_EXHAUSTED && budget == 0);
+    CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+          results[0].witness == SIZE_MAX && !facts->bounds.oom);
+  }
+
+  {
+    ixs_finite_integer_domain hostile[2];
+    ixs_finite_domain_batch_query query = {IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                           true_pred};
+    hostile[0] = (ixs_finite_integer_domain){
+        block, (const int64_t *)(uintptr_t)1, SIZE_MAX};
+    hostile[1] =
+        (ixs_finite_integer_domain){item, (const int64_t *)(uintptr_t)1, 2};
+    budget = SIZE_MAX;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, hostile, 2, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == SIZE_MAX);
+
+    hostile[0].npoints = SIZE_MAX / 2 + 1;
+    hostile[1].npoints = 2;
+    budget = SIZE_MAX;
+    ixs_ctx_clear_errors(ctx);
+    status = ixs_finite_domain_batch_facts(facts, hostile, 2, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == SIZE_MAX);
+  }
+
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  budget = 56;
+  status = ixs_finite_domain_batch_facts(facts, domains, 3, queries, 7, results,
+                                         &budget);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(status == IXS_FINITE_DOMAIN_OOM && budget == 0);
+  for (size_t query = 0; query < 7; query++)
+    CHECK(results[query].check == IXS_CHECK_UNKNOWN &&
+          results[query].witness == SIZE_MAX);
+  budget = 56;
+  status = ixs_finite_domain_batch_facts(facts, domains, 3, queries, 7, results,
+                                         &budget);
+  CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0 &&
+        results[0].check == IXS_CHECK_TRUE);
+
+  {
+    const int64_t point[1] = {0};
+    ixs_finite_integer_domain domain = {block, point, 1};
+    ixs_finite_domain_batch_query query = {IXS_FINITE_DOMAIN_DEFINED,
+                                           query_partial};
+    results[0].check = IXS_CHECK_TRUE;
+    results[0].witness = 0;
+    budget = 1;
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), 2);
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+    CHECK(status == IXS_FINITE_DOMAIN_OOM && budget == 0);
+    CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+          results[0].witness == SIZE_MAX);
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0);
+  }
+
+  {
+    const int64_t point[1] = {101};
+    ixs_node *replacement_symbol = ixs_sym(ctx, "finite_batch_replacement_oom");
+    ixs_node *replacement_predicate =
+        ixs_cmp(ctx, replacement_symbol, IXS_CMP_GE, zero);
+    ixs_finite_integer_domain domain = {replacement_symbol, point, 1};
+    ixs_finite_domain_batch_query query = {IXS_FINITE_DOMAIN_PREDICATE_TRUE,
+                                           replacement_predicate};
+    CHECK(replacement_symbol && replacement_predicate);
+    results[0].check = IXS_CHECK_TRUE;
+    results[0].witness = 0;
+    budget = 1;
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(status == IXS_FINITE_DOMAIN_OOM && budget == 0);
+    CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+          results[0].witness == SIZE_MAX);
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0 &&
+          results[0].check == IXS_CHECK_TRUE);
+  }
+
+  {
+    const int64_t point[1] = {103};
+    ixs_node *substitution_symbol =
+        ixs_sym(ctx, "finite_batch_substitution_oom");
+    ixs_node *replacement = ixs_int(ctx, point[0]);
+    ixs_node *substitution_value = ixs_add(ctx, substitution_symbol, unknown);
+    ixs_finite_integer_domain domain = {substitution_symbol, point, 1};
+    ixs_finite_domain_batch_query query = {IXS_FINITE_DOMAIN_DEFINED,
+                                           substitution_value};
+    CHECK(substitution_symbol && replacement && substitution_value);
+    results[0].check = IXS_CHECK_TRUE;
+    results[0].witness = 0;
+    budget = 1;
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(status == IXS_FINITE_DOMAIN_OOM && budget == 0);
+    CHECK(results[0].check == IXS_CHECK_UNKNOWN &&
+          results[0].witness == SIZE_MAX);
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           results, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0 &&
+          results[0].check == IXS_CHECK_TRUE);
+  }
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_finite_domain_query_hold_oom_retry(void) {
+  {
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_facts *facts = ixs_facts_create(ctx);
+    ixs_node *nested = make_nested_query_root(ctx, "finite_hold_equivalence");
+    ixs_finite_domain_result result;
+    size_t budget = 0;
+    CHECK(ctx && facts && nested && ctx->bounds_query_state == NULL &&
+          !facts->bounds.oom);
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    result = finite_domain_equivalent(facts, nested, nested, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0 && !facts->bounds.oom &&
+          facts->bounds.query_tracking_depth == 0);
+    result = finite_domain_equivalent(facts, nested, nested, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value == NULL &&
+          budget == 0);
+    check_nested_query_tracking_clean(ctx, facts);
+    ixs_ctx_destroy(ctx);
+  }
+
+  {
+    const int64_t points[1] = {0};
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_facts *facts = ixs_facts_create(ctx);
+    ixs_node *item = ixs_sym(ctx, "finite_hold_relation_item");
+    ixs_node *nested = make_nested_query_root(ctx, "finite_hold_relation");
+    ixs_node *values[1] = {nested};
+    ixs_finite_domain_query query;
+    ixs_finite_domain_result result;
+    size_t budget = 1;
+    query.kind = IXS_FINITE_DOMAIN_EXPR_RELATION;
+    query.as.relation =
+        (ixs_finite_domain_relation_query){item, points, values, 1, nested};
+    CHECK(ctx && facts && item && nested && ctx->bounds_query_state == NULL &&
+          !facts->bounds.oom);
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    result = ixs_finite_domain_facts(facts, &query, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0 && !facts->bounds.oom &&
+          facts->bounds.query_tracking_depth == 0);
+    budget = 1;
+    result = ixs_finite_domain_facts(facts, &query, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value == NULL &&
+          budget == 0);
+    check_nested_query_tracking_clean(ctx, facts);
+    ixs_ctx_destroy(ctx);
+  }
+
+  {
+    const int64_t points[1] = {0};
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_facts *facts = ixs_facts_create(ctx);
+    ixs_node *item = ixs_sym(ctx, "finite_hold_synthesis_item");
+    ixs_node *nested = make_nested_query_root(ctx, "finite_hold_synthesis");
+    ixs_node *values[1] = {nested};
+    ixs_finite_domain_result result;
+    size_t budget = 2;
+    CHECK(ctx && facts && item && nested && ctx->bounds_query_state == NULL &&
+          !facts->bounds.oom);
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                      item, points, values, 1, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+          result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+          budget == 0 && !facts->bounds.oom &&
+          facts->bounds.query_tracking_depth == 0);
+    budget = 2;
+    result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                      item, points, values, 1, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && result.value != NULL &&
+          budget == 0);
+    check_nested_query_tracking_clean(ctx, facts);
+    ixs_ctx_destroy(ctx);
+  }
+
+  {
+    const int64_t points[1] = {0};
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_facts *facts = ixs_facts_create(ctx);
+    ixs_node *item = ixs_sym(ctx, "finite_hold_batch_item");
+    ixs_node *nested = make_nested_query_root(ctx, "finite_hold_batch");
+    ixs_finite_integer_domain domain = {item, points, 1};
+    ixs_finite_domain_batch_query query = {IXS_FINITE_DOMAIN_DEFINED, nested};
+    ixs_finite_domain_batch_result result = {IXS_CHECK_TRUE, 0};
+    ixs_finite_domain_status status;
+    size_t budget = 1;
+    CHECK(ctx && facts && item && nested && ctx->bounds_query_state == NULL &&
+          !facts->bounds.oom);
+    ixs_arena_set_fail_after(&ctx->arena, 0);
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           &result, &budget);
+    ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(status == IXS_FINITE_DOMAIN_OOM && budget == 0 &&
+          result.check == IXS_CHECK_UNKNOWN && result.witness == SIZE_MAX &&
+          !facts->bounds.oom && facts->bounds.query_tracking_depth == 0);
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &domain, 1, &query, 1,
+                                           &result, &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0 &&
+          result.check == IXS_CHECK_TRUE && result.witness == SIZE_MAX);
+    check_nested_query_tracking_clean(ctx, facts);
+    ixs_ctx_destroy(ctx);
+  }
+}
+
+static void test_public_finite_domain_composed_synthesis(void) {
+  const int64_t dense_points[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  const int64_t sparse_points[16] = {0,  1,  2,  3,  4,  5,  6,  7,
+                                     16, 17, 18, 19, 20, 21, 22, 23};
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "finite_composed_item");
+  ixs_node *base = ixs_sym(ctx, "finite_composed_base");
+  ixs_node *add_xor[8];
+  ixs_node *xor_add[8];
+  ixs_node *xor_xor[8];
+  ixs_node *sparse[16];
+  int64_t nonpower_points[192];
+  ixs_node *nonpower[192];
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_finite_domain_result result;
+  size_t budget;
+  size_t i;
+
+  CHECK(ctx && item && base && facts);
+  for (i = 0; i < 8u; i++) {
+    int64_t xor_delta =
+        ((i & 1u) ? 3 : 0) ^ ((i & 2u) ? 5 : 0) ^ ((i & 4u) ? 6 : 0);
+    add_xor[i] = ixs_add(ctx, base, ixs_int(ctx, xor_delta));
+    xor_add[i] = ixs_xor(ctx, base, ixs_int(ctx, (int64_t)i));
+    xor_xor[i] = ixs_xor(ctx, base, ixs_int(ctx, xor_delta));
+    CHECK(add_xor[i] && xor_add[i] && xor_xor[i]);
+  }
+  for (i = 0; i < 16u; i++) {
+    sparse[i] = ixs_add(ctx, base, ixs_int(ctx, 8 * sparse_points[i]));
+    CHECK(sparse[i]);
+  }
+  for (i = 0; i < 192u; i++) {
+    nonpower_points[i] = (int64_t)i;
+    nonpower[i] = ixs_add(ctx, base, ixs_int(ctx, 8 * (int64_t)i));
+    CHECK(nonpower[i]);
+  }
+
+  budget = 16;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, dense_points, add_xor, 8, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+
+  budget = 16;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, dense_points, xor_add, 8, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+
+  budget = 16;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, dense_points, xor_xor, 8, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+
+  budget = 32;
+  result = finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
+                                    item, sparse_points, sparse, 16, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
+  CHECK(budget == 0);
+  if (result.value) {
+    ixs_node *at_missing_basis =
+        ixs_subs(ctx, (ixs_node *)result.value, item, ixs_int(ctx, 8));
+    ixs_node *expected = ixs_add(ctx, base, ixs_int(ctx, 64));
+    CHECK(ixs_equivalent_facts(facts, at_missing_basis, expected) ==
+          IXS_CHECK_TRUE);
+  }
+
+  budget = 384;
+  result =
+      finite_domain_synthesize(facts, IXS_FINITE_DOMAIN_EXPR_SYNTHESIS, item,
+                               nonpower_points, nonpower, 192, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL);
   CHECK(budget == 0);
 
   ixs_ctx_destroy(ctx);
@@ -7356,6 +8431,156 @@ static void test_public_finite_difference_and_additive_split(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_cyclic_decomposition_shapes_and_facts(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "cyclic_i");
+  ixs_node *w = ixs_sym(ctx, "cyclic_w");
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *direct = ixs_mod(ctx, i, four);
+  ixs_node *phased = ixs_mod(ctx, ixs_add(ctx, i, ixs_int(ctx, 2)), four);
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 8192), phased);
+  ixs_node *base = ixs_mul(ctx, ixs_int(ctx, 1024), w);
+  ixs_node *added =
+      ixs_add(ctx, base,
+              ixs_mul(ctx, ixs_int(ctx, 32768),
+                      ixs_mod(ctx, ixs_add(ctx, i, ixs_int(ctx, -2)), four)));
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *bounded = ixs_facts_create(ctx);
+  ixs_cyclic_decomposition result;
+
+  CHECK(ixs_decompose_cyclic_facts(empty, direct, i, &result));
+  CHECK(ixs_same_node(result.residual, ixs_int(ctx, 0)));
+  CHECK(result.scale == 1 && result.modulus == 4 && result.phase == 0 &&
+        result.ring == 4 && result.residual_bounded);
+
+  CHECK(ixs_decompose_cyclic_facts(empty, scaled, i, &result));
+  CHECK(ixs_same_node(result.residual, ixs_int(ctx, 0)));
+  CHECK(result.scale == 8192 && result.modulus == 4 && result.phase == 2 &&
+        result.ring == 32768 && result.residual_bounded);
+
+  CHECK(ixs_facts_assume_pred(bounded,
+                              ixs_cmp(ctx, w, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(bounded,
+                              ixs_cmp(ctx, w, IXS_CMP_LE, ixs_int(ctx, 15))));
+  CHECK(ixs_decompose_cyclic_facts(bounded, added, i, &result));
+  CHECK(ixs_same_node(result.residual, base));
+  CHECK(result.scale == 32768 && result.modulus == 4 && result.phase == 2 &&
+        result.ring == 131072 && result.residual_bounded);
+
+  CHECK(ixs_decompose_cyclic_facts(empty, added, i, &result));
+  CHECK(ixs_same_node(result.residual, base));
+  CHECK(!result.residual_bounded);
+
+  CHECK(ixs_decompose_cyclic_facts(
+      empty,
+      ixs_add(ctx, ixs_int(ctx, 8), ixs_mul(ctx, ixs_int(ctx, 8), direct)), i,
+      &result));
+  CHECK(ixs_same_node(result.residual, ixs_int(ctx, 8)));
+  CHECK(result.scale == 8 && result.ring == 32 && !result.residual_bounded);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_cyclic_decomposition_bound_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "cyclic_bound_oom_i");
+  ixs_node *residual = ixs_sym(ctx, "cyclic_bound_oom_residual");
+  ixs_node *mod = ixs_mod(ctx, i, ixs_int(ctx, 4));
+  int64_t scale = 104729;
+  ixs_node *cyclic = ixs_mul(ctx, ixs_int(ctx, scale), mod);
+  ixs_node *expr = ixs_add(ctx, residual, cyclic);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_cyclic_decomposition result;
+
+  CHECK(ctx && i && residual && mod && cyclic && expr && facts);
+  /* Prewarm all earlier constructors; scale - 1 remains uninterned. */
+  CHECK(ixs_add(ctx, i, ixs_int(ctx, 1)) != NULL);
+  CHECK(ixs_same_node(ixs_sub(ctx, expr, cyclic), residual));
+  memset(&result, 0xa5, sizeof(result));
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(!ixs_decompose_cyclic_facts(facts, expr, i, &result));
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.residual == NULL && result.scale == 0 && result.modulus == 0 &&
+        result.phase == 0 && result.ring == 0 && !result.residual_bounded);
+  CHECK(ixs_decompose_cyclic_facts(facts, expr, i, &result));
+  CHECK(ixs_same_node(result.residual, residual));
+  CHECK(result.scale == scale && result.modulus == 4 && result.phase == 0 &&
+        result.ring == scale * 4 && !result.residual_bounded);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_cyclic_decomposition_rejections(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "cyclic_reject_i");
+  ixs_node *w = ixs_sym(ctx, "cyclic_reject_w");
+  ixs_node *d = ixs_sym(ctx, "cyclic_reject_d");
+  ixs_node *mod = ixs_mod(ctx, i, ixs_int(ctx, 4));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *positive_divisor = ixs_facts_create(ctx);
+  ixs_facts *point = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_cyclic_decomposition result;
+
+  CHECK(!ixs_decompose_cyclic_facts(facts, ixs_mul(ctx, ixs_int(ctx, -8), mod),
+                                    i, &result));
+  CHECK(result.residual == NULL && result.scale == 0 && result.modulus == 0 &&
+        result.phase == 0 && result.ring == 0 && !result.residual_bounded);
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts, ixs_mul(ctx, ixs_rat(ctx, 1, 2), mod), i, &result));
+  CHECK(!ixs_decompose_cyclic_facts(facts, ixs_mod(ctx, i, ixs_int(ctx, 1)), i,
+                                    &result));
+
+  CHECK(ixs_facts_assume_pred(positive_divisor,
+                              ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 1))));
+  CHECK(!ixs_decompose_cyclic_facts(positive_divisor, ixs_mod(ctx, i, d), i,
+                                    &result));
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts, ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 2), i), ixs_int(ctx, 4)), i,
+      &result));
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts, ixs_mod(ctx, ixs_add(ctx, i, w), ixs_int(ctx, 4)), i, &result));
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts, ixs_add(ctx, i, ixs_mul(ctx, ixs_int(ctx, 8), mod)), i, &result));
+  CHECK(ixs_facts_assume_pred(point,
+                              ixs_cmp(ctx, i, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(!ixs_decompose_cyclic_facts(
+      point, ixs_add(ctx, i, ixs_mul(ctx, ixs_int(ctx, 8), mod)), i, &result));
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts,
+      ixs_mul(ctx, ixs_int(ctx, INT64_MAX), ixs_mod(ctx, i, ixs_int(ctx, 2))),
+      i, &result));
+  CHECK(!ixs_decompose_cyclic_facts(facts, ixs_add(ctx, i, w), i, &result));
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, w, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, w, IXS_CMP_LE, ixs_int(ctx, 0))));
+  CHECK(!ixs_decompose_cyclic_facts(contradictory, mod, i, &result));
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_decompose_cyclic_facts(facts, mod, i, NULL));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "NULL output") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_decompose_cyclic_facts(facts, mod, ixs_int(ctx, 1), &result));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "must be a symbol") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_decompose_cyclic_facts(
+      facts, mod, ixs_sym(other, "cyclic_reject_i"), &result));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_decompose_cyclic_facts(facts, ctx->sentinel_error, i, &result));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "sentinel") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_algebra_helpers_use_facts(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *i = ixs_sym(ctx, "facts_algebra_i");
@@ -7588,6 +8813,70 @@ static void test_public_exact_divide_fact_simplification(void) {
   result = ixs_try_exact_divide_facts(inactive, piecewise, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
   CHECK(result.quotient == NULL);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_exact_divide_canonical_nonzero_factor(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "canonical_nonzero_x");
+  ixs_node *d = ixs_sym(ctx, "canonical_nonzero_d");
+  ixs_node *other = ixs_sym(ctx, "canonical_nonzero_other");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *source_argument =
+      ixs_mul(ctx, ixs_rat(ctx, 1, 256), ixs_add(ctx, ixs_int(ctx, 255), d));
+  ixs_node *canonical_argument = ixs_add(ctx, ixs_rat(ctx, 255, 256),
+                                         ixs_mul(ctx, ixs_rat(ctx, 1, 256), d));
+  ixs_node *source_base = ixs_trunc(ctx, source_argument);
+  ixs_node *canonical_base = ixs_trunc(ctx, canonical_argument);
+  ixs_node *scaled_base = ixs_mul(ctx, ixs_int(ctx, 8), source_base);
+  ixs_node *base_nonzero = ixs_cmp(ctx, scaled_base, IXS_CMP_NE, zero);
+  ixs_node *quotient_source = ixs_trunc(ctx, ixs_div(ctx, x, source_base));
+  ixs_node *dividend = ixs_mul(ctx, ixs_int(ctx, 8), quotient_source);
+  ixs_node *canonical_quotient =
+      ixs_trunc(ctx, ixs_div(ctx, x, canonical_base));
+  ixs_node *sum = ixs_add(ctx, source_base, other);
+  ixs_node *sum_nonzero = ixs_cmp(ctx, sum, IXS_CMP_NE, zero);
+  ixs_node *canonical_reciprocal =
+      ixs_div(ctx, ixs_int(ctx, 1), canonical_base);
+  ixs_node *piecewise_values[2] = {source_base, ixs_int(ctx, 8)};
+  ixs_node *piecewise_conditions[2] = {
+      ixs_cmp(ctx, source_base, IXS_CMP_LT, ixs_int(ctx, 8)), ixs_true(ctx)};
+  ixs_node *source_piecewise =
+      ixs_pw(ctx, 2, piecewise_values, piecewise_conditions);
+  ixs_node *canonical_piecewise = ixs_expand(ctx, source_piecewise);
+  ixs_node *piecewise_nonzero =
+      ixs_cmp(ctx, source_piecewise, IXS_CMP_NE, zero);
+  ixs_node *piecewise_quotient_source =
+      ixs_trunc(ctx, ixs_div(ctx, x, source_piecewise));
+  ixs_node *piecewise_dividend =
+      ixs_mul(ctx, ixs_int(ctx, 8), piecewise_quotient_source);
+  ixs_node *canonical_piecewise_reciprocal =
+      ixs_div(ctx, ixs_int(ctx, 1), canonical_piecewise);
+  ixs_facts *product = ixs_facts_create(ctx);
+  ixs_facts *piecewise = ixs_facts_create(ctx);
+  ixs_facts *addition = ixs_facts_create(ctx);
+  ixs_exact_divide_result result;
+
+  CHECK(!ixs_same_node(source_base, canonical_base));
+  CHECK(ixs_facts_assume_preds(product, &base_nonzero, 1));
+  CHECK(ixs_check_defined_facts(product, dividend) == IXS_CHECK_TRUE);
+  result = ixs_try_exact_divide_facts(product, dividend, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_same_node(result.quotient, canonical_quotient));
+  CHECK(ixs_check_defined_facts(product, result.quotient) == IXS_CHECK_TRUE);
+
+  CHECK(!ixs_same_node(source_piecewise, canonical_piecewise));
+  CHECK(ixs_facts_assume_preds(piecewise, &piecewise_nonzero, 1));
+  CHECK(ixs_check_defined_facts(piecewise, canonical_piecewise_reciprocal) ==
+        IXS_CHECK_TRUE);
+  result = ixs_try_exact_divide_facts(piecewise, piecewise_dividend, 8);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_check_defined_facts(piecewise, result.quotient) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_preds(addition, &sum_nonzero, 1));
+  CHECK(ixs_check_defined_facts(addition, canonical_reciprocal) ==
+        IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
 }
@@ -8010,6 +9299,25 @@ static void test_public_defined_piecewise_condition(void) {
   CHECK(ixs_check_defined(ctx, piecewise, &x_zero, 1) == IXS_CHECK_FALSE);
   CHECK(ixs_check_defined(ctx, piecewise, &x_positive, 1) == IXS_CHECK_TRUE);
   CHECK(ixs_check_defined(ctx, piecewise, mixed, 2) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_defined_shared_rounding_piecewise(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "defined_shared_round_x");
+  ixs_node *d = ixs_sym(ctx, "defined_shared_round_d");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *quotient = ixs_div(ctx, x, d);
+  ixs_node *values[2] = {ixs_floor(ctx, quotient), ixs_ceil(ctx, quotient)};
+  ixs_node *conditions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, zero), ixs_true(ctx)};
+  ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *d_nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, zero);
+  ixs_node *d_zero = ixs_cmp(ctx, d, IXS_CMP_EQ, zero);
+
+  CHECK(ixs_check_defined(ctx, piecewise, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, piecewise, &d_nonzero, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined(ctx, piecewise, &d_zero, 1) == IXS_CHECK_FALSE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -8634,18 +9942,38 @@ static void rational_assume_integer_range(ixs_facts *facts, ixs_node *expr,
 static void test_public_rational_intermediate_boundaries(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "rational_boundary_x");
+  int64_t large_denominator = INT64_C(1099511627776);
+  int64_t large_bias = large_denominator - 1;
   ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
   ixs_node *floor_half = ixs_floor(ctx, half);
   ixs_node *ceil_half = ixs_ceil(ctx, half);
+  ixs_node *trunc_half = ixs_trunc(ctx, half);
+  ixs_node *large_quotient = ixs_div(ctx, x, ixs_int(ctx, large_denominator));
+  ixs_node *large_ceil = ixs_ceil(ctx, large_quotient);
+  ixs_node *large_trunc = ixs_trunc(ctx, large_quotient);
   ixs_facts *signed_boundary = ixs_facts_create(ctx);
   ixs_facts *word_boundary = ixs_facts_create(ctx);
   ixs_facts *word_overflow = ixs_facts_create(ctx);
   ixs_facts *partial_crossing = ixs_facts_create(ctx);
   ixs_facts *ceil_overflow = ixs_facts_create(ctx);
   ixs_facts *wide_word = ixs_facts_create(ctx);
+  ixs_facts *widest_word = ixs_facts_create(ctx);
+  ixs_facts *signed_i64_word = ixs_facts_create(ctx);
+  ixs_facts *large_ceil_fit = ixs_facts_create(ctx);
+  ixs_facts *large_ceil_overflow = ixs_facts_create(ctx);
+  ixs_facts *large_trunc_negative = ixs_facts_create(ctx);
+  ixs_facts *dynamic_word = ixs_facts_create(ctx);
+  ixs_facts *dynamic_overflow = ixs_facts_create(ctx);
+  ixs_facts *dynamic_undefined = ixs_facts_create(ctx);
   ixs_facts *contradictory = ixs_facts_create(ctx);
   ixs_facts *empty = ixs_facts_create(ctx);
   ixs_node *rational_leaf = ixs_rat(ctx, 256, 3);
+  ixs_node *divisor = ixs_sym(ctx, "rational_boundary_divisor");
+  ixs_node *dynamic_quotient = ixs_div(ctx, x, divisor);
+  ixs_node *dynamic_floor = ixs_floor(ctx, dynamic_quotient);
+  ixs_node *dynamic_ceil = ixs_ceil(ctx, dynamic_quotient);
+  ixs_node *dynamic_trunc = ixs_trunc(ctx, dynamic_quotient);
+  ixs_rational_materialization_plan plan;
   size_t errors;
 
   rational_assume_integer_range(signed_boundary, x, -128, 127);
@@ -8654,12 +9982,28 @@ static void test_public_rational_intermediate_boundaries(void) {
   rational_assume_integer_range(partial_crossing, x, 0, 256);
   rational_assume_integer_range(ceil_overflow, x, 255, 255);
   rational_assume_integer_range(wide_word, x, 0, INT64_C(4611686018427387903));
+  rational_assume_integer_range(widest_word, x, 0, INT64_MAX);
+  rational_assume_integer_range(signed_i64_word, x, INT64_MIN, INT64_MAX);
+  rational_assume_integer_range(large_ceil_fit, x, INT64_MAX - large_bias,
+                                INT64_MAX - large_bias);
+  rational_assume_integer_range(large_ceil_overflow, x,
+                                INT64_MAX - large_bias + 1,
+                                INT64_MAX - large_bias + 1);
+  rational_assume_integer_range(large_trunc_negative, x, INT64_MIN, -1);
+  rational_assume_integer_range(dynamic_word, x, -128, 127);
+  rational_assume_integer_range(dynamic_word, divisor, 1, 8);
+  rational_assume_integer_range(dynamic_overflow, x, 128, 128);
+  rational_assume_integer_range(dynamic_overflow, divisor, 2, 3);
+  rational_assume_integer_range(dynamic_undefined, x, -128, 127);
+  rational_assume_integer_range(dynamic_undefined, divisor, 0, 8);
   CHECK(ixs_facts_assume_pred(contradictory,
                               ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 10))));
   CHECK(ixs_facts_assume_pred(contradictory,
                               ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 5))));
 
   CHECK(ixs_check_rational_intermediates_facts(signed_boundary, floor_half,
+                                               8) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(signed_boundary, trunc_half,
                                                8) == IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(word_boundary, floor_half, 8) ==
         IXS_CHECK_TRUE);
@@ -8671,6 +10015,38 @@ static void test_public_rational_intermediate_boundaries(void) {
         IXS_CHECK_FALSE);
   CHECK(ixs_check_rational_intermediates_facts(wide_word, floor_half, 62) ==
         IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(widest_word, floor_half, 63) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(signed_i64_word, floor_half,
+                                               64) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(signed_i64_word, trunc_half,
+                                               64) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(large_ceil_fit, large_ceil,
+                                               64) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(large_ceil_overflow, large_ceil,
+                                               64) != IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(
+            large_trunc_negative, large_trunc, 64) == IXS_CHECK_TRUE);
+  plan =
+      ixs_plan_rational_materialization_facts(signed_i64_word, trunc_half, 64);
+  CHECK(plan.status == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == 1);
+  CHECK(ixs_same_node(plan.numerator, trunc_half));
+  CHECK(ixs_check_rational_intermediates_facts(dynamic_word, dynamic_floor,
+                                               8) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(dynamic_word, dynamic_ceil, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(dynamic_word, dynamic_trunc,
+                                               8) == IXS_CHECK_TRUE);
+  plan =
+      ixs_plan_rational_materialization_facts(dynamic_word, dynamic_trunc, 8);
+  CHECK(plan.status == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == 1);
+  CHECK(ixs_same_node(plan.numerator, dynamic_trunc));
+  CHECK(ixs_check_rational_intermediates_facts(dynamic_overflow, dynamic_trunc,
+                                               8) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(dynamic_undefined, dynamic_trunc,
+                                               8) == IXS_CHECK_UNKNOWN);
   CHECK(ixs_check_rational_intermediates_facts(empty, x, 8) == IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(empty, rational_leaf, 8) ==
         IXS_CHECK_TRUE);
@@ -8679,6 +10055,11 @@ static void test_public_rational_intermediate_boundaries(void) {
 
   errors = ixs_ctx_nerrors(ctx);
   CHECK(ixs_check_rational_intermediates_facts(word_boundary, floor_half, 1) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  ixs_ctx_clear_errors(ctx);
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(ixs_check_rational_intermediates_facts(word_boundary, floor_half, 65) ==
         IXS_CHECK_UNKNOWN);
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
   ixs_ctx_clear_errors(ctx);
@@ -8699,6 +10080,7 @@ static void test_public_rational_intermediate_compounds(void) {
   ixs_node *conditions[2] = {condition, ixs_true(ctx)};
   ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
   ixs_node *sum = ixs_add(ctx, half_x, quarter_y);
+  ixs_node *reciprocal_sum = ixs_mul(ctx, ixs_div(ctx, ixs_int(ctx, 1), y), x);
   ixs_node *product = ixs_mul(ctx, half_x, y);
   ixs_node *bitwise = ixs_and(ctx, half_x, ixs_int(ctx, 7));
   ixs_node *bitwise_island = ixs_add(ctx, bitwise, ixs_rat(ctx, 1, 2));
@@ -8710,6 +10092,9 @@ static void test_public_rational_intermediate_compounds(void) {
   ixs_facts *piecewise_overflow = ixs_facts_create(ctx);
   ixs_facts *bitwise_fit = ixs_facts_create(ctx);
   ixs_facts *bitwise_noninteger = ixs_facts_create(ctx);
+  ixs_rational_materialization_plan plan;
+  ixs_node *expected_sum_numerator =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), y);
 
   rational_assume_integer_range(sum_boundary, x, 127, 127);
   rational_assume_integer_range(sum_boundary, y, 1, 1);
@@ -8721,16 +10106,18 @@ static void test_public_rational_intermediate_compounds(void) {
   rational_assume_integer_range(product_overflow, y, 2, 2);
   rational_assume_integer_range(piecewise_fit, x, 0, 100);
   rational_assume_integer_range(piecewise_fit, y, 0, 200);
+  rational_assume_integer_range(piecewise_fit, guard, 0, 255);
   rational_assume_integer_range(piecewise_overflow, x, 128, 128);
   rational_assume_integer_range(piecewise_overflow, y, 0, 200);
+  rational_assume_integer_range(piecewise_overflow, guard, 0, 255);
   rational_assume_integer_range(bitwise_fit, x, 0, 62);
   CHECK(ixs_facts_assume_pred(bitwise_fit,
                               ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
                                       IXS_CMP_EQ, ixs_int(ctx, 0))));
   rational_assume_integer_range(bitwise_noninteger, x, 0, 63);
 
-  /* Piecewise conditions do not materialize as value numerators.  No facts
-   * are needed for the rational expression nested in condition. */
+  /* Conditions are checked as separate materialization roots; they do not
+   * participate in the common-denominator value numerator. */
   CHECK(ixs_check_rational_intermediates_facts(sum_boundary, sum, 8) ==
         IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(sum_overflow, sum, 8) ==
@@ -8739,6 +10126,8 @@ static void test_public_rational_intermediate_compounds(void) {
         IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(product_overflow, product, 8) ==
         IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(product_boundary, reciprocal_sum,
+                                               8) == IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(piecewise_fit, piecewise, 8) ==
         IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(piecewise_overflow, piecewise,
@@ -8747,6 +10136,110 @@ static void test_public_rational_intermediate_compounds(void) {
                                                8) == IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(
             bitwise_noninteger, bitwise_island, 8) == IXS_CHECK_UNKNOWN);
+  plan = ixs_plan_rational_materialization_facts(sum_boundary, sum, 8);
+  CHECK(plan.status == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == 4);
+  CHECK(ixs_same_node(plan.numerator, expected_sum_numerator));
+  plan = ixs_plan_rational_materialization_facts(sum_overflow, sum, 8);
+  CHECK(plan.status == IXS_CHECK_FALSE);
+  CHECK(plan.numerator == NULL);
+  CHECK(plan.denominator == 1);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_piecewise_conditions(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *guard = ixs_sym(ctx, "rational_condition_guard");
+  ixs_node *selector = ixs_sym(ctx, "rational_condition_selector");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *half_guard = ixs_div(ctx, guard, ixs_int(ctx, 2));
+  ixs_node *rational_condition =
+      ixs_cmp(ctx, ixs_floor(ctx, half_guard), IXS_CMP_GT, zero);
+  ixs_node *scalar_values[2] = {ixs_int(ctx, 3), ixs_int(ctx, 5)};
+  ixs_node *direct_conditions[2] = {rational_condition, ixs_true(ctx)};
+  ixs_node *direct = ixs_pw(ctx, 2, scalar_values, direct_conditions);
+  ixs_node *predicate_values[2] = {rational_condition, ixs_true(ctx)};
+  ixs_node *predicate_conditions[2] = {ixs_cmp(ctx, selector, IXS_CMP_GT, zero),
+                                       ixs_true(ctx)};
+  ixs_node *nested_condition =
+      ixs_pw(ctx, 2, predicate_values, predicate_conditions);
+  ixs_node *nested_conditions[2] = {nested_condition, ixs_true(ctx)};
+  ixs_node *nested = ixs_pw(ctx, 2, scalar_values, nested_conditions);
+  ixs_facts *fitting = ixs_facts_create(ctx);
+  ixs_facts *overflow = ixs_facts_create(ctx);
+  ixs_rational_materialization_plan plan;
+
+  CHECK(ctx && guard && selector && half_guard && rational_condition &&
+        direct && nested_condition && nested && fitting && overflow);
+  CHECK(ixs_node_tag(direct) == IXS_PIECEWISE);
+  CHECK(ixs_node_tag(nested_condition) == IXS_PIECEWISE);
+  CHECK(ixs_node_tag(nested) == IXS_PIECEWISE);
+  rational_assume_integer_range(fitting, guard, 255, 255);
+  rational_assume_integer_range(fitting, selector, 0, 1);
+  rational_assume_integer_range(overflow, guard, 256, 256);
+  rational_assume_integer_range(overflow, selector, 0, 1);
+
+  /* Branch values fit in one byte, but the condition is executable and its
+   * rational numerator therefore participates in the materialization proof. */
+  CHECK(ixs_check_rational_intermediates_facts(fitting, direct, 8) ==
+        IXS_CHECK_TRUE);
+  plan = ixs_plan_rational_materialization_facts(fitting, direct, 8);
+  CHECK(plan.status == IXS_CHECK_TRUE && plan.numerator != NULL &&
+        plan.denominator == 1);
+  CHECK(ixs_check_rational_intermediates_facts(overflow, direct, 8) ==
+        IXS_CHECK_FALSE);
+  plan = ixs_plan_rational_materialization_facts(overflow, direct, 8);
+  CHECK(plan.status == IXS_CHECK_FALSE && plan.numerator == NULL &&
+        plan.denominator == 1);
+
+  /* The same obligation is found recursively when a predicate-valued
+   * Piecewise is itself used as the outer Piecewise condition. */
+  CHECK(ixs_check_rational_intermediates_facts(fitting, nested, 8) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check_rational_intermediates_facts(overflow, nested, 8) ==
+        IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_rational_intermediate_unsupported_extrema(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "rational_extrema_x");
+  ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *constant = ixs_int(ctx, 7);
+  ixs_node *rational_args[2] = {half_x, ixs_int(ctx, 1)};
+  ixs_node *integral_args[2] = {x, ixs_int(ctx, 1)};
+  ixs_node *maximum = ixs_max_many(ctx, 2, rational_args);
+  ixs_node *minimum = ixs_min_many(ctx, 2, rational_args);
+  ixs_node *maximum_predicate = ixs_cmp(ctx, maximum, IXS_CMP_EQ, constant);
+  ixs_node *minimum_predicate = ixs_cmp(ctx, minimum, IXS_CMP_EQ, constant);
+  ixs_node *integral_predicate =
+      ixs_cmp(ctx, ixs_max_many(ctx, 2, integral_args), IXS_CMP_EQ, constant);
+  ixs_facts *fitting = ixs_facts_create(ctx);
+  ixs_facts *overflow = ixs_facts_create(ctx);
+  ixs_rational_materialization_plan plan;
+
+  rational_assume_integer_range(fitting, x, 0, 255);
+  rational_assume_integer_range(overflow, x, 256, 256);
+
+  CHECK(ixs_node_tag(maximum) == IXS_MAX);
+  CHECK(ixs_node_tag(minimum) == IXS_MIN);
+  CHECK(ixs_check_rational_intermediates_facts(fitting, maximum_predicate, 8) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_rational_intermediates_facts(fitting, minimum_predicate, 8) ==
+        IXS_CHECK_UNKNOWN);
+  plan = ixs_plan_rational_materialization_facts(fitting, maximum_predicate, 8);
+  CHECK(plan.status == IXS_CHECK_UNKNOWN && plan.numerator == NULL &&
+        plan.denominator == 1);
+
+  /* A conclusive child overflow remains conclusive across the unsupported
+   * boundary. An integral extremum still has no executable materialization
+   * plan, so it must not turn into a vacuous TRUE through the predicate. */
+  CHECK(ixs_check_rational_intermediates_facts(overflow, maximum_predicate,
+                                               8) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_rational_intermediates_facts(fitting, integral_predicate,
+                                               8) == IXS_CHECK_UNKNOWN);
+
   ixs_ctx_destroy(ctx);
 }
 
@@ -8817,11 +10310,12 @@ static void test_public_rational_intermediate_piecewise_selector(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_rational_intermediate_limits_and_shared_dag(void) {
+static void test_public_rational_intermediate_growable_and_shared_dag(void) {
   enum { CASE_LIMIT = 1025, MEMO_CASES = 1024 };
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "rational_limit_x");
   ixs_node *guard = ixs_sym(ctx, "rational_limit_guard");
+  ixs_node *zero_symbol = ixs_sym(ctx, "rational_limit_zero");
   ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
   ixs_node *floor_half = ixs_floor(ctx, half_x);
   ixs_node *deep = half_x;
@@ -8837,10 +10331,12 @@ static void test_public_rational_intermediate_limits_and_shared_dag(void) {
   uint32_t i;
 
   rational_assume_integer_range(facts, x, 0, 0);
+  rational_assume_integer_range(facts, zero_symbol, 0, 0);
   for (i = 0; i < 70; i++)
-    deep = ixs_floor(ctx, ixs_div(ctx, deep, ixs_int(ctx, 2)));
+    deep = ixs_floor(
+        ctx, ixs_div(ctx, ixs_add(ctx, deep, zero_symbol), ixs_int(ctx, 2)));
   CHECK(ixs_check_rational_intermediates_facts(facts, deep, 16) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
         IXS_CHECK_TRUE);
 
@@ -8848,7 +10344,7 @@ static void test_public_rational_intermediate_limits_and_shared_dag(void) {
     power_base = ixs_mul(ctx, power_base, x);
   power = ixs_floor(ctx, ixs_div(ctx, power_base, ixs_int(ctx, 2)));
   CHECK(ixs_check_rational_intermediates_facts(facts, power, 16) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
         IXS_CHECK_TRUE);
 
@@ -8862,13 +10358,14 @@ static void test_public_rational_intermediate_limits_and_shared_dag(void) {
   too_many_cases = ixs_pw(ctx, CASE_LIMIT, case_values, case_conditions);
   CHECK(ixs_node_tag(too_many_cases) == IXS_PIECEWISE);
   CHECK(ixs_check_rational_intermediates_facts(facts, too_many_cases, 16) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_check_rational_intermediates_facts(facts, floor_half, 16) ==
         IXS_CHECK_TRUE);
 
   deep = half_x;
   for (i = 0; i < 32; i++)
-    deep = ixs_floor(ctx, ixs_div(ctx, deep, ixs_int(ctx, 2)));
+    deep = ixs_floor(
+        ctx, ixs_div(ctx, ixs_add(ctx, deep, zero_symbol), ixs_int(ctx, 2)));
   for (i = 0; i < MEMO_CASES; i++) {
     memo_values[i] = ixs_add(ctx, deep, ixs_rat(ctx, 2 * (int64_t)i + 1, 2));
     memo_conditions[i] =
@@ -8878,8 +10375,7 @@ static void test_public_rational_intermediate_limits_and_shared_dag(void) {
   }
   shared_piecewise = ixs_pw(ctx, MEMO_CASES, memo_values, memo_conditions);
   CHECK(ixs_node_tag(shared_piecewise) == IXS_PIECEWISE);
-  /* Rewalking the 32-level shared value for every case exceeds the visit
-   * budget.  A single memoized DAG analysis stays well below it. */
+  /* The shared value is analyzed once even though every arm references it. */
   CHECK(ixs_check_rational_intermediates_facts(facts, shared_piecewise, 16) ==
         IXS_CHECK_TRUE);
   ixs_ctx_destroy(ctx);
@@ -8907,7 +10403,84 @@ static void test_public_rational_intermediate_mod_projection(void) {
   CHECK(ixs_check_rational_intermediates_facts(facts, other_island, 8) ==
         IXS_CHECK_FALSE);
   CHECK(ixs_check_rational_intermediates_facts(facts, reciprocal_island, 8) ==
+        IXS_CHECK_TRUE);
+  {
+    ixs_rational_materialization_plan plan =
+        ixs_plan_rational_materialization_facts(facts, reciprocal_island, 8);
+    CHECK(plan.status == IXS_CHECK_TRUE);
+    CHECK(plan.denominator == 2400);
+    CHECK(ixs_same_node(plan.numerator, ixs_int(ctx, 1)));
+  }
+  ixs_ctx_destroy(ctx);
+}
+
+static void
+test_public_rational_intermediate_order_independent_envelopes(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *u = ixs_sym(ctx, "rational_order_u");
+  ixs_node *v = ixs_sym(ctx, "rational_order_v");
+  ixs_node *huge = ixs_sym(ctx, "rational_mul_huge");
+  ixs_node *zero = ixs_sym(ctx, "rational_mul_zero");
+  ixs_node *trunc_input = ixs_sym(ctx, "rational_trunc_bias");
+  ixs_node *deep_input = ixs_sym(ctx, "rational_deep_input");
+  ixs_node *deep_zero = ixs_sym(ctx, "rational_deep_zero");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *ordered = ixs_div(
+      ctx, ixs_add(ctx, ixs_int(ctx, INT64_C(4000000000)), ixs_add(ctx, u, v)),
+      two);
+  ixs_node *zero_product = ixs_div(ctx, ixs_mul(ctx, huge, zero), two);
+  ixs_node *selected_trunc =
+      ixs_trunc(ctx, ixs_div(ctx, trunc_input, ixs_int(ctx, 256)));
+  ixs_node *deep = ixs_div(ctx, deep_input, two);
+  ixs_node *cycle = ixs_add(ctx, u, ixs_rat(ctx, 1, 2));
+  ixs_facts *unsafe_add = ixs_facts_create(ctx);
+  ixs_facts *safe_add = ixs_facts_create(ctx);
+  ixs_facts *mul_facts = ixs_facts_create(ctx);
+  ixs_facts *trunc_facts = ixs_facts_create(ctx);
+  ixs_facts *deep_facts = ixs_facts_create(ctx);
+  ixs_facts *cycle_facts = ixs_facts_create(ctx);
+  unsigned i;
+
+  rational_assume_integer_range(unsafe_add, u, -1000000000, -1000000000);
+  rational_assume_integer_range(unsafe_add, v, 1000000000, 1000000000);
+  CHECK(ixs_check_rational_intermediates_facts(unsafe_add, ordered, 32) ==
         IXS_CHECK_UNKNOWN);
+
+  rational_assume_integer_range(safe_add, u, -200000000, -200000000);
+  rational_assume_integer_range(safe_add, v, 200000000, 200000000);
+  CHECK(ixs_check_rational_intermediates_facts(safe_add, ordered, 32) ==
+        IXS_CHECK_TRUE);
+
+  rational_assume_integer_range(mul_facts, huge, INT64_C(5000000000),
+                                INT64_C(5000000000));
+  rational_assume_integer_range(mul_facts, zero, 0, 0);
+  CHECK(ixs_check_rational_intermediates_facts(mul_facts, zero_product, 32) ==
+        IXS_CHECK_FALSE);
+
+  rational_assume_integer_range(trunc_facts, trunc_input, -128, 127);
+  CHECK(ixs_check_rational_intermediates_facts(trunc_facts, selected_trunc,
+                                               8) == IXS_CHECK_TRUE);
+
+  rational_assume_integer_range(deep_facts, deep_input, 0, 127);
+  rational_assume_integer_range(deep_facts, deep_zero, 0, 0);
+  for (i = 0; i < 80; i++)
+    deep = ixs_floor(
+        ctx, ixs_div(ctx, ixs_add(ctx, deep, deep_zero), ixs_int(ctx, 2)));
+  CHECK(ixs_node_tag(deep) == IXS_FLOOR);
+  CHECK(ixs_check_rational_intermediates_facts(deep_facts, deep, 16) ==
+        IXS_CHECK_TRUE);
+
+  rational_assume_integer_range(cycle_facts, u, 0, 127);
+  {
+    ixs_addterm *terms = (ixs_addterm *)(uintptr_t)cycle->u.add.terms;
+    ixs_node *saved = terms[0].term;
+    ixs_check_result cycle_result;
+    terms[0].term = cycle;
+    cycle_result =
+        ixs_check_rational_intermediates_facts(cycle_facts, cycle, 16);
+    terms[0].term = saved;
+    CHECK(cycle_result == IXS_CHECK_UNKNOWN);
+  }
   ixs_ctx_destroy(ctx);
 }
 
@@ -8939,6 +10512,596 @@ static void test_public_rational_intermediate_oom_and_invalid(void) {
             facts, ixs_sym(other, "rational_oom_foreign"), 8) ==
         IXS_CHECK_UNKNOWN);
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static ixs_group_union_result
+scalar_group_union_query(ixs_ctx *ctx, const ixs_predicate_group *groups,
+                         const ixs_group_union_query *query) {
+  ixs_node *predicates[16];
+  size_t n_predicates = 0;
+  size_t side;
+  ixs_facts *facts;
+  ixs_group_union_result result = {IXS_CHECK_UNKNOWN, 0};
+
+  for (side = 0; side < 2; side++) {
+    size_t group_index = side == 0 ? query->lhs_group : query->rhs_group;
+    size_t predicate_index;
+    for (predicate_index = 0;
+         predicate_index < groups[group_index].n_predicates;
+         predicate_index++) {
+      ixs_node *predicate = groups[group_index].predicates[predicate_index];
+      size_t existing;
+      for (existing = 0; existing < n_predicates; existing++)
+        if (predicates[existing] == predicate)
+          break;
+      if (existing == n_predicates) {
+        CHECK(n_predicates < sizeof(predicates) / sizeof(predicates[0]));
+        predicates[n_predicates++] = predicate;
+      }
+    }
+  }
+  facts = ixs_facts_create(ctx);
+  CHECK(facts != NULL);
+  CHECK(ixs_facts_assume_preds(facts, predicates, n_predicates));
+  if (query->kind == IXS_GROUP_UNION_EQUIVALENT) {
+    result.status = ixs_equivalent_facts(facts, query->lhs, query->rhs);
+  } else if (query->kind == IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT) {
+    ixs_finite_domain_query finite_query;
+    ixs_finite_domain_result finite_result;
+    size_t remaining_work = 1000000;
+    finite_query.kind = IXS_FINITE_DOMAIN_EQUIVALENCE;
+    finite_query.as.equivalence.lhs = query->lhs;
+    finite_query.as.equivalence.rhs = query->rhs;
+    finite_result =
+        ixs_finite_domain_facts(facts, &finite_query, &remaining_work);
+    CHECK(finite_result.status == IXS_FINITE_DOMAIN_COMPLETE);
+    result.status = finite_result.check;
+  } else if (ixs_constant_difference_facts(facts, query->lhs, query->rhs,
+                                           &result.difference)) {
+    result.status = IXS_CHECK_TRUE;
+  }
+  return result;
+}
+
+static void test_public_group_union_scalar_oracle_size(size_t n_groups) {
+  enum { MAX_GROUPS = 16, MAX_QUERIES = MAX_GROUPS * (MAX_GROUPS - 1) };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *shared = ixs_sym(ctx, "group_union_shared");
+  ixs_node *shared_lower = ixs_cmp(ctx, shared, IXS_CMP_GE, ixs_int(ctx, -100));
+  ixs_node *shared_upper = ixs_cmp(ctx, shared, IXS_CMP_LE, ixs_int(ctx, 100));
+  ixs_node *values[MAX_GROUPS];
+  ixs_node *predicate_storage[MAX_GROUPS][3];
+  ixs_predicate_group groups[MAX_GROUPS];
+  ixs_group_union_query queries[MAX_QUERIES];
+  ixs_group_union_result results[MAX_QUERIES];
+  size_t n_queries = 0;
+  size_t remaining_work = 1000000;
+  size_t i;
+
+  CHECK(n_groups <= MAX_GROUPS);
+  for (i = 0; i < n_groups; i++) {
+    char name[48];
+    snprintf(name, sizeof(name), "group_union_value_%u_%u", (unsigned)n_groups,
+             (unsigned)i);
+    values[i] = ixs_sym(ctx, name);
+    predicate_storage[i][0] = shared_lower;
+    predicate_storage[i][1] = shared_upper;
+    predicate_storage[i][2] =
+        ixs_cmp(ctx, values[i], IXS_CMP_EQ, ixs_int(ctx, (int64_t)(4u * i)));
+    groups[i].predicates = predicate_storage[i];
+    groups[i].n_predicates = 3;
+  }
+  for (i = 0; i < n_groups; i++) {
+    size_t j;
+    for (j = i + 1u; j < n_groups; j++) {
+      int64_t delta = (int64_t)(4u * (j - i));
+      queries[n_queries++] =
+          (ixs_group_union_query){i, j, IXS_GROUP_UNION_EQUIVALENT, values[j],
+                                  ixs_add(ctx, values[i], ixs_int(ctx, delta))};
+      queries[n_queries++] = (ixs_group_union_query){
+          i, j, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, values[j], values[i]};
+    }
+  }
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, n_groups,
+                                 queries, n_queries, results,
+                                 &remaining_work) == IXS_GROUP_UNION_COMPLETE);
+  CHECK(remaining_work < 1000000);
+  for (i = 0; i < n_queries; i++) {
+    ixs_group_union_result scalar =
+        scalar_group_union_query(ctx, groups, &queries[i]);
+    CHECK(results[i].status == scalar.status);
+    if (scalar.status == IXS_CHECK_TRUE &&
+        queries[i].kind == IXS_GROUP_UNION_CONSTANT_DIFFERENCE)
+      CHECK(results[i].difference == scalar.difference);
+  }
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_sixty_five_group_registry(void) {
+  enum {
+    GROUP_COUNT = 65,
+    PAIR_GROUP_COUNT = 64,
+    PAIR_COUNT = PAIR_GROUP_COUNT * (PAIR_GROUP_COUNT - 1) / 2,
+    QUERY_COUNT = PAIR_COUNT + 1
+  };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *shared = ixs_sym(ctx, "group_union_large_shared");
+  ixs_node *shared_bound = ixs_cmp(ctx, shared, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *values[GROUP_COUNT];
+  ixs_node *predicate_storage[GROUP_COUNT][2];
+  ixs_predicate_group groups[GROUP_COUNT];
+  ixs_group_union_query queries[QUERY_COUNT];
+  ixs_group_union_result results[QUERY_COUNT];
+  size_t remaining_work = 1000000;
+  size_t query_count = 0;
+  size_t i;
+
+  CHECK(ctx && shared && shared_bound);
+  for (i = 0; i < GROUP_COUNT; i++) {
+    char name[48];
+    snprintf(name, sizeof(name), "group_union_large_value_%zu", i);
+    values[i] = ixs_sym(ctx, name);
+    predicate_storage[i][0] = shared_bound;
+    predicate_storage[i][1] =
+        ixs_cmp(ctx, values[i], IXS_CMP_EQ, ixs_int(ctx, (int64_t)i));
+    groups[i].predicates = predicate_storage[i];
+    groups[i].n_predicates = 2;
+  }
+  for (i = 0; i < PAIR_GROUP_COUNT; i++) {
+    size_t j;
+    for (j = i + 1u; j < PAIR_GROUP_COUNT; j++) {
+      int64_t difference = (int64_t)(j - i);
+      if ((query_count & 1u) == 0u) {
+        queries[query_count] = (ixs_group_union_query){
+            i, j, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, values[j], values[i]};
+      } else {
+        queries[query_count] = (ixs_group_union_query){
+            i, j, IXS_GROUP_UNION_EQUIVALENT, values[j],
+            ixs_add(ctx, values[i], ixs_int(ctx, difference))};
+      }
+      query_count++;
+    }
+  }
+  queries[query_count++] = (ixs_group_union_query){
+      0, GROUP_COUNT - 1u, IXS_GROUP_UNION_CONSTANT_DIFFERENCE,
+      values[GROUP_COUNT - 1u], values[0]};
+  CHECK(query_count == QUERY_COUNT && PAIR_COUNT == 2016);
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, GROUP_COUNT,
+                                 queries, query_count, results,
+                                 &remaining_work) == IXS_GROUP_UNION_COMPLETE);
+  CHECK(remaining_work < 1000000);
+  for (i = 0; i < query_count; i++) {
+    CHECK(results[i].status == IXS_CHECK_TRUE);
+    if (queries[i].kind == IXS_GROUP_UNION_CONSTANT_DIFFERENCE)
+      CHECK(results[i].difference ==
+            (int64_t)(queries[i].rhs_group - queries[i].lhs_group));
+  }
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_cross_closure_and_isolation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "group_union_cross_x");
+  ixs_node *y = ixs_sym(ctx, "group_union_cross_y");
+  ixs_node *z = ixs_sym(ctx, "group_union_cross_z");
+  ixs_node *bad = ixs_sym(ctx, "group_union_cross_bad");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *group0_predicates[1] = {
+      ixs_cmp(ctx, ixs_add(ctx, x, y), IXS_CMP_GE, zero)};
+  ixs_node *group1_predicates[2] = {
+      ixs_cmp(ctx, ixs_add(ctx, y, z), IXS_CMP_EQ, zero),
+      ixs_cmp(ctx, z, IXS_CMP_EQ, zero)};
+  ixs_node *group2_predicates[2] = {
+      ixs_cmp(ctx, bad, IXS_CMP_GE, ixs_int(ctx, 1)),
+      ixs_cmp(ctx, bad, IXS_CMP_LE, zero)};
+  ixs_predicate_group groups[3] = {
+      {group0_predicates, 1}, {group1_predicates, 2}, {group2_predicates, 2}};
+  ixs_group_union_query queries[4] = {
+      {0, 1, IXS_GROUP_UNION_EQUIVALENT, ixs_max(ctx, x, zero), x},
+      {0, 1, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, ixs_add(ctx, x, y), x},
+      {0, 2, IXS_GROUP_UNION_EQUIVALENT, ixs_max(ctx, x, zero), x},
+      {0, 1, IXS_GROUP_UNION_EQUIVALENT, x, ixs_add(ctx, x, ixs_int(ctx, 1))}};
+  ixs_group_union_result results[4];
+  size_t remaining_work = 10000;
+  size_t i;
+
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, 3, queries, 4,
+                                 results,
+                                 &remaining_work) == IXS_GROUP_UNION_COMPLETE);
+  for (i = 0; i < 4; i++) {
+    ixs_group_union_result scalar =
+        scalar_group_union_query(ctx, groups, &queries[i]);
+    CHECK(results[i].status == scalar.status);
+    if (scalar.status == IXS_CHECK_TRUE &&
+        queries[i].kind == IXS_GROUP_UNION_CONSTANT_DIFFERENCE)
+      CHECK(results[i].difference == scalar.difference);
+  }
+  CHECK(results[0].status == IXS_CHECK_TRUE);
+  CHECK(results[1].status == IXS_CHECK_TRUE && results[1].difference == 0);
+  CHECK(results[2].status == IXS_CHECK_UNKNOWN);
+  CHECK(results[3].status == IXS_CHECK_FALSE);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_finite_domain_and_budget(void) {
+  static const char finite_text[] =
+      "Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *finite = ixs_parse_expr(ctx, finite_text, sizeof(finite_text) - 1u);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *predicates[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+                             ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 3))};
+  ixs_predicate_group groups[2] = {{&predicates[0], 1}, {&predicates[1], 1}};
+  ixs_group_union_query query = {0, 1, IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT,
+                                 finite, one};
+  ixs_group_union_result result;
+  ixs_group_union_result scalar;
+  size_t remaining_work = 1000;
+  size_t used;
+
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, 2, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_COMPLETE);
+  CHECK(result.status == IXS_CHECK_TRUE);
+  scalar = scalar_group_union_query(ctx, groups, &query);
+  CHECK(result.status == scalar.status);
+  used = 1000 - remaining_work;
+  CHECK(used > 4);
+
+  remaining_work = used - 1u;
+  result.status = IXS_CHECK_TRUE;
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, 2, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_EXHAUSTED);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_closed_validation_budget(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "group_union_closed_x");
+  ixs_node *denominator = ixs_sym(ctx, "group_union_closed_denominator");
+  ixs_node *predicate =
+      ixs_cmp(ctx, ixs_div(ctx, x, denominator), IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_predicate_group group = {&predicate, 1};
+  ixs_group_union_query query = {0, 0, IXS_GROUP_UNION_EQUIVALENT, x, x};
+  ixs_group_union_result result;
+  size_t remaining_work = 1000;
+  size_t used;
+
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_INVALID);
+  used = 1000 - remaining_work;
+  CHECK(used > 0);
+  ixs_ctx_clear_errors(ctx);
+  remaining_work = used - 1u;
+  result = (ixs_group_union_result){IXS_CHECK_TRUE, 99};
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_EXHAUSTED);
+  CHECK(remaining_work == 0 && result.status == IXS_CHECK_UNKNOWN &&
+        result.difference == 0);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_saturation_limit_status(void) {
+  enum { QUERY_HOLD_LIMIT = 8192 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "group_union_saturation_x");
+  ixs_node *inner_values[2] = {x, ixs_int(ctx, 1)};
+  ixs_node *inner_conditions[2] = {
+      ixs_cmp(ctx, ixs_sym(ctx, "group_union_saturation_inner_guard"),
+              IXS_CMP_GT, ixs_int(ctx, 0)),
+      ixs_true(ctx)};
+  ixs_node *inner = ixs_pw(ctx, 2, inner_values, inner_conditions);
+  ixs_node *outer_values[2] = {inner, ixs_int(ctx, 2)};
+  ixs_node *outer_conditions[2] = {
+      ixs_cmp(ctx, ixs_sym(ctx, "group_union_saturation_outer_guard"),
+              IXS_CMP_GT, ixs_int(ctx, 0)),
+      ixs_true(ctx)};
+  ixs_node *outer = ixs_pw(ctx, 2, outer_values, outer_conditions);
+  ixs_node *predicate = ixs_cmp(ctx, outer, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_predicate_group group = {&predicate, 1};
+  ixs_group_union_query query = {0, 0, IXS_GROUP_UNION_EQUIVALENT, x, x};
+  ixs_group_union_result result;
+  ixs_facts *holder = ixs_facts_create(ctx);
+  size_t remaining_work = 1000;
+  size_t i;
+  size_t held_count = 0;
+  bool entered = false;
+
+  CHECK(ixs_node_contains_nested_piecewise(predicate));
+  for (i = 0; i < QUERY_HOLD_LIMIT; i++) {
+    if (ixs_bounds_query_hold_begin(&holder->bounds, predicate, &entered)) {
+      CHECK(entered);
+      held_count++;
+    } else {
+      CHECK(!entered);
+      break;
+    }
+  }
+  CHECK(held_count > 0 && held_count < QUERY_HOLD_LIMIT);
+  CHECK(!ixs_bounds_query_hold_begin(&holder->bounds, predicate, &entered));
+  CHECK(!entered);
+  result = (ixs_group_union_result){IXS_CHECK_TRUE, 99};
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_LIMITED);
+  CHECK(remaining_work == 999 && result.status == IXS_CHECK_UNKNOWN &&
+        result.difference == 0);
+  for (i = 0; i < held_count; i++)
+    ixs_bounds_query_hold_end(&holder->bounds);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_group_union_failures(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "group_union_failure_x");
+  ixs_node *predicate = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_predicate_group group = {&predicate, 1};
+  ixs_group_union_query query = {0, 0, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, x,
+                                 x};
+  ixs_group_union_result result = {IXS_CHECK_TRUE, 99};
+  size_t remaining_work = 0;
+
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), NULL, 0, NULL, 0, NULL,
+                                 &remaining_work) == IXS_GROUP_UNION_COMPLETE);
+
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_EXHAUSTED);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+
+  query.rhs_group = 1;
+  remaining_work = 100;
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_INVALID);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+  query.rhs_group = 0;
+
+  query.kind = (ixs_group_union_query_kind)99;
+  remaining_work = 100;
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_INVALID);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+
+  query.kind = IXS_GROUP_UNION_EQUIVALENT;
+  query.lhs = predicate;
+  remaining_work = 100;
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_INVALID);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+  query.kind = IXS_GROUP_UNION_CONSTANT_DIFFERENCE;
+  query.lhs = x;
+
+  {
+    size_t hostile_query_count = SIZE_MAX / sizeof(ixs_group_union_query) + 1u;
+    result.status = IXS_CHECK_TRUE;
+    result.difference = 99;
+    remaining_work = SIZE_MAX;
+    CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query,
+                                   hostile_query_count, &result,
+                                   &remaining_work) == IXS_GROUP_UNION_INVALID);
+    CHECK(result.status == IXS_CHECK_TRUE && result.difference == 99 &&
+          remaining_work == SIZE_MAX);
+  }
+
+  {
+    ixs_predicate_group hostile = {(const ixs_node *const *)(uintptr_t)1,
+                                   SIZE_MAX / sizeof(ixs_node *) + 1u};
+    result.status = IXS_CHECK_TRUE;
+    result.difference = 99;
+    remaining_work = SIZE_MAX;
+    CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &hostile, 1, &query,
+                                   1, &result,
+                                   &remaining_work) == IXS_GROUP_UNION_INVALID);
+    CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0 &&
+          remaining_work == SIZE_MAX);
+  }
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), &group, 1, &query, 1,
+                                 &result,
+                                 &remaining_work) == IXS_GROUP_UNION_OOM);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_CHECK_UNKNOWN && result.difference == 0);
+  ixs_ctx_destroy(ctx);
+}
+
+static int64_t modulo_recurrence_sample(ixs_ctx *ctx, ixs_node *expr,
+                                        ixs_node *symbol, int64_t value) {
+  ixs_node *substituted = ixs_subs(ctx, expr, symbol, ixs_int(ctx, value));
+  ixs_node *simplified = ixs_simplify(ctx, substituted, NULL, 0);
+  CHECK(simplified && ixs_node_tag(simplified) == IXS_INT);
+  return ixs_node_int_val(simplified);
+}
+
+static void test_public_modulo_recurrence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "modulo_recurrence_i");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *plus_two = ixs_add(ctx, i, two);
+  ixs_node *minus_one = ixs_sub(ctx, i, one);
+  ixs_facts *nonnegative = ixs_facts_create(ctx);
+  ixs_facts *positive = ixs_facts_create(ctx);
+  ixs_facts *signed_no_wrap = ixs_facts_create(ctx);
+  ixs_facts *minus_one_point = ixs_facts_create(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_result result;
+
+  CHECK(ctx && i && one && two && plus_two && minus_one && nonnegative &&
+        positive && signed_no_wrap && minus_one_point && empty);
+  CHECK(ixs_facts_assume_pred(nonnegative,
+                              ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(nonnegative,
+                              ixs_cmp(ctx, i, IXS_CMP_LE, ixs_int(ctx, 100))));
+  CHECK(ixs_facts_assume_pred(positive,
+                              ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(positive,
+                              ixs_cmp(ctx, i, IXS_CMP_LE, ixs_int(ctx, 100))));
+  CHECK(ixs_facts_assume_pred(
+      signed_no_wrap, ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, INT32_MIN))));
+  CHECK(ixs_facts_assume_pred(
+      signed_no_wrap,
+      ixs_cmp(ctx, i, IXS_CMP_LE, ixs_int(ctx, INT32_MAX - 2))));
+  CHECK(ixs_facts_assume_pred(minus_one_point,
+                              ixs_cmp(ctx, i, IXS_CMP_EQ, ixs_int(ctx, -1))));
+
+  result = ixs_modulo_recurrence_facts(nonnegative, plus_two, i, i,
+                                       IXS_REMAINDER_SIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 2 && result.remainder != NULL);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, 7) == 2);
+
+  /* A signed negative delta is Euclidean-normalized once all truncating
+   * remainder operands are proved nonnegative. */
+  result = ixs_modulo_recurrence_facts(positive, minus_one, i, i,
+                                       IXS_REMAINDER_SIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 4 && result.remainder != NULL);
+  result = ixs_modulo_recurrence_facts(nonnegative, minus_one, i, i,
+                                       IXS_REMAINDER_SIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_UNKNOWN &&
+        result.increment == 0 && result.remainder == NULL);
+
+  result = ixs_modulo_recurrence_facts(positive, minus_one, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 4 && result.remainder != NULL);
+  result = ixs_modulo_recurrence_facts(nonnegative, plus_two, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 2 && result.remainder != NULL);
+
+  /* A raw algebraic delta is not an unsigned fixed-width delta when the add
+   * can wrap.  For an arbitrary divisor the two projected deltas have
+   * different residues, so incomplete no-wrap facts must stay unknown. */
+  result = ixs_modulo_recurrence_facts(empty, plus_two, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_UNKNOWN &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(signed_no_wrap, plus_two, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_UNKNOWN &&
+        result.increment == 0 && result.remainder == NULL);
+
+  /* When the fixed-width modulus is itself divisible by the divisor, every
+   * possible wrap has residue zero and the raw delta is sufficient. */
+  result = ixs_modulo_recurrence_facts(empty, plus_two, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 8);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 2 && result.remainder != NULL);
+
+  /* Crossing the signed-view boundary is still an ordinary adjacent unsigned
+   * increment/decrement. The 32-bit unsigned projection removes the apparent
+   * +/- (2^32 - 1) signed delta. */
+  result = ixs_modulo_recurrence_facts(empty, ixs_int(ctx, INT32_MIN),
+                                       ixs_int(ctx, INT32_MAX), i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 1 && result.remainder != NULL);
+  result = ixs_modulo_recurrence_facts(empty, ixs_int(ctx, INT32_MAX),
+                                       ixs_int(ctx, INT32_MIN), i,
+                                       IXS_REMAINDER_UNSIGNED, 32, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 4 && result.remainder != NULL);
+
+  /* Crossing the signed boundary is an unsigned fixed-width wrap.  For
+   * UINT64_MAX -> 0 modulo 5 the apparent +1 delta has residue zero because
+   * 2^64 also has residue one. */
+  result = ixs_modulo_recurrence_facts(minus_one_point, ixs_add(ctx, i, one), i,
+                                       i, IXS_REMAINDER_UNSIGNED, 64, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 0 && result.remainder != NULL);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, -1) == 0);
+  result = ixs_modulo_recurrence_facts(empty, ixs_add(ctx, i, one), i, i,
+                                       IXS_REMAINDER_UNSIGNED, 64, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_UNKNOWN &&
+        result.increment == 0 && result.remainder == NULL);
+
+  /* Upper-half divisors are passed as uint64_t bit patterns. Their exact
+   * signed-view result never needs an unrepresentable positive literal. */
+  result = ixs_modulo_recurrence_facts(empty, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       32, UINT64_C(2147483651));
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 0 && result.remainder != NULL);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, INT32_MIN) ==
+        INT32_MIN);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, -2147483645) == 0);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, -1) == 2147483644);
+
+  result = ixs_modulo_recurrence_facts(empty, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       64, UINT64_C(9223372036854775808));
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.increment == 0 && result.remainder != NULL);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, INT64_MIN) == 0);
+  CHECK(modulo_recurrence_sample(ctx, result.remainder, i, -1) == INT64_MAX);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_modulo_recurrence_failures(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "modulo_recurrence_failure_i");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_result result;
+
+  CHECK(ctx && other && i && facts);
+  result =
+      ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED, 0, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       65, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result =
+      ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED, 8, 0);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       8, 256);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result =
+      ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_SIGNED, 8, 128);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(facts, i, i, i,
+                                       (ixs_remainder_signedness)99, 8, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(
+      facts, ixs_sym(other, "modulo_recurrence_foreign"), i, i,
+      IXS_REMAINDER_UNSIGNED, 8, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(
+      facts, ixs_cmp(ctx, i, IXS_CMP_EQ, ixs_int(ctx, 0)), i, i,
+      IXS_REMAINDER_UNSIGNED, 8, 5);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_INVALID &&
+        result.increment == 0 && result.remainder == NULL);
+
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  result = ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       32, 104729);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_OOM && result.increment == 0 &&
+        result.remainder == NULL);
+  result = ixs_modulo_recurrence_facts(facts, i, i, i, IXS_REMAINDER_UNSIGNED,
+                                       32, 104729);
+  CHECK(result.status == IXS_MODULO_RECURRENCE_PROVEN &&
+        result.remainder != NULL);
+
   ixs_ctx_destroy(other);
   ixs_ctx_destroy(ctx);
 }
@@ -9045,6 +11208,7 @@ int main(void) {
   test_bounds_check_contradiction_unknown();
   test_public_pow2_fact();
   test_bounds_check_non_cmp();
+  test_public_fact_consistency();
 
   /* Bounds: public range API */
   test_public_range_basic();
@@ -9055,11 +11219,13 @@ int main(void) {
   test_public_range_int64_extrema();
   test_public_range_mod_int64_min_step();
   test_public_range_mod_requires_positive_divisor();
+  test_public_range_mod_nonnegative_dividend_cap();
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
   test_public_range_congruence_alignment_overflow();
   test_public_range_difference_constraint_propagation();
   test_public_modular_projection_difference();
+  test_public_range_nonnegative_signed_remainder_packet();
   test_public_dynamic_modular_projection_difference();
   test_public_modular_projection_unbounded_query_stack();
   test_public_modular_projection_exact_residual();
@@ -9092,6 +11258,17 @@ int main(void) {
   test_public_difference_constraint_oom_is_atomic();
   test_public_exact_equality_oom_is_atomic();
   test_public_difference_potential_overflow_is_atomic();
+  test_public_group_union_scalar_oracle_size(3);
+  test_public_group_union_scalar_oracle_size(8);
+  test_public_group_union_scalar_oracle_size(16);
+  test_public_group_union_sixty_five_group_registry();
+  test_public_group_union_cross_closure_and_isolation();
+  test_public_group_union_finite_domain_and_budget();
+  test_public_group_union_closed_validation_budget();
+  test_public_group_union_saturation_limit_status();
+  test_public_group_union_failures();
+  test_public_modulo_recurrence();
+  test_public_modulo_recurrence_failures();
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();
@@ -9120,6 +11297,7 @@ int main(void) {
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
+  test_public_trunc_primitive_constant_difference();
   test_public_truncating_remainder_equivalence();
   test_public_truncating_remainder_oom();
   test_public_remainder_projection_candidate_growth();
@@ -9128,18 +11306,26 @@ int main(void) {
   test_public_modulo_pow2_equivalence();
   test_public_finite_domain_equivalence();
   test_finite_domain_equivalence_growable_discovery();
+  test_public_finite_domain_synthesis();
+  test_public_finite_domain_batch();
+  test_public_finite_domain_query_hold_oom_retry();
+  test_public_finite_domain_composed_synthesis();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();
   test_public_affine_and_constant_difference();
   test_public_exact_quotient_decomposition();
   test_public_exact_quotient_invalid_and_oom();
   test_public_finite_difference_and_additive_split();
+  test_public_cyclic_decomposition_shapes_and_facts();
+  test_public_cyclic_decomposition_bound_oom();
+  test_public_cyclic_decomposition_rejections();
   test_public_algebra_helpers_use_facts();
   test_public_algebra_helper_invalid_inputs();
   test_public_exact_divide_basic();
   test_public_exact_divide_fact_integer_bitwise_factor();
   test_public_exact_divide_requires_defined_product();
   test_public_exact_divide_fact_simplification();
+  test_public_exact_divide_canonical_nonzero_factor();
   test_public_exact_divide_scaled_mod_domain();
   test_public_exact_divide_extrema_and_overflow();
   test_public_exact_divide_invalid_and_oom();
@@ -9149,6 +11335,7 @@ int main(void) {
   test_public_defined_bitwise_integrality();
   test_public_defined_piecewise_first_match();
   test_public_defined_piecewise_condition();
+  test_public_defined_shared_rounding_piecewise();
   test_public_defined_facts_and_invalid();
   test_public_defined_total_memo_rejects_malformed_nodes();
   test_public_defined_expression_facts_do_not_close_domain();
@@ -9162,10 +11349,13 @@ int main(void) {
   test_deep_node_order_is_iterative();
   test_public_rational_intermediate_boundaries();
   test_public_rational_intermediate_compounds();
+  test_public_rational_intermediate_piecewise_conditions();
+  test_public_rational_intermediate_unsupported_extrema();
   test_public_rational_intermediate_piecewise_selector();
   test_public_rational_intermediate_mod_projection();
+  test_public_rational_intermediate_order_independent_envelopes();
   test_public_rational_intermediate_oom_and_invalid();
-  test_public_rational_intermediate_limits_and_shared_dag();
+  test_public_rational_intermediate_growable_and_shared_dag();
 
   printf("test_bounds: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

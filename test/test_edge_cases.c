@@ -494,6 +494,152 @@ static void test_many_expression_ranges(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_product_nonzero_factors(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "product_nonzero_x");
+  ixs_node *y = ixs_sym(ctx, "product_nonzero_y");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 8), x);
+  ixs_node *scaled_nonzero = ixs_cmp(ctx, scaled, IXS_CMP_NE, zero);
+  ixs_node *reciprocal = ixs_div(ctx, one, scaled);
+  ixs_node *sum = ixs_add(ctx, scaled, y);
+  ixs_node *sum_nonzero = ixs_cmp(ctx, sum, IXS_CMP_NE, zero);
+  ixs_node *inverse = ixs_div(ctx, one, x);
+  ixs_node *inverse_nonzero = ixs_cmp(ctx, inverse, IXS_CMP_NE, zero);
+  ixs_facts *product = ixs_facts_create(ctx);
+  ixs_facts *addition = ixs_facts_create(ctx);
+  ixs_facts *negative_power = ixs_facts_create(ctx);
+  ixs_facts *negative_power_batch = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_preds(product, &scaled_nonzero, 1));
+  CHECK(ixs_check_defined_facts(product, reciprocal) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(addition, sum_nonzero));
+  CHECK(ixs_check_defined_facts(addition, inverse) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(negative_power, inverse_nonzero));
+  CHECK(ixs_check_defined_facts(negative_power, inverse) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_facts_assume_preds(negative_power_batch, &inverse_nonzero, 1));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_congruence_proves_nonzero(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "congruence_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *minus_one = ixs_int(ctx, -1);
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 8), x);
+  ixs_node *odd = ixs_add(ctx, ixs_int(ctx, 1), scaled);
+  ixs_node *odd_nonzero = ixs_cmp(ctx, odd, IXS_CMP_NE, zero);
+  ixs_node *odd_zero = ixs_cmp(ctx, odd, IXS_CMP_EQ, zero);
+  ixs_node *scaled_not_minus_one = ixs_cmp(ctx, scaled, IXS_CMP_NE, minus_one);
+  ixs_node *scaled_minus_one = ixs_cmp(ctx, scaled, IXS_CMP_EQ, minus_one);
+  ixs_node *scaled_nonzero = ixs_cmp(ctx, scaled, IXS_CMP_NE, zero);
+  ixs_node *one_plus_x = ixs_add(ctx, ixs_int(ctx, 1), x);
+  ixs_node *one_plus_x_nonzero = ixs_cmp(ctx, one_plus_x, IXS_CMP_NE, zero);
+  ixs_node *unknown = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *either = ixs_or(ctx, odd_nonzero, unknown);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_check_facts(facts, odd_nonzero) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, odd_zero) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_facts(facts, scaled_not_minus_one) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, scaled_minus_one) == IXS_CHECK_FALSE);
+  CHECK(ixs_check_predicate_facts(facts, either) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(facts, scaled_nonzero) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_facts(facts, one_plus_x_nonzero) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_opposite_max_nonzero_range(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "absolute_x");
+  ixs_node *d = ixs_sym(ctx, "absolute_d");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *magnitude = ixs_max(ctx, d, ixs_neg(ctx, d));
+  ixs_node *nonnegative = ixs_cmp(ctx, magnitude, IXS_CMP_GE, zero);
+  ixs_node *positive = ixs_cmp(ctx, magnitude, IXS_CMP_GT, zero);
+  ixs_node *nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, zero);
+  ixs_node *remainder = ixs_mod(ctx, x, magnitude);
+  ixs_facts *unconstrained = ixs_facts_create(ctx);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_check_facts(unconstrained, nonnegative) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_facts(unconstrained, positive) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(facts, nonzero));
+  CHECK(ixs_check_facts(facts, positive) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_defined_facts(facts, remainder) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_truncating_remainder_excludes_signed_min(void) {
+  static const char remainder_text[] =
+      "x - d*Piecewise((floor(x/d), (x >= 0 & d > 0) | "
+      "(x <= 0 & d < 0)), (ceiling(x/d), True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *d = ixs_sym(ctx, "d");
+  ixs_node *remainder =
+      ixs_parse_expr(ctx, remainder_text, strlen(remainder_text));
+  ixs_node *signed_min = ixs_int(ctx, INT32_MIN);
+  ixs_node *nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0));
+  ixs_node *not_min = ixs_cmp(ctx, remainder, IXS_CMP_NE, signed_min);
+  ixs_node *is_min = ixs_cmp(ctx, remainder, IXS_CMP_EQ, signed_min);
+  ixs_range_result range = {true, true, INT32_MIN, 1, INT32_MAX, 1};
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_range(facts, x, &range));
+  CHECK(ixs_facts_assume_range(facts, d, &range));
+  CHECK(ixs_facts_assume_pred(facts, nonzero));
+  CHECK(ixs_check_predicate_facts(facts, not_min) == IXS_CHECK_TRUE);
+  CHECK(ixs_check_predicate_facts(facts, is_min) == IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_truncating_remainder_intersects_explicit_range(void) {
+  static const char remainder_text[] =
+      "x - d*Piecewise((floor(x/d), (x >= 0 & d > 0) | "
+      "(x <= 0 & d < 0)), (ceiling(x/d), True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *d = ixs_sym(ctx, "d");
+  ixs_node *remainder =
+      ixs_parse_expr(ctx, remainder_text, strlen(remainder_text));
+  ixs_node *d_is_four = ixs_cmp(ctx, d, IXS_CMP_EQ, ixs_int(ctx, 4));
+  ixs_node *remainder_is_zero =
+      ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *remainder_is_four =
+      ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, 4));
+  ixs_range_result exact_zero = {true, true, 0, 1, 0, 1};
+  ixs_range_result exact_four = {true, true, 4, 1, 4, 1};
+  ixs_range_result range;
+  ixs_integer_range_result integer_range;
+  ixs_facts *refined = ixs_facts_create(ctx);
+  ixs_facts *disjoint = ixs_facts_create(ctx);
+
+  CHECK(ixs_facts_assume_pred(refined, d_is_four));
+  CHECK(ixs_facts_assume_range(refined, remainder, &exact_zero));
+  CHECK(ixs_check_facts(refined, remainder_is_zero) == IXS_CHECK_TRUE);
+  CHECK(ixs_range_facts(refined, remainder, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
+  CHECK(ixs_integer_range_facts(refined, remainder, &integer_range));
+  CHECK(integer_range.has_lower && integer_range.lower == 0);
+  CHECK(integer_range.has_upper && integer_range.upper == 0);
+
+  CHECK(ixs_facts_assume_pred(disjoint, d_is_four));
+  CHECK(ixs_facts_assume_range(disjoint, remainder, &exact_four));
+  CHECK(ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
+  CHECK(!ixs_range_facts(disjoint, remainder, &range));
+  CHECK(!ixs_integer_range_facts(disjoint, remainder, &integer_range));
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_integer_overflow();
   test_division_by_zero();
@@ -508,6 +654,11 @@ int main(void) {
   test_print_buffer();
   test_null_ctx_destroy();
   test_many_expression_ranges();
+  test_product_nonzero_factors();
+  test_congruence_proves_nonzero();
+  test_opposite_max_nonzero_range();
+  test_truncating_remainder_excludes_signed_min();
+  test_truncating_remainder_intersects_explicit_range();
 
   printf("test_edge_cases: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

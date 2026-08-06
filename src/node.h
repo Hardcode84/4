@@ -83,7 +83,7 @@ struct ixs_node_impl {
       uint32_t nfactors;
       const ixs_mulfactor *factors;
     } mul;
-    struct { /* IXS_FLOOR, IXS_CEIL */
+    struct { /* IXS_FLOOR, IXS_CEIL, IXS_TRUNC */
       ixs_node *arg;
     } unary;
     struct { /* IXS_MOD, IXS_CMP */
@@ -235,6 +235,7 @@ IXS_STATIC ixs_node *ixs_node_mul(ixs_ctx *ctx, ixs_node *coeff,
                                   const ixs_mulfactor *factors);
 IXS_STATIC ixs_node *ixs_node_floor(ixs_ctx *ctx, ixs_node *arg);
 IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg);
+IXS_STATIC ixs_node *ixs_node_trunc(ixs_ctx *ctx, ixs_node *arg);
 IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op);
 IXS_STATIC ixs_node *ixs_node_pw(ixs_ctx *ctx, uint32_t ncases,

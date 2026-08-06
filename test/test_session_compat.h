@@ -105,6 +105,8 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
   IXS_TEST_WITH_CTX((ctx), (ixs_floor)(IXS_TEST_SESSION(ctx), (x)))
 #define ixs_ceil(ctx, x)                                                       \
   IXS_TEST_WITH_CTX((ctx), (ixs_ceil)(IXS_TEST_SESSION(ctx), (x)))
+#define ixs_trunc(ctx, x)                                                      \
+  IXS_TEST_WITH_CTX((ctx), (ixs_trunc)(IXS_TEST_SESSION(ctx), (x)))
 #define ixs_mod(ctx, a, b)                                                     \
   IXS_TEST_WITH_CTX((ctx), (ixs_mod)(IXS_TEST_SESSION(ctx), (a), (b)))
 #define ixs_max(ctx, a, b)                                                     \

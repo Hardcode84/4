@@ -334,6 +334,10 @@ static void print_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
     print_unary_func(pb, "ceiling", n->u.unary.arg);
     break;
 
+  case IXS_TRUNC:
+    print_unary_func(pb, "Trunc", n->u.unary.arg);
+    break;
+
   case IXS_MOD:
     print_binary_func(pb, "Mod", n);
     break;
@@ -472,6 +476,11 @@ static void print_c_node(printbuf *pb, const ixs_node *n, prec_t parent_prec) {
     break;
   case IXS_CEIL:
     pb_str(pb, "ixs_ceil_i(");
+    print_c_node(pb, n->u.unary.arg, PREC_TOP);
+    pb_char(pb, ')');
+    break;
+  case IXS_TRUNC:
+    pb_str(pb, "ixs_trunc_i(");
     print_c_node(pb, n->u.unary.arg, PREC_TOP);
     pb_char(pb, ')');
     break;

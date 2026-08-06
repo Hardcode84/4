@@ -208,6 +208,7 @@ static bool import_child_count(const ixs_node *src, uint32_t *out) {
     return true;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     *out = 1;
     return true;
   case IXS_MOD:
@@ -247,6 +248,7 @@ static const ixs_node *import_child_at(const ixs_node *src, uint32_t idx) {
     return src->u.mul.factors[idx - 1u].base;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return src->u.unary.arg;
   case IXS_MOD:
   case IXS_CMP:
@@ -331,8 +333,11 @@ static ixs_node *import_build_unary(ixs_ctx *dst_ctx, import_state *state,
   ixs_node *arg = import_memo_dst(state, src->u.unary.arg);
   if (!arg)
     return NULL;
-  return src->tag == IXS_FLOOR ? ixs_node_floor(dst_ctx, arg)
-                               : ixs_node_ceil(dst_ctx, arg);
+  if (src->tag == IXS_FLOOR)
+    return ixs_node_floor(dst_ctx, arg);
+  if (src->tag == IXS_CEIL)
+    return ixs_node_ceil(dst_ctx, arg);
+  return ixs_node_trunc(dst_ctx, arg);
 }
 
 static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
@@ -430,6 +435,7 @@ static ixs_node *import_build_node(ixs_ctx *dst_ctx, import_state *state,
     return import_build_mul(dst_ctx, state, src);
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return import_build_unary(dst_ctx, state, src);
   case IXS_MOD:
   case IXS_CMP:

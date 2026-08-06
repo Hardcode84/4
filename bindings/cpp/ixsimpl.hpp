@@ -253,6 +253,91 @@ struct ExactDivideResult {
   Expr quotient;
 };
 
+struct RationalMaterializationPlan {
+  ixs_check_result status;
+  Expr numerator;
+  int64_t denominator;
+};
+
+struct FiniteDomainResult {
+  ixs_finite_domain_status status;
+  ixs_check_result check;
+  Expr value;
+};
+
+struct FiniteIntegerDomain {
+  Expr symbol;
+  std::vector<int64_t> points;
+};
+
+struct FiniteDomainBatchQuery {
+  ixs_finite_domain_batch_query_kind kind;
+  Expr value;
+};
+
+struct FiniteDomainBatchResult {
+  ixs_check_result check;
+  size_t witness;
+};
+
+struct ModuloRecurrenceResult {
+  ixs_modulo_recurrence_status status;
+  uint64_t increment;
+  Expr remainder;
+};
+
+struct CyclicDecomposition {
+  Expr residual;
+  int64_t scale;
+  int64_t modulus;
+  int64_t phase;
+  int64_t ring;
+  bool residual_bounded;
+};
+
+struct GroupUnionQuery {
+  size_t lhs_group;
+  size_t rhs_group;
+  ixs_group_union_query_kind kind;
+  Expr lhs;
+  Expr rhs;
+};
+
+struct GroupUnionResult {
+  ixs_check_result status;
+  int64_t difference;
+};
+
+inline ixs_group_union_status
+query_group_unions(Context &ctx, const std::vector<std::vector<Expr>> &groups,
+                   const std::vector<GroupUnionQuery> &queries,
+                   std::vector<GroupUnionResult> &results,
+                   size_t &remaining_work) {
+  std::vector<std::vector<const ixs_node *>> raw_predicates(groups.size());
+  std::vector<ixs_predicate_group> raw_groups(groups.size());
+  std::vector<ixs_group_union_query> raw_queries;
+  std::vector<ixs_group_union_result> raw_results(queries.size());
+
+  for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+    raw_predicates[group_index].reserve(groups[group_index].size());
+    for (const Expr &predicate : groups[group_index])
+      raw_predicates[group_index].push_back(predicate.raw());
+    raw_groups[group_index] = {raw_predicates[group_index].data(),
+                               raw_predicates[group_index].size()};
+  }
+  raw_queries.reserve(queries.size());
+  for (const GroupUnionQuery &query : queries)
+    raw_queries.push_back({query.lhs_group, query.rhs_group, query.kind,
+                           query.lhs.raw(), query.rhs.raw()});
+  ixs_group_union_status status = ixs_query_group_unions(
+      ctx.session(), raw_groups.data(), raw_groups.size(), raw_queries.data(),
+      raw_queries.size(), raw_results.data(), &remaining_work);
+  results.resize(raw_results.size());
+  for (size_t index = 0; index < raw_results.size(); ++index)
+    results[index] = {raw_results[index].status, raw_results[index].difference};
+  return status;
+}
+
 class Facts {
   ixs_ctx *ctx_;
   ixs_session *session_;
@@ -308,6 +393,9 @@ public:
   ixs_check_result check_predicate(const Expr &predicate) const {
     return ixs_check_predicate_facts(facts_, predicate.raw());
   }
+  ixs_check_result check_consistent() const {
+    return ixs_check_consistent_facts(facts_);
+  }
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
     return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
   }
@@ -315,14 +403,101 @@ public:
                                           unsigned bits) const {
     return ixs_equivalent_modulo_pow2_facts(facts_, lhs.raw(), rhs.raw(), bits);
   }
-  ixs_check_result equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
-                                            size_t &remaining_points) const {
-    return ixs_equivalent_finite_domain_facts(facts_, lhs.raw(), rhs.raw(),
-                                              &remaining_points);
+  FiniteDomainResult equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
+                                              size_t &remaining_work) const {
+    ixs_finite_domain_query query{};
+    query.kind = IXS_FINITE_DOMAIN_EQUIVALENCE;
+    query.as.equivalence = {lhs.raw(), rhs.raw()};
+    ixs_finite_domain_result result =
+        ixs_finite_domain_facts(facts_, &query, &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
+  FiniteDomainResult synthesize_finite_expression(
+      const Expr &symbol, const std::vector<int64_t> &points,
+      const std::vector<Expr> &values, size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw;
+    ixs_finite_domain_query query{};
+    if (points.size() != values.size())
+      return {IXS_FINITE_DOMAIN_INVALID, IXS_CHECK_UNKNOWN,
+              Expr(ctx_, session_, nullptr)};
+    raw.reserve(values.size());
+    for (const Expr &value : values)
+      raw.push_back(value.raw());
+    query.kind = IXS_FINITE_DOMAIN_EXPR_SYNTHESIS;
+    query.as.synthesis = {symbol.raw(), points.data(), raw.data(), raw.size()};
+    ixs_finite_domain_result result =
+        ixs_finite_domain_facts(facts_, &query, &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
+  FiniteDomainResult synthesize_finite_predicate(
+      const Expr &symbol, const std::vector<int64_t> &points,
+      const std::vector<Expr> &values, size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw;
+    ixs_finite_domain_query query{};
+    if (points.size() != values.size())
+      return {IXS_FINITE_DOMAIN_INVALID, IXS_CHECK_UNKNOWN,
+              Expr(ctx_, session_, nullptr)};
+    raw.reserve(values.size());
+    for (const Expr &value : values)
+      raw.push_back(value.raw());
+    query.kind = IXS_FINITE_DOMAIN_PRED_SYNTHESIS;
+    query.as.synthesis = {symbol.raw(), points.data(), raw.data(), raw.size()};
+    ixs_finite_domain_result result =
+        ixs_finite_domain_facts(facts_, &query, &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
+  FiniteDomainResult verify_finite_expression(
+      const Expr &symbol, const std::vector<int64_t> &points,
+      const std::vector<Expr> &values, const Expr &candidate,
+      size_t &remaining_work) const {
+    return verify_finite_relation(IXS_FINITE_DOMAIN_EXPR_RELATION, symbol,
+                                  points, values, candidate, remaining_work);
+  }
+  FiniteDomainResult verify_finite_predicate(const Expr &symbol,
+                                             const std::vector<int64_t> &points,
+                                             const std::vector<Expr> &values,
+                                             const Expr &candidate,
+                                             size_t &remaining_work) const {
+    return verify_finite_relation(IXS_FINITE_DOMAIN_PRED_RELATION, symbol,
+                                  points, values, candidate, remaining_work);
+  }
+  ixs_finite_domain_status
+  check_finite_domain_batch(const std::vector<FiniteIntegerDomain> &domains,
+                            const std::vector<FiniteDomainBatchQuery> &queries,
+                            std::vector<FiniteDomainBatchResult> &results,
+                            size_t &remaining_work) const {
+    std::vector<ixs_finite_integer_domain> raw_domains;
+    std::vector<ixs_finite_domain_batch_query> raw_queries;
+    std::vector<ixs_finite_domain_batch_result> raw_results(
+        queries.size(), {IXS_CHECK_UNKNOWN, SIZE_MAX});
+    raw_domains.reserve(domains.size());
+    for (const FiniteIntegerDomain &domain : domains)
+      raw_domains.push_back(
+          {domain.symbol.raw(), domain.points.data(), domain.points.size()});
+    raw_queries.reserve(queries.size());
+    for (const FiniteDomainBatchQuery &query : queries)
+      raw_queries.push_back({query.kind, query.value.raw()});
+    ixs_finite_domain_status status = ixs_finite_domain_batch_facts(
+        facts_, raw_domains.data(), raw_domains.size(), raw_queries.data(),
+        raw_queries.size(), raw_results.data(), &remaining_work);
+    results.resize(raw_results.size());
+    for (size_t index = 0; index < raw_results.size(); ++index)
+      results[index] = {raw_results[index].check, raw_results[index].witness};
+    return status;
   }
   bool constant_difference(const Expr &lhs, const Expr &rhs,
                            int64_t &delta) const {
     return ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw(), &delta);
+  }
+  ModuloRecurrenceResult
+  modulo_recurrence(const Expr &value, const Expr &reference,
+                    const Expr &induction, ixs_remainder_signedness signedness,
+                    unsigned width, uint64_t divisor) const {
+    ixs_modulo_recurrence_result result = ixs_modulo_recurrence_facts(
+        facts_, value.raw(), reference.raw(), induction.raw(), signedness,
+        width, divisor);
+    return {result.status, result.increment,
+            Expr(ctx_, session_, result.remainder)};
   }
   bool affine_decompose(const Expr &expr, const Expr &symbol, Expr &coefficient,
                         Expr &residual) const {
@@ -353,6 +528,19 @@ public:
                                      step.raw(), &raw_difference))
       return false;
     difference = Expr(ctx_, session_, raw_difference);
+    return true;
+  }
+  bool decompose_cyclic(const Expr &expr, const Expr &symbol,
+                        CyclicDecomposition &out) const {
+    ixs_cyclic_decomposition raw{};
+    if (!ixs_decompose_cyclic_facts(facts_, expr.raw(), symbol.raw(), &raw))
+      return false;
+    out = CyclicDecomposition{Expr(ctx_, session_, raw.residual),
+                              raw.scale,
+                              raw.modulus,
+                              raw.phase,
+                              raw.ring,
+                              raw.residual_bounded};
     return true;
   }
   bool split_additive_constant(const Expr &expr, Expr &residual,
@@ -393,6 +581,13 @@ public:
     return ixs_check_rational_intermediates_facts(facts_, expr.raw(),
                                                   word_bits);
   }
+  RationalMaterializationPlan
+  plan_rational_materialization(const Expr &expr, uint32_t word_bits) const {
+    ixs_rational_materialization_plan result =
+        ixs_plan_rational_materialization_facts(facts_, expr.raw(), word_bits);
+    return {result.status, Expr(ctx_, session_, result.numerator),
+            result.denominator};
+  }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {
     return ixs_facts_substitute(facts_, source.raw(), target.raw(),
@@ -424,6 +619,29 @@ public:
   }
   ixs_facts *raw() const { return facts_; }
   ixs_ctx *raw_ctx() const { return ctx_; }
+
+private:
+  FiniteDomainResult verify_finite_relation(ixs_finite_domain_query_kind kind,
+                                            const Expr &symbol,
+                                            const std::vector<int64_t> &points,
+                                            const std::vector<Expr> &values,
+                                            const Expr &candidate,
+                                            size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw;
+    ixs_finite_domain_query query{};
+    if (points.size() != values.size())
+      return {IXS_FINITE_DOMAIN_INVALID, IXS_CHECK_UNKNOWN,
+              Expr(ctx_, session_, nullptr)};
+    raw.reserve(values.size());
+    for (const Expr &value : values)
+      raw.push_back(value.raw());
+    query.kind = kind;
+    query.as.relation = {symbol.raw(), points.data(), raw.data(), raw.size(),
+                         candidate.raw()};
+    ixs_finite_domain_result result =
+        ixs_finite_domain_facts(facts_, &query, &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
 };
 
 inline Expr Expr::simplify(const Facts &facts) const {
@@ -517,6 +735,10 @@ inline Expr floor(Expr x) {
 }
 inline Expr ceil(Expr x) {
   return Expr(x.raw_ctx(), x.raw_session(), ixs_ceil(x.raw_session(), x.raw()));
+}
+inline Expr trunc(Expr x) {
+  return Expr(x.raw_ctx(), x.raw_session(),
+              ixs_trunc(x.raw_session(), x.raw()));
 }
 inline Expr mod(Expr a, Expr b) {
   return Expr(a.raw_ctx(), a.raw_session(),

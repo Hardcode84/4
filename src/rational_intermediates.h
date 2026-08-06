@@ -9,7 +9,8 @@
 #include "bounds.h"
 #include "node.h"
 
-IXS_STATIC ixs_check_result ixs_bounds_check_rational_intermediates(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *expr, uint32_t word_bits);
+IXS_STATIC ixs_rational_materialization_plan
+ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
+                                         ixs_node *expr, uint32_t word_bits);
 
 #endif /* IXS_RATIONAL_INTERMEDIATES_H */

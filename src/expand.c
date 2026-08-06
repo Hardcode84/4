@@ -179,25 +179,8 @@ static ixs_node *expand_assoc(ixs_ctx *ctx, ixs_node *node, int depth) {
   return result;
 }
 
-static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
-  ixs_node *cached;
+static ixs_node *expand_by_tag(ixs_ctx *ctx, ixs_node *node, int depth) {
   ixs_node *expanded;
-  if (!node)
-    return NULL;
-  if (ixs_node_is_sentinel(node))
-    return node;
-  if (depth >= EXPAND_MAX_DEPTH) {
-    ixs_ctx_push_error(ctx, "expand: recursion depth limit (%d) exceeded",
-                       EXPAND_MAX_DEPTH);
-    return ctx->sentinel_error;
-  }
-
-  if (expand_cacheable(node)) {
-    cached = ixs_node_expand_cache_lookup(ctx, node, (unsigned)depth);
-    if (cached)
-      return cached;
-  }
-
   switch (node->tag) {
   case IXS_INT:
   case IXS_RAT:
@@ -219,6 +202,9 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     break;
   case IXS_CEIL:
     expanded = simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    break;
+  case IXS_TRUNC:
+    expanded = simp_trunc(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
     break;
 
   case IXS_MOD:
@@ -246,6 +232,29 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     expanded = node;
     break;
   }
+  return expanded;
+}
+
+static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
+  ixs_node *cached;
+  ixs_node *expanded;
+  if (!node)
+    return NULL;
+  if (ixs_node_is_sentinel(node))
+    return node;
+  if (depth >= EXPAND_MAX_DEPTH) {
+    ixs_ctx_push_error(ctx, "expand: recursion depth limit (%d) exceeded",
+                       EXPAND_MAX_DEPTH);
+    return ctx->sentinel_error;
+  }
+
+  if (expand_cacheable(node)) {
+    cached = ixs_node_expand_cache_lookup(ctx, node, (unsigned)depth);
+    if (cached)
+      return cached;
+  }
+
+  expanded = expand_by_tag(ctx, node, depth);
   if (expand_cacheable(node))
     ixs_node_expand_cache_store(ctx, node, expanded, (unsigned)depth);
   return expanded;

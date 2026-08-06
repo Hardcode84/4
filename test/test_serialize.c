@@ -27,6 +27,7 @@ static int failures;
 #define TEST_WIRE_AND 13u
 #define TEST_WIRE_OR 14u
 #define TEST_WIRE_ERROR 16u
+#define TEST_WIRE_TRUNC 18u
 
 #define CHECK(expr)                                                            \
   do {                                                                         \
@@ -367,6 +368,7 @@ static ixs_node *build_roundtrip_expr(ixs_session *s) {
   ixs_node *conds[2];
   ixs_node *pw;
   ixs_node *half_up;
+  ixs_node *truncated;
   ixs_node *modded;
   ixs_node *arith;
 
@@ -384,7 +386,8 @@ static ixs_node *build_roundtrip_expr(ixs_session *s) {
   conds[1] = ixs_true(s);
   pw = ixs_pw(s, 2, vals, conds);
   half_up = ixs_ceil(s, ixs_div(s, ixs_add(s, y, three), two));
-  modded = ixs_mod(s, ixs_add(s, x, three), five);
+  truncated = ixs_trunc(s, ixs_div(s, z, two));
+  modded = ixs_add(s, ixs_mod(s, ixs_add(s, x, three), five), truncated);
   assoc_args[0] = modded;
   assoc_args[1] = half_up;
   assoc_args[2] = z;
@@ -1249,6 +1252,35 @@ static void test_associative_payload_validation(void) {
   destroy_session(ctx, &s);
 }
 
+static void test_trunc_sentinel_child_rejected_without_pollution(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *decoded;
+  size_t before_used;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  begin_blob(&buf, 2);
+  append_u8(&buf, TEST_WIRE_ERROR);
+  append_u8(&buf, TEST_WIRE_TRUNC);
+  append_le32(&buf, 0);
+  append_le32(&buf, 1);
+
+  before_used = ctx->htab_used;
+  ixs_session_clear_errors(&s);
+  decoded = deserialize_from_buffer(&s, &buf);
+  CHECK(decoded != NULL && ixs_is_parse_error(decoded));
+  CHECK(ctx->htab_used == before_used);
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "sentinel child") != NULL);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
 static void test_version_mismatch_stops_at_header(void) {
   static const uint32_t versions[] = {1u, 3u};
   ixs_ctx *ctx = NULL;
@@ -1286,6 +1318,28 @@ static void test_version_mismatch_stops_at_header(void) {
  * this check on the normal multi-translation-unit path only.
  */
 #ifndef IXS_TEST_AMALGAMATION
+static void test_compound_sentinel_rejected_on_serialize(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *bad;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+
+  bad = ixs_node_trunc(ctx, ctx->sentinel_error);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(buf.len == 0);
+  CHECK(ixs_session_nerrors(&s) == 1);
+  CHECK(strstr(ixs_session_error(&s, 0), "sentinel child") != NULL);
+
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
 static void test_noncanonical_mul_rejected_on_serialize(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
@@ -1496,8 +1550,10 @@ int main(void) {
   test_facts_assume_preds_duplicate_skip();
   test_malformed_root_rejected_without_pollution();
   test_associative_payload_validation();
+  test_trunc_sentinel_child_rejected_without_pollution();
   test_version_mismatch_stops_at_header();
 #ifndef IXS_TEST_AMALGAMATION
+  test_compound_sentinel_rejected_on_serialize();
   test_noncanonical_mul_rejected_on_serialize();
   test_noncanonical_assoc_rejected_on_serialize();
   test_raw_child_count_limits();

@@ -27,13 +27,14 @@ from __future__ import annotations
 import math
 import warnings
 from fractions import Fraction
-from typing import Any
+from typing import Any, Literal
 
 import ixsimpl
 import pytest
 import sympy
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
+from ixsimpl.sympy_conv import Trunc as SympyTrunc
 from ixsimpl.sympy_conv import from_sympy as conv_from_sympy
 from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 
@@ -45,6 +46,7 @@ ModSymbolCase = tuple[str, int, int, int, int, str]
 ModCompositeCase = tuple[str, str, int, int, int, int, int, int, int, str, str]
 BitMaskCase = tuple[str, str, int, int, int, int, str]
 Pow2Case = tuple[str, bool, str, int, str]
+FiniteDomainQuery = tuple[Literal["predicate", "defined", "integer"], ixsimpl.Expr]
 
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
@@ -221,6 +223,7 @@ _OPS_BASE = [
     "div",
     "floor",
     "ceiling",
+    "trunc",
     "mod",
     "max",
     "min",
@@ -262,7 +265,7 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
             )
         return (op, *args)
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op in ("floor", "ceiling"):
+    if op in ("floor", "ceiling", "trunc"):
         choice = draw(st.sampled_from(["div", "rat_add", "mul", "sub", "add", "plain"]))
         if choice == "div":
             d = draw(pos_ints)
@@ -370,6 +373,8 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.floor(to_sympy(tree[1]), evaluate=False)
     if op == "ceiling":
         return sympy.ceiling(to_sympy(tree[1]), evaluate=False)
+    if op == "trunc":
+        return SympyTrunc(to_sympy(tree[1]), evaluate=False)
     if op == "mod":
         # evaluate=False avoids SymPy Mod bugs (e.g. #28744) that silently
         # produce wrong results for certain inputs.
@@ -443,6 +448,8 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
         return ixsimpl.floor(to_ixsimpl(ctx, tree[1]))
     if op == "ceiling":
         return ixsimpl.ceil(to_ixsimpl(ctx, tree[1]))
+    if op == "trunc":
+        return ixsimpl.trunc(to_ixsimpl(ctx, tree[1]))
     if op == "mod":
         return ixsimpl.mod(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "max":
@@ -537,6 +544,9 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if op == "ceiling":
         v = eval_expr(tree[1], env)
         return math.ceil(v)
+    if op == "trunc":
+        v = eval_expr(tree[1], env)
+        return math.trunc(v)
     if op == "mod":
         return _floored_mod(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "max":
@@ -1169,19 +1179,52 @@ def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
     assert ixsimpl.same_node(roundtripped, original)
 
 
-def test_node_ptr_exposes_canonical_node_address() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("x")
-    x_again = ctx.sym("x")
-    y = ctx.sym("y")
+def test_expr_bytes_are_stable_and_outlive_the_source_context() -> None:
+    source = ixsimpl.Context()
+    expr = 4 * source.sym("x") + source.sym("y")
+    data = expr.to_bytes()
 
-    assert isinstance(x.node_ptr, int)
-    assert x.node_ptr != 0
-    assert x_again.node_ptr == x.node_ptr
-    assert y.node_ptr != x.node_ptr
-    node_as_any: Any = x
-    with pytest.raises(AttributeError):
-        node_as_any.node_ptr = 0
+    assert data == source.serialize(expr)
+    assert not hasattr(expr, "node_ptr")
+
+    foreign = ixsimpl.Context()
+    with pytest.raises(ValueError, match="different context"):
+        source.serialize(foreign.sym("foreign"))
+
+    del expr
+    del source
+    decoded = foreign.deserialize(data)
+    assert str(decoded) == "4*x + y"
+    assert decoded.to_bytes() == data
+
+
+def test_trunc_binding_constructs_toward_zero_rounding() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("trunc_binding_x")
+    truncated = ixsimpl.trunc(x / 3)
+
+    assert truncated.tag == ixsimpl.TRUNC
+    assert ixsimpl.same_node(truncated, ctx.parse_expr("Trunc(trunc_binding_x/3)"))
+    assert int(truncated.subs(x, -5)) == -1
+    assert int(truncated.subs(x, 5)) == 1
+    with pytest.raises(TypeError, match="requires an Expr"):
+        ixsimpl.trunc(1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator"),
+    [
+        ((1 << 63) - 1, 3),
+        (-(1 << 63) + 1, 3),
+        (-1, 2),
+        (1, 2),
+    ],
+)
+def test_trunc_binding_matches_exact_fraction_semantics(numerator: int, denominator: int) -> None:
+    ctx = ixsimpl.Context()
+    truncated = ixsimpl.trunc(ctx.rat(numerator, denominator))
+
+    assert int(truncated) == math.trunc(Fraction(numerator, denominator))
 
 
 @pytest.mark.forked
@@ -2274,12 +2317,17 @@ def test_rational_intermediates_fit_binding() -> None:
     fitting.assume_range(x, -128, 127)
     overflow = ctx.facts()
     overflow.assume_range(x, 256, 256)
+    signed_i64 = ctx.facts()
+    signed_i64.assume_range(x, -(1 << 63), (1 << 63) - 1)
 
     assert ctx.rational_intermediates_fit(expr, 8, fitting) is True
     assert ctx.rational_intermediates_fit(expr, 8, overflow) is False
     assert ctx.rational_intermediates_fit(expr, 8, ctx.facts()) is None
+    assert ctx.rational_intermediates_fit(expr, 64, signed_i64) is True
     with pytest.raises(ValueError, match="word_bits"):
         ctx.rational_intermediates_fit(expr, 1, fitting)
+    with pytest.raises(ValueError, match="word_bits"):
+        ctx.rational_intermediates_fit(expr, 65, fitting)
     with pytest.raises(ValueError, match="different context"):
         ctx.rational_intermediates_fit(other.sym("x"), 8, fitting)
     with pytest.raises(ValueError, match="different context"):
@@ -2618,16 +2666,58 @@ def test_finite_domain_equivalence_binding() -> None:
 
     assert ctx.equivalent(finite, ctx.int_(1), facts) is None
     assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 4) == (
+        "complete",
         True,
         0,
     )
     assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 3) == (
+        "exhausted",
         None,
         3,
     )
-    assert ctx.equivalent_finite_domain(x, x, facts, 0) == (True, 0)
+    assert ctx.equivalent_finite_domain(x, x, facts, 0) == (
+        "complete",
+        True,
+        0,
+    )
     with pytest.raises(OverflowError):
         ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, -1)
+
+
+def test_finite_domain_batch_binding() -> None:
+    ctx = ixsimpl.Context()
+    other = ixsimpl.Context()
+    block = ctx.sym("finite_batch_block")
+    slot = ctx.sym("finite_batch_slot")
+    facts = ctx.facts()
+    domains = [(block, [0, 1]), (slot, [5, 6])]
+    queries: list[FiniteDomainQuery] = [
+        ("predicate", ctx.eq(slot, 5)),
+        ("defined", 1 / (slot - 5)),
+        ("integer", block / 2),
+    ]
+
+    assert ctx.check_finite_domain(domains, queries, facts, 12) == (
+        "complete",
+        [(False, 1), (False, 0), (False, 2)],
+        0,
+    )
+    assert ctx.check_finite_domain(domains, queries, facts, 11) == (
+        "exhausted",
+        [(None, None), (None, None), (None, None)],
+        11,
+    )
+    with pytest.raises(ValueError, match="points are not ordered"):
+        ctx.check_finite_domain([(block, [1, 1])], queries[:1], facts, 2)
+    with pytest.raises(ValueError, match="must be predicate, defined, or integer"):
+        # This exercises the runtime parser with an untyped external payload;
+        # statically typed callers cannot construct an invalid query kind.
+        invalid_queries: Any = [("bad", block)]
+        ctx.check_finite_domain(domains, invalid_queries, facts, 4)
+    with pytest.raises(ValueError, match="different context"):
+        ctx.check_finite_domain([(other.sym("foreign"), [0])], queries[:1], facts, 1)
+    with pytest.raises(OverflowError):
+        ctx.check_finite_domain(domains, queries, facts, -1)
 
 
 def test_equivalence_binding_invalid_inputs() -> None:
@@ -2912,6 +3002,44 @@ def test_exact_quotient_decomposition_binding() -> None:
     numerator, denominator = parts
     assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
     assert ixsimpl.same_node(denominator, common_denominator)
+
+
+def test_fixed_width_modulo_recurrence_query() -> None:
+    ctx = ixsimpl.Context()
+    i = ctx.sym("modulo_recurrence_binding_i")
+    positive = ctx.facts()
+    positive.assume_many([i >= 1, i <= 100])
+
+    signed = ctx.modulo_recurrence(i - 1, i, i, "signed", 32, 5, positive)
+    assert signed is not None
+    increment, remainder = signed
+    assert increment == 4
+    assert str(remainder) == "Mod(modulo_recurrence_binding_i, 5)"
+
+    empty = ctx.facts()
+    upper_half = ctx.modulo_recurrence(i, i, i, "unsigned", 32, 2**31 + 3, empty)
+    assert upper_half is not None
+    increment, remainder = upper_half
+    assert increment == 0
+    assert int(remainder.subs(i, -(2**31))) == -(2**31)
+    assert int(remainder.subs(i, -(2**31) + 3)) == 0
+    assert int(remainder.subs(i, -1)) == 2**31 - 4
+
+    assert ctx.modulo_recurrence(i + 1, i, i, "unsigned", 64, 5, empty) is None
+    with pytest.raises(ValueError, match="signedness"):
+        ctx.modulo_recurrence(i, i, i, "bogus", 32, 5, empty)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="width"):
+        ctx.modulo_recurrence(i, i, i, "unsigned", 0, 5, empty)
+    with pytest.raises(ValueError, match="divisor"):
+        ctx.modulo_recurrence(i, i, i, "signed", 8, 128, empty)
+    with pytest.raises(OverflowError):
+        ctx.modulo_recurrence(i, i, i, "unsigned", -1, 5, empty)
+    with pytest.raises(OverflowError):
+        ctx.modulo_recurrence(i, i, i, "unsigned", 2**32 + 32, 5, empty)
+    with pytest.raises(OverflowError):
+        ctx.modulo_recurrence(i, i, i, "unsigned", 64, -1, empty)
+    with pytest.raises(OverflowError):
+        ctx.modulo_recurrence(i, i, i, "unsigned", 64, 2**64, empty)
 
 
 def test_fact_backed_algebra_helpers_use_domain_facts() -> None:

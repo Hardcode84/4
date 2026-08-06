@@ -31,6 +31,7 @@ from ixsimpl._ixsimpl import (
     PIECEWISE,
     RAT,
     SYM,
+    TRUNC,
     XOR,
     Facts,
     _Expr,
@@ -46,6 +47,7 @@ from ixsimpl._ixsimpl import not_ as _not
 from ixsimpl._ixsimpl import or_ as _or
 from ixsimpl._ixsimpl import pw as _pw
 from ixsimpl._ixsimpl import same_node as _same_node
+from ixsimpl._ixsimpl import trunc as _trunc
 from ixsimpl._ixsimpl import xor_ as _xor
 
 
@@ -179,9 +181,30 @@ if TYPE_CHECKING:
             self, lhs: _Expr, rhs: _Expr, bits: int, facts: Facts
         ) -> bool | None: ...
         def equivalent_finite_domain(
-            self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_points: int
-        ) -> tuple[bool | None, int]: ...
+            self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_work: int
+        ) -> tuple[Literal["complete", "exhausted"], bool | None, int]: ...
+        def check_finite_domain(
+            self,
+            domains: Sequence[tuple[_Expr, Sequence[int]]],
+            queries: Sequence[tuple[Literal["predicate", "defined", "integer"], _Expr]],
+            facts: Facts,
+            remaining_work: int,
+        ) -> tuple[
+            Literal["complete", "exhausted"],
+            list[tuple[bool | None, int | None]],
+            int,
+        ]: ...
         def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
+        def modulo_recurrence(
+            self,
+            value: _Expr,
+            reference: _Expr,
+            induction: _Expr,
+            signedness: Literal["signed", "unsigned"],
+            width: int,
+            divisor: int,
+            facts: Facts,
+        ) -> tuple[int, Expr] | None: ...
         def affine_decompose(
             self, expr: _Expr, symbol: _Expr, facts: Facts
         ) -> tuple[Expr, Expr] | None: ...
@@ -228,6 +251,7 @@ if TYPE_CHECKING:
     def abs_(x: Expr) -> Expr: ...
     def floor(expr: Expr) -> Expr: ...
     def ceil(expr: Expr) -> Expr: ...
+    def trunc(expr: Expr) -> Expr: ...
     def mod(a: Expr, b: Expr | int) -> Expr: ...
     def max_(a: Expr, *args: Expr | int) -> Expr: ...
     def min_(a: Expr, *args: Expr | int) -> Expr: ...
@@ -251,6 +275,7 @@ else:
 
     floor = _floor
     ceil = _ceil
+    trunc = _trunc
     mod = _mod
     max_ = _max
     min_ = _min
@@ -285,6 +310,7 @@ __all__ = [
     "PIECEWISE",
     "RAT",
     "SYM",
+    "TRUNC",
     "XOR",
     "Context",
     "Expr",
@@ -301,5 +327,6 @@ __all__ = [
     "or_",
     "pw",
     "same_node",
+    "trunc",
     "xor_",
 ]

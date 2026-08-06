@@ -130,8 +130,8 @@ static void test_cross_store_tag_smoke(void) {
   ixs_node *five;
   ixs_node *gt0;
   ixs_node *lt4;
-  ixs_node *roots[9];
-  ixs_node *imported[9];
+  ixs_node *roots[10];
+  ixs_node *imported[10];
   ixs_node *pw_vals[2];
   ixs_node *pw_conds[2];
   ixs_node *expr_args[3];
@@ -172,10 +172,11 @@ static void test_cross_store_tag_smoke(void) {
   roots[2] = ixs_or_many(&src_s, 3, pred_args);
   roots[3] = ixs_floor(&src_s, ixs_div(&src_s, x, two));
   roots[4] = ixs_ceil(&src_s, ixs_div(&src_s, y, three));
-  roots[5] = ixs_mod(&src_s, ixs_add(&src_s, x, three), five);
-  roots[6] = ixs_xor_many(&src_s, 3, expr_args);
-  roots[7] = ixs_pw(&src_s, 2, pw_vals, pw_conds);
-  roots[8] = ixs_not(&src_s, gt0);
+  roots[5] = ixs_trunc(&src_s, ixs_div(&src_s, z, two));
+  roots[6] = ixs_mod(&src_s, ixs_add(&src_s, x, three), five);
+  roots[7] = ixs_xor_many(&src_s, 3, expr_args);
+  roots[8] = ixs_pw(&src_s, 2, pw_vals, pw_conds);
+  roots[9] = ixs_not(&src_s, gt0);
 
   CHECK(ixs_import_many(&dst_s, roots, sizeof(roots) / sizeof(roots[0]),
                         imported));

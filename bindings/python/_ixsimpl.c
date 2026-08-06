@@ -14,6 +14,7 @@
 #include <Python.h>
 #include <ixsimpl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Forward declarations */
@@ -127,23 +128,6 @@ static int raise_new_prefixed_error(ixs_session *session, size_t before,
   return 0;
 }
 
-static int raise_new_finite_equivalence_error(ixs_session *session,
-                                              size_t before) {
-  size_t i;
-  size_t after = ixs_session_nerrors(session);
-  for (i = before; i < after; i++) {
-    const char *message = ixs_session_error(session, i);
-    if (!message || strncmp(message, "finite equivalence:", 19) != 0)
-      continue;
-    if (strstr(message, "out of memory"))
-      PyErr_NoMemory();
-    else
-      PyErr_SetString(PyExc_ValueError, message);
-    return -1;
-  }
-  return 0;
-}
-
 static int raise_new_divisibility_error(ixs_session *session, size_t before) {
   return raise_new_prefixed_error(session, before, "divisibility:");
 }
@@ -251,6 +235,38 @@ static size_t BytesReader_remaining(void *userdata) {
   if (state->pos > state->len)
     return 0;
   return (size_t)(state->len - state->pos);
+}
+
+static PyObject *serialize_node_to_bytes(ContextObject *ctx_obj,
+                                         const ixs_node *node) {
+  ixs_session *session = Context_session(ctx_obj);
+  size_t before_nerrors = ixs_session_nerrors(session);
+  size_t after_nerrors;
+  PyObject *tmp = PyByteArray_FromStringAndSize(NULL, 0);
+  PyObject *result;
+  BytesWriterState state;
+  const ixs_writer writer = {BytesWriter_write, &state};
+
+  if (!tmp)
+    return NULL;
+  state.buf_obj = tmp;
+  if (!ixs_serialize_node(session, node, &writer)) {
+    after_nerrors = ixs_session_nerrors(session);
+    Py_DECREF(tmp);
+    if (PyErr_Occurred())
+      return NULL;
+    if (after_nerrors > before_nerrors) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      ixs_session_error(session, before_nerrors));
+      return NULL;
+    }
+    return PyErr_NoMemory();
+  }
+
+  result = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(tmp),
+                                     PyByteArray_GET_SIZE(tmp));
+  Py_DECREF(tmp);
+  return result;
 }
 
 static void Expr_dealloc(ExprObject *self) {
@@ -876,6 +892,10 @@ static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
   return PyLong_FromLong(ixs_node_mul_factor_exp(self->node, (uint32_t)i));
 }
 
+static PyObject *Expr_to_bytes(ExprObject *self, PyObject *Py_UNUSED(args)) {
+  return serialize_node_to_bytes(self->ctx_obj, self->node);
+}
+
 static PyMethodDef Expr_methods[] = {
     {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
      "Simplify with either assumptions or a reusable fact set."},
@@ -883,6 +903,8 @@ static PyMethodDef Expr_methods[] = {
      "Distribute MUL over ADD (expand products of sums)."},
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
+    {"to_bytes", (PyCFunction)Expr_to_bytes, METH_NOARGS,
+     "Return the stable binary serialization."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
      "expr.subs(target, repl) or expr.subs({t1: r1, ...}): simultaneous "
      "substitution. Keys can be str or Expr; values can be Expr or int."},
@@ -933,10 +955,6 @@ static PyObject *Expr_get_is_integer_valued(ExprObject *self,
 
 static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
-}
-
-static PyObject *Expr_get_node_ptr(ExprObject *self, void *Py_UNUSED(closure)) {
-  return PyLong_FromVoidPtr(self->node);
 }
 
 static PyObject *Expr_get_nchildren(ExprObject *self,
@@ -1021,8 +1039,6 @@ static PyGetSetDef Expr_getset[] = {
     {"is_integer_valued", (getter)Expr_get_is_integer_valued, NULL,
      "True if the expression is structurally integer-valued.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
-    {"node_ptr", (getter)Expr_get_node_ptr, NULL,
-     "Raw ixs_node* address as an int. For identity/debug/FFI use only.", NULL},
     {"nchildren", (getter)Expr_get_nchildren, NULL,
      "Number of child node pointers (0 for leaves).", NULL},
     {"children", (getter)Expr_get_children, NULL, "Tuple of child Expr nodes.",
@@ -1478,13 +1494,6 @@ static PyObject *Context_import_(ContextObject *self, PyObject *arg) {
 
 static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
   ExprObject *expr;
-  ixs_session *session;
-  size_t before_nerrors;
-  size_t after_nerrors;
-  PyObject *tmp;
-  PyObject *result;
-  BytesWriterState state;
-  const ixs_writer writer = {BytesWriter_write, &state};
 
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
@@ -1492,30 +1501,13 @@ static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
   }
 
   expr = (ExprObject *)arg;
-  session = Context_session(self);
-  before_nerrors = ixs_session_nerrors(session);
-  tmp = PyByteArray_FromStringAndSize(NULL, 0);
-  if (!tmp)
+  if (expr->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: cannot serialize an expression from a "
+                    "different context");
     return NULL;
-
-  state.buf_obj = tmp;
-  if (!ixs_serialize_node(session, expr->node, &writer)) {
-    after_nerrors = ixs_session_nerrors(session);
-    Py_DECREF(tmp);
-    if (PyErr_Occurred())
-      return NULL;
-    if (after_nerrors > before_nerrors) {
-      PyErr_SetString(PyExc_RuntimeError,
-                      ixs_session_error(session, before_nerrors));
-      return NULL;
-    }
-    return PyErr_NoMemory();
   }
-
-  result = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(tmp),
-                                     PyByteArray_GET_SIZE(tmp));
-  Py_DECREF(tmp);
-  return result;
+  return serialize_node_to_bytes(self, expr->node);
 }
 
 static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
@@ -1817,17 +1809,19 @@ static PyObject *Context_equivalent_modulo_pow2(ContextObject *self,
 static PyObject *Context_equivalent_finite_domain(ContextObject *self,
                                                   PyObject *args,
                                                   PyObject *kwargs) {
-  static char *kwlist[] = {"lhs", "rhs", "facts", "remaining_points", NULL};
+  static char *kwlist[] = {"lhs", "rhs", "facts", "remaining_work", NULL};
   PyObject *lhs_obj;
   PyObject *rhs_obj;
   PyObject *facts_obj;
   PyObject *remaining_obj;
+  PyObject *status_answer;
   PyObject *answer;
   PyObject *remaining_answer;
-  PyObject *pair;
+  PyObject *triple;
   ixs_session *session = Context_session(self);
-  ixs_check_result result;
-  size_t remaining_points;
+  ixs_finite_domain_query query;
+  ixs_finite_domain_result result;
+  size_t remaining_work;
   size_t errors_before;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
                                    &rhs_obj, &facts_obj, &remaining_obj))
@@ -1851,31 +1845,299 @@ static PyObject *Context_equivalent_finite_domain(ContextObject *self,
     PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
     return NULL;
   }
-  remaining_points = PyLong_AsSize_t(remaining_obj);
-  if (remaining_points == (size_t)-1 && PyErr_Occurred())
+  remaining_work = PyLong_AsSize_t(remaining_obj);
+  if (remaining_work == (size_t)-1 && PyErr_Occurred())
     return NULL;
   errors_before = ixs_session_nerrors(session);
-  result = ixs_equivalent_finite_domain_facts(
-      ((FactsObject *)facts_obj)->facts, ((ExprObject *)lhs_obj)->node,
-      ((ExprObject *)rhs_obj)->node, &remaining_points);
-  if (raise_new_finite_equivalence_error(session, errors_before) < 0)
+  query.kind = IXS_FINITE_DOMAIN_EQUIVALENCE;
+  query.as.equivalence.lhs = ((ExprObject *)lhs_obj)->node;
+  query.as.equivalence.rhs = ((ExprObject *)rhs_obj)->node;
+  result = ixs_finite_domain_facts(((FactsObject *)facts_obj)->facts, &query,
+                                   &remaining_work);
+  if (result.status == IXS_FINITE_DOMAIN_OOM) {
+    PyErr_NoMemory();
     return NULL;
-  answer = check_result_to_py(result);
-  remaining_answer = PyLong_FromSize_t(remaining_points);
-  if (!answer || !remaining_answer) {
+  }
+  if (result.status == IXS_FINITE_DOMAIN_INVALID) {
+    if (raise_new_prefixed_error(session, errors_before,
+                                 "finite equivalence:") < 0)
+      return NULL;
+    PyErr_SetString(PyExc_ValueError, "finite equivalence: invalid query");
+    return NULL;
+  }
+  if (raise_new_prefixed_error(session, errors_before, "finite equivalence:") <
+      0)
+    return NULL;
+  status_answer = PyUnicode_FromString(
+      result.status == IXS_FINITE_DOMAIN_COMPLETE ? "complete" : "exhausted");
+  answer = check_result_to_py(result.check);
+  remaining_answer = PyLong_FromSize_t(remaining_work);
+  if (!status_answer || !answer || !remaining_answer) {
+    Py_XDECREF(status_answer);
     Py_XDECREF(answer);
     Py_XDECREF(remaining_answer);
     return NULL;
   }
-  pair = PyTuple_New(2);
-  if (!pair) {
+  triple = PyTuple_New(3);
+  if (!triple) {
+    Py_DECREF(status_answer);
     Py_DECREF(answer);
     Py_DECREF(remaining_answer);
     return NULL;
   }
-  PyTuple_SET_ITEM(pair, 0, answer);
-  PyTuple_SET_ITEM(pair, 1, remaining_answer);
-  return pair;
+  PyTuple_SET_ITEM(triple, 0, status_answer);
+  PyTuple_SET_ITEM(triple, 1, answer);
+  PyTuple_SET_ITEM(triple, 2, remaining_answer);
+  return triple;
+}
+
+static PyObject *Context_check_finite_domain(ContextObject *self,
+                                             PyObject *args, PyObject *kwargs) {
+  static char *kwlist[] = {"domains", "queries", "facts", "remaining_work",
+                           NULL};
+  PyObject *domains_obj;
+  PyObject *queries_obj;
+  PyObject *facts_obj;
+  PyObject *remaining_obj;
+  PyObject *domain_sequence = NULL;
+  PyObject *query_sequence = NULL;
+  PyObject *answer_list = NULL;
+  PyObject *status_answer = NULL;
+  PyObject *remaining_answer = NULL;
+  PyObject *triple = NULL;
+  ixs_finite_integer_domain *domains = NULL;
+  ixs_finite_domain_batch_query *queries = NULL;
+  ixs_finite_domain_batch_result *results = NULL;
+  int64_t **point_storage = NULL;
+  Py_ssize_t ndomains;
+  Py_ssize_t nqueries;
+  Py_ssize_t index;
+  size_t remaining_work;
+  size_t errors_before;
+  ixs_finite_domain_status status;
+  ixs_session *session = Context_session(self);
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &domains_obj,
+                                   &queries_obj, &facts_obj, &remaining_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+  remaining_work = PyLong_AsSize_t(remaining_obj);
+  if (remaining_work == (size_t)-1 && PyErr_Occurred())
+    return NULL;
+  domain_sequence =
+      PySequence_Fast(domains_obj, "domains must be an iterable of pairs");
+  query_sequence =
+      PySequence_Fast(queries_obj, "queries must be an iterable of pairs");
+  if (!domain_sequence || !query_sequence)
+    goto cleanup;
+  ndomains = PySequence_Fast_GET_SIZE(domain_sequence);
+  nqueries = PySequence_Fast_GET_SIZE(query_sequence);
+  if (ndomains > 0) {
+    domains = PyMem_Calloc((size_t)ndomains, sizeof(*domains));
+    point_storage = PyMem_Calloc((size_t)ndomains, sizeof(*point_storage));
+    if (!domains || !point_storage) {
+      PyErr_NoMemory();
+      goto cleanup;
+    }
+  }
+  if (nqueries > 0) {
+    queries = PyMem_Calloc((size_t)nqueries, sizeof(*queries));
+    results = PyMem_Calloc((size_t)nqueries, sizeof(*results));
+    if (!queries || !results) {
+      PyErr_NoMemory();
+      goto cleanup;
+    }
+  }
+
+  for (index = 0; index < ndomains; index++) {
+    PyObject *entry =
+        PySequence_Fast(PySequence_Fast_GET_ITEM(domain_sequence, index),
+                        "each domain must be (symbol, points)");
+    PyObject *points = NULL;
+    Py_ssize_t point;
+    Py_ssize_t npoints;
+    if (!entry)
+      goto cleanup;
+    if (PySequence_Fast_GET_SIZE(entry) != 2) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_ValueError,
+                      "each domain must contain exactly symbol and points");
+      goto cleanup;
+    }
+    PyObject *symbol_obj = PySequence_Fast_GET_ITEM(entry, 0);
+    if (!PyObject_TypeCheck(symbol_obj, &_ExprType)) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_TypeError, "domain symbol must be an Expr");
+      goto cleanup;
+    }
+    if (((ExprObject *)symbol_obj)->ctx_obj != self) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: domain symbol from different context");
+      goto cleanup;
+    }
+    points = PySequence_Fast(PySequence_Fast_GET_ITEM(entry, 1),
+                             "domain points must be an iterable of integers");
+    if (!points) {
+      Py_DECREF(entry);
+      goto cleanup;
+    }
+    npoints = PySequence_Fast_GET_SIZE(points);
+    if ((size_t)npoints > SIZE_MAX / sizeof(*point_storage[index])) {
+      Py_DECREF(points);
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_OverflowError,
+                      "finite-domain point table is too large");
+      goto cleanup;
+    }
+    if (npoints > 0) {
+      point_storage[index] =
+          PyMem_Malloc((size_t)npoints * sizeof(*point_storage[index]));
+      if (!point_storage[index]) {
+        Py_DECREF(points);
+        Py_DECREF(entry);
+        PyErr_NoMemory();
+        goto cleanup;
+      }
+    }
+    for (point = 0; point < npoints; point++)
+      if (!py_int64(PySequence_Fast_GET_ITEM(points, point),
+                    &point_storage[index][point], "domain point")) {
+        Py_DECREF(points);
+        Py_DECREF(entry);
+        goto cleanup;
+      }
+    domains[index].symbol = ((ExprObject *)symbol_obj)->node;
+    domains[index].points = point_storage[index];
+    domains[index].npoints = (size_t)npoints;
+    Py_DECREF(points);
+    Py_DECREF(entry);
+  }
+
+  for (index = 0; index < nqueries; index++) {
+    PyObject *entry =
+        PySequence_Fast(PySequence_Fast_GET_ITEM(query_sequence, index),
+                        "each query must be (kind, value)");
+    const char *kind;
+    PyObject *kind_obj;
+    PyObject *value_obj;
+    if (!entry)
+      goto cleanup;
+    if (PySequence_Fast_GET_SIZE(entry) != 2) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_ValueError,
+                      "each query must contain exactly kind and value");
+      goto cleanup;
+    }
+    kind_obj = PySequence_Fast_GET_ITEM(entry, 0);
+    value_obj = PySequence_Fast_GET_ITEM(entry, 1);
+    if (!PyUnicode_Check(kind_obj)) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_TypeError, "finite-domain query kind must be str");
+      goto cleanup;
+    }
+    if (!PyObject_TypeCheck(value_obj, &_ExprType)) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_TypeError,
+                      "finite-domain query value must be an Expr");
+      goto cleanup;
+    }
+    if (((ExprObject *)value_obj)->ctx_obj != self) {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: query value from different context");
+      goto cleanup;
+    }
+    kind = PyUnicode_AsUTF8(kind_obj);
+    if (!kind) {
+      Py_DECREF(entry);
+      goto cleanup;
+    }
+    if (strcmp(kind, "predicate") == 0)
+      queries[index].kind = IXS_FINITE_DOMAIN_PREDICATE_TRUE;
+    else if (strcmp(kind, "defined") == 0)
+      queries[index].kind = IXS_FINITE_DOMAIN_DEFINED;
+    else if (strcmp(kind, "integer") == 0)
+      queries[index].kind = IXS_FINITE_DOMAIN_INTEGER_VALUED;
+    else {
+      Py_DECREF(entry);
+      PyErr_SetString(PyExc_ValueError,
+                      "finite-domain query kind must be predicate, defined, "
+                      "or integer");
+      goto cleanup;
+    }
+    queries[index].value = ((ExprObject *)value_obj)->node;
+    Py_DECREF(entry);
+  }
+
+  errors_before = ixs_session_nerrors(session);
+  status = ixs_finite_domain_batch_facts(
+      ((FactsObject *)facts_obj)->facts, domains, (size_t)ndomains, queries,
+      (size_t)nqueries, results, &remaining_work);
+  if (status == IXS_FINITE_DOMAIN_OOM) {
+    PyErr_NoMemory();
+    goto cleanup;
+  }
+  if (status == IXS_FINITE_DOMAIN_INVALID) {
+    if (raise_new_prefixed_error(session, errors_before,
+                                 "finite domain batch:") < 0)
+      goto cleanup;
+    PyErr_SetString(PyExc_ValueError, "finite domain batch: invalid query");
+    goto cleanup;
+  }
+  if (raise_new_prefixed_error(session, errors_before, "finite domain batch:") <
+      0)
+    goto cleanup;
+
+  answer_list = PyList_New(nqueries);
+  if (!answer_list)
+    goto cleanup;
+  for (index = 0; index < nqueries; index++) {
+    PyObject *check = check_result_to_py(results[index].check);
+    PyObject *witness = results[index].witness == SIZE_MAX
+                            ? Py_NewRef(Py_None)
+                            : PyLong_FromSize_t(results[index].witness);
+    PyObject *answer;
+    if (!check || !witness) {
+      Py_XDECREF(check);
+      Py_XDECREF(witness);
+      goto cleanup;
+    }
+    answer = PyTuple_Pack(2, check, witness);
+    Py_DECREF(check);
+    Py_DECREF(witness);
+    if (!answer)
+      goto cleanup;
+    PyList_SET_ITEM(answer_list, index, answer);
+  }
+  status_answer = PyUnicode_FromString(
+      status == IXS_FINITE_DOMAIN_COMPLETE ? "complete" : "exhausted");
+  remaining_answer = PyLong_FromSize_t(remaining_work);
+  if (!status_answer || !remaining_answer)
+    goto cleanup;
+  triple = PyTuple_Pack(3, status_answer, answer_list, remaining_answer);
+
+cleanup:
+  if (point_storage)
+    for (index = 0; index < ndomains; index++)
+      PyMem_Free(point_storage[index]);
+  PyMem_Free(point_storage);
+  PyMem_Free(domains);
+  PyMem_Free(queries);
+  PyMem_Free(results);
+  Py_XDECREF(domain_sequence);
+  Py_XDECREF(query_sequence);
+  Py_XDECREF(answer_list);
+  Py_XDECREF(status_answer);
+  Py_XDECREF(remaining_answer);
+  return triple;
 }
 
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
@@ -2074,6 +2336,88 @@ static PyObject *Context_constant_difference(ContextObject *self,
   if (!ok)
     Py_RETURN_NONE;
   return PyLong_FromLongLong((long long)delta);
+}
+
+static PyObject *Context_modulo_recurrence(ContextObject *self, PyObject *args,
+                                           PyObject *kwargs) {
+  static char *kwlist[] = {"value", "reference", "induction", "signedness",
+                           "width", "divisor",   "facts",     NULL};
+  static const char *names[] = {"value", "reference", "induction"};
+  PyObject *expr_objs[3];
+  PyObject *width_obj;
+  PyObject *divisor_obj;
+  PyObject *facts_obj;
+  const ixs_node *exprs[3];
+  ixs_facts *facts;
+  const char *signedness_text;
+  ixs_remainder_signedness signedness;
+  unsigned int width;
+  unsigned long long width_value;
+  unsigned long long divisor;
+  ixs_modulo_recurrence_result result;
+  size_t errors_before;
+  PyObject *pair;
+  PyObject *increment;
+  PyObject *remainder;
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOsOOO", kwlist,
+                                   &expr_objs[0], &expr_objs[1], &expr_objs[2],
+                                   &signedness_text, &width_obj, &divisor_obj,
+                                   &facts_obj))
+    return NULL;
+  width_value = PyLong_AsUnsignedLongLong(width_obj);
+  if (PyErr_Occurred())
+    return NULL;
+  if (width_value > UINT_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "width does not fit unsigned int");
+    return NULL;
+  }
+  width = (unsigned int)width_value;
+  divisor = PyLong_AsUnsignedLongLong(divisor_obj);
+  if (PyErr_Occurred())
+    return NULL;
+  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
+                                 &facts))
+    return NULL;
+  if (strcmp(signedness_text, "signed") == 0)
+    signedness = IXS_REMAINDER_SIGNED;
+  else if (strcmp(signedness_text, "unsigned") == 0)
+    signedness = IXS_REMAINDER_UNSIGNED;
+  else {
+    PyErr_SetString(PyExc_ValueError,
+                    "signedness must be 'signed' or 'unsigned'");
+    return NULL;
+  }
+
+  errors_before = ixs_session_nerrors(Context_session(self));
+  result = ixs_modulo_recurrence_facts(facts, exprs[0], exprs[1], exprs[2],
+                                       signedness, width, (uint64_t)divisor);
+  if (result.status == IXS_MODULO_RECURRENCE_OOM)
+    return PyErr_NoMemory();
+  if (result.status == IXS_MODULO_RECURRENCE_INVALID) {
+    if (raise_new_prefixed_error(Context_session(self), errors_before,
+                                 "modulo recurrence:") < 0)
+      return NULL;
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid modulo recurrence");
+    return NULL;
+  }
+  if (result.status == IXS_MODULO_RECURRENCE_UNKNOWN)
+    Py_RETURN_NONE;
+
+  pair = PyTuple_New(2);
+  if (!pair)
+    return NULL;
+  increment = PyLong_FromUnsignedLongLong(result.increment);
+  remainder = (PyObject *)Expr_wrap(self, result.remainder);
+  if (!increment || !remainder) {
+    Py_XDECREF(increment);
+    Py_XDECREF(remainder);
+    Py_DECREF(pair);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(pair, 0, increment);
+  PyTuple_SET_ITEM(pair, 1, remainder);
+  return pair;
 }
 
 static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
@@ -2899,10 +3243,18 @@ static PyMethodDef Context_methods[] = {
     {"equivalent_finite_domain", (PyCFunction)Context_equivalent_finite_domain,
      METH_VARARGS | METH_KEYWORDS,
      "Try ordinary equivalence, then finite-domain enumeration; return "
-     "(result, remaining_points)."},
+     "(status, result, remaining_work)."},
+    {"check_finite_domain", (PyCFunction)Context_check_finite_domain,
+     METH_VARARGS | METH_KEYWORDS,
+     "Check typed properties over an ordered Cartesian integer domain; "
+     "return (status, [(result, witness)], remaining_work)."},
     {"constant_difference", (PyCFunction)Context_constant_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return the proven integer lhs-rhs difference, or None."},
+    {"modulo_recurrence", (PyCFunction)Context_modulo_recurrence,
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove a fixed-width modulo recurrence and return (increment, "
+     "remainder), or None."},
     {"affine_decompose", (PyCFunction)Context_affine_decompose,
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
@@ -2929,7 +3281,8 @@ static PyMethodDef Context_methods[] = {
     {"rational_intermediates_fit",
      (PyCFunction)Context_rational_intermediates_fit,
      METH_VARARGS | METH_KEYWORDS,
-     "Prove that canonical rational intermediates fit word_bits."},
+     "Prove that order-independent rational materialization intermediates "
+     "fit word_bits."},
     {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
      METH_VARARGS | METH_KEYWORDS,
      "Prove exact division under facts; return (status, quotient)."},
@@ -3019,6 +3372,18 @@ static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
   }
   e = (ExprObject *)arg;
   result = ixs_ceil(Context_session(e->ctx_obj), e->node);
+  return (PyObject *)Expr_wrap(e->ctx_obj, result);
+}
+
+static PyObject *mod_trunc(PyObject *Py_UNUSED(module), PyObject *arg) {
+  ExprObject *e;
+  const ixs_node *result;
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "ixsimpl.trunc() requires an Expr");
+    return NULL;
+  }
+  e = (ExprObject *)arg;
+  result = ixs_trunc(Context_session(e->ctx_obj), e->node);
   return (PyObject *)Expr_wrap(e->ctx_obj, result);
 }
 
@@ -3238,6 +3603,8 @@ static PyMethodDef module_methods[] = {
      "floor(expr) -> Expr: apply floor function."},
     {"ceil", (PyCFunction)mod_ceil, METH_O,
      "ceil(expr) -> Expr: apply ceiling function."},
+    {"trunc", (PyCFunction)mod_trunc, METH_O,
+     "trunc(expr) -> Expr: truncate toward zero."},
     {"mod", (PyCFunction)mod_mod, METH_VARARGS,
      "mod(a, b) -> Expr: floored modulo, defined for b > 0."},
     {"max_", (PyCFunction)mod_max_, METH_VARARGS,
@@ -3318,6 +3685,7 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
   PyModule_AddIntConstant(m, "MUL", IXS_MUL);
   PyModule_AddIntConstant(m, "FLOOR", IXS_FLOOR);
   PyModule_AddIntConstant(m, "CEIL", IXS_CEIL);
+  PyModule_AddIntConstant(m, "TRUNC", IXS_TRUNC);
   PyModule_AddIntConstant(m, "MOD", IXS_MOD);
   PyModule_AddIntConstant(m, "PIECEWISE", IXS_PIECEWISE);
   PyModule_AddIntConstant(m, "MAX", IXS_MAX);

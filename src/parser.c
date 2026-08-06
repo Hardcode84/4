@@ -397,6 +397,11 @@ static ixs_node *parse_atom(parser *p) {
     depth_pop(p);
     return result ? simp_ceil(p->ctx, result) : NULL;
   }
+  if (match_str(p, "Trunc")) {
+    result = parse_func_1(p, "Trunc");
+    depth_pop(p);
+    return result ? simp_trunc(p->ctx, result) : NULL;
+  }
   if (match_str(p, "Mod")) {
     result = parse_func_2(p, "Mod", simp_mod);
     depth_pop(p);
