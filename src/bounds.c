@@ -3674,6 +3674,9 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
   uint32_t i;
   if (!b || !expr || m <= 0)
     return false;
+  if (m == 1)
+    return ixs_node_is_integer_valued(expr) ||
+           ixs_bounds_is_integer_with_divinfo(b, expr);
 
   /* ADD has a cheap termwise proof and a bounded symbolic-congruence
    * fallback.  A successful structural proof avoids entering the mutually

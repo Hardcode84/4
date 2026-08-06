@@ -281,6 +281,25 @@ static void test_mod_rules(void) {
     CHECK(r != ixs_int(ctx, 0));
   }
 
+  /* Divisibility by one still requires an integer dividend.  An empty
+   * low-bit mask must not prove Mod(x/2, 1) == 0 unless facts prove x even. */
+  {
+    ixs_node *y = ixs_sym(ctx, "mod_one_piecewise_y");
+    ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
+    ixs_node *rem = ixs_mod(ctx, half, ixs_int(ctx, 1));
+    ixs_node *cond = ixs_cmp(ctx, rem, IXS_CMP_EQ, ixs_int(ctx, 0));
+    ixs_node *values[2] = {x, y};
+    ixs_node *conditions[2] = {cond, ixs_true(ctx)};
+    ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+    ixs_node *x_even = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                               IXS_CMP_EQ, ixs_int(ctx, 0));
+
+    CHECK(ixs_simplify(ctx, cond, NULL, 0) == cond);
+    CHECK(ixs_simplify(ctx, piecewise, NULL, 0) == piecewise);
+    CHECK(ixs_simplify(ctx, cond, &x_even, 1) == ixs_true(ctx));
+    CHECK(ixs_simplify(ctx, piecewise, &x_even, 1) == x);
+  }
+
   /* ceiling(Mod(-Mod(y/2, 1), 1)) must NOT fold to 0.
    * At y=1: Mod(1/2, 1)=1/2, -1/2, Mod(-1/2, 1)=1/2, ceil=1. */
   {
