@@ -26,6 +26,7 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
+typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
 typedef struct {
   ixs_difference_constraint *incoming;
@@ -62,6 +63,7 @@ typedef struct {
 
 typedef struct {
   ixs_ctx *ctx;        /* optional; enables expression canonical aliases */
+  ixs_ctx *store_ctx;  /* stable owner while ctx is temporarily disabled */
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
@@ -95,6 +97,15 @@ typedef struct {
   bool empty_cache_valid;
   bool empty_cache_value;
   bool oom;
+  /* Contextless query state and its growable tables live here.  Context-backed
+   * bounds use the context arena instead, but still own this empty arena so a
+   * fork never aliases arena ownership with its source. */
+  ixs_arena query_arena;
+  ixs_bounds_query_state *query_state;
+  uint64_t query_owner;
+  unsigned query_tracking_depth;
+  bool query_state_owner;
+  bool query_state_borrowed;
   bool *semantic_changed; /* optional fact-mutation observer */
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
@@ -107,15 +118,37 @@ struct ixs_facts {
   ixs_bounds bounds;
 };
 
+/* Internal hooks for bounded mutual-query regression tests. */
+#ifndef IXS_AMALGAMATED
+IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
+                                       size_t *stride_visits,
+                                       size_t *range_pw_case_visits,
+                                       size_t *range_pw_limit_blocks,
+                                       size_t *cache_hits, size_t *cycle_blocks,
+                                       size_t *limit_blocks,
+                                       size_t *active_count, size_t *nesting);
+/* Test hook: re-enter one active interval key and verify clean unwind. */
+IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
+#endif
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
                                     ixs_arena *scratch);
 
-/* No-op; bounds memory is reclaimed by scratch arena restore. */
+/* Bound one complete fact-backed query.  Nested holds share the same
+ * generation, recursion guard, and Piecewise budget.  `entered` distinguishes
+ * a real tracked hold from the intentional direct path for a flat root. */
+IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
+                                            bool *entered);
+IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b);
+
+/* Release bounds-owned contextless query workspace; arena-backed bounds
+ * storage remains owned by the caller. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
 
-/* Deep-copy bounds onto the scratch arena. Returns false on OOM. */
+/* Deep-copy bounds onto the shared scratch arena.  An active source query is
+ * borrowed by the fork, so the source hold and scratch arena must outlive the
+ * fork.  The fork owns a separate, initially empty query arena. */
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
 /* Extract variable bounds from one validated CMP assumption. */
@@ -170,6 +203,7 @@ IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
 typedef enum {
   IXS_BOUNDS_BUILD_OK,
   IXS_BOUNDS_BUILD_INVALID,
+  IXS_BOUNDS_BUILD_LIMIT,
   IXS_BOUNDS_BUILD_OOM
 } ixs_bounds_build_status;
 

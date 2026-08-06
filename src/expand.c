@@ -180,6 +180,8 @@ static ixs_node *expand_assoc(ixs_ctx *ctx, ixs_node *node, int depth) {
 }
 
 static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
+  ixs_node *cached;
+  ixs_node *expanded;
   if (!node)
     return NULL;
   if (ixs_node_is_sentinel(node))
@@ -188,6 +190,12 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     ixs_ctx_push_error(ctx, "expand: recursion depth limit (%d) exceeded",
                        EXPAND_MAX_DEPTH);
     return ctx->sentinel_error;
+  }
+
+  if (expand_cacheable(node)) {
+    cached = ixs_node_expand_cache_lookup(ctx, node, (unsigned)depth);
+    if (cached)
+      return cached;
   }
 
   switch (node->tag) {
@@ -199,51 +207,50 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return node;
 
   case IXS_ADD:
-    return expand_add(ctx, node, depth);
+    expanded = expand_add(ctx, node, depth);
+    break;
 
   case IXS_MUL:
-    return expand_mul(ctx, node, depth);
+    expanded = expand_mul(ctx, node, depth);
+    break;
 
   case IXS_FLOOR:
-    return simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    expanded = simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    break;
   case IXS_CEIL:
-    return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    expanded = simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    break;
 
   case IXS_MOD:
   case IXS_CMP:
-    return expand_binary(ctx, node, depth);
+    expanded = expand_binary(ctx, node, depth);
+    break;
 
   case IXS_PIECEWISE:
-    return expand_pw(ctx, node, depth);
+    expanded = expand_pw(ctx, node, depth);
+    break;
 
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return expand_assoc(ctx, node, depth);
+    expanded = expand_assoc(ctx, node, depth);
+    break;
 
   case IXS_NOT:
-    return simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
+    expanded = simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
+    break;
 
   default:
-    return node;
+    expanded = node;
+    break;
   }
+  if (expand_cacheable(node))
+    ixs_node_expand_cache_store(ctx, node, expanded, (unsigned)depth);
+  return expanded;
 }
 
 IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
-  ixs_node *cached;
-  ixs_node *expanded;
-
-  if (!expand_cacheable(expr))
-    return do_expand(ctx, expr, 0);
-  cached =
-      ixs_node_transform_cache_lookup(ctx, expr, IXS_NODE_TRANSFORM_EXPAND);
-  if (cached)
-    return cached;
-
-  expanded = do_expand(ctx, expr, 0);
-  ixs_node_transform_cache_store(ctx, expr, IXS_NODE_TRANSFORM_EXPAND,
-                                 expanded);
-  return expanded;
+  return do_expand(ctx, expr, 0);
 }

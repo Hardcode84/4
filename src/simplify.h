@@ -47,6 +47,11 @@ IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
                                           ixs_bounds *bounds);
 
+/* As above, but reports a root-hold nesting limit separately from OOM. */
+IXS_STATIC ixs_node *simp_simplify_bounds_status(ixs_ctx *ctx, ixs_node *expr,
+                                                 ixs_bounds *bounds,
+                                                 bool *limited);
+
 IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
                                            size_t n, ixs_bounds *bounds);
 

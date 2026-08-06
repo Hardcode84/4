@@ -247,6 +247,39 @@ static void test_expand_cache_failure_semantics(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_expand_child_cache_preserves_depth_limit(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "expand_depth_x");
+  ixs_node *child = x;
+  ixs_node *wrapped;
+  ixs_node *result;
+  size_t cached;
+  unsigned i;
+
+  /* A 255-node chain reaches its leaf at depth 255 and is legal. */
+  for (i = 0; i < 255u; i++)
+    child = ixs_node_floor(ctx, child);
+  CHECK(ixs_expand(ctx, child) == x);
+  cached = ctx->transform_cache_used;
+  CHECK(cached == 255u);
+
+  /* Reaching that same child one level deeper must still hit the limit. */
+  wrapped = ixs_node_floor(ctx, child);
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_expand(ctx, wrapped);
+  CHECK(result != NULL && ixs_is_error(result));
+  CHECK(ctx->transform_cache_used == cached);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "recursion depth limit") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  result = ixs_expand(ctx, wrapped);
+  CHECK(result != NULL && ixs_is_error(result));
+  CHECK(ctx->transform_cache_used == cached);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_add_without_const_cache(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -363,6 +396,7 @@ int main(void) {
 #ifndef IXS_TEST_AMALGAMATION
   test_expand_cache();
   test_expand_cache_failure_semantics();
+  test_expand_child_cache_preserves_depth_limit();
   test_add_without_const_cache();
 #endif
 

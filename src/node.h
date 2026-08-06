@@ -50,6 +50,7 @@ typedef enum {
 typedef struct {
   ixs_node *source;
   ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
+  unsigned expand_depth_plus_one;
 } ixs_node_transform_cache_entry;
 
 #define IXS_NODE_PROPERTY_VALID 1u
@@ -58,6 +59,7 @@ typedef struct {
 #define IXS_NODE_PROPERTY_TOTAL 8u
 #define IXS_NODE_PROPERTY_ROUNDING 16u
 #define IXS_NODE_PROPERTY_PIECEWISE 32u
+#define IXS_NODE_PROPERTY_NESTED_PIECEWISE 64u
 
 /* Only pre-intern builders and unpublished stack probes spell this tag. */
 struct ixs_node_impl {
@@ -113,6 +115,11 @@ static inline bool ixs_node_contains_piecewise(const ixs_node *node) {
          (node->properties & IXS_NODE_PROPERTY_PIECEWISE) != 0;
 }
 
+static inline bool ixs_node_contains_nested_piecewise(const ixs_node *node) {
+  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&
+         (node->properties & IXS_NODE_PROPERTY_NESTED_PIECEWISE) != 0;
+}
+
 /* --- Rule-hit statistics (compile with -DIXS_STATS to enable) --- */
 
 #ifdef IXS_STATS
@@ -159,6 +166,8 @@ struct ixs_ctx {
   size_t transform_cache_cap;
   size_t transform_cache_used;
 
+  /* Lazily allocated, context-lifetime workspace for bounds proof queries. */
+  void *bounds_query_state;
   /* Bound session mirrors. Session-owned state is copied in on entry to
    * session-taking APIs and copied back out on return. */
   ixs_arena scratch;
@@ -200,6 +209,11 @@ ixs_node_transform_cache_lookup(const ixs_ctx *ctx, const ixs_node *source,
 IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
                                                ixs_node_transform_kind kind,
                                                ixs_node *result);
+IXS_STATIC ixs_node *ixs_node_expand_cache_lookup(const ixs_ctx *ctx,
+                                                  const ixs_node *source,
+                                                  unsigned depth);
+IXS_STATIC void ixs_node_expand_cache_store(ixs_ctx *ctx, ixs_node *source,
+                                            ixs_node *result, unsigned depth);
 IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx);
 
 /*

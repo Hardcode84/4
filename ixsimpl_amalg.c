@@ -243,6 +243,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #include "expand.h"
 #include "rational_intermediates.h"
 #include "simplify.h"
+#include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -260,6 +261,11 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #define RANGE_PW_DEPTH_LIMIT 32u
 #define RANGE_PW_CASE_LIMIT 1024u
 #define MOD_RANGE_ENUM_LIMIT 1024u
+#define BOUNDS_QUERY_ACTIVE_INIT_CAP 16u
+#define BOUNDS_QUERY_CACHE_INIT_CAP 256u
+#define BOUNDS_QUERY_NESTING_LIMIT 256u
+#define BOUNDS_QUERY_VISIT_LIMIT 8192u
+#define BOUNDS_RANGE_PW_CASE_VISIT_LIMIT 256u
 
 /* lhs - rhs <= offset, equivalently the directed edge rhs -> lhs. Edge
  * objects are immutable after publication. Variable indices remain valid
@@ -284,8 +290,514 @@ typedef struct {
   size_t count;
 } difference_worklist;
 
+typedef enum {
+  BOUNDS_QUERY_EMPTY,
+  BOUNDS_QUERY_INTERVAL,
+  BOUNDS_QUERY_BITFACTS,
+  BOUNDS_QUERY_RESIDUE,
+  BOUNDS_QUERY_STRIDE
+} bounds_query_kind;
+
+typedef struct {
+  bounds_query_kind kind;
+  uint64_t owner;
+  ixs_node *expr;
+  uint64_t argument;
+} bounds_query_key;
+
+typedef struct {
+  bounds_query_key key;
+  uint64_t generation;
+  unsigned depth;
+  bool complete;
+  bool success;
+  union {
+    ixs_interval interval;
+    ixs_bitfacts bitfacts;
+    uint64_t residue;
+    uint64_t stride;
+  } result;
+} bounds_query_cache_entry;
+
+struct ixs_bounds_query_state {
+  ixs_arena *arena;
+  bounds_query_key *active;
+  bounds_query_cache_entry *cache;
+  size_t active_count;
+  size_t active_capacity;
+  size_t cache_count;
+  size_t cache_capacity;
+  size_t nesting;
+  size_t visits;
+  size_t stride_visits;
+  size_t range_pw_case_visits;
+  size_t range_pw_limit_blocks;
+  size_t cache_hits;
+  size_t cycle_blocks;
+  size_t limit_blocks;
+  bool range_pw_budget_armed;
+  uint64_t generation;
+  uint64_t next_owner;
+};
+
+typedef enum {
+  BOUNDS_QUERY_ENTER_STARTED,
+  BOUNDS_QUERY_ENTER_CACHED,
+  BOUNDS_QUERY_ENTER_CYCLE,
+  BOUNDS_QUERY_ENTER_LIMIT,
+  BOUNDS_QUERY_ENTER_INVALID,
+  BOUNDS_QUERY_ENTER_OOM
+} bounds_query_enter_result;
+
+typedef struct {
+  ixs_bounds_query_state *state;
+  bounds_query_key key;
+  bool active;
+} bounds_query_scope;
+
 static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
                                                const char *second);
+static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
+static bool bounds_get_bitfacts_tracked(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out);
+static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
+                                             bool value,
+                                             struct ixs_node_impl *storage);
+static ixs_check_result bounds_condition_truth(ixs_bounds *b, ixs_node *cond);
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth);
+
+static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
+  return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
+         lhs.expr == rhs.expr && lhs.argument == rhs.argument;
+}
+
+static void bounds_query_reset(ixs_bounds_query_state *state) {
+  assert(state->active_count == 0);
+  state->active_count = 0;
+  state->visits = 0;
+  state->stride_visits = 0;
+  state->range_pw_case_visits = 0;
+  state->range_pw_limit_blocks = 0;
+  state->cache_hits = 0;
+  state->cycle_blocks = 0;
+  state->limit_blocks = 0;
+  state->range_pw_budget_armed = false;
+  state->cache_count = 0;
+  state->generation++;
+  if (state->generation == 0) {
+    if (state->cache)
+      memset(state->cache, 0, state->cache_capacity * sizeof(*state->cache));
+    state->generation = 1;
+  }
+}
+
+static void bounds_query_note_limit(ixs_bounds_query_state *state) {
+  if (!state)
+    return;
+  if (state->limit_blocks != SIZE_MAX)
+    state->limit_blocks++;
+}
+
+static void bounds_query_counter_increment(size_t *counter) {
+  if (*counter != SIZE_MAX)
+    (*counter)++;
+}
+
+static uint64_t bounds_query_new_owner(ixs_bounds_query_state *state) {
+  /* A generation admits only finitely many visits/nested holds, so owner reuse
+   * within one generation would require more than 2^64 bounded operations.
+   * Generation wrap separately clears every memo slot in bounds_query_reset. */
+  state->next_owner++;
+  if (state->next_owner == 0)
+    state->next_owner++;
+  return state->next_owner;
+}
+
+static bool bounds_query_ensure(ixs_bounds *b) {
+  ixs_bounds_query_state *state;
+  ixs_arena *arena;
+  if (!b || b->oom)
+    return false;
+  if (b->query_state)
+    return true;
+  if (b->store_ctx && b->store_ctx->bounds_query_state) {
+    state = b->store_ctx->bounds_query_state;
+  } else if (b->store_ctx) {
+    state =
+        ixs_arena_alloc(&b->store_ctx->arena, sizeof(*state), sizeof(void *));
+  } else {
+    state = ixs_arena_alloc(&b->query_arena, sizeof(*state), sizeof(void *));
+  }
+  if (!state) {
+    b->oom = true;
+    return false;
+  }
+  if (!b->store_ctx || !b->store_ctx->bounds_query_state) {
+    memset(state, 0, sizeof(*state));
+    arena = b->store_ctx ? &b->store_ctx->arena : &b->query_arena;
+    state->arena = arena;
+    state->next_owner = 1;
+    if (b->store_ctx)
+      b->store_ctx->bounds_query_state = state;
+  } else {
+    (void)bounds_query_new_owner(state);
+  }
+  b->query_state = state;
+  b->query_owner = state->next_owner;
+  b->query_state_owner = !b->store_ctx;
+  b->query_state_borrowed = false;
+  return true;
+}
+
+static void bounds_query_refresh_owner(ixs_bounds *b) {
+  if (!b || !b->query_state)
+    return;
+  b->query_owner = bounds_query_new_owner(b->query_state);
+}
+
+static bool bounds_query_is_tracking(const ixs_bounds *b) {
+  return b && (b->query_tracking_depth != 0 || b->query_state_borrowed);
+}
+
+static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
+                                             const ixs_node *root) {
+  return b && (bounds_query_is_tracking(b) ||
+               ixs_node_contains_nested_piecewise(root));
+}
+
+static const ixs_node *bounds_query_select_root(const ixs_bounds *b,
+                                                ixs_node *const *nodes,
+                                                size_t nnodes) {
+  size_t i;
+  if (!nodes || nnodes == 0)
+    return NULL;
+  if (bounds_query_is_tracking(b))
+    return nodes[0];
+  for (i = 0; i < nnodes; i++) {
+    if (ixs_node_contains_nested_piecewise(nodes[i]))
+      return nodes[i];
+  }
+  return nodes[0];
+}
+
+IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
+                                            bool *entered) {
+  ixs_bounds_query_state *state;
+  assert(entered != NULL);
+  *entered = false;
+  if (!bounds_query_root_needs_tracking(b, root))
+    return true;
+  if (!bounds_query_ensure(b))
+    return false;
+  state = b->query_state;
+  if (state->nesting == 0) {
+    bounds_query_reset(state);
+    state->range_pw_budget_armed = ixs_node_contains_nested_piecewise(root);
+  }
+  if (state->nesting >= BOUNDS_QUERY_NESTING_LIMIT ||
+      b->query_tracking_depth >= BOUNDS_QUERY_NESTING_LIMIT) {
+    bounds_query_note_limit(state);
+    return false;
+  }
+  state->nesting++;
+  b->query_tracking_depth++;
+  *entered = true;
+  return true;
+}
+
+IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b) {
+  ixs_bounds_query_state *state;
+  assert(b != NULL && b->query_tracking_depth != 0);
+  state = b->query_state;
+  assert(state != NULL && state->nesting != 0);
+  b->query_tracking_depth--;
+  state->nesting--;
+}
+
+static bool bounds_query_grow_active(ixs_bounds *b,
+                                     ixs_bounds_query_state *state) {
+  bounds_query_key *grown;
+  size_t capacity;
+  size_t old_bytes;
+  size_t new_bytes;
+
+  if (state->active_count < state->active_capacity)
+    return true;
+  capacity = state->active_capacity ? state->active_capacity * 2u
+                                    : BOUNDS_QUERY_ACTIVE_INIT_CAP;
+  if (capacity < state->active_capacity ||
+      state->active_capacity > SIZE_MAX / sizeof(*state->active) ||
+      capacity > SIZE_MAX / sizeof(*state->active)) {
+    b->oom = true;
+    return false;
+  }
+  old_bytes = state->active_capacity * sizeof(*state->active);
+  new_bytes = capacity * sizeof(*state->active);
+  grown = ixs_arena_grow(state->arena, state->active, old_bytes, new_bytes,
+                         sizeof(void *));
+  if (!grown) {
+    b->oom = true;
+    return false;
+  }
+  state->active = grown;
+  state->active_capacity = capacity;
+  return true;
+}
+
+static size_t bounds_query_key_hash(bounds_query_key key) {
+  uint64_t mixed = key.owner ^ key.argument ^ ((uint64_t)key.kind << 56);
+  mixed ^= (uint64_t)((uintptr_t)key.expr >> 3);
+  mixed ^= mixed >> 33;
+  mixed *= UINT64_C(0xff51afd7ed558ccd);
+  mixed ^= mixed >> 33;
+  return (size_t)mixed;
+}
+
+static bounds_query_cache_entry *
+bounds_query_cache_find(ixs_bounds_query_state *state, bounds_query_key key,
+                        bool *found) {
+  size_t slot;
+  if (!state->cache_capacity) {
+    *found = false;
+    return NULL;
+  }
+  slot = bounds_query_key_hash(key) & (state->cache_capacity - 1u);
+  while (state->cache[slot].generation == state->generation) {
+    if (bounds_query_key_equal(state->cache[slot].key, key)) {
+      *found = true;
+      return &state->cache[slot];
+    }
+    slot = (slot + 1u) & (state->cache_capacity - 1u);
+  }
+  *found = false;
+  return &state->cache[slot];
+}
+
+static bool bounds_query_grow_cache(ixs_bounds *b,
+                                    ixs_bounds_query_state *state) {
+  bounds_query_cache_entry *grown;
+  size_t capacity;
+  size_t bytes;
+  size_t i;
+
+  capacity = state->cache_capacity ? state->cache_capacity * 2u
+                                   : BOUNDS_QUERY_CACHE_INIT_CAP;
+  if (capacity < state->cache_capacity ||
+      capacity > SIZE_MAX / sizeof(*state->cache)) {
+    b->oom = true;
+    return false;
+  }
+  bytes = capacity * sizeof(*state->cache);
+  grown = ixs_arena_alloc(state->arena, bytes, sizeof(void *));
+  if (!grown) {
+    b->oom = true;
+    return false;
+  }
+  memset(grown, 0, bytes);
+  for (i = 0; i < state->cache_capacity; i++) {
+    bounds_query_cache_entry entry = state->cache[i];
+    size_t slot;
+    if (entry.generation != state->generation)
+      continue;
+    slot = bounds_query_key_hash(entry.key) & (capacity - 1u);
+    while (grown[slot].generation == state->generation)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = entry;
+  }
+  state->cache = grown;
+  state->cache_capacity = capacity;
+  return true;
+}
+
+static bool bounds_query_prepare_cache_insert(ixs_bounds *b,
+                                              ixs_bounds_query_state *state) {
+  if (!state->cache_capacity ||
+      state->cache_count + 1u >
+          state->cache_capacity - state->cache_capacity / 4u)
+    return bounds_query_grow_cache(b, state);
+  return true;
+}
+
+static bounds_query_enter_result
+bounds_query_begin(ixs_bounds *b, bounds_query_kind kind, ixs_node *expr,
+                   uint64_t argument, unsigned depth, bounds_query_scope *scope,
+                   bounds_query_cache_entry **cached) {
+  ixs_bounds_query_state *state;
+  bounds_query_key key;
+  bounds_query_cache_entry *entry;
+  bool found;
+
+  memset(scope, 0, sizeof(*scope));
+  *cached = NULL;
+  if (!b || !expr || (expr->properties & IXS_NODE_PROPERTY_VALID) == 0)
+    return BOUNDS_QUERY_ENTER_INVALID;
+  if (!bounds_query_ensure(b))
+    return BOUNDS_QUERY_ENTER_OOM;
+  state = b->query_state;
+  if (state->nesting == 0)
+    bounds_query_reset(state);
+  key.kind = kind;
+  key.owner = b->query_owner;
+  key.expr = expr;
+  key.argument = argument;
+  entry = bounds_query_cache_find(state, key, &found);
+  if (found) {
+    /* STARTED entries remain incomplete until their LIFO scope finishes, so
+     * an incomplete current-generation entry is exactly an active cycle.
+     * This keeps the hot-path recursion guard expected O(1); the active vector
+     * exists only for finish-order assertions and diagnostics. */
+    if (!entry->complete) {
+      bounds_query_counter_increment(&state->cycle_blocks);
+      return BOUNDS_QUERY_ENTER_CYCLE;
+    }
+    if ((kind == BOUNDS_QUERY_STRIDE && entry->depth >= depth) ||
+        (kind != BOUNDS_QUERY_STRIDE &&
+         (entry->success || entry->depth >= depth))) {
+      bounds_query_counter_increment(&state->cache_hits);
+      *cached = entry;
+      return BOUNDS_QUERY_ENTER_CACHED;
+    }
+  }
+  if (state->nesting >= BOUNDS_QUERY_NESTING_LIMIT) {
+    bounds_query_note_limit(state);
+    return BOUNDS_QUERY_ENTER_LIMIT;
+  }
+  if (state->visits >= BOUNDS_QUERY_VISIT_LIMIT) {
+    bounds_query_note_limit(state);
+    return BOUNDS_QUERY_ENTER_LIMIT;
+  }
+  state->visits++;
+  if (kind == BOUNDS_QUERY_STRIDE)
+    state->stride_visits++;
+  if (!bounds_query_grow_active(b, state))
+    return BOUNDS_QUERY_ENTER_OOM;
+  if (!found) {
+    if (!bounds_query_prepare_cache_insert(b, state))
+      return BOUNDS_QUERY_ENTER_OOM;
+    entry = bounds_query_cache_find(state, key, &found);
+    assert(!found);
+    if (found)
+      return BOUNDS_QUERY_ENTER_INVALID;
+    state->cache_count++;
+  }
+  memset(entry, 0, sizeof(*entry));
+  entry->key = key;
+  entry->generation = state->generation;
+  state->active[state->active_count++] = key;
+  state->nesting++;
+  scope->state = state;
+  scope->key = key;
+  scope->active = true;
+  return BOUNDS_QUERY_ENTER_STARTED;
+}
+
+static bounds_query_cache_entry *
+bounds_query_finish(bounds_query_scope *scope, unsigned depth, bool success) {
+  ixs_bounds_query_state *state;
+  bounds_query_cache_entry *entry;
+  bool found;
+  if (!scope || !scope->active)
+    return NULL;
+  state = scope->state;
+  assert(state->active_count != 0 &&
+         bounds_query_key_equal(state->active[state->active_count - 1u],
+                                scope->key));
+  entry = bounds_query_cache_find(state, scope->key, &found);
+  assert(found && entry && !entry->complete);
+  entry->depth = depth;
+  entry->complete = true;
+  entry->success = success;
+  if (state->active_count != 0)
+    state->active_count--;
+  if (state->nesting != 0)
+    state->nesting--;
+  scope->active = false;
+  return entry;
+}
+
+#ifndef IXS_AMALGAMATED
+IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
+                                       size_t *stride_visits,
+                                       size_t *range_pw_case_visits,
+                                       size_t *range_pw_limit_blocks,
+                                       size_t *cache_hits, size_t *cycle_blocks,
+                                       size_t *limit_blocks,
+                                       size_t *active_count, size_t *nesting) {
+  const ixs_bounds_query_state *state = b ? b->query_state : NULL;
+  if (visits)
+    *visits = state ? state->visits : 0;
+  if (stride_visits)
+    *stride_visits = state ? state->stride_visits : 0;
+  if (range_pw_case_visits)
+    *range_pw_case_visits = state ? state->range_pw_case_visits : 0;
+  if (range_pw_limit_blocks)
+    *range_pw_limit_blocks = state ? state->range_pw_limit_blocks : 0;
+  if (cache_hits)
+    *cache_hits = state ? state->cache_hits : 0;
+  if (cycle_blocks)
+    *cycle_blocks = state ? state->cycle_blocks : 0;
+  if (limit_blocks)
+    *limit_blocks = state ? state->limit_blocks : 0;
+  if (active_count)
+    *active_count = state ? state->active_count : 0;
+  if (nesting)
+    *nesting = state ? state->nesting : 0;
+}
+
+IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr) {
+  bounds_query_scope outer;
+  bounds_query_scope reentered;
+  bounds_query_cache_entry *cached;
+  bounds_query_enter_result outer_status;
+  bounds_query_enter_result reentered_status;
+  bool held = false;
+
+  if (!b || !expr || !ixs_bounds_query_hold_begin(b, expr, &held))
+    return false;
+  outer_status =
+      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, 0, &outer, &cached);
+  if (outer_status != BOUNDS_QUERY_ENTER_STARTED)
+    goto cleanup;
+  reentered_status = bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, 0,
+                                        &reentered, &cached);
+  (void)bounds_query_finish(&outer, 0, false);
+  if (held)
+    ixs_bounds_query_hold_end(b);
+  return reentered_status == BOUNDS_QUERY_ENTER_CYCLE;
+
+cleanup:
+  if (held)
+    ixs_bounds_query_hold_end(b);
+  return false;
+}
+#endif
+
+static bool bounds_query_should_track(const ixs_bounds *b,
+                                      const ixs_node *expr) {
+  return bounds_query_is_tracking(b) && expr &&
+         (expr->properties & IXS_NODE_PROPERTY_VALID) != 0;
+}
+
+static bool bounds_query_take_range_visit(ixs_bounds *b,
+                                          const ixs_node *piecewise) {
+  ixs_bounds_query_state *state;
+  if (!bounds_query_is_tracking(b) || !b->query_state)
+    return true;
+  state = b->query_state;
+  if (ixs_node_contains_nested_piecewise(piecewise))
+    state->range_pw_budget_armed = true;
+  if (!state->range_pw_budget_armed)
+    return true;
+  if (state->range_pw_case_visits >= BOUNDS_RANGE_PW_CASE_VISIT_LIMIT) {
+    if (state->range_pw_limit_blocks != SIZE_MAX)
+      state->range_pw_limit_blocks++;
+    bounds_query_note_limit(state);
+    return false;
+  }
+  state->range_pw_case_visits++;
+  return true;
+}
 
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
@@ -312,6 +824,7 @@ static bool bounds_intervals_equal(ixs_interval a, ixs_interval b) {
 
 static void bounds_cache_clear(ixs_bounds *b) {
   bounds_empty_cache_invalidate(b);
+  bounds_query_refresh_owner(b);
   if (b && b->cache && b->cache_cap != BOUNDS_CACHE_DISABLED)
     memset(b->cache, 0, b->cache_cap * sizeof(*b->cache));
 }
@@ -358,7 +871,9 @@ static bool bounds_cacheable_expr(ixs_node *expr) {
 }
 
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
+  ixs_arena_init(&b->query_arena, IXS_ARENA_DEFAULT_SIZE);
   b->ctx = NULL;
+  b->store_ctx = NULL;
   b->scratch = scratch;
   b->nvars = 0;
   b->cap = BOUNDS_INIT_CAP;
@@ -394,6 +909,11 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
   b->oom = false;
+  b->query_state = NULL;
+  b->query_owner = 0;
+  b->query_tracking_depth = 0;
+  b->query_state_owner = false;
+  b->query_state_borrowed = false;
   b->semantic_changed = NULL;
   if (b->vars)
     bounds_cache_alloc(b);
@@ -405,11 +925,34 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
   if (!ixs_bounds_init(b, scratch))
     return false;
   b->ctx = ctx;
+  b->store_ctx = ctx;
   return true;
 }
 
-/* All bounds storage lives in the scratch arena; no per-object cleanup. */
-IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) { (void)b; }
+/* Context-owned query state lives in the context arena.  Contextless state
+ * lives in this bounds object's dedicated arena, so scratch restores cannot
+ * invalidate growable recursion and memo buffers. */
+IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
+  if (!b)
+    return;
+  assert(b->query_tracking_depth == 0);
+  assert(!b->query_state_borrowed ||
+         (b->query_state && b->query_state->nesting != 0));
+  assert(!b->query_state_owner ||
+         (b->query_state && b->query_state->arena == &b->query_arena &&
+          b->query_state->nesting == 0 && b->query_state->active_count == 0));
+  ixs_arena_destroy_transient(&b->query_arena);
+  b->query_state = NULL;
+  b->query_owner = 0;
+  b->query_tracking_depth = 0;
+  b->query_state_owner = false;
+  b->query_state_borrowed = false;
+}
+
+static void bounds_destroy_if_initialized(ixs_bounds *b, bool initialized) {
+  if (initialized)
+    ixs_bounds_destroy(b);
+}
 
 static bool bounds_fork_index_state(ixs_bounds *dst, const ixs_bounds *src) {
   if (src->nvars) {
@@ -480,17 +1023,27 @@ static bool bounds_fork_exact_state(ixs_bounds *dst, const ixs_bounds *src) {
   return true;
 }
 
+static void bounds_query_assign_fork_owner(ixs_bounds *dst) {
+  if (!dst->query_state) {
+    dst->query_owner = 0;
+    return;
+  }
+  dst->query_owner = bounds_query_new_owner(dst->query_state);
+}
+
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   if (!dst || !src || src->oom)
     return false;
+  ixs_arena_init(&dst->query_arena, IXS_ARENA_DEFAULT_SIZE);
   dst->ctx = src->ctx;
+  dst->store_ctx = src->store_ctx;
   dst->scratch = src->scratch;
   dst->nvars = src->nvars;
   dst->cap = src->nvars ? src->nvars : 1;
   dst->vars = ixs_arena_alloc(dst->scratch, dst->cap * sizeof(*dst->vars),
                               sizeof(void *));
   if (!dst->vars)
-    return false;
+    goto failed;
   if (src->nvars)
     memcpy(dst->vars, src->vars, src->nvars * sizeof(*src->vars));
   dst->var_index = NULL;
@@ -523,23 +1076,39 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
   dst->oom = false;
+  /* A fork allocated from the source scratch cannot outlive that scratch.
+   * While a source hold is active, the same lifetime rule also keeps the
+   * source-owned query arena alive, so borrowing its guard/budget is safe.
+   * Outside an active hold the fork starts with no state and lazily acquires
+   * context-owned state or its own dedicated arena. */
+  assert(dst->scratch == src->scratch);
+  assert(!bounds_query_is_tracking(src) ||
+         (src->query_state && src->query_state->nesting != 0));
+  dst->query_state = bounds_query_is_tracking(src) ? src->query_state : NULL;
+  dst->query_tracking_depth = 0;
+  dst->query_state_owner = false;
+  dst->query_state_borrowed = dst->query_state != NULL;
+  if (dst->query_state)
+    bounds_query_assign_fork_owner(dst);
+  else
+    dst->query_owner = 0;
   dst->semantic_changed = NULL;
   if (!bounds_fork_index_state(dst, src) || !bounds_fork_exact_state(dst, src))
-    return false;
+    goto failed;
   if (src->nexprs) {
     dst->exprs = ixs_arena_alloc(
         dst->scratch, dst->expr_cap * sizeof(*dst->exprs), sizeof(void *));
     if (!dst->exprs)
-      return false;
+      goto failed;
     memcpy(dst->exprs, src->exprs, src->nexprs * sizeof(*src->exprs));
     if (!src->expr_index || !src->expr_index_cap ||
         src->expr_index_cap > SIZE_MAX / sizeof(*dst->expr_index))
-      return false;
+      goto failed;
     dst->expr_index = ixs_arena_alloc(
         dst->scratch, dst->expr_index_cap * sizeof(*dst->expr_index),
         sizeof(void *));
     if (!dst->expr_index)
-      return false;
+      goto failed;
     memcpy(dst->expr_index, src->expr_index,
            src->expr_index_cap * sizeof(*src->expr_index));
   }
@@ -547,10 +1116,14 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
     dst->nonzero = ixs_arena_alloc(
         dst->scratch, dst->nonzero_cap * sizeof(*dst->nonzero), sizeof(void *));
     if (!dst->nonzero)
-      return false;
+      goto failed;
     memcpy(dst->nonzero, src->nonzero, src->nnonzero * sizeof(*src->nonzero));
   }
   return true;
+
+failed:
+  ixs_arena_destroy_transient(&dst->query_arena);
+  return false;
 }
 
 static size_t bounds_hash_ptr(const void *ptr) {
@@ -1624,17 +2197,7 @@ static void extract_bitfacts(ixs_bounds *b, ixs_node *a) {
 }
 
 static ixs_node *bounds_simplify_fact_free(ixs_ctx *ctx, ixs_node *expr) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
-  ixs_bounds empty;
-  ixs_node *result = NULL;
-  if (ixs_bounds_init_ctx(&empty, ctx, &ctx->scratch)) {
-    result = simp_simplify_bounds(ctx, expr, &empty);
-    if (empty.oom)
-      result = NULL;
-    ixs_bounds_destroy(&empty);
-  }
-  ixs_arena_restore(&ctx->scratch, mark);
-  return result;
+  return simp_simplify_bounds(ctx, expr, NULL);
 }
 
 static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
@@ -2971,7 +3534,7 @@ static bool bitfacts_scale_nonnegative_pow2(ixs_bounds *b, ixs_node *term,
   if (!int64_is_positive_pow2(coeff) || !ixs_node_is_integer_valued(term))
     return false;
 
-  iv = ixs_bounds_get(b, term);
+  iv = bounds_get_tracked(b, term);
   scale = (uint64_t)coeff;
   if (!interval_lower_at_least(&iv, 0, 1) || iv.hi_inf || iv.hi_q != 1 ||
       iv.hi_p < 0 || (uint64_t)iv.hi_p > (uint64_t)INT64_MAX / scale ||
@@ -3120,7 +3683,7 @@ static bool bitfacts_apply_floor_div(ixs_bounds *b, ixs_node *expr,
   if (!extract_pow2_dividend(expr->u.unary.arg, &dividend, &denom))
     return true;
 
-  iv = ixs_bounds_get(b, dividend);
+  iv = bounds_get_tracked(b, dividend);
   if (!interval_lower_at_least(&iv, 0, 1) ||
       !bounds_get_bitfacts_depth(b, dividend, &bits, depth - 1))
     return true;
@@ -3195,7 +3758,7 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
   if (!expr || depth == 0)
     return false;
 
-  iv = ixs_bounds_get(b, expr);
+  iv = bounds_get_tracked(b, expr);
   bitfacts_apply_interval(out, &iv);
 
   switch (expr->tag) {
@@ -3235,6 +3798,34 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
     return false;
   }
   return false;
+}
+
+static bool bounds_get_bitfacts_tracked(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached;
+  bounds_query_cache_entry *entry;
+  bounds_query_enter_result status;
+  bool success;
+  if (!b || !out)
+    return false;
+  if (!bounds_query_should_track(b, expr))
+    return bounds_get_bitfacts_depth(b, expr, out, BITFACTS_DEPTH_LIMIT);
+  status = bounds_query_begin(b, BOUNDS_QUERY_BITFACTS, expr, 0,
+                              BITFACTS_DEPTH_LIMIT, &scope, &cached);
+  if (status == BOUNDS_QUERY_ENTER_CACHED) {
+    *out = cached->result.bitfacts;
+    return cached->success;
+  }
+  if (status != BOUNDS_QUERY_ENTER_STARTED) {
+    bitfacts_unknown(out);
+    return false;
+  }
+  success = bounds_get_bitfacts_depth(b, expr, out, BITFACTS_DEPTH_LIMIT);
+  entry = bounds_query_finish(&scope, BITFACTS_DEPTH_LIMIT, success);
+  if (entry)
+    entry->result.bitfacts = *out;
+  return success;
 }
 
 IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
@@ -3289,18 +3880,23 @@ static inline bool bounds_mul_divisible(ixs_bounds *b, ixs_node *expr,
   return false;
 }
 
+static bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                       int64_t modulus);
+
 static inline bool bounds_add_divisible(ixs_bounds *b, ixs_node *expr,
                                         int64_t m) {
   int64_t cp, cq;
   uint32_t i;
   ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
-  if (cq != 1 || cp % m != 0)
+  if (cq != 1)
+    return bounds_add_known_divisible(b, expr, m);
+  if (cp % m != 0)
     return false;
   for (i = 0; i < expr->u.add.nterms; i++) {
     int64_t tp, tq, g, remain;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
     if (tq != 1)
-      return false;
+      return bounds_add_known_divisible(b, expr, m);
     g = ixs_gcd(tp, m);
     remain = m / g;
     if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, remain))
@@ -3316,6 +3912,12 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
   uint32_t i;
   if (!b || !expr || m <= 0)
     return false;
+
+  /* ADD has a cheap termwise proof and a bounded symbolic-congruence
+   * fallback.  A successful structural proof avoids entering the mutually
+   * recursive interval/bitfact domains at all. */
+  if (expr->tag == IXS_ADD && bounds_add_divisible(b, expr, m))
+    return true;
 
   if (int64_modulus_is_pow2(m)) {
     low_mask = (uint64_t)m - 1u;
@@ -3336,7 +3938,7 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
   }
 
   if (expr->tag == IXS_ADD) {
-    return bounds_add_divisible(b, expr, m);
+    return false;
   }
 
   if (expr->tag == IXS_MAX || expr->tag == IXS_MIN) {
@@ -3387,7 +3989,7 @@ static bool bounds_mul_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
 
   ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
   for (i = 0; i < expr->u.mul.nfactors; i++) {
-    if (expr->u.mul.factors[i].exp < 0 ||
+    if (expr->u.mul.factors[i].exp <= 0 ||
         !ixs_bounds_is_integer_with_divinfo(b, expr->u.mul.factors[i].base))
       return false;
   }
@@ -3407,7 +4009,7 @@ static bool bounds_add_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
 
   if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.add.coeff))
-    return false;
+    return bounds_add_known_divisible(b, expr, 1);
   for (i = 0; i < expr->u.add.nterms; i++) {
     int64_t cp;
     int64_t cq;
@@ -3423,7 +4025,7 @@ static bool bounds_add_is_integer_with_divinfo(ixs_bounds *b, ixs_node *expr) {
     g = ixs_gcd(cp, cq);
     denom = cq / g;
     if (!ixs_bounds_is_known_divisible(b, expr->u.add.terms[i].term, denom))
-      return false;
+      return bounds_add_known_divisible(b, expr, 1);
   }
   return true;
 }
@@ -3432,7 +4034,7 @@ static bool bounds_assoc_is_integer_with_divinfo(ixs_bounds *b,
                                                  ixs_node *expr) {
   uint32_t i;
 
-  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
+  if (expr->u.assoc.nargs < 2 || !expr->u.assoc.args)
     return false;
   for (i = 0; i < expr->u.assoc.nargs; i++) {
     if (!ixs_bounds_is_integer_with_divinfo(b, expr->u.assoc.args[i]))
@@ -3601,10 +4203,170 @@ static uint64_t bounds_pow_mod(uint64_t base, int32_t exponent,
 }
 
 #define CONGRUENCE_DEPTH_LIMIT 64u
+#define CONGRUENCE_ADD_TERM_LIMIT 32u
 
 static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
                                        uint64_t modulus, uint64_t *out,
                                        unsigned depth);
+static bool bounds_known_residue_tracked(ixs_bounds *b, ixs_node *expr,
+                                         uint64_t modulus, uint64_t *out,
+                                         unsigned depth);
+
+typedef struct {
+  ixs_node *representative;
+  uint64_t coefficient;
+} bounds_residue_group;
+
+static bool bounds_add_denominator_lcm(ixs_node *expr, uint64_t *out) {
+  uint64_t denominator = 1u;
+  uint32_t i;
+  int64_t p;
+  int64_t q;
+
+  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+  (void)p;
+  for (i = 0;; i++) {
+    uint64_t factor;
+    uint64_t divisor;
+    if (q <= 0)
+      return false;
+    divisor = (uint64_t)q;
+    factor = divisor / bounds_u64_gcd(denominator, divisor);
+    if (factor != 0 && denominator > (uint64_t)INT64_MAX / factor)
+      return false;
+    denominator *= factor;
+    if (i == expr->u.add.nterms)
+      break;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+  }
+  *out = denominator;
+  return true;
+}
+
+/* Mod(x, k) and x have the same residue modulo every positive divisor of k.
+ * Strip only literal, positive moduli and only across integer-valued operands;
+ * pointer identity then gives a cheap canonical congruence representative.
+ */
+static ixs_node *bounds_residue_representative(ixs_bounds *b, ixs_node *expr,
+                                               uint64_t modulus,
+                                               unsigned depth) {
+  while (depth != 0 && expr->tag == IXS_MOD &&
+         expr->u.binary.rhs->tag == IXS_INT && expr->u.binary.rhs->u.ival > 0 &&
+         (uint64_t)expr->u.binary.rhs->u.ival % modulus == 0 &&
+         ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) &&
+         ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs)) {
+    expr = expr->u.binary.lhs;
+    depth--;
+  }
+  return expr;
+}
+
+/* Compute the residue of scale*expr without constructing a normalized copy.
+ * Equal congruence representatives are grouped before recursive residue
+ * queries, so equal-and-opposite symbolic terms cancel even when neither term
+ * has an absolute known residue.  The fixed term cap bounds the quadratic
+ * pointer grouping pass.
+ */
+static bool bounds_known_scaled_add_residue(ixs_bounds *b, ixs_node *expr,
+                                            uint64_t scale, uint64_t modulus,
+                                            uint64_t *out, unsigned depth) {
+  bounds_residue_group groups[CONGRUENCE_ADD_TERM_LIMIT];
+  size_t ngroups = 0;
+  uint64_t result;
+  uint32_t i;
+  int64_t p;
+  int64_t q;
+
+  if (!b || !expr || expr->tag != IXS_ADD || !out || scale == 0 ||
+      modulus == 0 || depth == 0 ||
+      expr->u.add.nterms > CONGRUENCE_ADD_TERM_LIMIT)
+    return false;
+
+  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+  if (q <= 0 || scale % (uint64_t)q != 0)
+    return false;
+  result = bounds_mul_mod(bounds_normalize_residue(p, modulus),
+                          (scale / (uint64_t)q) % modulus, modulus);
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
+    ixs_node *representative;
+    uint64_t coefficient;
+    size_t group;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    if (q <= 0 || scale % (uint64_t)q != 0 ||
+        !ixs_bounds_is_integer_with_divinfo(b, term))
+      return false;
+    coefficient = bounds_mul_mod(bounds_normalize_residue(p, modulus),
+                                 (scale / (uint64_t)q) % modulus, modulus);
+    if (coefficient == 0)
+      continue;
+    representative =
+        bounds_residue_representative(b, term, modulus, depth - 1u);
+    for (group = 0; group < ngroups; group++) {
+      if (groups[group].representative == representative)
+        break;
+    }
+    if (group == ngroups) {
+      groups[ngroups].representative = representative;
+      groups[ngroups].coefficient = 0;
+      ngroups++;
+    }
+    groups[group].coefficient =
+        bounds_add_mod(groups[group].coefficient, coefficient, modulus);
+  }
+
+  for (i = 0; i < ngroups; i++) {
+    uint64_t coefficient = groups[i].coefficient;
+    uint64_t reduced;
+    uint64_t residue;
+    if (coefficient == 0)
+      continue;
+    reduced = modulus / bounds_u64_gcd(coefficient, modulus);
+    if (reduced == 1u)
+      continue;
+    if (!bounds_known_residue_depth(b, groups[i].representative, reduced,
+                                    &residue, depth - 1u))
+      return false;
+    result = bounds_add_mod(
+        result, bounds_mul_mod(coefficient, residue, modulus), modulus);
+  }
+  *out = result;
+  return true;
+}
+
+static bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                       int64_t modulus) {
+  uint64_t denominator;
+  uint64_t scaled_modulus;
+  uint64_t residue;
+  uint32_t i;
+  int64_t p;
+  int64_t q;
+  bool has_rational_coefficient;
+
+  if (!b || !expr || expr->tag != IXS_ADD || modulus <= 0)
+    return false;
+  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+  (void)p;
+  has_rational_coefficient = q != 1;
+  for (i = 0; !has_rational_coefficient && i < expr->u.add.nterms; i++) {
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    has_rational_coefficient = q != 1;
+  }
+  if (!has_rational_coefficient)
+    return false;
+  if (expr->u.add.nterms > CONGRUENCE_ADD_TERM_LIMIT)
+    return false;
+  if (!bounds_add_denominator_lcm(expr, &denominator) ||
+      (uint64_t)modulus > (uint64_t)INT64_MAX / denominator)
+    return false;
+  scaled_modulus = (uint64_t)modulus * denominator;
+  return bounds_known_scaled_add_residue(b, expr, denominator, scaled_modulus,
+                                         &residue, CONGRUENCE_DEPTH_LIMIT) &&
+         residue == 0;
+}
 
 static bool bounds_known_scaled_residue(ixs_bounds *b, ixs_node *expr,
                                         int64_t coefficient, uint64_t modulus,
@@ -3628,6 +4390,9 @@ static bool bounds_known_add_residue(ixs_bounds *b, ixs_node *expr,
   uint64_t result;
   uint32_t i;
   int64_t p, q;
+  if (expr->u.add.nterms <= CONGRUENCE_ADD_TERM_LIMIT &&
+      bounds_known_scaled_add_residue(b, expr, 1u, modulus, out, depth))
+    return true;
   ixs_node_get_rat(expr->u.add.coeff, &p, &q);
   if (q != 1)
     return false;
@@ -3717,6 +4482,197 @@ static bool bounds_known_extrema_residue(ixs_bounds *b, ixs_node *expr,
   return true;
 }
 
+static bool bounds_known_bitwise_residue(ixs_bounds *b, ixs_node *expr,
+                                         uint64_t modulus, uint64_t *out,
+                                         unsigned depth) {
+  uint64_t result;
+  uint64_t operand;
+  uint64_t mask;
+  uint32_t i;
+  if (!uint64_is_pow2(modulus) || expr->u.assoc.nargs == 0 ||
+      !expr->u.assoc.args ||
+      !bounds_known_residue_depth(b, expr->u.assoc.args[0], modulus, &result,
+                                  depth - 1u))
+    return false;
+  for (i = 1; i < expr->u.assoc.nargs; i++) {
+    if (!bounds_known_residue_depth(b, expr->u.assoc.args[i], modulus, &operand,
+                                    depth - 1u))
+      return false;
+    if (expr->tag == IXS_XOR)
+      result ^= operand;
+    else if (expr->tag == IXS_AND)
+      result &= operand;
+    else
+      result |= operand;
+  }
+  mask = modulus - 1u;
+  *out = result & mask;
+  return true;
+}
+
+static bool bounds_merge_residue(uint64_t branch, uint64_t *result,
+                                 bool *have_result) {
+  if (!*have_result) {
+    *result = branch;
+    *have_result = true;
+    return true;
+  }
+  return *result == branch;
+}
+
+static bool bounds_known_total_piecewise_residue(ixs_bounds *b, ixs_node *expr,
+                                                 uint64_t modulus,
+                                                 uint64_t *out,
+                                                 unsigned depth) {
+  uint64_t result = 0;
+  bool have_result = false;
+  uint32_t i;
+
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    uint64_t branch;
+    if (!bounds_known_residue_depth(b, expr->u.pw.cases[i].value, modulus,
+                                    &branch, depth - 1u) ||
+        !bounds_merge_residue(branch, &result, &have_result))
+      return false;
+  }
+  if (have_result)
+    *out = result;
+  return have_result;
+}
+
+static bool bounds_piecewise_residue_active(ixs_bounds *owner,
+                                            ixs_bounds *remaining,
+                                            ixs_node *cond, ixs_node *value,
+                                            uint64_t modulus, uint64_t *branch,
+                                            bool *reachable, unsigned depth) {
+  ixs_arena_mark mark = ixs_arena_save(owner->scratch);
+  ixs_bounds active;
+  struct ixs_node_impl assumption;
+  bool active_ready = false;
+  bool ok = false;
+
+  *reachable = false;
+  memset(&active, 0, sizeof(active));
+  if (!ixs_bounds_fork(&active, remaining)) {
+    owner->oom = true;
+    goto cleanup;
+  }
+  active_ready = true;
+  if (!ixs_bounds_add_assumption(
+          &active,
+          bounds_condition_assumption(&active, cond, true, &assumption))) {
+    if (active.oom)
+      owner->oom = true;
+    goto cleanup;
+  }
+  if (ixs_bounds_has_empty(&active)) {
+    ok = true;
+    goto cleanup;
+  }
+  *reachable = true;
+  if (ixs_bounds_check_defined(&active, value) != IXS_CHECK_TRUE ||
+      !bounds_known_residue_depth(&active, value, modulus, branch, depth - 1u))
+    goto cleanup;
+  ok = true;
+
+cleanup:
+  if (active.oom)
+    owner->oom = true;
+  if (active_ready)
+    ixs_bounds_destroy(&active);
+  ixs_arena_restore(owner->scratch, mark);
+  return ok && !owner->oom;
+}
+
+static bool bounds_known_reachable_piecewise_residue(ixs_bounds *b,
+                                                     ixs_node *expr,
+                                                     uint64_t modulus,
+                                                     uint64_t *out,
+                                                     unsigned depth) {
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  uint64_t result = 0;
+  bool have_result = false;
+  bool covered = false;
+  bool remaining_ready = false;
+  bool ok = false;
+  uint32_t i;
+
+  outer_mark = ixs_arena_save(b->scratch);
+  memset(&remaining, 0, sizeof(remaining));
+  if (!ixs_bounds_fork(&remaining, b)) {
+    b->oom = true;
+    goto cleanup;
+  }
+  remaining_ready = true;
+
+  for (i = 0; i < expr->u.pw.ncases; i++) {
+    ixs_node *cond = expr->u.pw.cases[i].cond;
+    ixs_node *value = expr->u.pw.cases[i].value;
+    ixs_check_result truth;
+    struct ixs_node_impl assumption;
+    uint64_t branch;
+    bool reachable;
+
+    if (!cond || !value || remaining.oom)
+      goto cleanup;
+    if (ixs_bounds_has_empty(&remaining)) {
+      covered = true;
+      break;
+    }
+    if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE)
+      goto cleanup;
+    truth = bounds_condition_truth(&remaining, cond);
+    if (truth == IXS_CHECK_FALSE)
+      continue;
+    if (!bounds_piecewise_residue_active(b, &remaining, cond, value, modulus,
+                                         &branch, &reachable, depth) ||
+        (reachable && !bounds_merge_residue(branch, &result, &have_result)))
+      goto cleanup;
+
+    if (truth == IXS_CHECK_TRUE) {
+      covered = true;
+      break;
+    }
+    if (!ixs_bounds_add_assumption(
+            &remaining, bounds_condition_assumption(&remaining, cond, false,
+                                                    &assumption))) {
+      if (remaining.oom)
+        b->oom = true;
+      goto cleanup;
+    }
+  }
+
+  if (!covered && ixs_bounds_has_empty(&remaining))
+    covered = true;
+  ok = covered && have_result;
+
+cleanup:
+  if (remaining.oom)
+    b->oom = true;
+  if (remaining_ready)
+    ixs_bounds_destroy(&remaining);
+  ixs_arena_restore(b->scratch, outer_mark);
+  if (ok)
+    *out = result;
+  return ok;
+}
+
+static bool bounds_known_piecewise_residue(ixs_bounds *b, ixs_node *expr,
+                                           uint64_t modulus, uint64_t *out,
+                                           unsigned depth) {
+  if (!b || !b->ctx || !expr || expr->tag != IXS_PIECEWISE || depth <= 1u ||
+      expr->u.pw.ncases == 0 || expr->u.pw.ncases > RANGE_PW_CASE_LIMIT ||
+      !expr->u.pw.cases)
+    return false;
+
+  /* Syntactic arms share one owner; reachable fallback forks branch facts. */
+  if (ixs_node_is_known_total(expr) &&
+      bounds_known_total_piecewise_residue(b, expr, modulus, out, depth))
+    return true;
+  return bounds_known_reachable_piecewise_residue(b, expr, modulus, out, depth);
+}
+
 static bool bounds_known_structural_residue(ixs_bounds *b, ixs_node *expr,
                                             uint64_t modulus, uint64_t *out,
                                             unsigned depth) {
@@ -3737,6 +4693,12 @@ static bool bounds_known_structural_residue(ixs_bounds *b, ixs_node *expr,
     return bounds_known_mul_residue(b, expr, modulus, out, depth);
   case IXS_MOD:
     return bounds_known_mod_residue(b, expr, modulus, out, depth);
+  case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    return bounds_known_bitwise_residue(b, expr, modulus, out, depth);
+  case IXS_PIECEWISE:
+    return bounds_known_piecewise_residue(b, expr, modulus, out, depth);
   case IXS_MAX:
   case IXS_MIN:
     return bounds_known_extrema_residue(b, expr, modulus, out, depth);
@@ -3745,21 +4707,36 @@ static bool bounds_known_structural_residue(ixs_bounds *b, ixs_node *expr,
   }
 }
 
-static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
-                                       uint64_t modulus, uint64_t *out,
-                                       unsigned depth) {
+static bool bounds_known_residue_depth_impl(ixs_bounds *b, ixs_node *expr,
+                                            uint64_t modulus, uint64_t *out,
+                                            unsigned depth) {
   ixs_interval iv;
   ixs_bitfacts bits;
   int64_t exact;
-  if (!b || !expr || !out || modulus == 0 || depth == 0 || b->oom ||
-      ixs_bounds_check_integer_valued(b, expr) != IXS_CHECK_TRUE)
+  bool structural_tried = false;
+  if (!b || !expr || !out || modulus == 0 || depth == 0 || b->oom)
+    return false;
+  if ((expr->tag == IXS_ADD || expr->tag == IXS_MOD ||
+       expr->tag == IXS_PIECEWISE) &&
+      ixs_node_is_integer_valued(expr) && ixs_node_is_known_total(expr)) {
+    structural_tried = true;
+    if (bounds_known_structural_residue(b, expr, modulus, out, depth))
+      return true;
+  }
+  if (ixs_bounds_check_integer_valued(b, expr) != IXS_CHECK_TRUE)
+    return false;
+  /* A residue is meaningful only for a defined expression.  Structural
+   * totality proves that cheaply; recursively launching the general
+   * definedness engine here would repeat its large memo allocation along
+   * mutual interval/bitfact/residue paths. */
+  if (!ixs_node_is_known_total(expr))
     return false;
   if (modulus == 1u) {
     *out = 0;
     return true;
   }
 
-  iv = ixs_bounds_get(b, expr);
+  iv = bounds_get_tracked(b, expr);
   if (b->oom)
     return false;
   if (ixs_interval_is_point_int(iv, &exact)) {
@@ -3767,7 +4744,7 @@ static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
     return true;
   }
 
-  if (uint64_is_pow2(modulus) && ixs_bounds_get_bitfacts(b, expr, &bits)) {
+  if (uint64_is_pow2(modulus) && bounds_get_bitfacts_tracked(b, expr, &bits)) {
     uint64_t mask = modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
       *out = bits.known_one & mask;
@@ -3776,7 +4753,47 @@ static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
   }
   if (b->oom)
     return false;
+  if (structural_tried)
+    return false;
   return bounds_known_structural_residue(b, expr, modulus, out, depth);
+}
+
+static bool bounds_known_residue_tracked(ixs_bounds *b, ixs_node *expr,
+                                         uint64_t modulus, uint64_t *out,
+                                         unsigned depth) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached;
+  bounds_query_cache_entry *entry;
+  bounds_query_enter_result status;
+  uint64_t residue = 0;
+  bool success;
+
+  if (!out)
+    return false;
+  if (!bounds_query_should_track(b, expr))
+    return bounds_known_residue_depth_impl(b, expr, modulus, out, depth);
+  status = bounds_query_begin(b, BOUNDS_QUERY_RESIDUE, expr, modulus, depth,
+                              &scope, &cached);
+  if (status == BOUNDS_QUERY_ENTER_CACHED) {
+    if (cached->success)
+      *out = cached->result.residue;
+    return cached->success;
+  }
+  if (status != BOUNDS_QUERY_ENTER_STARTED)
+    return false;
+  success = bounds_known_residue_depth_impl(b, expr, modulus, &residue, depth);
+  entry = bounds_query_finish(&scope, depth, success);
+  if (entry)
+    entry->result.residue = residue;
+  if (success)
+    *out = residue;
+  return success;
+}
+
+static bool bounds_known_residue_depth(ixs_bounds *b, ixs_node *expr,
+                                       uint64_t modulus, uint64_t *out,
+                                       unsigned depth) {
+  return bounds_known_residue_tracked(b, expr, modulus, out, depth);
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
@@ -3905,9 +4922,10 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
   span = value_span_mask((uint64_t)max_hi);
   possible = span;
   required = 0;
-  have_bits = ixs_bounds_get_bitfacts(b, expr->u.assoc.args[0], &result_bits);
+  have_bits =
+      bounds_get_bitfacts_tracked(b, expr->u.assoc.args[0], &result_bits);
   for (i = 1; have_bits && i < expr->u.assoc.nargs; i++) {
-    if (!ixs_bounds_get_bitfacts(b, expr->u.assoc.args[i], &arg_bits)) {
+    if (!bounds_get_bitfacts_tracked(b, expr->u.assoc.args[i], &arg_bits)) {
       have_bits = false;
       break;
     }
@@ -4053,34 +5071,76 @@ static bool bounds_symbol_mod_range(ixs_bounds *b, ixs_node *symbol,
   return true;
 }
 
+/* An expression-wide stride class maps through Mod to one class modulo the
+ * gcd of that stride and the positive literal divisor.  This gives the full
+ * sound residue envelope without first expanding a Piecewise interval. */
+static bool bounds_structural_mod_range(ixs_bounds *b, ixs_node *dividend,
+                                        int64_t modulus, ixs_interval *out) {
+  uint64_t stride;
+  uint64_t common;
+  uint64_t residue;
+  uint64_t upper;
+  if (modulus <= 0 ||
+      !bounds_known_stride(b, dividend, &stride, CONGRUENCE_DEPTH_LIMIT))
+    return false;
+  common = bounds_u64_gcd(stride, (uint64_t)modulus);
+  if (common <= 1u ||
+      !bounds_known_residue_tracked(b, dividend, common, &residue,
+                                    CONGRUENCE_DEPTH_LIMIT))
+    return false;
+  residue %= common;
+  upper = residue + (uint64_t)modulus - common;
+  if (upper > (uint64_t)INT64_MAX)
+    return false;
+  *out = ixs_interval_range((int64_t)residue, 1, (int64_t)upper, 1);
+  return true;
+}
+
+static ixs_interval bounds_get_positive_mod(ixs_bounds *b, ixs_node *lhs,
+                                            int64_t modulus) {
+  bool residue_tried = false;
+  ixs_interval pi;
+  int64_t exact_lhs;
+  uint64_t residue;
+  ixs_interval congruent;
+
+  if (b->has_modrem && ixs_node_contains_piecewise(lhs) &&
+      ixs_node_is_integer_valued(lhs) && ixs_node_is_known_total(lhs)) {
+    residue_tried = true;
+    if (bounds_structural_mod_range(b, lhs, modulus, &congruent))
+      return congruent;
+    if (bounds_known_residue_tracked(b, lhs, (uint64_t)modulus, &residue,
+                                     CONGRUENCE_DEPTH_LIMIT))
+      return ixs_interval_exact((int64_t)residue, 1);
+  }
+  pi = ixs_bounds_get(b, lhs);
+  if (interval_exact_int(&pi, &exact_lhs))
+    return ixs_interval_exact(
+        (int64_t)bounds_normalize_residue(exact_lhs, (uint64_t)modulus), 1);
+  if (b->has_modrem && !residue_tried &&
+      bounds_known_residue_tracked(b, lhs, (uint64_t)modulus, &residue,
+                                   CONGRUENCE_DEPTH_LIMIT))
+    return ixs_interval_exact((int64_t)residue, 1);
+  if (b->has_modrem &&
+      bounds_symbol_mod_range(b, lhs, &pi, modulus, &congruent))
+    return congruent;
+  if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
+      pi.hi_p < modulus)
+    return pi;
+  if (ixs_node_is_integer_valued(lhs)) {
+    int64_t divisor = mod_dividend_gcd(lhs, modulus);
+    return ixs_interval_range(0, 1, modulus - divisor, 1);
+  }
+  return ixs_interval_unknown();
+}
+
 static inline ixs_interval bounds_get_mod(ixs_bounds *b, ixs_node *expr) {
   ixs_node *m = expr->u.binary.rhs;
   ixs_interval mi = ixs_bounds_get(b, m);
   int64_t exact_m;
 
-  if (interval_exact_int(&mi, &exact_m) && exact_m > 0) {
-    ixs_interval pi = ixs_bounds_get(b, expr->u.binary.lhs);
-    int64_t exact_lhs;
-    uint64_t residue;
-    ixs_interval congruent;
-    if (interval_exact_int(&pi, &exact_lhs))
-      return ixs_interval_exact(
-          (int64_t)bounds_normalize_residue(exact_lhs, (uint64_t)exact_m), 1);
-    if (b->has_modrem &&
-        bounds_known_residue_depth(b, expr->u.binary.lhs, (uint64_t)exact_m,
-                                   &residue, CONGRUENCE_DEPTH_LIMIT))
-      return ixs_interval_exact((int64_t)residue, 1);
-    if (b->has_modrem && bounds_symbol_mod_range(b, expr->u.binary.lhs, &pi,
-                                                 exact_m, &congruent))
-      return congruent;
-    if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
-        pi.hi_p < exact_m)
-      return pi;
-    if (ixs_node_is_integer_valued(expr->u.binary.lhs)) {
-      int64_t g = mod_dividend_gcd(expr->u.binary.lhs, exact_m);
-      return ixs_interval_range(0, 1, exact_m - g, 1);
-    }
-  }
+  if (interval_exact_int(&mi, &exact_m) && exact_m > 0)
+    return bounds_get_positive_mod(b, expr->u.binary.lhs, exact_m);
 
   if (ixs_node_is_integer_valued(expr->u.binary.lhs) &&
       ixs_node_is_integer_valued(m) && interval_lower_at_least(&mi, 1, 1)) {
@@ -4275,6 +5335,7 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
   ixs_bounds active;
   struct ixs_node_impl assumption;
   ixs_interval branch;
+  bool active_ready = false;
   bool ok = false;
 
   memset(&active, 0, sizeof(active));
@@ -4282,6 +5343,7 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
     owner->oom = true;
     goto cleanup;
   }
+  active_ready = true;
   if (!ixs_bounds_add_assumption(
           &active,
           bounds_condition_assumption(&active, cond, true, &assumption))) {
@@ -4309,6 +5371,8 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
 cleanup:
   if (active.oom)
     owner->oom = true;
+  if (active_ready)
+    ixs_bounds_destroy(&active);
   ixs_arena_restore(owner->scratch, mark);
   return ok;
 }
@@ -4320,13 +5384,13 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
   bool have_result = false;
   bool covered = false;
   bool failed = false;
+  bool remaining_ready = false;
   uint32_t i;
 
   if (!b->ctx || b->range_pw_depth >= RANGE_PW_DEPTH_LIMIT ||
       expr->u.pw.ncases == 0 || expr->u.pw.ncases > RANGE_PW_CASE_LIMIT ||
       (expr->u.pw.ncases > 0 && !expr->u.pw.cases))
     return result;
-
   outer_mark = ixs_arena_save(b->scratch);
   b->range_pw_depth++;
   if (!ixs_bounds_fork(&remaining, b)) {
@@ -4334,6 +5398,7 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     failed = true;
     goto cleanup;
   }
+  remaining_ready = true;
 
   for (i = 0; i < expr->u.pw.ncases; i++) {
     ixs_node *cond = expr->u.pw.cases[i].cond;
@@ -4347,6 +5412,10 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     }
     if (ixs_bounds_has_empty(&remaining)) {
       covered = true;
+      break;
+    }
+    if (!bounds_query_take_range_visit(b, expr)) {
+      failed = true;
       break;
     }
     if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
@@ -4381,6 +5450,7 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     failed = true;
 
 cleanup:
+  bounds_destroy_if_initialized(&remaining, remaining_ready);
   ixs_arena_restore(b->scratch, outer_mark);
   b->range_pw_depth--;
   if (failed || !have_result)
@@ -4457,6 +5527,27 @@ IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr) {
   return iv;
 }
 
+static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached;
+  bounds_query_cache_entry *entry;
+  bounds_query_enter_result status;
+  ixs_interval result;
+
+  if (!bounds_query_should_track(b, expr))
+    return ixs_bounds_get(b, expr);
+  status =
+      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, 0, &scope, &cached);
+  if (status == BOUNDS_QUERY_ENTER_CACHED)
+    return cached->result.interval;
+  if (status != BOUNDS_QUERY_ENTER_STARTED)
+    return ixs_interval_unknown();
+  result = ixs_bounds_get(b, expr);
+  entry = bounds_query_finish(&scope, 0, result.valid);
+  if (entry)
+    entry->result.interval = result;
+  return result;
+}
 static bool bounds_exact_integer_difference(ixs_bounds *b, ixs_node *difference,
                                             int64_t *delta) {
   int64_t p;
@@ -4796,13 +5887,23 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
+  ixs_check_result result;
+  bool query_held = false;
+  if (!ixs_bounds_query_hold_begin(b, cmp, &query_held))
+    return IXS_CHECK_UNKNOWN;
   if (cmp && cmp->tag == IXS_CMP &&
       ((!ixs_node_is_known_total(cmp->u.binary.lhs) &&
         ixs_bounds_check_defined(b, cmp->u.binary.lhs) != IXS_CHECK_TRUE) ||
        (!ixs_node_is_known_total(cmp->u.binary.rhs) &&
-        ixs_bounds_check_defined(b, cmp->u.binary.rhs) != IXS_CHECK_TRUE)))
+        ixs_bounds_check_defined(b, cmp->u.binary.rhs) != IXS_CHECK_TRUE))) {
+    if (query_held)
+      ixs_bounds_query_hold_end(b);
     return IXS_CHECK_UNKNOWN;
-  return bounds_check_raw(b, cmp);
+  }
+  result = bounds_check_raw(b, cmp);
+  if (query_held)
+    ixs_bounds_query_hold_end(b);
+  return result;
 }
 
 /* Definedness is a proof query, not an evaluator.  Keep its traversal bounds
@@ -5291,24 +6392,30 @@ static bool defined_piecewise_active(defined_state *state,
   ixs_arena_mark mark = ixs_arena_save(remaining->scratch);
   ixs_bounds active;
   struct ixs_node_impl assumption;
+  bool active_ready = false;
+  bool ok = false;
   if (!ixs_bounds_fork(&active, remaining)) {
     state->oom = true;
-    ixs_arena_restore(remaining->scratch, mark);
-    return false;
+    goto cleanup;
   }
+  active_ready = true;
   if (!ixs_bounds_add_assumption(
           &active,
           defined_condition_assumption(state, cond, true, &assumption))) {
     state->oom = true;
-    ixs_arena_restore(remaining->scratch, mark);
-    return false;
+    goto cleanup;
   }
   if (!ixs_bounds_has_empty(&active)) {
     ixs_check_result result = defined_eval(state, &active, value, pw_depth);
     defined_partition_add(partitions, result);
   }
+  ok = !state->oom && !state->limited;
+
+cleanup:
+  if (active_ready)
+    ixs_bounds_destroy(&active);
   ixs_arena_restore(remaining->scratch, mark);
-  return !state->oom && !state->limited;
+  return ok;
 }
 
 static defined_pw_step defined_piecewise_case(defined_state *state,
@@ -5360,6 +6467,7 @@ static ixs_check_result defined_piecewise(defined_state *state, ixs_bounds *b,
   unsigned partitions = 0;
   uint32_t i;
   bool stopped = false;
+  bool remaining_ready = false;
 
   if (pw_depth > DEFINED_PW_DEPTH_LIMIT)
     return IXS_CHECK_UNKNOWN;
@@ -5375,6 +6483,7 @@ static ixs_check_result defined_piecewise(defined_state *state, ixs_bounds *b,
     ixs_arena_restore(b->scratch, outer_mark);
     return IXS_CHECK_UNKNOWN;
   }
+  remaining_ready = true;
 
   for (i = 0; i < expr->u.pw.ncases; i++) {
     defined_pw_step step;
@@ -5403,6 +6512,8 @@ static ixs_check_result defined_piecewise(defined_state *state, ixs_bounds *b,
   if (remaining.oom)
     state->oom = true;
 
+  if (remaining_ready)
+    ixs_bounds_destroy(&remaining);
   ixs_arena_restore(b->scratch, outer_mark);
   if (state->oom || state->limited)
     return IXS_CHECK_UNKNOWN;
@@ -5473,6 +6584,11 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
 
   if (!node || !ixs_ctx_owns_node(state->ctx, node) ||
       ixs_node_is_sentinel(node)) {
+    *has_direct = true;
+    return;
+  }
+  if (ixs_node_is_known_total(node)) {
+    *direct = IXS_CHECK_TRUE;
     *has_direct = true;
     return;
   }
@@ -5612,6 +6728,8 @@ static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
   if (!b || !b->ctx || !b->scratch || !expr || b->oom ||
       ixs_bounds_has_empty(b))
     return IXS_CHECK_UNKNOWN;
+  if (ixs_ctx_owns_node(b->ctx, expr) && ixs_node_is_known_total(expr))
+    return IXS_CHECK_TRUE;
   state.ctx = b->ctx;
   state.visited = 0;
   state.oom = false;
@@ -5735,7 +6853,17 @@ static ixs_bounds_build_status bounds_validate_predicate(ixs_bounds *b,
 
 static ixs_bounds_build_status bounds_ingest_predicate(ixs_bounds *b,
                                                        ixs_node *pred) {
-  return bounds_process_predicate(b, pred, true);
+  ixs_bounds_build_status status;
+  bool query_held = false;
+  /* One published predicate owns the complete proof scope used while its CMP
+   * leaves are ingested.  Synthetic branch assumptions are added below an
+   * already-active Piecewise scope and therefore do not enter here. */
+  if (!ixs_bounds_query_hold_begin(b, pred, &query_held))
+    return b && b->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_LIMIT;
+  status = bounds_process_predicate(b, pred, true);
+  if (query_held)
+    ixs_bounds_query_hold_end(b);
+  return status;
 }
 
 static ixs_bounds_build_status
@@ -5825,6 +6953,7 @@ static bool facts_bind(ixs_facts *facts, ixs_session_binding *binding,
     return false;
   *ctx = ixs_session_bind_impl(binding, facts->impl);
   facts->bounds.ctx = *ctx;
+  facts->bounds.store_ctx = *ctx;
   facts->bounds.scratch = &(*ctx)->scratch;
   return true;
 }
@@ -5839,6 +6968,18 @@ static void facts_poison(ixs_facts *facts) {
 }
 
 static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
+  /* ixs_bounds embeds a noncopyable arena.  Fact candidates are necessarily
+   * context-backed, have ended every local hold, and never allocate that local
+   * arena, making this assignment an explicit empty-arena move. */
+  assert(candidate->store_ctx != NULL);
+  assert(candidate->query_tracking_depth == 0);
+  assert(!candidate->query_state_owner && !candidate->query_state_borrowed);
+  assert(candidate->query_arena.current == NULL &&
+         candidate->query_arena.spare == NULL &&
+         candidate->query_arena.inline_chunk == NULL);
+  assert(facts->bounds.query_arena.current == NULL &&
+         facts->bounds.query_arena.spare == NULL &&
+         facts->bounds.query_arena.inline_chunk == NULL);
   candidate->cache = facts->bounds.cache;
   candidate->cache_cap = facts->bounds.cache_cap;
   bounds_cache_clear(candidate);
@@ -6503,9 +7644,14 @@ facts_process_predicate_worklist(ixs_ctx *ctx, ixs_bounds *candidate,
     ixs_node *predicate;
     ixs_bounds_build_status status;
     bool changed = false;
+    bool limited = false;
     candidate->semantic_changed = &changed;
-    predicate =
-        simp_simplify_bounds(ctx, predicates[predicate_index], candidate);
+    predicate = simp_simplify_bounds_status(ctx, predicates[predicate_index],
+                                            candidate, &limited);
+    if (limited) {
+      candidate->semantic_changed = NULL;
+      return IXS_BOUNDS_BUILD_LIMIT;
+    }
     if (!predicate || candidate->oom) {
       candidate->semantic_changed = NULL;
       return IXS_BOUNDS_BUILD_OOM;
@@ -6574,6 +7720,11 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
   facts->impl = binding.impl;
   facts->ctx = ctx;
   facts->epoch = binding.impl->epoch;
+  assert(bounds.store_ctx != NULL && bounds.query_tracking_depth == 0 &&
+         !bounds.query_state_owner && !bounds.query_state_borrowed &&
+         bounds.query_arena.current == NULL &&
+         bounds.query_arena.spare == NULL &&
+         bounds.query_arena.inline_chunk == NULL);
   facts->bounds = bounds;
   facts->usable = true;
   ixs_session_unbind(&binding);
@@ -6596,6 +7747,7 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_bounds_build_status status;
+  bool candidate_ready = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts)) {
@@ -6619,6 +7771,7 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
     ixs_session_unbind(&binding);
     return false;
   }
+  candidate_ready = true;
   status = bounds_validate_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
@@ -6626,6 +7779,8 @@ bool ixs_facts_assume_preds(ixs_facts *facts, ixs_node *const *predicates,
   if (status == IXS_BOUNDS_BUILD_OK) {
     facts_commit(facts, &candidate);
   } else {
+    if (candidate_ready)
+      ixs_bounds_destroy(&candidate);
     ixs_arena_restore(&ctx->scratch, mark);
     facts_poison(facts);
   }
@@ -6644,15 +7799,18 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_interval iv;
+  bool candidate_ready = false;
   bool ok = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts))
     goto cleanup;
   mark = ixs_arena_save(&ctx->scratch);
-  if (!facts_node_ok(ctx, expr) || !range_result_to_interval(range, &iv) ||
-      !ixs_bounds_fork(&candidate, &facts->bounds))
+  if (!facts_node_ok(ctx, expr) || !range_result_to_interval(range, &iv))
     goto failed;
+  if (!ixs_bounds_fork(&candidate, &facts->bounds))
+    goto failed;
+  candidate_ready = true;
   ixs_bounds_add_expr(&candidate, expr, iv);
   if (candidate.oom)
     goto failed;
@@ -6661,6 +7819,8 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
   goto cleanup;
 
 failed:
+  if (candidate_ready)
+    ixs_bounds_destroy(&candidate);
   ixs_arena_restore(&ctx->scratch, mark);
   facts_poison(facts);
 
@@ -6676,6 +7836,8 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_interval iv, shifted;
+  bool candidate_ready = false;
+  bool query_held = false;
   bool ok = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
@@ -6686,6 +7848,9 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
     goto failed;
   if (!ixs_bounds_fork(&candidate, &facts->bounds))
     goto failed;
+  candidate_ready = true;
+  if (!ixs_bounds_query_hold_begin(&candidate, base, &query_held))
+    goto failed;
   iv = ixs_bounds_get(&candidate, base);
   if (candidate.oom || !iv.valid || ixs_interval_is_empty(iv))
     goto failed;
@@ -6695,11 +7860,19 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
   ixs_bounds_add_expr(&candidate, derived, shifted);
   if (candidate.oom)
     goto failed;
+  if (query_held) {
+    ixs_bounds_query_hold_end(&candidate);
+    query_held = false;
+  }
   facts_commit(facts, &candidate);
   ok = true;
   goto cleanup;
 
 failed:
+  if (query_held)
+    ixs_bounds_query_hold_end(&candidate);
+  if (candidate_ready)
+    ixs_bounds_destroy(&candidate);
   ixs_arena_restore(&ctx->scratch, mark);
   facts_poison(facts);
 
@@ -6806,6 +7979,7 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
   ixs_ctx *ctx;
   ixs_arena_mark mark;
   ixs_bounds candidate;
+  bool candidate_ready = false;
   bool ok = false;
 
   if (!facts_bind(dst, &binding, &ctx))
@@ -6822,6 +7996,7 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
   }
   if (!ixs_bounds_fork(&candidate, &dst->bounds))
     goto failed;
+  candidate_ready = true;
   if (src->bounds.contradiction)
     bounds_mark_contradiction(&candidate);
   if (!bounds_transfer_substituted_exprs(&candidate, &src->bounds, ctx, nsubs,
@@ -6836,6 +8011,8 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
   goto cleanup;
 
 failed:
+  if (candidate_ready)
+    ixs_bounds_destroy(&candidate);
   ixs_arena_restore(&ctx->scratch, mark);
   facts_poison(dst);
 
@@ -6849,12 +8026,17 @@ static ixs_node *facts_simplify_error(ixs_ctx *ctx, const char *message) {
   return ctx->sentinel_error;
 }
 
+static ixs_node *facts_simplify_truncating_remainders(ixs_ctx *ctx,
+                                                      ixs_bounds *bounds,
+                                                      ixs_node *expr);
+
 ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_session_binding binding;
   ixs_arena_mark mark;
   ixs_ctx *ctx;
   ixs_node *result;
   bool old_oom;
+  bool query_held = false;
 
   if (!facts_bind(facts, &binding, &ctx))
     return NULL;
@@ -6879,10 +8061,17 @@ ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr) {
     result = expr;
     goto cleanup;
   }
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
+    result = facts->bounds.oom ? NULL : expr;
+    goto cleanup;
+  }
 
   mark = ixs_arena_save(&ctx->scratch);
   old_oom = facts->bounds.oom;
   result = simp_simplify_bounds(ctx, expr, &facts->bounds);
+  if (result && !ixs_node_is_sentinel(result) &&
+      ixs_node_contains_rounding(result) && ixs_node_contains_piecewise(result))
+    result = facts_simplify_truncating_remainders(ctx, &facts->bounds, result);
   if (!result || (!old_oom && facts->bounds.oom)) {
     result = NULL;
     bounds_cache_clear(&facts->bounds);
@@ -6891,6 +8080,8 @@ ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_arena_restore(&ctx->scratch, mark);
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -6907,6 +8098,7 @@ void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n) {
   ixs_session_binding binding;
   ixs_arena_mark mark;
   ixs_ctx *ctx;
+  bool ok;
   bool old_oom;
   size_t i;
 
@@ -6937,8 +8129,27 @@ void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n) {
 
   mark = ixs_arena_save(&ctx->scratch);
   old_oom = facts->bounds.oom;
-  if (!simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds) ||
-      (!old_oom && facts->bounds.oom)) {
+  ok = simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds);
+  for (i = 0; ok && i < n; i++) {
+    bool query_held = false;
+    if (!exprs[i] || ixs_node_is_sentinel(exprs[i]) ||
+        !ixs_node_contains_rounding(exprs[i]) ||
+        !ixs_node_contains_piecewise(exprs[i]))
+      continue;
+    if (!ixs_bounds_query_hold_begin(&facts->bounds, exprs[i], &query_held)) {
+      if (facts->bounds.oom) {
+        ok = false;
+        break;
+      }
+      continue;
+    }
+    exprs[i] =
+        facts_simplify_truncating_remainders(ctx, &facts->bounds, exprs[i]);
+    if (query_held)
+      ixs_bounds_query_hold_end(&facts->bounds);
+    ok = exprs[i] != NULL;
+  }
+  if (!ok || (!old_oom && facts->bounds.oom)) {
     facts_fill_batch(exprs, n, NULL);
     bounds_cache_clear(&facts->bounds);
   }
@@ -7240,8 +8451,8 @@ static bool bounds_mul_stride(ixs_bounds *bounds, ixs_node *expr,
 /* Stride inference is bounded by CONGRUENCE_DEPTH_LIMIT. Each ADD or MUL
  * level scans only its normalized immediate operands, so one proof is O(n)
  * in the visited expression rather than restarting integrality walks. */
-static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
-                                uint64_t *stride, unsigned depth) {
+static bool bounds_known_stride_impl(ixs_bounds *bounds, ixs_node *expr,
+                                     uint64_t *stride, unsigned depth) {
   if (!bounds || !expr || !stride || depth == 0 || bounds->oom)
     return false;
   switch (expr->tag) {
@@ -7273,6 +8484,22 @@ static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
     }
     *stride = 1;
     return true;
+  case IXS_PIECEWISE: {
+    uint64_t result = 0;
+    uint32_t i;
+    if (!ixs_node_is_integer_valued(expr) || !ixs_node_is_known_total(expr) ||
+        expr->u.pw.ncases == 0 || !expr->u.pw.cases)
+      return false;
+    for (i = 0; i < expr->u.pw.ncases; i++) {
+      uint64_t branch;
+      if (!bounds_known_stride(bounds, expr->u.pw.cases[i].value, &branch,
+                               depth - 1u))
+        return false;
+      result = bounds_u64_gcd(result, branch);
+    }
+    *stride = result;
+    return true;
+  }
   default:
     if (ixs_node_is_integer_valued(expr)) {
       *stride = 1;
@@ -7280,6 +8507,39 @@ static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
     }
     return false;
   }
+}
+
+/* Piecewise arms commonly share expression DAGs.  Memoize stride in the
+ * shared fact-domain query state so one outer visit budget covers the proof. */
+static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
+                                uint64_t *stride, unsigned depth) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached;
+  bounds_query_cache_entry *entry;
+  bounds_query_enter_result status;
+  uint64_t result = 0;
+  bool success;
+
+  if (!bounds || !expr || !stride || depth == 0 || bounds->oom)
+    return false;
+  if (!bounds_query_should_track(bounds, expr))
+    return bounds_known_stride_impl(bounds, expr, stride, depth);
+  status = bounds_query_begin(bounds, BOUNDS_QUERY_STRIDE, expr, 0, depth,
+                              &scope, &cached);
+  if (status == BOUNDS_QUERY_ENTER_CACHED) {
+    if (cached->success)
+      *stride = cached->result.stride;
+    return cached->success;
+  }
+  if (status != BOUNDS_QUERY_ENTER_STARTED)
+    return false;
+  success = bounds_known_stride_impl(bounds, expr, &result, depth);
+  entry = bounds_query_finish(&scope, depth, success);
+  if (entry)
+    entry->result.stride = result;
+  if (success)
+    *stride = result;
+  return success;
 }
 
 typedef struct {
@@ -8357,6 +9617,553 @@ static ixs_check_result equivalence_mod_shifts(equivalence_state *state,
   return equivalence_mod_shift_direction(state, rhs, lhs);
 }
 
+#define EQUIVALENCE_TRUNCATING_LIMIT 32u
+#define EQUIVALENCE_TRUNCATING_STACK_LIMIT 1024u
+
+typedef struct {
+  ixs_node *target;
+  ixs_node *replacement;
+} equivalence_truncating_substitution;
+
+static bool equivalence_remainder_domain_proven(equivalence_state *state,
+                                                ixs_node *node) {
+  bool proven = ixs_bounds_check_defined(state->bounds, node) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return proven;
+}
+
+static bool equivalence_remainder_integer_proven(equivalence_state *state,
+                                                 ixs_node *node) {
+  bool proven =
+      ixs_bounds_check_integer_valued(state->bounds, node) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return proven;
+}
+
+static bool equivalence_build_same_sign(equivalence_state *state,
+                                        ixs_node *numerator,
+                                        ixs_node *denominator,
+                                        ixs_node **same_sign) {
+  ixs_node *numerator_nonnegative =
+      simp_cmp(state->ctx, numerator, IXS_CMP_GE, state->ctx->node_zero);
+  ixs_node *numerator_nonpositive =
+      simp_cmp(state->ctx, numerator, IXS_CMP_LE, state->ctx->node_zero);
+  ixs_node *denominator_positive =
+      simp_cmp(state->ctx, denominator, IXS_CMP_GT, state->ctx->node_zero);
+  ixs_node *denominator_negative =
+      simp_cmp(state->ctx, denominator, IXS_CMP_LT, state->ctx->node_zero);
+  ixs_node *both_nonnegative;
+  ixs_node *both_nonpositive;
+  if (!numerator_nonnegative || !numerator_nonpositive ||
+      !denominator_positive || !denominator_negative) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(numerator_nonnegative) ||
+      ixs_node_is_sentinel(numerator_nonpositive) ||
+      ixs_node_is_sentinel(denominator_positive) ||
+      ixs_node_is_sentinel(denominator_negative))
+    return false;
+  both_nonnegative =
+      simp_and(state->ctx, numerator_nonnegative, denominator_positive);
+  both_nonpositive =
+      simp_and(state->ctx, numerator_nonpositive, denominator_negative);
+  if (!both_nonnegative || !both_nonpositive) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(both_nonnegative) ||
+      ixs_node_is_sentinel(both_nonpositive))
+    return false;
+  *same_sign = simp_or(state->ctx, both_nonnegative, both_nonpositive);
+  if (!*same_sign) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*same_sign);
+}
+
+static bool equivalence_split_affine_round(equivalence_state *state,
+                                           ixs_node *value, ixs_tag tag,
+                                           ixs_node **argument,
+                                           ixs_node **residual) {
+  ixs_node *round = NULL;
+  uint32_t i;
+  if (value->tag == tag) {
+    *argument = value->u.unary.arg;
+    *residual = state->ctx->node_zero;
+    return true;
+  }
+  if (value->tag != IXS_ADD)
+    return false;
+  for (i = 0; i < value->u.add.nterms; i++) {
+    ixs_node *term = value->u.add.terms[i].term;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(value->u.add.terms[i].coeff, &p, &q);
+    if (term->tag != tag || p != 1 || q != 1)
+      continue;
+    if (round)
+      return false;
+    round = term;
+  }
+  if (!round)
+    return false;
+  *argument = round->u.unary.arg;
+  *residual = simp_sub(state->ctx, value, round);
+  if (!*residual) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*residual);
+}
+
+static bool equivalence_match_truncating_round(equivalence_state *state,
+                                               ixs_node *node, unsigned depth,
+                                               ixs_node **quotient,
+                                               bool *matched) {
+  ixs_node *argument;
+  *matched = false;
+  if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL) {
+    argument = node->u.unary.arg;
+    if ((node->tag == IXS_FLOOR &&
+         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_GE)) ||
+        (node->tag == IXS_CEIL &&
+         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_LE)))
+      return true;
+    *quotient = argument;
+    *matched = true;
+    return true;
+  }
+  if (node->tag == IXS_PIECEWISE) {
+    ixs_node *floor_argument;
+    ixs_node *floor_residual;
+    ixs_node *ceil_argument;
+    ixs_node *ceil_residual;
+    ixs_node *same_sign;
+    ixs_node *numerator;
+    ixs_node *denominator;
+    ixs_check_result guard_equivalent;
+    if (node->u.pw.ncases != 2u ||
+        !ixs_node_is_known_true(node->u.pw.cases[1].cond))
+      return true;
+    if (!equivalence_split_affine_round(state, node->u.pw.cases[0].value,
+                                        IXS_FLOOR, &floor_argument,
+                                        &floor_residual) ||
+        !equivalence_split_affine_round(state, node->u.pw.cases[1].value,
+                                        IXS_CEIL, &ceil_argument,
+                                        &ceil_residual))
+      return !state->oom;
+    if (floor_argument != ceil_argument || floor_residual != ceil_residual ||
+        !equivalence_remainder_domain_proven(state, floor_residual) ||
+        !equivalence_remainder_integer_proven(state, floor_residual))
+      return true;
+    argument = simp_add(state->ctx, floor_argument, floor_residual);
+    if (!argument) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(argument))
+      return true;
+    if (!simp_decompose_exact_quotient(state->ctx, argument, &numerator,
+                                       &denominator) ||
+        !equivalence_build_same_sign(state, numerator, denominator, &same_sign))
+      return !state->oom;
+    if (!equivalence_remainder_domain_proven(state, node->u.pw.cases[0].cond) ||
+        !equivalence_remainder_domain_proven(state, same_sign))
+      return !state->oom;
+    guard_equivalent = equivalence_core(state, node->u.pw.cases[0].cond,
+                                        same_sign, depth + 1u);
+    if (guard_equivalent != IXS_CHECK_TRUE)
+      return true;
+    *quotient = argument;
+    *matched = true;
+  }
+  return true;
+}
+
+static bool equivalence_truncating_parts_proven(equivalence_state *state,
+                                                ixs_node *node,
+                                                ixs_node *quotient,
+                                                ixs_node *numerator,
+                                                ixs_node *denominator) {
+  return equivalence_remainder_domain_proven(state, node) &&
+         equivalence_remainder_domain_proven(state, quotient) &&
+         equivalence_remainder_domain_proven(state, numerator) &&
+         equivalence_remainder_domain_proven(state, denominator) &&
+         equivalence_remainder_integer_proven(state, numerator) &&
+         equivalence_remainder_integer_proven(state, denominator);
+}
+
+static bool equivalence_build_signed_remainder(equivalence_state *state,
+                                               ixs_node *numerator,
+                                               ixs_node *denominator,
+                                               ixs_node **remainder) {
+  ixs_node *numerator_nonnegative_cmp;
+  ixs_node *positive_modulus;
+  ixs_node *positive_modulo;
+  ixs_node *negative_numerator;
+  ixs_node *negative_modulo;
+  ixs_node *negative_remainder;
+  ixs_node *values[2];
+  ixs_node *conditions[2];
+  bool numerator_nonnegative =
+      equivalence_proves_zero_cmp(state, numerator, IXS_CMP_GE);
+  bool numerator_nonpositive;
+  bool denominator_positive;
+  bool denominator_negative;
+
+  numerator_nonpositive =
+      !numerator_nonnegative &&
+      equivalence_proves_zero_cmp(state, numerator, IXS_CMP_LE);
+  denominator_positive =
+      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT);
+  denominator_negative =
+      !denominator_positive &&
+      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_LT);
+  if (!denominator_positive && !denominator_negative)
+    return false;
+
+  positive_modulus =
+      denominator_positive ? denominator : simp_neg(state->ctx, denominator);
+  if (!positive_modulus) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(positive_modulus))
+    return false;
+
+  if (numerator_nonnegative) {
+    *remainder = simp_mod(state->ctx, numerator, positive_modulus);
+  } else {
+    negative_numerator = simp_neg(state->ctx, numerator);
+    if (!negative_numerator) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(negative_numerator))
+      return false;
+    negative_modulo =
+        simp_mod(state->ctx, negative_numerator, positive_modulus);
+    if (!negative_modulo) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(negative_modulo))
+      return false;
+    negative_remainder = simp_neg(state->ctx, negative_modulo);
+    if (!negative_remainder) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(negative_remainder))
+      return false;
+    if (numerator_nonpositive) {
+      *remainder = negative_remainder;
+    } else {
+      positive_modulo = simp_mod(state->ctx, numerator, positive_modulus);
+      numerator_nonnegative_cmp =
+          simp_cmp(state->ctx, numerator, IXS_CMP_GE, state->ctx->node_zero);
+      if (!positive_modulo || !numerator_nonnegative_cmp) {
+        state->oom = true;
+        return false;
+      }
+      if (ixs_node_is_sentinel(positive_modulo) ||
+          ixs_node_is_sentinel(numerator_nonnegative_cmp))
+        return false;
+      values[0] = positive_modulo;
+      values[1] = negative_remainder;
+      conditions[0] = numerator_nonnegative_cmp;
+      conditions[1] = state->ctx->node_true;
+      *remainder = simp_pw(state->ctx, 2u, values, conditions);
+    }
+  }
+  if (!*remainder) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(*remainder))
+    return false;
+  return equivalence_remainder_domain_proven(state, *remainder) &&
+         equivalence_remainder_integer_proven(state, *remainder);
+}
+
+static bool equivalence_build_truncating_replacement(equivalence_state *state,
+                                                     ixs_node *node,
+                                                     unsigned depth,
+                                                     ixs_node **replacement,
+                                                     bool *matched) {
+  ixs_node *quotient;
+  ixs_node *numerator;
+  ixs_node *denominator;
+  ixs_node *remainder;
+  ixs_node *difference;
+
+  *replacement = NULL;
+  if (!equivalence_match_truncating_round(state, node, depth, &quotient,
+                                          matched) ||
+      !*matched)
+    return !state->oom;
+  if (!simp_decompose_exact_quotient(state->ctx, quotient, &numerator,
+                                     &denominator) ||
+      !equivalence_truncating_parts_proven(state, node, quotient, numerator,
+                                           denominator) ||
+      !equivalence_build_signed_remainder(state, numerator, denominator,
+                                          &remainder)) {
+    *matched = false;
+    return !state->oom;
+  }
+  /* q = trunc(N/D), R = N - D*q, hence q = (N - R)/D. */
+  difference = simp_sub(state->ctx, numerator, remainder);
+  if (!difference) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(difference)) {
+    *matched = false;
+    return true;
+  }
+  *replacement = simp_div(state->ctx, difference, denominator);
+  if (!*replacement) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(*replacement) ||
+      !equivalence_remainder_domain_proven(state, *replacement)) {
+    *replacement = NULL;
+    *matched = false;
+    return !state->oom;
+  }
+  return true;
+}
+
+/* Candidate discovery walks only the query DAG. Piecewise children are opaque
+ * unless the complete two-arm truncation form matches. */
+static bool equivalence_collect_truncating_substitutions(
+    equivalence_state *state, ixs_node *root, unsigned depth,
+    bool piecewise_only, equivalence_truncating_substitution *substitutions,
+    size_t *nsubs) {
+  ixs_node *stack[EQUIVALENCE_TRUNCATING_STACK_LIMIT];
+  size_t nstack = 1u;
+  stack[0] = root;
+  while (nstack > 0) {
+    ixs_node *node = stack[--nstack];
+    ixs_node *replacement;
+    uint32_t nchildren;
+    uint32_t i;
+    bool matched;
+    size_t existing;
+    if (!ixs_node_contains_rounding(node))
+      continue;
+    if (state->visited >= EQUIVALENCE_VISIT_LIMIT) {
+      state->limited = true;
+      return false;
+    }
+    state->visited++;
+    if ((node->tag == IXS_PIECEWISE ||
+         (!piecewise_only &&
+          (node->tag == IXS_FLOOR || node->tag == IXS_CEIL))) &&
+        !equivalence_build_truncating_replacement(state, node, depth,
+                                                  &replacement, &matched))
+      return false;
+    else if (node->tag == IXS_PIECEWISE ||
+             (!piecewise_only &&
+              (node->tag == IXS_FLOOR || node->tag == IXS_CEIL))) {
+      if (matched) {
+        for (existing = 0; existing < *nsubs; existing++)
+          if (substitutions[existing].target == node)
+            break;
+        if (existing == *nsubs) {
+          if (*nsubs >= EQUIVALENCE_TRUNCATING_LIMIT) {
+            state->limited = true;
+            return false;
+          }
+          substitutions[*nsubs].target = node;
+          substitutions[*nsubs].replacement = replacement;
+          (*nsubs)++;
+        }
+        continue;
+      }
+      if (node->tag == IXS_PIECEWISE)
+        continue;
+    }
+    if (!defined_child_count(node, &nchildren))
+      return false;
+    if ((size_t)nchildren > EQUIVALENCE_TRUNCATING_STACK_LIMIT - nstack) {
+      state->limited = true;
+      return false;
+    }
+    for (i = 0; i < nchildren; i++)
+      stack[nstack++] = defined_child_at(node, i);
+  }
+  return true;
+}
+
+static bool equivalence_apply_truncating_substitutions(
+    equivalence_state *state, ixs_node *root,
+    const equivalence_truncating_substitution *substitutions, size_t nsubs,
+    ixs_node **result) {
+  ixs_node *targets[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_node *replacements[EQUIVALENCE_TRUNCATING_LIMIT];
+  size_t i;
+  if (nsubs == 0) {
+    *result = root;
+    return true;
+  }
+  for (i = 0; i < nsubs; i++) {
+    targets[i] = substitutions[i].target;
+    replacements[i] = substitutions[i].replacement;
+  }
+  *result =
+      simp_subs_multi(state->ctx, root, (uint32_t)nsubs, targets, replacements);
+  if (!*result) {
+    state->oom = true;
+    return false;
+  }
+  return !ixs_node_is_sentinel(*result);
+}
+
+/* Semantic projection is private to proof queries. It does not change the
+ * caller's expression or expose truncation relations as an API. Modular
+ * arithmetic remains in the generic constant-delta proof. */
+static bool equivalence_project_truncating_rounds(
+    equivalence_state *state, ixs_node *lhs, ixs_node *rhs, unsigned depth,
+    bool piecewise_only, ixs_node **projected_lhs, ixs_node **projected_rhs) {
+  equivalence_truncating_substitution
+      substitutions[EQUIVALENCE_TRUNCATING_LIMIT];
+  ixs_node *nodes[2] = {lhs, rhs};
+  size_t nsubstitutions = 0;
+
+  *projected_lhs = lhs;
+  *projected_rhs = rhs;
+  if (!ixs_node_contains_rounding(lhs) && !ixs_node_contains_rounding(rhs))
+    return false;
+  if (!equivalence_collect_truncating_substitutions(
+          state, lhs, depth, piecewise_only, substitutions, &nsubstitutions) ||
+      !equivalence_collect_truncating_substitutions(
+          state, rhs, depth, piecewise_only, substitutions, &nsubstitutions) ||
+      nsubstitutions == 0)
+    return false;
+  if (!equivalence_apply_truncating_substitutions(state, lhs, substitutions,
+                                                  nsubstitutions, &nodes[0]) ||
+      !equivalence_apply_truncating_substitutions(state, rhs, substitutions,
+                                                  nsubstitutions, &nodes[1]))
+    return false;
+  *projected_lhs = nodes[0];
+  *projected_rhs = nodes[1];
+  return true;
+}
+
+#define FACT_TRUNCATING_COST_VISIT_LIMIT 4096u
+#define FACT_TRUNCATING_COST_STACK_LIMIT 4096u
+#define FACT_TRUNCATING_COST_MEMO_CAP 8192u
+
+typedef struct {
+  size_t nodes;
+  size_t rounds;
+} facts_truncating_cost;
+
+static bool facts_truncating_cost_insert(ixs_node **memo, ixs_node *node,
+                                         bool *inserted) {
+  size_t index = (size_t)node->hash & (FACT_TRUNCATING_COST_MEMO_CAP - 1u);
+  size_t probes;
+  for (probes = 0; probes < FACT_TRUNCATING_COST_MEMO_CAP; probes++) {
+    if (!memo[index]) {
+      memo[index] = node;
+      *inserted = true;
+      return true;
+    }
+    if (memo[index] == node) {
+      *inserted = false;
+      return true;
+    }
+    index = (index + 1u) & (FACT_TRUNCATING_COST_MEMO_CAP - 1u);
+  }
+  return false;
+}
+
+static bool facts_measure_truncating_cost(ixs_ctx *ctx, ixs_node *root,
+                                          facts_truncating_cost *cost) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_node **stack = ixs_arena_alloc(
+      &ctx->scratch, FACT_TRUNCATING_COST_STACK_LIMIT * sizeof(*stack),
+      sizeof(void *));
+  ixs_node **memo = ixs_arena_alloc(
+      &ctx->scratch, FACT_TRUNCATING_COST_MEMO_CAP * sizeof(*memo),
+      sizeof(void *));
+  size_t nstack = 0;
+  bool ok = false;
+
+  cost->nodes = 0;
+  cost->rounds = 0;
+  if (!root || !stack || !memo)
+    goto cleanup;
+  memset(memo, 0, FACT_TRUNCATING_COST_MEMO_CAP * sizeof(*memo));
+  stack[nstack++] = root;
+  while (nstack > 0) {
+    ixs_node *node = stack[--nstack];
+    uint32_t nchildren;
+    uint32_t i;
+    bool inserted;
+    if (!facts_truncating_cost_insert(memo, node, &inserted))
+      goto cleanup;
+    if (!inserted)
+      continue;
+    if (cost->nodes >= FACT_TRUNCATING_COST_VISIT_LIMIT ||
+        !defined_child_count(node, &nchildren) ||
+        (size_t)nchildren > FACT_TRUNCATING_COST_STACK_LIMIT - nstack)
+      goto cleanup;
+    cost->nodes++;
+    if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL)
+      cost->rounds++;
+    for (i = 0; i < nchildren; i++)
+      stack[nstack++] = defined_child_at(node, i);
+  }
+  ok = true;
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  return ok;
+}
+
+static ixs_node *facts_simplify_truncating_remainders(ixs_ctx *ctx,
+                                                      ixs_bounds *bounds,
+                                                      ixs_node *expr) {
+  equivalence_state state;
+  facts_truncating_cost original_cost;
+  facts_truncating_cost candidate_cost;
+  ixs_node *projected;
+  ixs_node *unused;
+  ixs_node *candidate;
+
+  state.ctx = ctx;
+  state.bounds = bounds;
+  state.visited = 0;
+  state.limited = false;
+  state.oom = false;
+  if (!equivalence_project_truncating_rounds(&state, expr, ctx->node_zero, 0,
+                                             true, &projected, &unused))
+    return state.oom ? NULL : expr;
+  if (state.oom)
+    return NULL;
+  if (state.limited || projected == expr)
+    return expr;
+  candidate = simp_simplify_bounds(ctx, projected, bounds);
+  if (!candidate)
+    return NULL;
+  if (ixs_node_is_sentinel(candidate) || candidate == expr)
+    return expr;
+  if (!facts_measure_truncating_cost(ctx, expr, &original_cost) ||
+      !facts_measure_truncating_cost(ctx, candidate, &candidate_cost))
+    return expr;
+  if (candidate_cost.rounds >= original_cost.rounds ||
+      candidate_cost.nodes >= original_cost.nodes)
+    return expr;
+  return candidate;
+}
+
 static bool equivalence_extract_mod_cmp(ixs_node *cmp,
                                         equivalence_mod_cmp *out) {
   ixs_node *residual;
@@ -8578,6 +10385,8 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
 static ixs_check_result equivalence_core(equivalence_state *state,
                                          ixs_node *lhs, ixs_node *rhs,
                                          unsigned depth) {
+  ixs_node *projected_lhs;
+  ixs_node *projected_rhs;
   ixs_node *simplified_lhs;
   ixs_node *simplified_rhs;
   ixs_check_result left_truth;
@@ -8621,6 +10430,20 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
+  if (equivalence_project_truncating_rounds(state, lhs, rhs, depth, false,
+                                            &projected_lhs, &projected_rhs)) {
+    if (projected_lhs == projected_rhs)
+      return IXS_CHECK_TRUE;
+    result = equivalence_difference(state, projected_lhs, projected_rhs);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+    result = equivalence_mod_shifts(state, projected_lhs, projected_rhs);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+    result = equivalence_expanded(state, projected_lhs, projected_rhs, depth);
+    if (result != IXS_CHECK_UNKNOWN)
+      return result;
+  }
   return equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
 }
 
@@ -8773,6 +10596,461 @@ restore:
   ixs_arena_restore(&ctx->scratch, mark);
   if (oom)
     *oom = query_oom;
+  return result;
+}
+
+#define MODULO_POW2_DEPTH_LIMIT 64u
+#define MODULO_POW2_VISIT_LIMIT 4096u
+#define MODULO_POW2_CHILD_LIMIT 1024u
+#define MODULO_POW2_MEMO_SIZE 256u
+#define MODULO_POW2_MEMO_MASK (MODULO_POW2_MEMO_SIZE - 1u)
+
+typedef struct {
+  ixs_node *key;
+  ixs_node *value;
+} modulo_pow2_memo_slot;
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  unsigned bits;
+  size_t visited;
+  bool limited;
+  bool oom;
+  modulo_pow2_memo_slot memo[MODULO_POW2_MEMO_SIZE];
+} modulo_pow2_state;
+
+static bool modulo_pow2_stopped(const modulo_pow2_state *state) {
+  return state->limited || state->oom || state->bounds->oom;
+}
+
+static bool modulo_pow2_domain_proven(modulo_pow2_state *state,
+                                      ixs_node *expr) {
+  bool result =
+      ixs_bounds_check_defined(state->bounds, expr) == IXS_CHECK_TRUE &&
+      ixs_bounds_check_integer_valued(state->bounds, expr) == IXS_CHECK_TRUE;
+  if (state->bounds->oom)
+    state->oom = true;
+  return result;
+}
+
+static size_t modulo_pow2_memo_index(ixs_node *node) {
+  uint32_t hash = node->hash;
+  return (size_t)((hash ^ (hash >> 8)) & MODULO_POW2_MEMO_MASK);
+}
+
+static ixs_node *modulo_pow2_normalize(modulo_pow2_state *state, ixs_node *expr,
+                                       unsigned depth);
+
+static bool modulo_pow2_integer_node(ixs_node *node) {
+  int64_t numerator;
+  int64_t denominator;
+  if (!node || (node->tag != IXS_INT && node->tag != IXS_RAT))
+    return false;
+  ixs_node_get_rat(node, &numerator, &denominator);
+  (void)numerator;
+  return denominator == 1;
+}
+
+static bool modulo_pow2_literal_divisible(ixs_node *node, unsigned bits) {
+  uint64_t mask;
+  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
+    return false;
+  if (bits == 0)
+    return true;
+  if (bits >= 63u)
+    return false;
+  mask = (UINT64_C(1) << bits) - UINT64_C(1);
+  return ((uint64_t)node->u.ival & mask) == 0;
+}
+
+static ixs_node *modulo_pow2_rebuild_terms(modulo_pow2_state *state,
+                                           ixs_node *expr,
+                                           ixs_node *const *targets,
+                                           ixs_node *const *replacements,
+                                           uint32_t count, bool changed) {
+  ixs_node *result;
+  if (!changed)
+    return expr;
+  /* Every target is an immediate child, so substitution cannot enter an
+   * opaque subtree.  Direct-match lookup makes this O(count^2), bounded by
+   * MODULO_POW2_CHILD_LIMIT independently of context size. */
+  result = simp_subs_multi(state->ctx, expr, count, targets, replacements);
+  if (!result)
+    state->oom = true;
+  if (result && ixs_node_is_sentinel(result))
+    return NULL;
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_add(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **targets;
+  ixs_node **replacements;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.add.nterms;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_integer_node(expr->u.add.coeff) ||
+      !modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (!modulo_pow2_integer_node(expr->u.add.terms[i].coeff) ||
+        !modulo_pow2_domain_proven(state, expr->u.add.terms[i].term))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  targets = ixs_arena_alloc(&state->ctx->scratch,
+                            (size_t)count * sizeof(*targets), sizeof(void *));
+  replacements =
+      ixs_arena_alloc(&state->ctx->scratch,
+                      (size_t)count * sizeof(*replacements), sizeof(void *));
+  if ((!targets || !replacements) && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    targets[i] = expr->u.add.terms[i].term;
+    replacements[i] = modulo_pow2_normalize(state, targets[i], depth + 1u);
+    if (!replacements[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || replacements[i] != targets[i];
+  }
+  result = modulo_pow2_rebuild_terms(state, expr, targets, replacements, count,
+                                     changed);
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_mul(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **targets;
+  ixs_node **replacements;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.mul.nfactors;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_integer_node(expr->u.mul.coeff) ||
+      !modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (expr->u.mul.factors[i].exp <= 0 ||
+        !modulo_pow2_domain_proven(state, expr->u.mul.factors[i].base))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  targets = ixs_arena_alloc(&state->ctx->scratch,
+                            (size_t)count * sizeof(*targets), sizeof(void *));
+  replacements =
+      ixs_arena_alloc(&state->ctx->scratch,
+                      (size_t)count * sizeof(*replacements), sizeof(void *));
+  if ((!targets || !replacements) && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    targets[i] = expr->u.mul.factors[i].base;
+    replacements[i] = modulo_pow2_normalize(state, targets[i], depth + 1u);
+    if (!replacements[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || replacements[i] != targets[i];
+  }
+  result = modulo_pow2_rebuild_terms(state, expr, targets, replacements, count,
+                                     changed);
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_node *modulo_pow2_normalize_assoc(modulo_pow2_state *state,
+                                             ixs_node *expr, unsigned depth) {
+  ixs_arena_mark mark;
+  ixs_node **args;
+  ixs_node *result = expr;
+  uint32_t count = expr->u.assoc.nargs;
+  uint32_t i;
+  bool changed = false;
+
+  if (!modulo_pow2_domain_proven(state, expr))
+    return expr;
+  if (count > MODULO_POW2_CHILD_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  for (i = 0; i < count; i++) {
+    if (!modulo_pow2_domain_proven(state, expr->u.assoc.args[i]))
+      return expr;
+  }
+
+  mark = ixs_arena_save(&state->ctx->scratch);
+  args = ixs_arena_alloc(&state->ctx->scratch, (size_t)count * sizeof(*args),
+                         sizeof(void *));
+  if (!args && count != 0) {
+    state->oom = true;
+    result = NULL;
+    goto restore;
+  }
+  for (i = 0; i < count; i++) {
+    args[i] = modulo_pow2_normalize(state, expr->u.assoc.args[i], depth + 1u);
+    if (!args[i]) {
+      result = NULL;
+      goto restore;
+    }
+    changed = changed || args[i] != expr->u.assoc.args[i];
+  }
+  if (!changed)
+    goto restore;
+  if (expr->tag == IXS_XOR)
+    result = simp_xor_many(state->ctx, count, args);
+  else if (expr->tag == IXS_AND)
+    result = simp_and_many(state->ctx, count, args);
+  else
+    result = simp_or_many(state->ctx, count, args);
+  if (!result)
+    state->oom = true;
+  if (result && ixs_node_is_sentinel(result))
+    result = NULL;
+
+restore:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+/* Mod(a, m) and a have the same low bits only when the requested 2^bits
+ * divides the positive literal m.  Otherwise the complete Mod stays opaque;
+ * congruence of its dividend alone is insufficient, for example modulo 4
+ * through Mod(a, 6). */
+static ixs_node *modulo_pow2_normalize_mod(modulo_pow2_state *state,
+                                           ixs_node *expr, unsigned depth) {
+  ixs_node *dividend = expr->u.binary.lhs;
+  if (!modulo_pow2_literal_divisible(expr->u.binary.rhs, state->bits) ||
+      !modulo_pow2_domain_proven(state, expr) ||
+      !modulo_pow2_domain_proven(state, dividend))
+    return expr;
+  return modulo_pow2_normalize(state, dividend, depth + 1u);
+}
+
+/* Query-local normalization in Z/(2^bits). Recursion and total visits are
+ * fixed independently of context size. Unsupported operations stay opaque. */
+static ixs_node *modulo_pow2_normalize(modulo_pow2_state *state, ixs_node *expr,
+                                       unsigned depth) {
+  modulo_pow2_memo_slot *slot;
+  size_t index;
+  ixs_node *result;
+
+  if (!expr || modulo_pow2_stopped(state))
+    return NULL;
+  index = modulo_pow2_memo_index(expr);
+  slot = &state->memo[index];
+  if (slot->key == expr)
+    return slot->value;
+  if (depth >= MODULO_POW2_DEPTH_LIMIT ||
+      state->visited >= MODULO_POW2_VISIT_LIMIT) {
+    state->limited = true;
+    return NULL;
+  }
+  state->visited++;
+
+  switch (expr->tag) {
+  case IXS_ADD:
+    result = modulo_pow2_normalize_add(state, expr, depth);
+    break;
+  case IXS_MUL:
+    result = modulo_pow2_normalize_mul(state, expr, depth);
+    break;
+  case IXS_MOD:
+    result = modulo_pow2_normalize_mod(state, expr, depth);
+    break;
+  case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    result = modulo_pow2_normalize_assoc(state, expr, depth);
+    break;
+  default:
+    result = expr;
+    break;
+  }
+  if (result) {
+    slot->key = expr;
+    slot->value = result;
+  }
+  return result;
+}
+
+static int64_t modulo_pow2_signed_modulus(unsigned bits) {
+  if (bits == 63u)
+    return INT64_MIN;
+  return (int64_t)(UINT64_C(1) << bits);
+}
+
+static ixs_check_result modulo_pow2_point_difference(modulo_pow2_state *state,
+                                                     ixs_node *lhs,
+                                                     ixs_node *rhs) {
+  ixs_integer_range_result lhs_range;
+  ixs_integer_range_result rhs_range;
+  uint64_t mask;
+  uint64_t difference;
+  if (!ixs_bounds_get_integer_range(state->bounds, lhs, &lhs_range) ||
+      !ixs_bounds_get_integer_range(state->bounds, rhs, &rhs_range) ||
+      !lhs_range.has_lower || !lhs_range.has_upper ||
+      lhs_range.lower != lhs_range.upper || !rhs_range.has_lower ||
+      !rhs_range.has_upper || rhs_range.lower != rhs_range.upper)
+    return IXS_CHECK_UNKNOWN;
+  mask = (UINT64_C(1) << state->bits) - UINT64_C(1);
+  difference = (uint64_t)lhs_range.lower - (uint64_t)rhs_range.lower;
+  return (difference & mask) == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+}
+
+static ixs_check_result modulo_pow2_difference_impl(modulo_pow2_state *state,
+                                                    ixs_node *lhs,
+                                                    ixs_node *rhs) {
+  ixs_node *difference;
+  ixs_check_result point = modulo_pow2_point_difference(state, lhs, rhs);
+  if (point != IXS_CHECK_UNKNOWN)
+    return point;
+  difference = simp_sub(state->ctx, lhs, rhs);
+  if (!difference) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(difference))
+    return IXS_CHECK_UNKNOWN;
+  difference = simp_simplify_bounds(state->ctx, difference, state->bounds);
+  if (!difference) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(difference) ||
+      ixs_bounds_check_defined(state->bounds, difference) != IXS_CHECK_TRUE)
+    return IXS_CHECK_UNKNOWN;
+  return ixs_bounds_check_congruent(state->bounds, difference,
+                                    modulo_pow2_signed_modulus(state->bits), 0);
+}
+
+/* Difference construction is an optional proof probe. Representation
+ * overflow must not add a user-visible diagnostic to a valid query. */
+static ixs_check_result modulo_pow2_difference(modulo_pow2_state *state,
+                                               ixs_node *lhs, ixs_node *rhs) {
+  ixs_arena_mark diag_mark = ixs_arena_save(&state->ctx->diag);
+  const char **saved_errors = state->ctx->errors;
+  size_t saved_nerrors = state->ctx->nerrors;
+  size_t saved_errors_cap = state->ctx->errors_cap;
+  ixs_check_result result = modulo_pow2_difference_impl(state, lhs, rhs);
+  ixs_arena_restore(&state->ctx->diag, diag_mark);
+  state->ctx->errors = saved_errors;
+  state->ctx->nerrors = saved_nerrors;
+  state->ctx->errors_cap = saved_errors_cap;
+  return result;
+}
+
+static ixs_check_result modulo_pow2_exact(modulo_pow2_state *state,
+                                          ixs_node *lhs, ixs_node *rhs) {
+  equivalence_state exact;
+  ixs_check_result result;
+  exact.ctx = state->ctx;
+  exact.bounds = state->bounds;
+  exact.visited = 0;
+  exact.limited = false;
+  exact.oom = false;
+  result = equivalence_core(&exact, lhs, rhs, 0);
+  if (exact.oom || state->bounds->oom)
+    state->oom = true;
+  return result == IXS_CHECK_TRUE ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result modulo_pow2_normalized_query(modulo_pow2_state *state,
+                                                     ixs_node *lhs,
+                                                     ixs_node *rhs) {
+  ixs_node *simplified_lhs =
+      simp_simplify_bounds(state->ctx, lhs, state->bounds);
+  ixs_node *simplified_rhs =
+      simp_simplify_bounds(state->ctx, rhs, state->bounds);
+  ixs_node *normalized_lhs;
+  ixs_node *normalized_rhs;
+  ixs_check_result result;
+  if (!simplified_lhs || !simplified_rhs) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (ixs_node_is_sentinel(simplified_lhs) ||
+      ixs_node_is_sentinel(simplified_rhs))
+    return IXS_CHECK_UNKNOWN;
+  normalized_lhs = modulo_pow2_normalize(state, simplified_lhs, 0);
+  normalized_rhs = modulo_pow2_normalize(state, simplified_rhs, 0);
+  if (!normalized_lhs || !normalized_rhs || modulo_pow2_stopped(state))
+    return IXS_CHECK_UNKNOWN;
+  if (!modulo_pow2_domain_proven(state, normalized_lhs) ||
+      !modulo_pow2_domain_proven(state, normalized_rhs))
+    return IXS_CHECK_UNKNOWN;
+  if (normalized_lhs == normalized_rhs)
+    return IXS_CHECK_TRUE;
+  result = modulo_pow2_exact(state, normalized_lhs, normalized_rhs);
+  if (result == IXS_CHECK_TRUE || modulo_pow2_stopped(state))
+    return result;
+  return modulo_pow2_difference(state, normalized_lhs, normalized_rhs);
+}
+
+static ixs_check_result modulo_pow2_equivalence_query_bound(ixs_facts *facts,
+                                                            ixs_ctx *ctx,
+                                                            ixs_node *lhs,
+                                                            ixs_node *rhs,
+                                                            unsigned bits) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  modulo_pow2_state state;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool old_oom = facts->bounds.oom;
+
+  memset(&state, 0, sizeof(state));
+  state.ctx = ctx;
+  state.bounds = &facts->bounds;
+  state.bits = bits;
+  if (!modulo_pow2_domain_proven(&state, lhs) ||
+      !modulo_pow2_domain_proven(&state, rhs))
+    goto restore;
+  if (bits == 0u) {
+    result = IXS_CHECK_TRUE;
+    goto restore;
+  }
+
+  result = modulo_pow2_difference(&state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN || modulo_pow2_stopped(&state))
+    goto restore;
+
+  result = modulo_pow2_exact(&state, lhs, rhs);
+  if (result == IXS_CHECK_TRUE || modulo_pow2_stopped(&state))
+    goto restore;
+  result = modulo_pow2_normalized_query(&state, lhs, rhs);
+
+restore:
+  if (state.oom || state.limited || (!old_oom && facts->bounds.oom))
+    result = IXS_CHECK_UNKNOWN;
+  if (!old_oom && facts->bounds.oom)
+    bounds_cache_clear(&facts->bounds);
+  facts->bounds.oom = old_oom;
+  ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
@@ -8934,6 +11212,7 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
   ixs_arena_mark mark;
   ixs_node *simplified;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool query_held = false;
   bool old_oom;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
@@ -8946,6 +11225,8 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
     goto cleanup;
   }
   if (ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, predicate, &query_held))
     goto cleanup;
 
   mark = ixs_arena_save(&ctx->scratch);
@@ -8961,6 +11242,8 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
   ixs_arena_restore(&ctx->scratch, mark);
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -8969,6 +11252,8 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
                                       ixs_node *rhs) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_node *nodes[2] = {lhs, rhs};
+  bool query_held = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
@@ -8979,9 +11264,49 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, ixs_node *lhs,
     goto cleanup;
   if (ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  if (!ixs_bounds_query_hold_begin(
+          &facts->bounds, bounds_query_select_root(&facts->bounds, nodes, 2),
+          &query_held))
+    goto cleanup;
   result = equivalence_query_bound(facts, ctx, lhs, rhs, NULL);
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
+ixs_check_result ixs_equivalent_modulo_pow2_facts(ixs_facts *facts,
+                                                  ixs_node *lhs, ixs_node *rhs,
+                                                  unsigned bits) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_node *nodes[2] = {lhs, rhs};
+  bool query_held = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_CHECK_UNKNOWN;
+  if (!facts_ready(facts))
+    goto cleanup;
+  if (bits > 63u) {
+    ixs_ctx_push_error(ctx, "modulo pow2 equivalence: bits must be at most 63");
+    goto cleanup;
+  }
+  if (!facts_query_node_ok(ctx, lhs, "modulo pow2 equivalence") ||
+      !facts_query_node_ok(ctx, rhs, "modulo pow2 equivalence"))
+    goto cleanup;
+  if (ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  if (!ixs_bounds_query_hold_begin(
+          &facts->bounds, bounds_query_select_root(&facts->bounds, nodes, 2),
+          &query_held))
+    goto cleanup;
+  result = modulo_pow2_equivalence_query_bound(facts, ctx, lhs, rhs, bits);
+
+cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -8992,7 +11317,9 @@ ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
                                                     size_t *remaining_points) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  ixs_node *nodes[2] = {lhs, rhs};
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool query_held = false;
   bool oom = false;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
@@ -9009,17 +11336,26 @@ ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
     goto cleanup;
   if (ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  if (!ixs_bounds_query_hold_begin(
+          &facts->bounds, bounds_query_select_root(&facts->bounds, nodes, 2),
+          &query_held)) {
+    oom = facts->bounds.oom;
+    goto query_failed;
+  }
 
   result = equivalence_query_bound(facts, ctx, lhs, rhs, &oom);
   if (result == IXS_CHECK_UNKNOWN && !oom)
     result = finite_equivalence_query_bound(facts, ctx, lhs, rhs,
                                             remaining_points, &oom);
+query_failed:
   if (oom) {
     ixs_ctx_push_error(ctx, "finite equivalence: out of memory");
     result = IXS_CHECK_UNKNOWN;
   }
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9039,6 +11375,7 @@ typedef struct {
   bool old_oom;
   bool bound;
   bool active;
+  bool query_held;
 } algebra_query_scope;
 
 typedef struct {
@@ -9070,9 +11407,18 @@ static bool algebra_query_begin(ixs_facts *facts, ixs_node *const *nodes,
   }
   if (ixs_bounds_has_empty(&facts->bounds))
     goto fail;
+  if (!ixs_bounds_query_hold_begin(
+          &facts->bounds,
+          bounds_query_select_root(&facts->bounds, nodes, nnodes),
+          &scope->query_held))
+    goto fail;
   return true;
 
 fail:
+  if (scope->query_held) {
+    ixs_bounds_query_hold_end(&facts->bounds);
+    scope->query_held = false;
+  }
   ixs_session_unbind(&scope->binding);
   scope->bound = false;
   return false;
@@ -9100,6 +11446,10 @@ static bool algebra_query_finish(algebra_query_scope *scope, bool success) {
     scope->ctx->errors = scope->saved_errors;
     scope->ctx->nerrors = scope->saved_nerrors;
     scope->ctx->errors_cap = scope->saved_errors_cap;
+  }
+  if (scope->query_held) {
+    ixs_bounds_query_hold_end(&scope->facts->bounds);
+    scope->query_held = false;
   }
   if (scope->bound)
     ixs_session_unbind(&scope->binding);
@@ -9244,6 +11594,7 @@ static bool algebra_affine_extract(ixs_ctx *ctx, ixs_node *expr,
 bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta) {
   algebra_query_scope scope;
+  equivalence_state projection;
   ixs_node *nodes[2] = {lhs, rhs};
   int64_t result = 0;
   bool ok = false;
@@ -9255,6 +11606,20 @@ bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
   algebra_query_start(&scope);
   ok = bounds_constant_delta_query(scope.ctx, &facts->bounds, lhs, rhs, true,
                                    &result);
+  if (!ok && !facts->bounds.oom &&
+      (ixs_node_contains_rounding(lhs) || ixs_node_contains_rounding(rhs))) {
+    projection.ctx = scope.ctx;
+    projection.bounds = &facts->bounds;
+    projection.visited = 0;
+    projection.limited = false;
+    projection.oom = false;
+    if (equivalence_project_truncating_rounds(&projection, lhs, rhs, 0, false,
+                                              &nodes[0], &nodes[1]) &&
+        !projection.limited && !projection.oom) {
+      ok = bounds_constant_delta_query(scope.ctx, &facts->bounds, nodes[0],
+                                       nodes[1], true, &result);
+    }
+  }
   ok = algebra_query_finish(&scope, ok);
   if (ok)
     *delta = result;
@@ -9459,11 +11824,16 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
                                                 ixs_node *expr) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  bool query_held = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
-  if (facts_ready(facts) && facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr) &&
+      ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
     result = ixs_bounds_check_integer_valued(&facts->bounds, expr);
+  }
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9471,11 +11841,16 @@ ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
 ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  bool query_held = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
-  if (facts_ready(facts) && facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr) &&
+      ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
     result = ixs_bounds_check_defined(&facts->bounds, expr);
+  }
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9484,6 +11859,7 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
                                            int64_t modulus) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  bool query_held = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
@@ -9493,10 +11869,14 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts, ixs_node *expr,
     ixs_ctx_push_error(ctx, "divisibility: modulus must be nonzero");
     goto cleanup;
   }
-  if (facts_node_ok(ctx, expr))
+  if (facts_node_ok(ctx, expr) &&
+      ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
     result = ixs_bounds_check_divisible(&facts->bounds, expr, modulus);
+  }
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9550,45 +11930,44 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   bool old_bounds_oom;
   bool defined_oom;
   bool oom;
+  bool query_held = false;
+  ixs_exact_divide_result result =
+      exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
 
   if (!facts_bind(facts, &binding, &ctx))
-    return exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
-  if (!facts_ready(facts)) {
-    ixs_exact_divide_result result =
-        exact_divide_error(ctx, "fact set is unusable");
-    ixs_session_unbind(&binding);
     return result;
+  if (!facts_ready(facts)) {
+    result = exact_divide_error(ctx, "fact set is unusable");
+    goto cleanup;
   }
   if (!expr) {
-    ixs_exact_divide_result result = exact_divide_error(ctx, "NULL expression");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "NULL expression");
+    goto cleanup;
   }
   if (ixs_node_is_sentinel(expr)) {
-    ixs_exact_divide_result result =
-        exact_divide_error(ctx, "sentinel expression is not accepted");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "sentinel expression is not accepted");
+    goto cleanup;
   }
   if (!ixs_ctx_owns_node(ctx, expr)) {
-    ixs_exact_divide_result result =
+    result =
         exact_divide_error(ctx, "expression belongs to a different context");
-    ixs_session_unbind(&binding);
-    return result;
+    goto cleanup;
   }
   if (divisor == 0) {
-    ixs_exact_divide_result result =
-        exact_divide_error(ctx, "divisor must be nonzero");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "divisor must be nonzero");
+    goto cleanup;
   }
-
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
+    result = facts->bounds.oom
+                 ? exact_divide_error(ctx, "out of memory")
+                 : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+    goto cleanup;
+  }
   input_expr = expr;
   expr = exact_divide_simplify_facts(facts, ctx, expr, &oom);
   if (oom) {
-    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "out of memory");
+    goto cleanup;
   }
   old_bounds_oom = facts->bounds.oom;
   proof = ixs_bounds_check_divisible(&facts->bounds, expr, divisor);
@@ -9596,13 +11975,12 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
     if (!old_bounds_oom)
       bounds_cache_clear(&facts->bounds);
     facts->bounds.oom = old_bounds_oom;
-    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "out of memory");
+    goto cleanup;
   }
   if (proof == IXS_CHECK_UNKNOWN) {
-    ixs_session_unbind(&binding);
-    return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+    result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+    goto cleanup;
   }
   if (!ixs_node_is_known_total(input_expr)) {
     ixs_check_result defined =
@@ -9612,53 +11990,49 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
         bounds_cache_clear(&facts->bounds);
         facts->bounds.oom = old_bounds_oom;
       }
-      ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-      ixs_session_unbind(&binding);
-      return result;
+      result = exact_divide_error(ctx, "out of memory");
+      goto cleanup;
     }
     if (defined != IXS_CHECK_TRUE) {
-      ixs_session_unbind(&binding);
-      return exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+      result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+      goto cleanup;
     }
   }
   if (proof == IXS_CHECK_FALSE) {
-    ixs_session_unbind(&binding);
-    return exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
+    result = exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
+    goto cleanup;
   }
 
   divisor_node = ixs_node_int(ctx, divisor);
   if (!divisor_node) {
-    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "out of memory");
+    goto cleanup;
   }
   quotient = simp_div(ctx, expr, divisor_node);
   if (!quotient) {
-    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "out of memory");
+    goto cleanup;
   }
   if (ixs_node_is_sentinel(quotient)) {
-    ixs_exact_divide_result result =
-        exact_divide_error(ctx, "quotient is not representable");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "quotient is not representable");
+    goto cleanup;
   }
   quotient = expand_impl(ctx, quotient);
   if (!quotient) {
-    ixs_exact_divide_result result = exact_divide_error(ctx, "out of memory");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "out of memory");
+    goto cleanup;
   }
   if (ixs_node_is_sentinel(quotient)) {
-    ixs_exact_divide_result result =
-        exact_divide_error(ctx, "quotient expansion failed");
-    ixs_session_unbind(&binding);
-    return result;
+    result = exact_divide_error(ctx, "quotient expansion failed");
+    goto cleanup;
   }
+  result = exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, quotient);
 
+cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
-  return exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, quotient);
+  return result;
 }
 
 static ixs_pow2_fact bounds_pow2_fact_from_int64(int64_t value) {
@@ -9677,11 +12051,14 @@ ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr) {
   ixs_bitfacts bits;
   ixs_interval iv;
   int64_t exact;
+  bool query_held = false;
   ixs_pow2_fact result = IXS_POW2_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_POW2_UNKNOWN;
   if (!facts_ready(facts) || !facts_node_ok(ctx, expr) ||
       ixs_bounds_has_empty(&facts->bounds))
+    goto cleanup;
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held))
     goto cleanup;
   if (ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits))
     result = bits.pow2;
@@ -9692,6 +12069,8 @@ ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr) {
   }
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9701,6 +12080,7 @@ bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
   ixs_session_binding binding;
   ixs_ctx *ctx;
   ixs_bitfacts bits;
+  bool query_held = false;
   bool ok = false;
   if (out) {
     out->known_zero = 0;
@@ -9720,6 +12100,8 @@ bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
   if (!facts_query_node_ok(ctx, expr, "known bits") ||
       ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held))
+    goto cleanup;
 
   bitfacts_unknown(&bits);
   if (ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
@@ -9734,6 +12116,8 @@ bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
   ok = true;
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return ok;
 }
@@ -9783,6 +12167,7 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
                                            int64_t modulus, int64_t residue) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  bool query_held = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   if (!facts_bind(facts, &binding, &ctx))
     return IXS_CHECK_UNKNOWN;
@@ -9797,6 +12182,8 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
   if (!facts_query_node_ok(ctx, expr, "congruence") ||
       ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held))
+    goto cleanup;
   result = ixs_bounds_check_congruent(&facts->bounds, expr, modulus, residue);
   if (facts->bounds.oom) {
     ixs_ctx_push_error(ctx, "congruence: out of memory");
@@ -9804,6 +12191,8 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts, ixs_node *expr,
   }
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -9812,6 +12201,7 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
   ixs_interval iv;
+  bool query_held = false;
   bool ok = false;
   if (!out)
     return false;
@@ -9826,6 +12216,8 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out) {
   if (!facts_ready(facts) || !facts_node_ok(ctx, expr) ||
       ixs_bounds_has_empty(&facts->bounds))
     goto cleanup;
+  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held))
+    goto cleanup;
   iv = ixs_bounds_get(&facts->bounds, expr);
   if (!iv.valid || ixs_interval_is_empty(iv))
     goto cleanup;
@@ -9833,6 +12225,8 @@ bool ixs_range_facts(ixs_facts *facts, ixs_node *expr, ixs_range_result *out) {
   ok = true;
 
 cleanup:
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return ok;
 }
@@ -9841,14 +12235,19 @@ bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
                              ixs_integer_range_result *out) {
   ixs_session_binding binding;
   ixs_ctx *ctx;
+  bool query_held = false;
   bool ok = false;
   if (!out)
     return false;
   integer_range_result_clear(out);
   if (!facts_bind(facts, &binding, &ctx))
     return false;
-  if (facts_ready(facts) && facts_node_ok(ctx, expr))
+  if (facts_ready(facts) && facts_node_ok(ctx, expr) &&
+      ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
     ok = ixs_bounds_get_integer_range(&facts->bounds, expr, out);
+  }
+  if (query_held)
+    ixs_bounds_query_hold_end(&facts->bounds);
   ixs_session_unbind(&binding);
   return ok;
 }
@@ -9891,6 +12290,7 @@ IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "bounds.h"
 #include "expand.h"
 #include "node.h"
 #include "parser.h"
@@ -10748,6 +13148,8 @@ static ixs_node *expand_assoc(ixs_ctx *ctx, ixs_node *node, int depth) {
 }
 
 static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
+  ixs_node *cached;
+  ixs_node *expanded;
   if (!node)
     return NULL;
   if (ixs_node_is_sentinel(node))
@@ -10756,6 +13158,12 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     ixs_ctx_push_error(ctx, "expand: recursion depth limit (%d) exceeded",
                        EXPAND_MAX_DEPTH);
     return ctx->sentinel_error;
+  }
+
+  if (expand_cacheable(node)) {
+    cached = ixs_node_expand_cache_lookup(ctx, node, (unsigned)depth);
+    if (cached)
+      return cached;
   }
 
   switch (node->tag) {
@@ -10767,53 +13175,52 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return node;
 
   case IXS_ADD:
-    return expand_add(ctx, node, depth);
+    expanded = expand_add(ctx, node, depth);
+    break;
 
   case IXS_MUL:
-    return expand_mul(ctx, node, depth);
+    expanded = expand_mul(ctx, node, depth);
+    break;
 
   case IXS_FLOOR:
-    return simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    expanded = simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    break;
   case IXS_CEIL:
-    return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    expanded = simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+    break;
 
   case IXS_MOD:
   case IXS_CMP:
-    return expand_binary(ctx, node, depth);
+    expanded = expand_binary(ctx, node, depth);
+    break;
 
   case IXS_PIECEWISE:
-    return expand_pw(ctx, node, depth);
+    expanded = expand_pw(ctx, node, depth);
+    break;
 
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return expand_assoc(ctx, node, depth);
+    expanded = expand_assoc(ctx, node, depth);
+    break;
 
   case IXS_NOT:
-    return simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
+    expanded = simp_not(ctx, do_expand(ctx, node->u.unary_bool.arg, depth + 1));
+    break;
 
   default:
-    return node;
+    expanded = node;
+    break;
   }
+  if (expand_cacheable(node))
+    ixs_node_expand_cache_store(ctx, node, expanded, (unsigned)depth);
+  return expanded;
 }
 
 IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
-  ixs_node *cached;
-  ixs_node *expanded;
-
-  if (!expand_cacheable(expr))
-    return do_expand(ctx, expr, 0);
-  cached =
-      ixs_node_transform_cache_lookup(ctx, expr, IXS_NODE_TRANSFORM_EXPAND);
-  if (cached)
-    return cached;
-
-  expanded = do_expand(ctx, expr, 0);
-  ixs_node_transform_cache_store(ctx, expr, IXS_NODE_TRANSFORM_EXPAND,
-                                 expanded);
-  return expanded;
+  return do_expand(ctx, expr, 0);
 }
 
 /* ==================================================================== */
@@ -12529,6 +14936,35 @@ IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
   ctx->transform_cache_used++;
 }
 
+IXS_STATIC ixs_node *ixs_node_expand_cache_lookup(const ixs_ctx *ctx,
+                                                  const ixs_node *source,
+                                                  unsigned depth) {
+  const ixs_node_transform_cache_entry *slot;
+  if (!ctx || !source || !ctx->transform_cache_cap)
+    return NULL;
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
+  if (!slot->source || slot->expand_depth_plus_one <= depth)
+    return NULL;
+  return slot->results[IXS_NODE_TRANSFORM_EXPAND];
+}
+
+IXS_STATIC void ixs_node_expand_cache_store(ixs_ctx *ctx, ixs_node *source,
+                                            ixs_node *result, unsigned depth) {
+  ixs_node_transform_cache_entry *slot;
+  unsigned depth_plus_one = depth + 1u;
+  ixs_node_transform_cache_store(ctx, source, IXS_NODE_TRANSFORM_EXPAND,
+                                 result);
+  if (!ctx || !source || !ctx->transform_cache_cap)
+    return;
+  slot = &ctx->transform_cache[node_transform_cache_index(
+      ctx->transform_cache, ctx->transform_cache_cap, source)];
+  if (slot->source == source &&
+      slot->results[IXS_NODE_TRANSFORM_EXPAND] == result &&
+      slot->expand_depth_plus_one < depth_plus_one)
+    slot->expand_depth_plus_one = depth_plus_one;
+}
+
 IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx) {
   if (!ctx || !ctx->transform_cache)
     return;
@@ -12628,7 +15064,22 @@ static bool node_property_total(const ixs_node *node) {
          (node->properties & IXS_NODE_PROPERTY_TOTAL) != 0;
 }
 
-static uint8_t node_pack_properties(bool integer, bool boolean, bool total) {
+static bool node_cmp_op_valid(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+  case IXS_CMP_GE:
+  case IXS_CMP_LT:
+  case IXS_CMP_LE:
+  case IXS_CMP_EQ:
+  case IXS_CMP_NE:
+    return true;
+  }
+  return false;
+}
+
+static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
+                                    bool rounding, bool piecewise,
+                                    bool nested_piecewise) {
   uint8_t properties = IXS_NODE_PROPERTY_VALID;
 
   if (integer)
@@ -12637,6 +15088,12 @@ static uint8_t node_pack_properties(bool integer, bool boolean, bool total) {
     properties |= IXS_NODE_PROPERTY_BOOL;
   if (total)
     properties |= IXS_NODE_PROPERTY_TOTAL;
+  if (rounding)
+    properties |= IXS_NODE_PROPERTY_ROUNDING;
+  if (piecewise)
+    properties |= IXS_NODE_PROPERTY_PIECEWISE;
+  if (nested_piecewise)
+    properties |= IXS_NODE_PROPERTY_NESTED_PIECEWISE;
   return properties;
 }
 
@@ -12644,28 +15101,52 @@ static uint8_t node_compute_add_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.add.coeff);
   bool total = node_property_total(node->u.add.coeff);
+  bool rounding = ixs_node_contains_rounding(node->u.add.coeff);
+  bool piecewise = ixs_node_contains_piecewise(node->u.add.coeff);
+  bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.add.coeff);
 
-  for (i = 0; integer && i < node->u.add.nterms; i++)
-    integer = node_property_integer(node->u.add.terms[i].coeff) &&
+  for (i = 0; i < node->u.add.nterms; i++) {
+    integer = integer && node_property_integer(node->u.add.terms[i].coeff) &&
               node_property_integer(node->u.add.terms[i].term);
-  for (i = 0; total && i < node->u.add.nterms; i++)
-    total = node_property_total(node->u.add.terms[i].coeff) &&
+    total = total && node_property_total(node->u.add.terms[i].coeff) &&
             node_property_total(node->u.add.terms[i].term);
-  return node_pack_properties(integer, false, total);
+    rounding = rounding ||
+               ixs_node_contains_rounding(node->u.add.terms[i].coeff) ||
+               ixs_node_contains_rounding(node->u.add.terms[i].term);
+    piecewise = piecewise ||
+                ixs_node_contains_piecewise(node->u.add.terms[i].coeff) ||
+                ixs_node_contains_piecewise(node->u.add.terms[i].term);
+    nested_piecewise =
+        nested_piecewise ||
+        ixs_node_contains_nested_piecewise(node->u.add.terms[i].coeff) ||
+        ixs_node_contains_nested_piecewise(node->u.add.terms[i].term);
+  }
+  return node_pack_properties(integer, false, total, rounding, piecewise,
+                              nested_piecewise);
 }
 
 static uint8_t node_compute_mul_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.mul.coeff);
   bool total = node_property_total(node->u.mul.coeff);
+  bool rounding = ixs_node_contains_rounding(node->u.mul.coeff);
+  bool piecewise = ixs_node_contains_piecewise(node->u.mul.coeff);
+  bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.mul.coeff);
 
-  for (i = 0; integer && i < node->u.mul.nfactors; i++)
-    integer = node->u.mul.factors[i].exp >= 0 &&
+  for (i = 0; i < node->u.mul.nfactors; i++) {
+    integer = integer && node->u.mul.factors[i].exp > 0 &&
               node_property_integer(node->u.mul.factors[i].base);
-  for (i = 0; total && i < node->u.mul.nfactors; i++)
-    total = node->u.mul.factors[i].exp >= 0 &&
+    total = total && node->u.mul.factors[i].exp > 0 &&
             node_property_total(node->u.mul.factors[i].base);
-  return node_pack_properties(integer, false, total);
+    rounding =
+        rounding || ixs_node_contains_rounding(node->u.mul.factors[i].base);
+    piecewise =
+        piecewise || ixs_node_contains_piecewise(node->u.mul.factors[i].base);
+    nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
+                                               node->u.mul.factors[i].base);
+  }
+  return node_pack_properties(integer, false, total, rounding, piecewise,
+                              nested_piecewise);
 }
 
 static uint8_t node_compute_pw_properties(const ixs_node *node) {
@@ -12674,38 +15155,59 @@ static uint8_t node_compute_pw_properties(const ixs_node *node) {
   bool boolean = integer;
   bool total = integer && ixs_node_is_known_true(
                               node->u.pw.cases[node->u.pw.ncases - 1u].cond);
+  bool rounding = false;
+  bool nested_piecewise = false;
 
   for (i = 0; i < node->u.pw.ncases; i++) {
     integer = integer && node_property_integer(node->u.pw.cases[i].value);
     boolean = boolean && node_property_bool(node->u.pw.cases[i].value);
     total = total && node_property_total(node->u.pw.cases[i].value) &&
             node_property_total(node->u.pw.cases[i].cond);
+    rounding = rounding ||
+               ixs_node_contains_rounding(node->u.pw.cases[i].value) ||
+               ixs_node_contains_rounding(node->u.pw.cases[i].cond);
+    nested_piecewise = nested_piecewise ||
+                       ixs_node_contains_piecewise(node->u.pw.cases[i].value) ||
+                       ixs_node_contains_piecewise(node->u.pw.cases[i].cond);
   }
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding, true,
+                              nested_piecewise);
 }
 
 static uint8_t node_compute_assoc_properties(const ixs_node *node) {
   uint32_t i;
-  bool has_args = node->u.assoc.nargs > 0;
-  bool integer = has_args;
-  bool boolean = has_args && (node->tag == IXS_AND || node->tag == IXS_OR);
-  bool total = has_args;
+  bool canonical_arity = node->u.assoc.nargs >= 2;
+  bool integer = canonical_arity;
+  bool boolean =
+      canonical_arity && (node->tag == IXS_AND || node->tag == IXS_OR);
+  bool total = canonical_arity;
+  bool rounding = false;
+  bool piecewise = false;
+  bool nested_piecewise = false;
 
   for (i = 0; i < node->u.assoc.nargs; i++) {
     integer = integer && node_property_integer(node->u.assoc.args[i]);
     if (boolean)
       boolean = node_property_bool(node->u.assoc.args[i]);
     total = total && node_property_total(node->u.assoc.args[i]);
+    rounding = rounding || ixs_node_contains_rounding(node->u.assoc.args[i]);
+    piecewise = piecewise || ixs_node_contains_piecewise(node->u.assoc.args[i]);
+    nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
+                                               node->u.assoc.args[i]);
   }
   if (node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR)
     total = total && integer;
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding, piecewise,
+                              nested_piecewise);
 }
 
 static uint8_t node_compute_simple_properties(const ixs_node *node) {
   bool integer = false;
   bool boolean = false;
   bool total = false;
+  bool rounding = false;
+  bool piecewise = false;
+  bool nested_piecewise = false;
 
   switch ((ixs_tag)node->tag) {
   case IXS_INT:
@@ -12725,17 +15227,30 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   case IXS_CEIL:
     integer = true;
     total = node_property_total(node->u.unary.arg);
+    rounding = true;
+    piecewise = ixs_node_contains_piecewise(node->u.unary.arg);
+    nested_piecewise = ixs_node_contains_nested_piecewise(node->u.unary.arg);
     break;
   case IXS_CMP:
-    integer = true;
-    boolean = true;
-    total = node_property_total(node->u.binary.lhs) &&
+    integer = node_cmp_op_valid(node->u.binary.cmp_op);
+    boolean = integer;
+    total = integer && node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
+    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
+               ixs_node_contains_rounding(node->u.binary.rhs);
+    piecewise = ixs_node_contains_piecewise(node->u.binary.lhs) ||
+                ixs_node_contains_piecewise(node->u.binary.rhs);
+    nested_piecewise = ixs_node_contains_nested_piecewise(node->u.binary.lhs) ||
+                       ixs_node_contains_nested_piecewise(node->u.binary.rhs);
     break;
   case IXS_NOT:
     integer = true;
     boolean = true;
     total = node_property_total(node->u.unary_bool.arg);
+    rounding = ixs_node_contains_rounding(node->u.unary_bool.arg);
+    piecewise = ixs_node_contains_piecewise(node->u.unary_bool.arg);
+    nested_piecewise =
+        ixs_node_contains_nested_piecewise(node->u.unary_bool.arg);
     break;
   case IXS_MOD:
     integer = node_property_integer(node->u.binary.lhs) &&
@@ -12744,6 +15259,12 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
                 IXS_MOD_DIVISOR_POSITIVE &&
             node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
+    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
+               ixs_node_contains_rounding(node->u.binary.rhs);
+    piecewise = ixs_node_contains_piecewise(node->u.binary.lhs) ||
+                ixs_node_contains_piecewise(node->u.binary.rhs);
+    nested_piecewise = ixs_node_contains_nested_piecewise(node->u.binary.lhs) ||
+                       ixs_node_contains_nested_piecewise(node->u.binary.rhs);
     break;
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
@@ -12751,7 +15272,8 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   default:
     break;
   }
-  return node_pack_properties(integer, boolean, total);
+  return node_pack_properties(integer, boolean, total, rounding, piecewise,
+                              nested_piecewise);
 }
 
 static uint8_t node_compute_properties(const ixs_node *node) {
@@ -17881,6 +20403,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
  */
 #include "simplify.h"
 #include "bounds.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19320,11 +21843,18 @@ static bool bit_known_zero_without_assumptions(ixs_ctx *ctx, ixs_node *expr,
                                                uint64_t bit) {
   ixs_bounds bnds;
   ixs_bitfacts bits;
+  bool query_held = false;
   bool result;
-  if (!ixs_bounds_init(&bnds, &ctx->scratch))
+  if (!ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch))
     return false;
+  if (!ixs_bounds_query_hold_begin(&bnds, expr, &query_held)) {
+    ixs_bounds_destroy(&bnds);
+    return false;
+  }
   result = ixs_bounds_get_bitfacts(&bnds, expr, &bits) &&
            (bits.known_zero & bit) != 0;
+  if (query_held)
+    ixs_bounds_query_hold_end(&bnds);
   ixs_bounds_destroy(&bnds);
   return result;
 }
@@ -23710,13 +26240,23 @@ static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
-                                          ixs_bounds *bnds) {
+IXS_STATIC ixs_node *simp_simplify_bounds_status(ixs_ctx *ctx, ixs_node *expr,
+                                                 ixs_bounds *bnds,
+                                                 bool *limited) {
   ixs_arena_mark mark;
   rewrite_shared_cache shared;
   ixs_node *result;
+  bool query_held = false;
+  assert(limited != NULL);
+  *limited = false;
   if (!expr || ixs_node_is_sentinel(expr))
     return expr;
+  if (!ixs_bounds_query_hold_begin(bnds, expr, &query_held)) {
+    if (bnds && bnds->oom)
+      return NULL;
+    *limited = true;
+    return expr;
+  }
   mark = ixs_arena_save(&ctx->scratch);
   shared.slots = NULL;
   shared.cap = 0;
@@ -23725,11 +26265,22 @@ IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
   shared.grow_pending = false;
   if (!rewrite_shared_cache_grow(&shared)) {
     ixs_arena_restore(&ctx->scratch, mark);
-    return simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+    result = simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+    if (query_held)
+      ixs_bounds_query_hold_end(bnds);
+    return result;
   }
   result = simp_simplify_bounds_cached(ctx, expr, bnds, &shared);
   ixs_arena_restore(&ctx->scratch, mark);
+  if (query_held)
+    ixs_bounds_query_hold_end(bnds);
   return result;
+}
+
+IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                          ixs_bounds *bnds) {
+  bool limited;
+  return simp_simplify_bounds_status(ctx, expr, bnds, &limited);
 }
 
 IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
@@ -23744,9 +26295,17 @@ IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
   if (n > 0 && !rewrite_shared_cache_grow(&shared))
     goto failed;
   for (i = 0; i < n; i++) {
+    bool query_held = false;
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
+    if (!ixs_bounds_query_hold_begin(bnds, exprs[i], &query_held)) {
+      if (bnds && bnds->oom)
+        goto failed;
+      continue;
+    }
     exprs[i] = simp_simplify_bounds_cached(ctx, exprs[i], bnds, &shared);
+    if (query_held)
+      ixs_bounds_query_hold_end(bnds);
     if (!exprs[i])
       goto failed;
   }
@@ -23819,6 +26378,7 @@ typedef struct {
   ixs_bounds bounds;
   bool active;
   bool built;
+  bool query_held;
 } simp_bounds_scope;
 
 static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
@@ -23828,6 +26388,7 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   scope->mark = ixs_arena_save(&ctx->scratch);
   scope->active = true;
   scope->built = false;
+  scope->query_held = false;
   if (ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
                            n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, scope->mark);
@@ -23838,9 +26399,22 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   return true;
 }
 
+static bool simp_bounds_scope_hold(simp_bounds_scope *scope, ixs_node *root) {
+  assert(scope && scope->active && scope->built && !scope->query_held);
+  return ixs_bounds_query_hold_begin(&scope->bounds, root, &scope->query_held);
+}
+
+static void simp_bounds_scope_end_query(simp_bounds_scope *scope) {
+  if (!scope->query_held)
+    return;
+  ixs_bounds_query_hold_end(&scope->bounds);
+  scope->query_held = false;
+}
+
 static void simp_bounds_scope_destroy(simp_bounds_scope *scope) {
   if (!scope->active)
     return;
+  assert(!scope->query_held);
   if (scope->built)
     ixs_bounds_destroy(&scope->bounds);
   ixs_arena_restore(&scope->ctx->scratch, scope->mark);
@@ -23859,7 +26433,12 @@ simp_check_integer_valued(ixs_ctx *ctx, ixs_node *expr,
     return IXS_CHECK_UNKNOWN;
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_CHECK_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return IXS_CHECK_UNKNOWN;
+  }
   result = ixs_bounds_check_integer_valued(&scope.bounds, expr);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -23875,7 +26454,12 @@ IXS_STATIC ixs_check_result simp_check_defined(ixs_ctx *ctx, ixs_node *expr,
     return IXS_CHECK_UNKNOWN;
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_CHECK_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return IXS_CHECK_UNKNOWN;
+  }
   result = ixs_bounds_check_defined(&scope.bounds, expr);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -23904,6 +26488,8 @@ IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
 
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_POW2_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr))
+    goto cleanup;
 
   if (ixs_bounds_has_empty(&scope.bounds))
     goto cleanup;
@@ -23917,6 +26503,7 @@ IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
   }
 
 cleanup:
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -23942,6 +26529,8 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
 
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return false;
+  if (!simp_bounds_scope_hold(&scope, expr))
+    goto cleanup;
 
   if (ixs_bounds_has_empty(&scope.bounds))
     goto cleanup;
@@ -23963,6 +26552,7 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
   ok = true;
 
 cleanup:
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
 }
@@ -23984,7 +26574,12 @@ IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
       !ixs_ctx_owns_node(ctx, expr) ||
       !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return false;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return false;
+  }
   ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
 }

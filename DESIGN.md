@@ -170,6 +170,10 @@ and bounds-canonical aliases.
 Arena-backed storage stays at or below 75% load, so hits and inserts are
 expected O(1). A bounds-canonical miss costs expansion plus bounded-iteration,
 fact-free simplification of the expanded DAG; later queries hit the cache.
+Expansion memoizes successful recursive children in the same growable cache.
+Each entry records the deepest successful call depth and is reused only at an
+equal or shallower depth, preserving the expansion depth limit; sentinel and
+depth-limit failures are not memoized.
 Successful results survive session reset; failures and sentinels are not
 cached. Cache-allocation failure leaves the result uncached without failing
 the query. Statistics reset clears the cache so rule-hit counters remain
@@ -1268,6 +1272,44 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   table can be added later if expression-level assumptions need to persist.
   Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
   assumptions remain isolated.
+
+  Interval, bitfact, congruence, and stride propagation share one lazily
+  allocated query-local state. Its open-addressed memo and LIFO diagnostic
+  stack are growable arena tables with initial capacities of 256 and 16.
+  Context-backed state lives in the context arena; contextless state and its
+  tables live in a dedicated bounds-owned arena until `ixs_bounds_destroy`.
+  An incomplete current-generation memo entry is exactly an active query, so
+  cycle rejection is expected O(1); the active stack is used only for LIFO
+  assertions and statistics. One outer query admits at most 256 nested
+  holds/work entries and 8192 cache misses. Only published, interned nodes are
+  pointer-keyed; unpublished stack probes take the direct path. `Piecewise`
+  forks share those limits and a separate budget of 256 attempted nonempty
+  range-case visits, while receiving distinct fact-domain identities. An
+  active fork borrows its source query state but owns an empty local arena;
+  the source hold and shared scratch lifetime must outlive the fork. The case
+  budget is armed monotonically only for a nested `Piecewise` outer root or a
+  nested `Piecewise` reached while tracking is already active. Flat roots keep
+  the existing 1024-case limit and direct path.
+  This makes mutual interval/bitfact/congruence dependencies return
+  conservative unknown results instead of restarting independent depth
+  budgets or expanding a shared DAG repeatedly. Stride memoization also
+  prevents shared `Piecewise`
+  arms from multiplying the same DAG walk. Same-domain stride and residue
+  recursion also enter the tracked helpers; ordinary interval queries retain
+  their direct legacy path. Fact-backed simplification and public proof APIs
+  hold one query scope across the complete root operation, including
+  predicate ingestion and each truncating-remainder postpass. Tracking is
+  activated for nested-`Piecewise` roots, with nested holds joining an already
+  active scope. Arbitrary expression equalities are not projected into query
+  activation or memo keys; exact facts remain in the weighted
+  symbol-difference forest described above. This keeps unrelated batch roots
+  on the direct path. The cache is cleared between outer queries;
+  facts remain the only persistent proof input. Interned nodes also
+  cache structural totality. Residue inference conservatively declines a
+  syntactically non-total expression instead of launching a full recursive
+  definedness proof on every mutual-query edge. Definedness queries return
+  immediately for a known-total root or subtree; invalid comparison operators
+  are never marked integer, boolean, or total.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
@@ -1466,6 +1508,11 @@ This enables rules like:
   (e.g. `Mod(4*a, 16)` in `[0, 12]` instead of `[0, 15]`).  The implementation
   computes `gcd(d, m)` directly, so an `INT64_MIN` coefficient never requires
   representing its `2^63` magnitude in `int64_t`.
+- A total integer `Piecewise` has the gcd of its arm strides. When every arm
+  has the same residue at the resulting class modulus, `Mod(Piecewise(...),m)`
+  uses that class envelope before interval branch expansion. If the universal
+  arm proof fails, reachable-arm reasoning forks first-match facts and requires
+  every condition and active value to be defined.
 - A symbol's finite interval and congruence narrow literal-`Mod` bounds to the
   extrema of reachable residues. Empty intersections are contradictions.
 - `Max(1, expr)` where `expr >= 1` → `expr`
@@ -1640,7 +1687,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   modulus and normalized residue for a symbol. It does not compute a strongest
   congruence for arbitrary expressions. The second answers one requested
   modulus/residue query using exact intervals, known low bits, stored symbol
-  facts, and bounded `ADD`/`MUL` propagation at that modulus. Negative moduli
+  facts, and bounded `ADD`/`MUL`/`Piecewise` propagation at that modulus.
+  Rational `ADD` coefficients are cleared with one bounded common denominator;
+  congruence-equivalent terms are grouped before recursive residue queries, so
+  equal-and-opposite representatives cancel without constructing a normalized
+  expression. `XOR`, `AND`, and `OR` propagate a requested residue only for a
+  power-of-two modulus and only when every operand has a complete residue at
+  that modulus; this is exact low-bit composition, not an arbitrary-modulus
+  bitwise rule. Negative moduli
   and residues normalize without signed negation, including the `2^63`
   magnitude of `INT64_MIN`; modulus zero emits a diagnostic and returns
   `UNKNOWN`. Known conflicting residues return `FALSE`, incomplete evidence

@@ -3,6 +3,7 @@
  */
 #include "simplify.h"
 #include "bounds.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1442,11 +1443,18 @@ static bool bit_known_zero_without_assumptions(ixs_ctx *ctx, ixs_node *expr,
                                                uint64_t bit) {
   ixs_bounds bnds;
   ixs_bitfacts bits;
+  bool query_held = false;
   bool result;
-  if (!ixs_bounds_init(&bnds, &ctx->scratch))
+  if (!ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch))
     return false;
+  if (!ixs_bounds_query_hold_begin(&bnds, expr, &query_held)) {
+    ixs_bounds_destroy(&bnds);
+    return false;
+  }
   result = ixs_bounds_get_bitfacts(&bnds, expr, &bits) &&
            (bits.known_zero & bit) != 0;
+  if (query_held)
+    ixs_bounds_query_hold_end(&bnds);
   ixs_bounds_destroy(&bnds);
   return result;
 }
@@ -5832,13 +5840,23 @@ static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,
   return expr;
 }
 
-IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
-                                          ixs_bounds *bnds) {
+IXS_STATIC ixs_node *simp_simplify_bounds_status(ixs_ctx *ctx, ixs_node *expr,
+                                                 ixs_bounds *bnds,
+                                                 bool *limited) {
   ixs_arena_mark mark;
   rewrite_shared_cache shared;
   ixs_node *result;
+  bool query_held = false;
+  assert(limited != NULL);
+  *limited = false;
   if (!expr || ixs_node_is_sentinel(expr))
     return expr;
+  if (!ixs_bounds_query_hold_begin(bnds, expr, &query_held)) {
+    if (bnds && bnds->oom)
+      return NULL;
+    *limited = true;
+    return expr;
+  }
   mark = ixs_arena_save(&ctx->scratch);
   shared.slots = NULL;
   shared.cap = 0;
@@ -5847,11 +5865,22 @@ IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
   shared.grow_pending = false;
   if (!rewrite_shared_cache_grow(&shared)) {
     ixs_arena_restore(&ctx->scratch, mark);
-    return simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+    result = simp_simplify_bounds_cached(ctx, expr, bnds, NULL);
+    if (query_held)
+      ixs_bounds_query_hold_end(bnds);
+    return result;
   }
   result = simp_simplify_bounds_cached(ctx, expr, bnds, &shared);
   ixs_arena_restore(&ctx->scratch, mark);
+  if (query_held)
+    ixs_bounds_query_hold_end(bnds);
   return result;
+}
+
+IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
+                                          ixs_bounds *bnds) {
+  bool limited;
+  return simp_simplify_bounds_status(ctx, expr, bnds, &limited);
 }
 
 IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
@@ -5866,9 +5895,17 @@ IXS_STATIC bool simp_simplify_batch_bounds(ixs_ctx *ctx, ixs_node **exprs,
   if (n > 0 && !rewrite_shared_cache_grow(&shared))
     goto failed;
   for (i = 0; i < n; i++) {
+    bool query_held = false;
     if (!exprs[i] || ixs_node_is_sentinel(exprs[i]))
       continue;
+    if (!ixs_bounds_query_hold_begin(bnds, exprs[i], &query_held)) {
+      if (bnds && bnds->oom)
+        goto failed;
+      continue;
+    }
     exprs[i] = simp_simplify_bounds_cached(ctx, exprs[i], bnds, &shared);
+    if (query_held)
+      ixs_bounds_query_hold_end(bnds);
     if (!exprs[i])
       goto failed;
   }
@@ -5941,6 +5978,7 @@ typedef struct {
   ixs_bounds bounds;
   bool active;
   bool built;
+  bool query_held;
 } simp_bounds_scope;
 
 static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
@@ -5950,6 +5988,7 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   scope->mark = ixs_arena_save(&ctx->scratch);
   scope->active = true;
   scope->built = false;
+  scope->query_held = false;
   if (ixs_bounds_build_ctx(&scope->bounds, ctx, &ctx->scratch, assumptions,
                            n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, scope->mark);
@@ -5960,9 +5999,22 @@ static bool simp_bounds_scope_init(simp_bounds_scope *scope, ixs_ctx *ctx,
   return true;
 }
 
+static bool simp_bounds_scope_hold(simp_bounds_scope *scope, ixs_node *root) {
+  assert(scope && scope->active && scope->built && !scope->query_held);
+  return ixs_bounds_query_hold_begin(&scope->bounds, root, &scope->query_held);
+}
+
+static void simp_bounds_scope_end_query(simp_bounds_scope *scope) {
+  if (!scope->query_held)
+    return;
+  ixs_bounds_query_hold_end(&scope->bounds);
+  scope->query_held = false;
+}
+
 static void simp_bounds_scope_destroy(simp_bounds_scope *scope) {
   if (!scope->active)
     return;
+  assert(!scope->query_held);
   if (scope->built)
     ixs_bounds_destroy(&scope->bounds);
   ixs_arena_restore(&scope->ctx->scratch, scope->mark);
@@ -5981,7 +6033,12 @@ simp_check_integer_valued(ixs_ctx *ctx, ixs_node *expr,
     return IXS_CHECK_UNKNOWN;
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_CHECK_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return IXS_CHECK_UNKNOWN;
+  }
   result = ixs_bounds_check_integer_valued(&scope.bounds, expr);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -5997,7 +6054,12 @@ IXS_STATIC ixs_check_result simp_check_defined(ixs_ctx *ctx, ixs_node *expr,
     return IXS_CHECK_UNKNOWN;
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_CHECK_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return IXS_CHECK_UNKNOWN;
+  }
   result = ixs_bounds_check_defined(&scope.bounds, expr);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -6026,6 +6088,8 @@ IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
 
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return IXS_POW2_UNKNOWN;
+  if (!simp_bounds_scope_hold(&scope, expr))
+    goto cleanup;
 
   if (ixs_bounds_has_empty(&scope.bounds))
     goto cleanup;
@@ -6039,6 +6103,7 @@ IXS_STATIC ixs_pow2_fact simp_get_pow2_fact(ixs_ctx *ctx, ixs_node *expr,
   }
 
 cleanup:
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return result;
 }
@@ -6064,6 +6129,8 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
 
   if (!simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return false;
+  if (!simp_bounds_scope_hold(&scope, expr))
+    goto cleanup;
 
   if (ixs_bounds_has_empty(&scope.bounds))
     goto cleanup;
@@ -6085,6 +6152,7 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
   ok = true;
 
 cleanup:
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
 }
@@ -6106,7 +6174,12 @@ IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
       !ixs_ctx_owns_node(ctx, expr) ||
       !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
     return false;
+  if (!simp_bounds_scope_hold(&scope, expr)) {
+    simp_bounds_scope_destroy(&scope);
+    return false;
+  }
   ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
+  simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
 }
