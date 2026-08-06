@@ -5579,6 +5579,184 @@ static void test_public_total_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_finite_domain_equivalence(void) {
+  static const char finite_text[] =
+      "Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))";
+  static const char unbounded_text[] =
+      "y*Piecewise((0, x*(x - 1)*(x - 2)*(x - 3) == 0), (1, True))";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "finite_equivalence_x");
+  ixs_node *finite_x = ixs_sym(ctx, "x");
+  ixs_node *finite = ixs_parse_expr(ctx, finite_text, sizeof(finite_text) - 1u);
+  ixs_node *unbounded =
+      ixs_parse_expr(ctx, unbounded_text, sizeof(unbounded_text) - 1u);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_facts *range_four = ixs_facts_create(ctx);
+  ixs_facts *range_five = ixs_facts_create(ctx);
+  ixs_facts *x_range = ixs_facts_create(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  size_t budget;
+
+  CHECK(ctx && other && x && finite_x && finite && unbounded && range_four &&
+        range_five && x_range && empty);
+  CHECK(ixs_facts_assume_pred(range_four,
+                              ixs_cmp(ctx, finite_x, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      range_four, ixs_cmp(ctx, finite_x, IXS_CMP_LE, ixs_int(ctx, 3))));
+  CHECK(ixs_facts_assume_pred(range_five,
+                              ixs_cmp(ctx, finite_x, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(
+      range_five, ixs_cmp(ctx, finite_x, IXS_CMP_LE, ixs_int(ctx, 4))));
+  CHECK(ixs_facts_assume_pred(x_range, ixs_cmp(ctx, x, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(x_range,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 1))));
+
+  CHECK(ixs_equivalent_facts(range_four, finite, one) == IXS_CHECK_UNKNOWN);
+  budget = 4;
+  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
+        IXS_CHECK_TRUE);
+  CHECK(budget == 0);
+
+  budget = 4;
+  CHECK(ixs_equivalent_finite_domain_facts(range_four, unbounded, zero,
+                                           &budget) == IXS_CHECK_TRUE);
+  CHECK(budget == 0);
+
+  budget = 4;
+  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, one, &budget) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(budget == 4);
+  budget = 5;
+  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, one, &budget) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(budget == 0);
+  budget = 5;
+  CHECK(ixs_equivalent_finite_domain_facts(range_five, finite, ixs_int(ctx, 2),
+                                           &budget) == IXS_CHECK_UNKNOWN);
+  CHECK(budget == 0);
+
+  budget = 7;
+  CHECK(ixs_equivalent_finite_domain_facts(x_range, x, x, &budget) ==
+        IXS_CHECK_TRUE);
+  CHECK(budget == 7);
+  CHECK(ixs_equivalent_finite_domain_facts(x_range, zero, one, &budget) ==
+        IXS_CHECK_FALSE);
+  CHECK(budget == 7);
+
+  budget = 3;
+  CHECK(ixs_equivalent_finite_domain_facts(
+            empty, ixs_mul(ctx, x, ixs_sub(ctx, x, one)), zero, &budget) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(budget == 3);
+
+  {
+    ixs_node *a = ixs_sym(ctx, "finite_equivalence_a");
+    ixs_node *b = ixs_sym(ctx, "finite_equivalence_b");
+    ixs_node *a_term = ixs_mul(ctx, a, ixs_sub(ctx, a, one));
+    ixs_node *b_term = ixs_mul(ctx, ixs_mul(ctx, b, ixs_sub(ctx, b, one)),
+                               ixs_sub(ctx, b, ixs_int(ctx, 2)));
+    ixs_node *product_identity = ixs_add(ctx, a_term, b_term);
+    ixs_facts *product_facts = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_pred(product_facts,
+                                ixs_cmp(ctx, a, IXS_CMP_GE, zero)));
+    CHECK(
+        ixs_facts_assume_pred(product_facts, ixs_cmp(ctx, a, IXS_CMP_LE, one)));
+    CHECK(ixs_facts_assume_pred(product_facts,
+                                ixs_cmp(ctx, b, IXS_CMP_GE, zero)));
+    CHECK(ixs_facts_assume_pred(product_facts,
+                                ixs_cmp(ctx, b, IXS_CMP_LE, ixs_int(ctx, 2))));
+    budget = 5;
+    CHECK(ixs_equivalent_finite_domain_facts(product_facts, product_identity,
+                                             zero,
+                                             &budget) == IXS_CHECK_UNKNOWN);
+    CHECK(budget == 5);
+    budget = 6;
+    CHECK(ixs_equivalent_finite_domain_facts(product_facts, product_identity,
+                                             zero, &budget) == IXS_CHECK_TRUE);
+    CHECK(budget == 0);
+  }
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_finite_domain_facts(x_range, x, x, NULL) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "remaining_points") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  budget = 3;
+  CHECK(ixs_equivalent_finite_domain_facts(
+            x_range, x, ixs_sym(other, "finite_equivalence_x"), &budget) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(budget == 3);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  budget = 4;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(budget == 4);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_equivalent_finite_domain_facts(range_four, finite, one, &budget) ==
+        IXS_CHECK_TRUE);
+  CHECK(budget == 0);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_finite_domain_equivalence_growable_discovery(void) {
+  enum { FINITE_SYMBOLS = 80, QUERY_SYMBOLS = 4100 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *finite[FINITE_SYMBOLS];
+  ixs_node **query_symbols = calloc(QUERY_SYMBOLS, sizeof(*query_symbols));
+  ixs_node *wide;
+  ixs_node *difference;
+  ixs_range_result singleton_integer = {true, true, -1, 4, 1, 4};
+  char name[64];
+  size_t budget = 1;
+  size_t i;
+
+  CHECK(ctx && facts && zero && one && query_symbols);
+  if (!ctx || !facts || !zero || !one || !query_symbols) {
+    free(query_symbols);
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+  for (i = 0; i < FINITE_SYMBOLS; i++) {
+    snprintf(name, sizeof(name), "finite_discovery_%03zu", i);
+    finite[i] = ixs_sym(ctx, name);
+    CHECK(finite[i] &&
+          ixs_facts_assume_range(facts, finite[i], &singleton_integer));
+  }
+  for (i = 0; i < QUERY_SYMBOLS; i++) {
+    snprintf(name, sizeof(name), "query_discovery_%04zu", i);
+    query_symbols[i] = ixs_sym(ctx, name);
+    CHECK(query_symbols[i]);
+  }
+  wide = ixs_max_many(ctx, QUERY_SYMBOLS, query_symbols);
+  free(query_symbols);
+  difference = ixs_mul(ctx, finite[0], wide);
+  for (i = 1; i < FINITE_SYMBOLS; i++)
+    difference = ixs_add(ctx, difference, finite[i]);
+
+  CHECK(wide && difference);
+  CHECK(ixs_equivalent_facts(facts, difference, zero) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_equivalent_finite_domain_facts(facts, difference, zero, &budget) ==
+        IXS_CHECK_TRUE);
+  CHECK(budget == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_total_equivalence_new_proof_oom(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "equiv_new_oom_x");
@@ -7178,6 +7356,8 @@ int main(void) {
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
+  test_public_finite_domain_equivalence();
+  test_finite_domain_equivalence_growable_discovery();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();
   test_public_affine_and_constant_difference();

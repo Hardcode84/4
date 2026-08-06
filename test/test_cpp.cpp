@@ -51,6 +51,7 @@ int main() {
     return 3;
 
   std::vector<ixs::Expr> batch = {x + zero, twice_x + zero};
+  size_t finite_budget = 0;
   facts.simplify_batch(batch);
   if (facts.simplify(x + zero).is_null() ||
       facts.check(nonnegative) != IXS_CHECK_TRUE ||
@@ -58,6 +59,8 @@ int main() {
       facts.check_defined(x) != IXS_CHECK_TRUE ||
       facts.check_predicate(nonnegative) != IXS_CHECK_TRUE ||
       facts.equivalent(x, x) != IXS_CHECK_TRUE ||
+      facts.equivalent_finite_domain(x, x, finite_budget) != IXS_CHECK_TRUE ||
+      finite_budget != 0 ||
       facts.check_divisible(twice_x, 2) != IXS_CHECK_TRUE ||
       facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE ||
       !facts.range(x, range) || !facts.integer_range(x, integer_range) ||

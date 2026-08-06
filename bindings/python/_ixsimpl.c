@@ -126,6 +126,23 @@ static int raise_new_prefixed_error(ixs_session *session, size_t before,
   return 0;
 }
 
+static int raise_new_finite_equivalence_error(ixs_session *session,
+                                              size_t before) {
+  size_t i;
+  size_t after = ixs_session_nerrors(session);
+  for (i = before; i < after; i++) {
+    const char *message = ixs_session_error(session, i);
+    if (!message || strncmp(message, "finite equivalence:", 19) != 0)
+      continue;
+    if (strstr(message, "out of memory"))
+      PyErr_NoMemory();
+    else
+      PyErr_SetString(PyExc_ValueError, message);
+    return -1;
+  }
+  return 0;
+}
+
 static int raise_new_divisibility_error(ixs_session *session, size_t before) {
   return raise_new_prefixed_error(session, before, "divisibility:");
 }
@@ -1745,6 +1762,70 @@ static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
   return check_result_to_py(result);
 }
 
+static PyObject *Context_equivalent_finite_domain(ContextObject *self,
+                                                  PyObject *args,
+                                                  PyObject *kwargs) {
+  static char *kwlist[] = {"lhs", "rhs", "facts", "remaining_points", NULL};
+  PyObject *lhs_obj;
+  PyObject *rhs_obj;
+  PyObject *facts_obj;
+  PyObject *remaining_obj;
+  PyObject *answer;
+  PyObject *remaining_answer;
+  PyObject *pair;
+  ixs_session *session = Context_session(self);
+  ixs_check_result result;
+  size_t remaining_points;
+  size_t errors_before;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
+                                   &rhs_obj, &facts_obj, &remaining_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
+      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
+    return NULL;
+  }
+  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
+      ((ExprObject *)rhs_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError,
+                    "ixsimpl: expression from different context");
+    return NULL;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+  remaining_points = PyLong_AsSize_t(remaining_obj);
+  if (remaining_points == (size_t)-1 && PyErr_Occurred())
+    return NULL;
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_equivalent_finite_domain_facts(
+      ((FactsObject *)facts_obj)->facts, ((ExprObject *)lhs_obj)->node,
+      ((ExprObject *)rhs_obj)->node, &remaining_points);
+  if (raise_new_finite_equivalence_error(session, errors_before) < 0)
+    return NULL;
+  answer = check_result_to_py(result);
+  remaining_answer = PyLong_FromSize_t(remaining_points);
+  if (!answer || !remaining_answer) {
+    Py_XDECREF(answer);
+    Py_XDECREF(remaining_answer);
+    return NULL;
+  }
+  pair = PyTuple_New(2);
+  if (!pair) {
+    Py_DECREF(answer);
+    Py_DECREF(remaining_answer);
+    return NULL;
+  }
+  PyTuple_SET_ITEM(pair, 0, answer);
+  PyTuple_SET_ITEM(pair, 1, remaining_answer);
+  return pair;
+}
+
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
   static char *kwlist[] = {"expr", "modulus", "facts", NULL};
@@ -2735,6 +2816,10 @@ static PyMethodDef Context_methods[] = {
     {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
+    {"equivalent_finite_domain", (PyCFunction)Context_equivalent_finite_domain,
+     METH_VARARGS | METH_KEYWORDS,
+     "Try ordinary equivalence, then finite-domain enumeration; return "
+     "(result, remaining_points)."},
     {"constant_difference", (PyCFunction)Context_constant_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return the proven integer lhs-rhs difference, or None."},

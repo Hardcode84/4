@@ -2458,6 +2458,28 @@ def test_total_equivalence_discrete_cut_and_mod_shift_property(
     assert result is (True if 0 <= residue + shift < modulus else None)
 
 
+def test_finite_domain_equivalence_binding() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    finite = ctx.parse_expr("Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))")
+    facts = ctx.facts()
+    facts.assume(x >= 0)
+    facts.assume(x <= 3)
+
+    assert ctx.equivalent(finite, ctx.int_(1), facts) is None
+    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 4) == (
+        True,
+        0,
+    )
+    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 3) == (
+        None,
+        3,
+    )
+    assert ctx.equivalent_finite_domain(x, x, facts, 0) == (True, 0)
+    with pytest.raises(OverflowError):
+        ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, -1)
+
+
 def test_equivalence_binding_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -3353,7 +3375,7 @@ def test_integer_range_normalizes_inside_ixsimpl() -> None:
     assert ctx.integer_range(x, facts=contradictory) is None
 
     with pytest.raises(TypeError, match="expr must be an Expr"):
-        ctx.integer_range(1)
+        ctx.integer_range(1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="expression from different context"):
         ctx.integer_range(other.sym("integer_range_x"))
     with pytest.raises(ValueError, match="assumption from different context"):

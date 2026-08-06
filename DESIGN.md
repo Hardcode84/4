@@ -1683,6 +1683,37 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
   inference uses the congruence depth limit and makes one structural pass over
   the visited expression. This API is not an unbounded theorem prover.
+- **Budgeted finite-domain equivalence**
+  (`ixs_equivalent_finite_domain_facts`, Python
+  `Context.equivalent_finite_domain`, C++
+  `Facts::equivalent_finite_domain`): runs total fact-backed equivalence first.
+  A direct `TRUE` or `FALSE` leaves the caller's remaining-point budget
+  unchanged. If the direct result is unknown, both inputs must still be
+  defined over the complete fact domain. The query simplifies `lhs - rhs`,
+  walks only that expression, and sorts the selected symbols by name. A symbol
+  is selected when its fact-backed integer range has finite endpoints. Symbols
+  without a finite range remain symbolic at every point, so each specialization
+  may still use ordinary equivalence to prove the residual identity.
+
+  The Cartesian product includes every integer between each selected range's
+  rounded endpoints. This superset remains sound when facts also carry
+  congruences or cross-symbol relations. The complete product must fit
+  `size_t` and the caller's remaining budget. It is deducted atomically before
+  any point is evaluated; an over-budget query changes nothing, while a proof
+  that fails after reservation is not refunded. Every selected symbol is
+  specialized to its value at that point before total equivalence with zero.
+  A mismatch returns `UNKNOWN`, not `FALSE`, because one counterexample does
+  not prove universal inequality.
+
+  Discovery uses a growable query-local traversal stack, expected-O(1) node
+  set, and growable domain vector. It visits each unique query DAG node once,
+  sorts `S` selected domains in `O(S log S)`, uses `O(N + S)` query workspace,
+  and has no semantic depth, visit, or symbol-count cutoff. Sequential
+  constant specialization costs at most `O(P*S*N)` structural work before the
+  ordinary proof attempts, where `P` is the reserved Cartesian-product size;
+  the caller-owned point budget is the only enumeration policy. Allocation or
+  checked-size failure returns `UNKNOWN`, preserves a not-yet-reserved budget,
+  and emits a `finite equivalence:` diagnostic.
 - **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
   `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
@@ -2201,6 +2232,9 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+ixs_check_result ixs_equivalent_finite_domain_facts(
+    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
+    size_t *remaining_points);
 bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta);
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
@@ -2865,6 +2899,8 @@ Key properties:
   `decompose_exact_quotient()`, `finite_difference()`, and
   `split_additive_constant()` mirror the narrow fact-backed C helpers and fill
   their output references only on success.
+  `Facts::equivalent_finite_domain()` takes the caller's remaining point count
+  by reference and preserves the core's atomic reservation semantics.
 - `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
   compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
@@ -2998,6 +3034,8 @@ Implementation:
 - `Context.check_predicate(predicate, facts)` and
   `Context.equivalent(lhs, rhs, facts)` expose conservative tri-state results
   as `True`, `False`, or `None`.
+  `Context.equivalent_finite_domain(lhs, rhs, facts, remaining_points)` returns
+  that result together with the updated remaining-point count.
 - `Context.facts()` creates a session-owned `Facts` object.  `Facts.assume()`
   imports predicates, `Facts.assume_range()` attaches direct expression
   ranges, `Facts.derive_affine()` transfers ranges through
@@ -3313,6 +3351,9 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
+ixs_check_result ixs_equivalent_finite_domain_facts(
+    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs,
+    size_t *remaining_points);
 bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
                                    ixs_node *rhs, int64_t *delta);
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,

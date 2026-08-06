@@ -386,6 +386,16 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
  * UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
+/* Try ordinary equivalence first, then enumerate the Cartesian product of
+ * finite integer symbol ranges still present in lhs-rhs.  Symbols without a
+ * finite range remain symbolic at every point.  The complete product is
+ * deducted from *remaining_points before evaluation; direct proofs and
+ * over-budget queries leave it unchanged.  A failed reserved proof remains
+ * charged.  remaining_points must be non-NULL. */
+ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
+                                                    const ixs_node *lhs,
+                                                    const ixs_node *rhs,
+                                                    size_t *remaining_points);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
 bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,

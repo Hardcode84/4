@@ -138,6 +138,7 @@ API. Key functions:
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
 | `ixs_check`, `ixs_range`, `ixs_integer_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
 | `ixs_facts_*` | First-class predicate and expression-range fact sets |
+| `ixs_equivalent_finite_domain_facts` | Budgeted finite integer-domain equivalence |
 | `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |
 | `ixs_import_node` / `ixs_import_many` | Structural import across contexts |
