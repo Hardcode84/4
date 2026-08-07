@@ -23,6 +23,7 @@ REMOVED_C_API_USES = {
     "ixs_integer_range": "(void)&ixs_integer_range;",
     "ixs_integer_range_facts": "(void)&ixs_integer_range_facts;",
     "ixs_equivalent_finite_domain_facts": "(void)&ixs_equivalent_finite_domain_facts;",
+    "ixs_decompose_exact_quotient_facts": "(void)&ixs_decompose_exact_quotient_facts;",
 }
 REMOVED_SOURCE_PATHS = (
     HEADER,

@@ -114,8 +114,8 @@ typedef enum {
   IXS_QUOTIENT_PARTS_OOM
 } ixs_quotient_parts_status;
 
-/* Exact top-level rational product or common-denominator sum. */
-IXS_STATIC ixs_quotient_parts_status simp_decompose_exact_quotient(
+/* Internal quotient partitioning for Trunc and exact equivalence proofs. */
+IXS_STATIC ixs_quotient_parts_status simp_exact_quotient_parts(
     ixs_ctx *ctx, ixs_node *expr, ixs_node **numerator, ixs_node **denominator);
 
 #endif /* IXS_SIMPLIFY_H */

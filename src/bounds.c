@@ -16372,8 +16372,8 @@ static bool equivalence_match_piecewise_truncating_round(
           EQUIVALENCE_BUILD_OK ||
       ixs_node_is_sentinel(argument))
     return true;
-  quotient_status = simp_decompose_exact_quotient(state->ctx, argument,
-                                                  &numerator, &denominator);
+  quotient_status =
+      simp_exact_quotient_parts(state->ctx, argument, &numerator, &denominator);
   if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
     state->oom = true;
     return false;
@@ -16567,8 +16567,8 @@ static bool equivalence_build_truncating_replacement(equivalence_state *state,
                                           matched) ||
       !*matched)
     return !state->oom;
-  quotient_status = simp_decompose_exact_quotient(state->ctx, quotient,
-                                                  &numerator, &denominator);
+  quotient_status =
+      simp_exact_quotient_parts(state->ctx, quotient, &numerator, &denominator);
   if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
     state->oom = true;
     return false;
@@ -16952,7 +16952,7 @@ bounds_try_truncating_remainder_range(ixs_bounds *b, ixs_node *expr,
   if (!bounds_truncating_round_quotient(round, &quotient))
     return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
   quotient_status =
-      simp_decompose_exact_quotient(b->ctx, quotient, &numerator, &denominator);
+      simp_exact_quotient_parts(b->ctx, quotient, &numerator, &denominator);
   if (quotient_status == IXS_QUOTIENT_PARTS_OOM)
     return BOUNDS_TRUNCATING_RANGE_OOM;
   if (quotient_status != IXS_QUOTIENT_PARTS_MATCH)
@@ -17414,9 +17414,9 @@ static ixs_check_result equivalence_floor_mod_partition_direction(
   if (!direct || !partitioned || direct->tag != IXS_FLOOR ||
       partitioned->tag != IXS_FLOOR)
     return IXS_CHECK_UNKNOWN;
-  direct_status = simp_decompose_exact_quotient(
+  direct_status = simp_exact_quotient_parts(
       state->ctx, direct->u.unary.arg, &direct_numerator, &direct_denominator);
-  partitioned_status = simp_decompose_exact_quotient(
+  partitioned_status = simp_exact_quotient_parts(
       state->ctx, partitioned->u.unary.arg, &partitioned_numerator,
       &partitioned_denominator);
   if (direct_status == IXS_QUOTIENT_PARTS_OOM ||
@@ -19446,47 +19446,6 @@ bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
   *coefficient = result.coefficient;
   *residual = result.residual;
   return true;
-}
-
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
-                                        const ixs_node **numerator,
-                                        const ixs_node **denominator) {
-  algebra_query_scope scope;
-  ixs_node *nodes[1] = {(ixs_node *)expr};
-  ixs_node *result_numerator = NULL;
-  ixs_node *result_denominator = NULL;
-  ixs_quotient_parts_status status;
-  bool outputs_ok = numerator && denominator && numerator != denominator;
-  bool ok = false;
-
-  if (numerator)
-    *numerator = NULL;
-  if (denominator)
-    *denominator = NULL;
-  if (!algebra_query_begin(facts, nodes, 1, "exact quotient decomposition",
-                           outputs_ok, "outputs must be non-NULL and distinct",
-                           &scope))
-    return false;
-  algebra_query_start(&scope);
-  if (!algebra_query_defined(&scope, nodes[0]))
-    goto cleanup;
-  nodes[0] = algebra_query_normalize(&scope, nodes[0]);
-  if (!nodes[0])
-    goto cleanup;
-  status = simp_decompose_exact_quotient(scope.ctx, nodes[0], &result_numerator,
-                                         &result_denominator);
-  if (status == IXS_QUOTIENT_PARTS_OOM)
-    scope.status = IXS_FACT_QUERY_OOM;
-  else
-    ok = status == IXS_QUOTIENT_PARTS_MATCH;
-
-cleanup:
-  ok = algebra_query_finish(&scope, ok);
-  if (ok) {
-    *numerator = result_numerator;
-    *denominator = result_denominator;
-  }
-  return ok;
 }
 
 bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,

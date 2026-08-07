@@ -164,6 +164,11 @@ predicate checking may exhaustively check a small finite symbol domain, but
 that fixed-budget fallback is an implementation detail. There is no separately
 budgeted `equivalent_finite_domain` endpoint.
 
+Structural numerator/denominator decomposition is internal to Trunc and exact
+equivalence proofs. Public callers use `ixs_try_exact_divide_facts`, which
+returns a quotient only after proving exact divisibility; there is no
+`decompose_exact_quotient` query.
+
 ## Rule-Hit Statistics
 
 Build with `-DENABLE_STATS=ON` to count how many times each

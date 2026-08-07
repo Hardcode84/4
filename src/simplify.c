@@ -6109,8 +6109,8 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
 }
 
 IXS_STATIC ixs_quotient_parts_status
-simp_decompose_exact_quotient(ixs_ctx *ctx, ixs_node *expr,
-                              ixs_node **numerator, ixs_node **denominator) {
+simp_exact_quotient_parts(ixs_ctx *ctx, ixs_node *expr, ixs_node **numerator,
+                          ixs_node **denominator) {
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
   ixs_node *result_numerator = NULL;
   ixs_node *result_denominator = NULL;

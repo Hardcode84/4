@@ -1779,7 +1779,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
   preserve quotient sign; `INT64_MIN` is handled without taking its signed
   magnitude. Every `ERROR` reached through a valid fact set appends a session
-  diagnostic.
+  diagnostic. Structural numerator/denominator partitioning remains an
+  internal helper for Trunc remainder and exact equivalence proofs. It is not a
+  public algebra query because decomposition alone carries no definedness,
+  integrality, or nonzero-denominator proof.
 - **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
   proof contexts for callers that carry facts through IR rewrites instead of
   re-encoding everything as predicates.  A fact set accepts predicate facts,
