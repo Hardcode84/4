@@ -586,11 +586,15 @@ typedef struct {
 
 /* Exact rational materialization plan returned by the width query.  Numerator
  * and denominator are populated only when check is TRUE.  The denominator is
- * always positive, and the proof does not depend on canonical child order.
- * numerator_nonnegative records a proof that the exact numerator is at least
- * zero.  ceil_bias_safe records a proof that numerator + denominator - 1 fits
- * the word domain (and the signed word domain unless numerator_nonnegative is
- * true).  Both strategy flags are conservative and false without such proof.
+ * always positive, and the proof does not depend on canonical child order. A
+ * TRUE plan for a root containing rational materialization proves that its
+ * exported numerator and construction fit the word domain. With denominator
+ * greater than one, either numerator_nonnegative is true or the numerator fits
+ * the signed word domain. numerator_nonnegative records a proof that the exact
+ * numerator is at least zero. ceil_bias_safe records a proof that numerator +
+ * denominator - 1 fits the word domain (and the signed word domain unless
+ * numerator_nonnegative is true). Both strategy flags are conservative and
+ * false without such proof.
  */
 typedef struct {
   ixs_fact_query_status status;
@@ -1180,8 +1184,9 @@ ixs_check_rational_intermediates_facts(ixs_facts *facts, const ixs_node *expr,
  * allocation-size overflow or OOM returns OOM, and a retryable proof-resource
  * stop returns LIMITED.  Every non-COMPLETE status clears the plan.  A TRUE
  * plan also reports conservative numerator-sign and ceil-bias strategy facts;
- * a false strategy fact selects a general materialization and does not weaken
- * the TRUE width proof.  The returned node belongs to the fact set's context.
+ * a false sign fact on a nontrivial denominator authorizes signed-magnitude
+ * materialization because the numerator is then proven to fit the signed word
+ * domain. The returned node belongs to the fact set's context.
  */
 ixs_rational_materialization_plan
 ixs_plan_rational_materialization_facts(ixs_facts *facts, const ixs_node *expr,

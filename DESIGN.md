@@ -1719,14 +1719,17 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   materialization island below one root, synthesizes its exact numerator and
   positive denominator, and proves the materialization safe for a requested
   machine-word width. A TRUE result carries the exact plan authorized by that
-  proof plus two conservative strategy facts: `numerator_nonnegative` proves
-  that the exact numerator is at least zero, and `ceil_bias_safe` proves that
-  `numerator + denominator - 1` fits the word domain (and the signed domain
-  when numerator nonnegativity is not proven). A false strategy fact selects a
-  general quotient/remainder materialization; it does not change a TRUE plan
-  into UNKNOWN. FALSE and UNKNOWN carry no plan and clear both facts. The
-  boolean C, C++, and Python `rational_intermediates_fit` queries return the
-  plan status.
+  proof plus two conservative strategy facts. For a root containing rational
+  materialization, the exported numerator and its construction fit the word
+  domain. When its denominator is greater than one, either
+  `numerator_nonnegative` proves that the exact numerator is at least zero or
+  the plan proves that numerator fits the signed word domain. This disjunction
+  authorizes unsigned or signed-magnitude quotient materialization without
+  interpreting a high-bit positive word as negative. `ceil_bias_safe` proves
+  that `numerator + denominator - 1` fits the word domain (and the signed
+  domain when numerator nonnegativity is not proven). FALSE and UNKNOWN carry
+  no plan and clear both facts. The boolean C, C++, and Python
+  `rational_intermediates_fit` queries return the plan status.
 
   Plan synthesis and intermediate validation are deliberately separate.
   Before scaling any ADD operand or Piecewise value, synthesis determines the
@@ -1760,9 +1763,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   the word may discard high dividend bits. Comparisons and logical NOT
   terminate a rational island at their 0/1 result while still checking rational
   islands in evaluated operands. Predicate-valued nodes contribute their
-  intrinsic `[0, 1]` interval to enclosing numerator arithmetic. A bare
-  rational literal has no arithmetic intermediate and therefore succeeds
-  vacuously; an enclosing island validates its scaled numerator.
+  intrinsic `[0, 1]` interval to enclosing numerator arithmetic. A rational
+  literal has no arithmetic intermediate, so internal analysis may retain it
+  as a carrier outside the word while an enclosing island validates its scaled
+  numerator. When the literal is the public query root, export validates that
+  carrier and withholds a TRUE plan if it is outside the word.
 
   Exact-plan analysis and integer-numerator validation each use a separate
   pointer-keyed memo table and explicit work stack. Both tables and stacks grow

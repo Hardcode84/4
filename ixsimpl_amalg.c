@@ -32858,9 +32858,9 @@ static void rational_finalize_analysis(rational_state *state, ixs_node *expr,
     analysis->full_fit = IXS_CHECK_TRUE;
     return;
   }
-  /* A literal has no arithmetic intermediate.  Its exact numerator remains a
-   * valid plan carrier even when the literal's mathematical value is outside
-   * the requested word; an enclosing operation will validate the scaled final
+  /* A literal has no arithmetic intermediate. Its exact numerator remains an
+   * internal plan carrier even when the literal is outside the requested word;
+   * an enclosing operation or the public root export validates the final
    * numerator before receiving TRUE. */
   if (expr->tag == IXS_RAT) {
     analysis->full_fit = IXS_CHECK_TRUE;
@@ -33349,6 +33349,7 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
   rational_analysis analysis;
   ixs_rational_materialization_plan result;
   uint64_t signed_modulus;
+  bool numerator_nonnegative = false;
   result.status = IXS_FACT_QUERY_INVALID;
   result.check = IXS_CHECK_UNKNOWN;
   result.numerator = NULL;
@@ -33394,14 +33395,34 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
       result.check = IXS_CHECK_UNKNOWN;
     return result;
   }
-  result.numerator = analysis.proof.numerator;
-  result.denominator = analysis.proof.denominator;
-  result.numerator_nonnegative =
-      analysis.nonnegative ||
-      rational_is_nonnegative(&state, analysis.proof.numerator);
-  result.ceil_bias_safe =
-      rational_ceil_bias_fits(&state, analysis.proof,
-                              result.numerator_nonnegative) == IXS_CHECK_TRUE;
+  /* Internal rational literals may carry an out-of-word numerator until an
+   * enclosing operation scales or rounds them. A public rational plan is the
+   * final consumer boundary and must prove its exported carrier executable. */
+  if (analysis.contains_materialization)
+    result.check = rational_check_and(
+        result.check,
+        rational_validate_integer(&state, analysis.proof.numerator));
+  if (result.check == IXS_CHECK_TRUE) {
+    /* The denominator is positive, so a nonnegative source proves its exact
+     * numerator nonnegative even when the numerator range alone loses that
+     * fact. Otherwise rational_open_fit proved signed fit for every
+     * nontrivial denominator; enforce that export contract explicitly. */
+    numerator_nonnegative =
+        analysis.nonnegative ||
+        rational_is_nonnegative(&state, analysis.proof.numerator) ||
+        rational_is_nonnegative(&state, expr);
+    if (analysis.proof.denominator > 1 && !numerator_nonnegative)
+      result.check = rational_check_and(
+          result.check, rational_signed_fits(&state, analysis.proof.numerator));
+  }
+  if (result.check == IXS_CHECK_TRUE) {
+    result.numerator = analysis.proof.numerator;
+    result.denominator = analysis.proof.denominator;
+    result.numerator_nonnegative = numerator_nonnegative;
+    result.ceil_bias_safe =
+        rational_ceil_bias_fits(&state, analysis.proof,
+                                result.numerator_nonnegative) == IXS_CHECK_TRUE;
+  }
   if (state.oom || bounds->oom) {
     result.status = IXS_FACT_QUERY_OOM;
     result.check = IXS_CHECK_UNKNOWN;
