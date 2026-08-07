@@ -143,6 +143,7 @@ API. Key functions:
 | `ixs_equivalent_modulo_pow2_facts` | Total low-bit equivalence under facts |
 | `ixs_finite_domain_facts` | Typed, budgeted finite-domain equivalence, relation verification, and synthesis with separate call status and proof result |
 | `ixs_synthesize_mapped_expression_facts` / `ixs_verify_mapped_expression_facts` | Budgeted synthesis and universal verification for caller-ordered source/candidate point mappings and additive offsets |
+| `ixs_synthesize_mapped_bundle_facts` | Atomic multi-component mapped synthesis with exact per-row fact domains and one shared budget |
 | `ixs_mapped_constant_differences_facts` | Atomically prove an exact signed scalar difference for every caller-ordered mapped row |
 | `ixs_finite_domain_batch_facts` | Mixed logical property checks over one ordered Cartesian integer domain, with universal results and first row-major witnesses |
 | `ixs_decompose_cyclic_facts` | Prove a cyclic residual-plus-scaled-Mod decomposition |

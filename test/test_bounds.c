@@ -8549,6 +8549,219 @@ static void test_public_mapped_expression_facts(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_mapped_bundle_facts(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "mapped_bundle_item");
+  ixs_node *base = ixs_sym(ctx, "mapped_bundle_base");
+  ixs_node *guard_value = ixs_sym(ctx, "mapped_bundle_guard");
+  ixs_node *guard = ixs_cmp(ctx, guard_value, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *not_guard = ixs_not(ctx, guard);
+  ixs_node *address = ixs_add(ctx, base, item);
+  const ixs_node *partial_values[1] = {address};
+  const ixs_node *partial_conditions[1] = {guard};
+  const ixs_node *partial_expressions[1] = {
+      ixs_pw(ctx, 1, partial_values, partial_conditions)};
+  const ixs_node *address_expressions[1] = {address};
+  const ixs_node *predicate_expressions[1] = {
+      ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 1))};
+  ixs_facts *common = ixs_facts_create(ctx);
+  ixs_session exact_session;
+  ixs_facts *strong;
+  ixs_facts *opposite;
+  ixs_mapped_bundle_row exact_rows[2];
+  ixs_mapped_bundle_component component;
+  ixs_mapped_bundle_result result;
+  const ixs_node *candidates[2];
+  size_t budget;
+
+  CHECK(ctx && item && base && guard_value && guard && not_guard && address &&
+        partial_expressions[0] && predicate_expressions[0] && common);
+  ixs_session_init(&exact_session, ctx);
+  strong = (ixs_facts_create)(&exact_session);
+  opposite = (ixs_facts_create)(&exact_session);
+  CHECK(strong && opposite && ixs_facts_assume_pred(strong, guard) &&
+        ixs_facts_assume_pred(opposite, not_guard));
+
+  exact_rows[0] = (ixs_mapped_bundle_row){strong, {0, 1, 1, 0}};
+  exact_rows[1] = (ixs_mapped_bundle_row){strong, {0, 0, 0, 0}};
+  component = (ixs_mapped_bundle_component){IXS_MAPPED_BUNDLE_SCALAR,
+                                            common,
+                                            item,
+                                            partial_expressions,
+                                            1,
+                                            exact_rows,
+                                            2};
+  candidates[0] = base;
+  budget = 9;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, candidates, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.check == IXS_CHECK_UNKNOWN && candidates[0] == NULL &&
+        budget == 1);
+  budget = 10;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, candidates, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && candidates[0] != NULL &&
+        test_ixs_equivalent_facts(strong, (ixs_node *)candidates[0], address) ==
+            IXS_CHECK_TRUE &&
+        budget == 0);
+
+  {
+    const ixs_node *left_values[1] = {base};
+    const ixs_node *right_values[1] = {ixs_add(ctx, base, ixs_int(ctx, 1))};
+    const ixs_node *left_conditions[1] = {guard};
+    const ixs_node *right_conditions[1] = {not_guard};
+    const ixs_node *incompatible_expressions[2] = {
+        ixs_pw(ctx, 1, left_values, left_conditions),
+        ixs_pw(ctx, 1, right_values, right_conditions)};
+    ixs_mapped_bundle_row incompatible_rows[2] = {{strong, {0, 0, 0, 0}},
+                                                  {opposite, {1, 0, 0, 0}}};
+    ixs_mapped_bundle_component incompatible = {
+        IXS_MAPPED_BUNDLE_SCALAR, common, item, incompatible_expressions, 2,
+        incompatible_rows,        2};
+    CHECK(incompatible_expressions[0] && incompatible_expressions[1]);
+    candidates[0] = base;
+    budget = 11;
+    result = ixs_synthesize_mapped_bundle_facts(&incompatible, 1, candidates, 1,
+                                                &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_UNKNOWN && candidates[0] == NULL &&
+          budget == 0);
+  }
+
+  {
+    ixs_mapped_bundle_row scalar_rows[2] = {{common, {0, 1, 1, 0}},
+                                            {common, {0, 0, 0, 0}}};
+    ixs_mapped_bundle_component components[2] = {
+        {IXS_MAPPED_BUNDLE_SCALAR, common, item, address_expressions, 1,
+         scalar_rows, 2},
+        {IXS_MAPPED_BUNDLE_PREDICATE, common, item, predicate_expressions, 1,
+         scalar_rows, 2}};
+
+    candidates[0] = base;
+    candidates[1] = base;
+    budget = 11;
+    result = ixs_synthesize_mapped_bundle_facts(components, 2, candidates, 2,
+                                                &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+          result.check == IXS_CHECK_UNKNOWN && candidates[0] == NULL &&
+          candidates[1] == NULL && budget == 1);
+    budget = 12;
+    result = ixs_synthesize_mapped_bundle_facts(components, 2, candidates, 2,
+                                                &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && candidates[0] != NULL &&
+          candidates[1] != NULL && ixs_node_is_pred(candidates[1]) &&
+          budget == 0);
+
+    components[1].expressions = address_expressions;
+    candidates[0] = base;
+    candidates[1] = base;
+    budget = 10;
+    result = ixs_synthesize_mapped_bundle_facts(components, 2, candidates, 2,
+                                                &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_UNKNOWN && candidates[0] == NULL &&
+          candidates[1] == NULL && budget == 0);
+  }
+
+  ixs_session_destroy(&exact_session);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_mapped_bundle_failures(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "mapped_bundle_failure_item");
+  ixs_node *base = ixs_sym(ctx, "mapped_bundle_failure_base");
+  ixs_node *foreign = ixs_sym(other, "mapped_bundle_failure_foreign");
+  const ixs_node *expressions[1] = {ixs_add(ctx, base, item)};
+  const ixs_node *foreign_expressions[1] = {foreign};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *foreign_facts = ixs_facts_create(other);
+  ixs_session stale_session;
+  ixs_facts *stale;
+  ixs_mapped_bundle_row rows[1] = {{facts, {0, 0, 0, 0}}};
+  ixs_mapped_bundle_component component = {
+      IXS_MAPPED_BUNDLE_SCALAR, facts, item, expressions, 1, rows, 1};
+  ixs_mapped_bundle_result result;
+  const ixs_node *candidate = base;
+  size_t budget;
+
+  CHECK(ctx && other && item && base && foreign && expressions[0] && facts &&
+        foreign_facts);
+  ixs_session_init(&stale_session, ctx);
+  stale = (ixs_facts_create)(&stale_session);
+  CHECK(stale != NULL);
+  ixs_session_reset(&stale_session);
+
+  budget = 3;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 0, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && budget == 3);
+
+  component.rows = (const ixs_mapped_bundle_row *)(uintptr_t)1;
+  candidate = base;
+  budget = 1;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 1);
+  component.rows = rows;
+  budget = 3;
+
+  rows[0].relation.expression_index = 1;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  rows[0].relation.expression_index = 0;
+
+  component.kind = (ixs_mapped_bundle_component_kind)99;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  component.kind = IXS_MAPPED_BUNDLE_SCALAR;
+
+  component.expressions = foreign_expressions;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  component.expressions = expressions;
+
+  candidate = base;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_FINITE_DOMAIN_OOM &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+
+  rows[0].facts = foreign_facts;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  rows[0].facts = stale;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+
+  ixs_session_destroy(&stale_session);
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_mapped_expression_failures(void) {
   const int64_t points[2] = {0, 1};
   ixs_ctx *ctx = ixs_ctx_create();
@@ -13512,6 +13725,8 @@ int main(void) {
   test_finite_domain_equivalence_growable_discovery();
   test_public_finite_domain_synthesis();
   test_public_mapped_expression_facts();
+  test_public_mapped_bundle_facts();
+  test_public_mapped_bundle_failures();
   test_public_mapped_expression_failures();
   test_public_mapped_constant_differences();
   test_public_finite_domain_batch();

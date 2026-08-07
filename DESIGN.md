@@ -2031,6 +2031,32 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `O(N + R log N)` and its scratch space is `O(N)` for `N` candidate points and
   `R` rows.
 
+  `ixs_synthesize_mapped_bundle_facts` owns the corresponding multi-output
+  transaction. Each ordered scalar or predicate component names one common
+  synthesis fact set and mapped rows carrying their exact verification fact
+  sets. All fact sets may use distinct live sessions but must share one
+  context. The query derives each sorted unique candidate image, nominates in
+  deterministic order from the common domain and then each distinct exact
+  domain in first-row order, and suppresses duplicate candidate handles.
+  Every well-typed nomination is universally verified across all rows under
+  their own facts. Predicate components accept only predicate nodes. Component
+  outputs are transactional: only `COMPLETE` plus `TRUE` publishes every
+  candidate in caller component order; semantic failure and every non-complete
+  status leave the complete output array null.
+
+  Fact domains are grouped with expected-O(1) pointer tables. Stable contiguous
+  row slices preserve both first-domain and within-domain row order. The common
+  point image is sorted once; an exact-domain point slice is sorted and uniqued
+  only if common nomination failed and that domain is reached. No nomination
+  re-sorts or recopies a reached group. For `R` rows, planning takes
+  `O(R log R + sum(reached R_g log R_g))` time and `O(R + G)` scratch space,
+  independent of the number of nominated candidates. Before reading any row
+  array, checked component headers establish the lower-bound common-nomination
+  charge `sum(R + 1)`; an insufficient budget returns `EXHAUSTED` without
+  inspecting rows. Full fact, provenance, scalar-kind, index, and size
+  validation then completes before any work is charged. Fact validation uses
+  one pointer set, so repeated row domains cause one session bind each.
+
   Synthesis first charges `N + R`, one unit for every representative and every
   caller row. This is `2N` with exactly one row per point, while every accepted
   duplicate row costs one additional unit. Structural predicate synthesis
@@ -2042,6 +2068,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   not consume work. OOM, a proof limit, or nested exhaustion after a
   reservation keeps every charge already made. Undefined specialized values
   are semantic no-proofs, not malformed input.
+
+  Bundle nomination reuses those exact synthesis charges for the common row
+  table and for each distinct exact-domain subset it reaches. Each distinct
+  well-typed candidate then pays exactly `R` verification units, split across
+  the prebuilt exact-domain row slices. The single caller counter covers all
+  components, nominations, predicate children, and universal verification.
+  Consumed work is retained when a later nomination is rejected, another
+  component is unsupported, or the query returns `EXHAUSTED`, `LIMITED`, OOM,
+  or invalid after proof work began. Header or full-table validation failures
+  consume no work.
 
   `ixs_mapped_constant_differences_facts` is the companion bounded scalar
   query. Each row independently names lhs and rhs expression indices and

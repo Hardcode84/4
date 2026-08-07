@@ -264,12 +264,41 @@ static void test_mapped_predicate_fallback_budget_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_mapped_bundle_atomic_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "mapped_bundle_contract_item");
+  ixs_node *base = ixs_sym(ctx, "mapped_bundle_contract_base");
+  const ixs_node *address[1] = {ixs_add(ctx, base, item)};
+  const ixs_node *predicate[1] = {
+      ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 1))};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_mapped_bundle_row rows[2] = {{facts, {0, 1, 1, 0}},
+                                   {facts, {0, 0, 0, 0}}};
+  ixs_mapped_bundle_component components[2] = {
+      {IXS_MAPPED_BUNDLE_SCALAR, facts, item, address, 1, rows, 2},
+      {IXS_MAPPED_BUNDLE_PREDICATE, facts, item, predicate, 1, rows, 2}};
+  const ixs_node *candidates[2] = {base, base};
+  ixs_mapped_bundle_result result;
+  size_t budget = 12;
+
+  CHECK(ctx && item && base && address[0] && predicate[0] && facts);
+  result =
+      ixs_synthesize_mapped_bundle_facts(components, 2, candidates, 2, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && candidates[0] != NULL &&
+        candidates[1] != NULL && ixs_node_is_pred(candidates[1]) &&
+        budget == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_relational_negative_cycle_contract();
   test_relational_chain_insertion_order_contract();
   test_relational_exact_equality_noise_contract();
   test_relational_loop_bound_production_witness();
   test_mapped_predicate_fallback_budget_contract();
+  test_mapped_bundle_atomic_contract();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

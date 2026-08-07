@@ -19874,6 +19874,557 @@ cleanup:
   return result;
 }
 
+typedef struct {
+  ixs_facts *facts;
+  size_t row_begin;
+  size_t nrows;
+  size_t ncandidate_points;
+  size_t fill;
+} mapped_bundle_fact_group;
+
+typedef struct {
+  ixs_facts *facts;
+  size_t group_plus_one;
+} mapped_bundle_fact_entry;
+
+typedef struct {
+  const ixs_node *candidate;
+} mapped_bundle_candidate_entry;
+
+typedef struct {
+  ixs_mapped_expression_row *rows;
+  int64_t *candidate_points;
+  size_t ncandidate_points;
+  mapped_bundle_fact_group *groups;
+  size_t ngroups;
+  size_t *row_groups;
+  ixs_mapped_expression_row *group_rows;
+  int64_t *group_points;
+  mapped_bundle_candidate_entry *attempted;
+  size_t attempted_capacity;
+} mapped_bundle_component_work;
+
+static void mapped_bundle_reset_candidates(const ixs_node **candidates,
+                                           size_t ncandidates) {
+  size_t i;
+  if (!candidates || ncandidates == 0u ||
+      ncandidates > SIZE_MAX / sizeof(*candidates))
+    return;
+  for (i = 0; i < ncandidates; i++)
+    candidates[i] = NULL;
+}
+
+static bool mapped_bundle_hash_capacity(size_t count, size_t element_size,
+                                        size_t *capacity) {
+  size_t needed;
+  *capacity = 0u;
+  if (count == 0u || count > SIZE_MAX / 2u)
+    return false;
+  needed = count * 2u;
+  *capacity = 2u;
+  while (*capacity < needed) {
+    if (*capacity > SIZE_MAX / 2u)
+      return false;
+    *capacity *= 2u;
+  }
+  return *capacity <= SIZE_MAX / element_size;
+}
+
+static bool mapped_bundle_fact_valid(ixs_facts *facts, ixs_ctx **shared_ctx) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  bool valid = true;
+
+  if (!facts_bind(facts, &binding, &ctx))
+    return false;
+  if (!facts_ready(facts)) {
+    ixs_ctx_push_error(ctx, "mapped bundle: fact set is unusable");
+    valid = false;
+  }
+  if (*shared_ctx && *shared_ctx != ctx) {
+    ixs_ctx_push_error(ctx,
+                       "mapped bundle: fact sets belong to different contexts");
+    valid = false;
+  } else if (!*shared_ctx) {
+    *shared_ctx = ctx;
+  }
+  ixs_session_unbind(&binding);
+  return valid;
+}
+
+static bool mapped_bundle_component_sizes_valid(
+    const ixs_mapped_bundle_component *component) {
+  size_t capacity;
+  return (component->kind == IXS_MAPPED_BUNDLE_SCALAR ||
+          component->kind == IXS_MAPPED_BUNDLE_PREDICATE) &&
+         component->synthesis_facts && component->symbol &&
+         component->nexpressions != 0u && component->rows &&
+         component->expressions && component->nrows != 0u &&
+         component->nrows != SIZE_MAX &&
+         component->nexpressions <=
+             SIZE_MAX / sizeof(*component->expressions) &&
+         component->nrows <= SIZE_MAX / sizeof(*component->rows) &&
+         component->nrows <= SIZE_MAX / sizeof(ixs_mapped_expression_row) &&
+         component->nrows <= SIZE_MAX / sizeof(int64_t) &&
+         component->nrows <= SIZE_MAX / sizeof(size_t) &&
+         mapped_bundle_hash_capacity(
+             component->nrows, sizeof(mapped_bundle_fact_entry), &capacity) &&
+         mapped_bundle_hash_capacity(component->nrows + 1u,
+                                     sizeof(mapped_bundle_candidate_entry),
+                                     &capacity);
+}
+
+static bool
+mapped_bundle_header_valid(const ixs_mapped_bundle_component *components,
+                           size_t ncomponents, const ixs_node **candidates,
+                           size_t ncandidates, size_t *remaining_work,
+                           size_t *minimum_work, size_t *fact_count) {
+  size_t component;
+  size_t fact_capacity;
+
+  *minimum_work = 0u;
+  *fact_count = 0u;
+  if (!components || ncomponents == 0u ||
+      ncomponents > SIZE_MAX / sizeof(*components) || !candidates ||
+      ncandidates != ncomponents || !remaining_work)
+    return false;
+  for (component = 0; component < ncomponents; component++) {
+    size_t component_work;
+    if (!mapped_bundle_component_sizes_valid(&components[component]))
+      return false;
+    component_work = components[component].nrows + 1u;
+    if (*minimum_work > SIZE_MAX - component_work)
+      return false;
+    *minimum_work += component_work;
+    if (*fact_count > SIZE_MAX - components[component].nrows - 1u)
+      return false;
+    *fact_count += components[component].nrows + 1u;
+  }
+  return mapped_bundle_hash_capacity(
+      *fact_count, sizeof(mapped_bundle_fact_entry), &fact_capacity);
+}
+
+static bool
+mapped_bundle_validate_component(const ixs_mapped_bundle_component *component) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  const char *query = "mapped bundle";
+  size_t row;
+  bool valid = true;
+
+  if (!facts_bind(component->synthesis_facts, &binding, &ctx))
+    return false;
+  if (component->kind != IXS_MAPPED_BUNDLE_SCALAR &&
+      component->kind != IXS_MAPPED_BUNDLE_PREDICATE) {
+    ixs_ctx_push_error(ctx, "%s: invalid component kind", query);
+    valid = false;
+  }
+  if (!mapped_bundle_component_sizes_valid(component)) {
+    ixs_ctx_push_error(ctx, "%s: invalid component arrays or counts", query);
+    valid = false;
+    goto cleanup;
+  }
+  if (!mapped_expression_symbol_valid(ctx, component->symbol, query) ||
+      !mapped_expression_values_valid(ctx, query, component->expressions,
+                                      component->nexpressions))
+    valid = false;
+  for (row = 0; row < component->nrows; row++) {
+    if (component->rows[row].relation.expression_index <
+        component->nexpressions)
+      continue;
+    ixs_ctx_push_error(ctx, "%s: expression index is out of range", query);
+    valid = false;
+  }
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return valid;
+}
+
+static mapped_bundle_fact_entry *
+mapped_bundle_find_fact(mapped_bundle_fact_entry *entries, size_t capacity,
+                        ixs_facts *facts);
+
+static ixs_finite_domain_status
+mapped_bundle_validate_facts(const ixs_mapped_bundle_component *components,
+                             size_t ncomponents, size_t fact_count,
+                             ixs_ctx **shared_ctx) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_arena_mark mark;
+  mapped_bundle_fact_entry *entries;
+  size_t capacity;
+  size_t component;
+  bool valid = true;
+
+  if (!facts_bind(components[0].synthesis_facts, &binding, &ctx))
+    return IXS_FINITE_DOMAIN_INVALID;
+  if (!facts_ready(components[0].synthesis_facts)) {
+    ixs_ctx_push_error(ctx, "mapped bundle: fact set is unusable");
+    ixs_session_unbind(&binding);
+    return IXS_FINITE_DOMAIN_INVALID;
+  }
+  *shared_ctx = ctx;
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!mapped_bundle_hash_capacity(fact_count, sizeof(*entries), &capacity)) {
+    valid = false;
+    goto cleanup;
+  }
+  entries = ixs_arena_alloc(&ctx->scratch, capacity * sizeof(*entries),
+                            sizeof(void *));
+  if (!entries) {
+    ixs_ctx_push_error(ctx, "mapped bundle: out of memory");
+    ixs_arena_restore(&ctx->scratch, mark);
+    ixs_session_unbind(&binding);
+    return IXS_FINITE_DOMAIN_OOM;
+  }
+  memset(entries, 0, capacity * sizeof(*entries));
+
+  /* First occurrence order bounds session switches by distinct fact sets. */
+  for (component = 0; component < ncomponents; component++) {
+    const ixs_mapped_bundle_component *current = &components[component];
+    size_t row;
+    mapped_bundle_fact_entry *entry =
+        mapped_bundle_find_fact(entries, capacity, current->synthesis_facts);
+    if (!entry->facts) {
+      entry->facts = current->synthesis_facts;
+      if (!mapped_bundle_fact_valid(entry->facts, shared_ctx))
+        valid = false;
+    }
+    for (row = 0; row < current->nrows; row++) {
+      entry =
+          mapped_bundle_find_fact(entries, capacity, current->rows[row].facts);
+      if (entry->facts)
+        continue;
+      entry->facts = current->rows[row].facts;
+      if (!mapped_bundle_fact_valid(entry->facts, shared_ctx))
+        valid = false;
+    }
+  }
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  ixs_session_unbind(&binding);
+  return valid ? IXS_FINITE_DOMAIN_COMPLETE : IXS_FINITE_DOMAIN_INVALID;
+}
+
+static ixs_finite_domain_status
+mapped_bundle_validate(const ixs_mapped_bundle_component *components,
+                       size_t ncomponents, size_t fact_count,
+                       ixs_ctx **shared_ctx) {
+  ixs_finite_domain_status status = mapped_bundle_validate_facts(
+      components, ncomponents, fact_count, shared_ctx);
+  size_t component;
+  bool valid = true;
+
+  if (status != IXS_FINITE_DOMAIN_COMPLETE)
+    return status;
+  for (component = 0; component < ncomponents; component++)
+    if (!mapped_bundle_validate_component(&components[component]))
+      valid = false;
+  return valid ? IXS_FINITE_DOMAIN_COMPLETE : IXS_FINITE_DOMAIN_INVALID;
+}
+
+static int mapped_bundle_point_compare(const void *lhs, const void *rhs) {
+  int64_t left = *(const int64_t *)lhs;
+  int64_t right = *(const int64_t *)rhs;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+static size_t mapped_bundle_sort_unique_points(int64_t *points,
+                                               size_t npoints) {
+  size_t input;
+  size_t output = 0u;
+  qsort(points, npoints, sizeof(*points), mapped_bundle_point_compare);
+  for (input = 0; input < npoints; input++)
+    if (output == 0u || points[input] != points[output - 1u])
+      points[output++] = points[input];
+  return output;
+}
+
+static mapped_bundle_fact_entry *
+mapped_bundle_find_fact(mapped_bundle_fact_entry *entries, size_t capacity,
+                        ixs_facts *facts) {
+  size_t index = bounds_hash_ptr(facts) & (capacity - 1u);
+  while (entries[index].facts && entries[index].facts != facts)
+    index = (index + 1u) & (capacity - 1u);
+  return &entries[index];
+}
+
+static mapped_bundle_candidate_entry *
+mapped_bundle_find_candidate(mapped_bundle_candidate_entry *entries,
+                             size_t capacity, const ixs_node *candidate) {
+  size_t index = bounds_hash_ptr(candidate) & (capacity - 1u);
+  while (entries[index].candidate && entries[index].candidate != candidate)
+    index = (index + 1u) & (capacity - 1u);
+  return &entries[index];
+}
+
+static bool mapped_bundle_prepare_component_work(
+    ixs_ctx *ctx, const ixs_mapped_bundle_component *component,
+    mapped_bundle_component_work *work) {
+  mapped_bundle_fact_entry *fact_entries;
+  size_t fact_capacity;
+  size_t row;
+
+  memset(work, 0, sizeof(*work));
+  if (!mapped_bundle_hash_capacity(component->nrows, sizeof(*fact_entries),
+                                   &fact_capacity) ||
+      !mapped_bundle_hash_capacity(component->nrows + 1u,
+                                   sizeof(*work->attempted),
+                                   &work->attempted_capacity))
+    return false;
+  work->rows = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->rows), sizeof(void *));
+  work->candidate_points = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->candidate_points),
+      sizeof(int64_t));
+  work->groups = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->groups), sizeof(void *));
+  work->row_groups = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->row_groups),
+      sizeof(size_t));
+  work->group_rows = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->group_rows),
+      sizeof(void *));
+  work->group_points = ixs_arena_alloc(
+      &ctx->scratch, component->nrows * sizeof(*work->group_points),
+      sizeof(int64_t));
+  work->attempted = ixs_arena_alloc(
+      &ctx->scratch, work->attempted_capacity * sizeof(*work->attempted),
+      sizeof(void *));
+  fact_entries = ixs_arena_alloc(
+      &ctx->scratch, fact_capacity * sizeof(*fact_entries), sizeof(void *));
+  if (!work->rows || !work->candidate_points || !work->groups ||
+      !work->row_groups || !work->group_rows || !work->group_points ||
+      !work->attempted || !fact_entries)
+    return false;
+  memset(work->groups, 0, component->nrows * sizeof(*work->groups));
+  memset(work->attempted, 0,
+         work->attempted_capacity * sizeof(*work->attempted));
+  memset(fact_entries, 0, fact_capacity * sizeof(*fact_entries));
+
+  for (row = 0; row < component->nrows; row++) {
+    const ixs_mapped_bundle_row *input = &component->rows[row];
+    mapped_bundle_fact_entry *entry =
+        mapped_bundle_find_fact(fact_entries, fact_capacity, input->facts);
+    mapped_bundle_fact_group *group;
+    work->rows[row] = input->relation;
+    work->candidate_points[row] = input->relation.candidate_point;
+    if (!entry->facts) {
+      entry->facts = input->facts;
+      entry->group_plus_one = ++work->ngroups;
+      group = &work->groups[work->ngroups - 1u];
+      group->facts = input->facts;
+    } else {
+      group = &work->groups[entry->group_plus_one - 1u];
+    }
+    work->row_groups[row] = entry->group_plus_one - 1u;
+    group->nrows++;
+  }
+  {
+    size_t begin = 0u;
+    size_t group;
+    for (group = 0; group < work->ngroups; group++) {
+      work->groups[group].row_begin = begin;
+      work->groups[group].fill = begin;
+      begin += work->groups[group].nrows;
+    }
+    assert(begin == component->nrows);
+  }
+  for (row = 0; row < component->nrows; row++) {
+    mapped_bundle_fact_group *group = &work->groups[work->row_groups[row]];
+    size_t output = group->fill++;
+    work->group_rows[output] = work->rows[row];
+    work->group_points[output] = work->rows[row].candidate_point;
+  }
+  {
+    size_t group;
+    for (group = 0; group < work->ngroups; group++)
+      assert(work->groups[group].fill ==
+             work->groups[group].row_begin + work->groups[group].nrows);
+  }
+  work->ncandidate_points = mapped_bundle_sort_unique_points(
+      work->candidate_points, component->nrows);
+  return true;
+}
+
+static ixs_finite_domain_result
+mapped_bundle_verify_candidate(const ixs_mapped_bundle_component *component,
+                               mapped_bundle_component_work *work,
+                               const ixs_node *candidate,
+                               size_t *remaining_work) {
+  ixs_finite_domain_result result = {IXS_FINITE_DOMAIN_COMPLETE, IXS_CHECK_TRUE,
+                                     NULL};
+  size_t group_index;
+  bool verified = true;
+
+  for (group_index = 0; group_index < work->ngroups; group_index++) {
+    const mapped_bundle_fact_group *group = &work->groups[group_index];
+    result = ixs_verify_mapped_expression_facts(
+        group->facts, component->symbol, component->expressions,
+        component->nexpressions, work->group_rows + group->row_begin,
+        group->nrows, candidate, remaining_work);
+    if (result.status != IXS_FINITE_DOMAIN_COMPLETE)
+      return result;
+    if (result.check != IXS_CHECK_TRUE)
+      verified = false;
+  }
+  result.check = verified ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+  return result;
+}
+
+static ixs_finite_domain_result
+mapped_bundle_try_nomination(const ixs_mapped_bundle_component *component,
+                             mapped_bundle_component_work *work,
+                             ixs_facts *facts,
+                             const ixs_mapped_expression_row *rows,
+                             size_t nrows, const int64_t *candidate_points,
+                             size_t ncandidate_points, size_t *remaining_work) {
+  ixs_finite_domain_result result = ixs_synthesize_mapped_expression_facts(
+      facts, component->symbol, component->expressions, component->nexpressions,
+      candidate_points, ncandidate_points, rows, nrows, remaining_work);
+  mapped_bundle_candidate_entry *entry;
+
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE || !result.value)
+    return result;
+  entry = mapped_bundle_find_candidate(work->attempted,
+                                       work->attempted_capacity, result.value);
+  if (entry->candidate) {
+    result.check = IXS_CHECK_UNKNOWN;
+    result.value = NULL;
+    return result;
+  }
+  entry->candidate = result.value;
+  if (component->kind == IXS_MAPPED_BUNDLE_PREDICATE &&
+      !ixs_node_is_pred_kind((ixs_node *)result.value)) {
+    result.check = IXS_CHECK_UNKNOWN;
+    result.value = NULL;
+    return result;
+  }
+  {
+    const ixs_node *candidate = result.value;
+    result = mapped_bundle_verify_candidate(component, work, candidate,
+                                            remaining_work);
+    if (result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE)
+      result.value = candidate;
+  }
+  return result;
+}
+
+/* Group once, sort the common image, then sort only exact domains reached by
+ * fallback. Proof calls own every repeated-work charge. */
+static ixs_finite_domain_result
+mapped_bundle_synthesize_component(ixs_ctx *ctx,
+                                   const ixs_mapped_bundle_component *component,
+                                   size_t *remaining_work) {
+  ixs_finite_domain_result result = {IXS_FINITE_DOMAIN_COMPLETE,
+                                     IXS_CHECK_UNKNOWN, NULL};
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  mapped_bundle_component_work work;
+  size_t group;
+
+  if (!mapped_bundle_prepare_component_work(ctx, component, &work)) {
+    ixs_ctx_push_error(ctx, "mapped bundle: out of memory");
+    result.status = IXS_FINITE_DOMAIN_OOM;
+    goto cleanup;
+  }
+  result = mapped_bundle_try_nomination(
+      component, &work, component->synthesis_facts, work.rows, component->nrows,
+      work.candidate_points, work.ncandidate_points, remaining_work);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE || result.value)
+    goto cleanup;
+
+  for (group = 0; group < work.ngroups; group++) {
+    mapped_bundle_fact_group *exact = &work.groups[group];
+    if (exact->facts == component->synthesis_facts)
+      continue;
+    exact->ncandidate_points = mapped_bundle_sort_unique_points(
+        work.group_points + exact->row_begin, exact->nrows);
+    result = mapped_bundle_try_nomination(
+        component, &work, exact->facts, work.group_rows + exact->row_begin,
+        exact->nrows, work.group_points + exact->row_begin,
+        exact->ncandidate_points, remaining_work);
+    if (result.status != IXS_FINITE_DOMAIN_COMPLETE || result.value)
+      goto cleanup;
+  }
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.check = IXS_CHECK_UNKNOWN;
+    result.value = NULL;
+  }
+  return result;
+}
+
+ixs_mapped_bundle_result ixs_synthesize_mapped_bundle_facts(
+    const ixs_mapped_bundle_component *components, size_t ncomponents,
+    const ixs_node **candidates, size_t ncandidates, size_t *remaining_work) {
+  ixs_mapped_bundle_result result = {IXS_FINITE_DOMAIN_INVALID,
+                                     IXS_CHECK_UNKNOWN};
+  ixs_session_binding binding;
+  ixs_ctx *ctx = NULL;
+  ixs_arena_mark mark;
+  const ixs_node **pending;
+  size_t minimum_work;
+  size_t fact_count;
+  size_t component;
+  ixs_finite_domain_status validation;
+
+  mapped_bundle_reset_candidates(candidates, ncandidates);
+  if (!mapped_bundle_header_valid(components, ncomponents, candidates,
+                                  ncandidates, remaining_work, &minimum_work,
+                                  &fact_count))
+    return result;
+  if (minimum_work > *remaining_work) {
+    result.status = IXS_FINITE_DOMAIN_EXHAUSTED;
+    return result;
+  }
+  validation =
+      mapped_bundle_validate(components, ncomponents, fact_count, &ctx);
+  if (validation != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = validation;
+    return result;
+  }
+  if (!facts_bind(components[0].synthesis_facts, &binding, &ctx))
+    return result;
+  mark = ixs_arena_save(&ctx->scratch);
+  pending = ixs_arena_alloc(&ctx->scratch, ncomponents * sizeof(*pending),
+                            sizeof(void *));
+  if (!pending) {
+    ixs_ctx_push_error(ctx, "mapped bundle: out of memory");
+    result.status = IXS_FINITE_DOMAIN_OOM;
+    goto cleanup;
+  }
+  for (component = 0; component < ncomponents; component++) {
+    ixs_finite_domain_result candidate = mapped_bundle_synthesize_component(
+        ctx, &components[component], remaining_work);
+    if (candidate.status != IXS_FINITE_DOMAIN_COMPLETE) {
+      result.status = candidate.status;
+      goto cleanup;
+    }
+    if (candidate.check != IXS_CHECK_TRUE || !candidate.value) {
+      result.status = IXS_FINITE_DOMAIN_COMPLETE;
+      goto cleanup;
+    }
+    pending[component] = candidate.value;
+  }
+  for (component = 0; component < ncomponents; component++)
+    candidates[component] = pending[component];
+  result.status = IXS_FINITE_DOMAIN_COMPLETE;
+  result.check = IXS_CHECK_TRUE;
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  ixs_session_unbind(&binding);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE ||
+      result.check != IXS_CHECK_TRUE)
+    mapped_bundle_reset_candidates(candidates, ncandidates);
+  return result;
+}
+
 static bool mapped_difference_header_valid(
     ixs_ctx *ctx, const ixs_node *symbol, const ixs_node *const *expressions,
     size_t nexpressions, const ixs_mapped_difference_row *rows, size_t nrows,

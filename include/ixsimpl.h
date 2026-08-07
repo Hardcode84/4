@@ -320,6 +320,36 @@ typedef struct {
   int64_t additive_offset;
 } ixs_mapped_expression_row;
 
+typedef enum {
+  IXS_MAPPED_BUNDLE_SCALAR,
+  IXS_MAPPED_BUNDLE_PREDICATE
+} ixs_mapped_bundle_component_kind;
+
+/* One mapped relation row and the exact fact domain that must prove it. */
+typedef struct {
+  ixs_facts *facts;
+  ixs_mapped_expression_row relation;
+} ixs_mapped_bundle_row;
+
+/* One ordered output component in an atomic mapped-bundle query.
+ * `synthesis_facts` is the first, normally common, candidate nomination
+ * domain. Exact row domains may nominate alternatives when it is
+ * inconclusive. */
+typedef struct {
+  ixs_mapped_bundle_component_kind kind;
+  ixs_facts *synthesis_facts;
+  const ixs_node *symbol;
+  const ixs_node *const *expressions;
+  size_t nexpressions;
+  const ixs_mapped_bundle_row *rows;
+  size_t nrows;
+} ixs_mapped_bundle_component;
+
+typedef struct {
+  ixs_finite_domain_status status;
+  ixs_check_result check;
+} ixs_mapped_bundle_result;
+
 /* One exact scalar-difference row. Its output is
  *
  *   expressions[lhs_expression_index](symbol := lhs_point)
@@ -783,6 +813,35 @@ ixs_finite_domain_result ixs_verify_mapped_expression_facts(
     const ixs_node *const *expressions, size_t nexpressions,
     const ixs_mapped_expression_row *rows, size_t nrows,
     const ixs_node *candidate, size_t *remaining_work);
+/* Synthesize an ordered bundle of mapped scalar or predicate candidates and
+ * universally verify every candidate under each row's exact fact domain.
+ * Every component and row fact set must be live and belong to one context;
+ * separate sessions over that context are accepted. Candidate-point images
+ * are the sorted unique image derived from the rows. The common synthesis
+ * domain is tried first, followed by distinct exact row domains in first-row
+ * order. Duplicate candidate handles are verified once.
+ *
+ * Each nomination consumes the ordinary mapped-synthesis charge for its row
+ * subset and derived image. Each distinct well-typed nomination additionally
+ * consumes exactly one mapped-verification unit per component row, split
+ * across its exact fact domains. One `remaining_work` counter owns all
+ * components and nominations. Work consumed before an ensuing semantic miss,
+ * EXHAUSTED, LIMITED, or hard failure is not refunded.
+ *
+ * `ncandidates` must equal `ncomponents`. A complete universal proof returns
+ * COMPLETE with TRUE and writes every candidate in component order. COMPLETE
+ * with UNKNOWN and every non-complete status leave every output NULL. Valid
+ * output storage is reset before the remaining query validation. Invalid
+ * input and validation OOM consume no work. Checked headers first establish
+ * a lower-bound common-nomination charge of sum(nrows + 1); insufficient work
+ * returns EXHAUSTED without reading any row array. Exact domains are grouped
+ * once into stable row slices; a point image is sorted only if that domain is
+ * reached for nomination. Planning is
+ * O(R log R + sum(reached R_g log R_g)) rather than proportional to the total
+ * nomination count. */
+ixs_mapped_bundle_result ixs_synthesize_mapped_bundle_facts(
+    const ixs_mapped_bundle_component *components, size_t ncomponents,
+    const ixs_node **candidates, size_t ncandidates, size_t *remaining_work);
 /* Prove one exactly representable signed integer constant difference for every
  * mapped row, preserving caller order. Every expression may be any scalar
  * expression, including a predicate-valued 0/1 expression. Work is exactly
