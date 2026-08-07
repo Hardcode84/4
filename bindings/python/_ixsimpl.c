@@ -2888,16 +2888,25 @@ static PyObject *Context_rational_intermediates_fit(ContextObject *self,
                                                     PyObject *args,
                                                     PyObject *kwargs) {
   static char *kwlist[] = {"expr", "word_bits", "facts", NULL};
-  PyObject *expr_obj, *facts_obj;
+  PyObject *expr_obj, *word_bits_obj, *facts_obj;
   ixs_session *session = Context_session(self);
   const ixs_node *expr;
   ixs_facts *facts;
   ixs_fact_check_result result;
-  unsigned int word_bits;
+  uint32_t word_bits;
+  unsigned long long word_bits_value;
   size_t errors_before;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OIO", kwlist, &expr_obj,
-                                   &word_bits, &facts_obj))
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_obj,
+                                   &word_bits_obj, &facts_obj))
     return NULL;
+  word_bits_value = PyLong_AsUnsignedLongLong(word_bits_obj);
+  if (PyErr_Occurred())
+    return NULL;
+  if (word_bits_value > UINT32_MAX) {
+    PyErr_SetString(PyExc_OverflowError, "word_bits does not fit uint32");
+    return NULL;
+  }
+  word_bits = (uint32_t)word_bits_value;
   if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
     return NULL;
   errors_before = ixs_session_nerrors(session);

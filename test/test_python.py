@@ -2343,6 +2343,10 @@ def test_rational_intermediates_fit_binding() -> None:
         ctx.rational_intermediates_fit(expr, 1, fitting)
     with pytest.raises(ValueError, match="word_bits"):
         ctx.rational_intermediates_fit(expr, 65, fitting)
+    with pytest.raises(OverflowError, match="word_bits"):
+        ctx.rational_intermediates_fit(expr, (1 << 32) + 8, fitting)
+    with pytest.raises(OverflowError):
+        ctx.rational_intermediates_fit(expr, -1, fitting)
     with pytest.raises(ValueError, match="different context"):
         ctx.rational_intermediates_fit(other.sym("x"), 8, fitting)
     with pytest.raises(ValueError, match="different context"):

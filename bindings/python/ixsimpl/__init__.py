@@ -234,6 +234,9 @@ if TYPE_CHECKING:
         def congruent(
             self, expr: _Expr, modulus: int, residue: int, facts: Facts
         ) -> bool | None: ...
+        def rational_intermediates_fit(
+            self, expr: _Expr, word_bits: int, facts: Facts
+        ) -> bool | None: ...
         def try_exact_divide(
             self, expr: _Expr, divisor: int, facts: Facts
         ) -> tuple[Literal["proven", "not_exact", "unknown"], Expr | None]: ...

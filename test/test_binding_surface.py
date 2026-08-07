@@ -34,6 +34,7 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "modulo_recurrence",
         "pow2_fact",
         "range",
+        "rational_intermediates_fit",
         "simplify_batch",
         "split_additive_constant",
         "symbol_congruence",
@@ -270,6 +271,7 @@ def _typecheck_package_surface(
     pointer: int = expr.node_ptr
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
+    rational_fit: bool | None = ctx.rational_intermediates_fit(expr, 32, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
@@ -292,6 +294,7 @@ def _typecheck_package_surface(
         truncated,
         pointer,
         exact,
+        rational_fit,
         transferred,
     )
 
@@ -333,6 +336,7 @@ def _typecheck_extension_surface(
     quotient = ctx.decompose_exact_quotient(expr, facts)
     truncated: _ixsimpl._Expr = _ixsimpl.trunc(expr)
     pointer: int = expr.node_ptr
+    rational_fit: bool | None = ctx.rational_intermediates_fit(expr, 32, facts)
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
@@ -352,4 +356,5 @@ def _typecheck_extension_surface(
         quotient,
         truncated,
         pointer,
+        rational_fit,
     )
