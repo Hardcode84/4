@@ -374,6 +374,14 @@ ixs_node *ixs_ceil(ixs_session *s, ixs_node *x) {
   return result;
 }
 
+ixs_node *ixs_trunc(ixs_session *s, ixs_node *x) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx = ixs_session_bind(&binding, s);
+  ixs_node *result = simp_trunc(ctx, x);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);

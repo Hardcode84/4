@@ -31,6 +31,7 @@ from ixsimpl._ixsimpl import (
     PIECEWISE,
     RAT,
     SYM,
+    TRUNC,
     XOR,
     Facts,
     _Expr,
@@ -46,6 +47,7 @@ from ixsimpl._ixsimpl import not_ as _not
 from ixsimpl._ixsimpl import or_ as _or
 from ixsimpl._ixsimpl import pw as _pw
 from ixsimpl._ixsimpl import same_node as _same_node
+from ixsimpl._ixsimpl import trunc as _trunc
 from ixsimpl._ixsimpl import xor_ as _xor
 
 
@@ -225,6 +227,7 @@ if TYPE_CHECKING:
     def abs_(x: Expr) -> Expr: ...
     def floor(expr: Expr) -> Expr: ...
     def ceil(expr: Expr) -> Expr: ...
+    def trunc(expr: Expr) -> Expr: ...
     def mod(a: Expr, b: Expr | int) -> Expr: ...
     def max_(a: Expr, *args: Expr | int) -> Expr: ...
     def min_(a: Expr, *args: Expr | int) -> Expr: ...
@@ -248,6 +251,7 @@ else:
 
     floor = _floor
     ceil = _ceil
+    trunc = _trunc
     mod = _mod
     max_ = _max
     min_ = _min
@@ -282,6 +286,7 @@ __all__ = [
     "PIECEWISE",
     "RAT",
     "SYM",
+    "TRUNC",
     "XOR",
     "Context",
     "Expr",
@@ -298,5 +303,6 @@ __all__ = [
     "or_",
     "pw",
     "same_node",
+    "trunc",
     "xor_",
 ]

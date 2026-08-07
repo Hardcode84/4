@@ -46,6 +46,10 @@ def test_migration_binding_surface_is_discoverable() -> None:
     assert facts_methods <= set(dir(ixsimpl.Facts))
     assert expr_members <= set(dir(ixsimpl.Expr))
     assert {"Context", "Expr", "Facts"} <= set(ixsimpl.__all__)
+    retained_module_members = {"TRUNC", "trunc"}
+    assert retained_module_members <= set(ixsimpl.__all__)
+    assert retained_module_members <= set(dir(ixsimpl))
+    assert retained_module_members <= set(dir(_ixsimpl))
 
 
 def _typecheck_package_surface(

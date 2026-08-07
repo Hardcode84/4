@@ -7,7 +7,7 @@ from __future__ import annotations
 import ixsimpl
 import pytest
 import sympy
-from ixsimpl.sympy_conv import extract_assumptions, from_sympy, to_sympy
+from ixsimpl.sympy_conv import Trunc, extract_assumptions, from_sympy, to_sympy
 
 
 @pytest.fixture()
@@ -94,6 +94,16 @@ def test_to_sympy_floor_ceil(
 ) -> None:
     assert to_sympy(ixsimpl.floor(syms["x"])) == sympy.floor(sp_syms["x"])
     assert to_sympy(ixsimpl.ceil(syms["x"])) == sympy.ceiling(sp_syms["x"])
+
+
+def test_to_sympy_trunc(
+    ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr], sp_syms: dict[str, sympy.Symbol]
+) -> None:
+    sp = to_sympy(ixsimpl.trunc(syms["x"] / 3))
+    assert isinstance(sp, Trunc)
+    assert sp.args == (sp_syms["x"] / 3,)
+    assert sp.subs({sp_syms["x"]: 4}) == 1
+    assert sp.subs({sp_syms["x"]: -4}) == -1
 
 
 def test_to_sympy_floor_ceil_max_min(ctx: ixsimpl.Context) -> None:
@@ -315,6 +325,17 @@ def test_from_sympy_floor_ceil(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Sy
     assert e_ce.tag == ixsimpl.CEIL
 
 
+def test_from_sympy_trunc(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
+    e = from_sympy(ctx, Trunc(sp_syms["x"] / 3, evaluate=False))
+    assert e.tag == ixsimpl.TRUNC
+    assert str(e) == "Trunc(1/3*x)"
+
+    external_trunc = sympy.Function("Trunc")(sp_syms["x"] / 5)
+    external = from_sympy(ctx, external_trunc)
+    assert external.tag == ixsimpl.TRUNC
+    assert str(external) == "Trunc(1/5*x)"
+
+
 def test_from_sympy_mod(ctx: ixsimpl.Context, sp_syms: dict[str, sympy.Symbol]) -> None:
     e = from_sympy(ctx, sympy.Mod(sp_syms["x"], sp_syms["y"], evaluate=False))
     assert e.tag == ixsimpl.MOD
@@ -423,6 +444,12 @@ def test_roundtrip_floor(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) ->
     e2 = from_sympy(ctx, sp)
     sp2 = to_sympy(e2)
     assert sympy.simplify(sp - sp2) == 0
+
+
+def test_roundtrip_trunc(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
+    e = ixsimpl.trunc((syms["x"] + syms["y"]) / 3)
+    e2 = from_sympy(ctx, to_sympy(e))
+    assert ctx.equivalent(e2, e, ctx.facts()) is True
 
 
 def test_roundtrip_piecewise(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:

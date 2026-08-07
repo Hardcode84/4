@@ -249,6 +249,34 @@ static void test_floor_rules(void) {
   }
 }
 
+static void test_trunc_rules(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "trunc_x");
+  ixs_node *y = ixs_sym(ctx, "trunc_y");
+  ixs_node *third = ixs_div(ctx, x, ixs_int(ctx, 3));
+  ixs_node *truncated = ixs_trunc(ctx, third);
+  ixs_node *assumption;
+
+  CHECK(ixs_trunc(ctx, ixs_int(ctx, 5)) == ixs_int(ctx, 5));
+  CHECK(ixs_trunc(ctx, x) == x);
+  CHECK(ixs_node_int_val(ixs_trunc(ctx, ixs_rat(ctx, 7, 3))) == 2);
+  CHECK(ixs_node_int_val(ixs_trunc(ctx, ixs_rat(ctx, -7, 3))) == -2);
+  CHECK(ixs_node_tag(truncated) == IXS_TRUNC);
+  CHECK(ixs_same_node(ixs_node_unary_arg(truncated), third));
+  CHECK(ixs_node_tag(ixs_trunc(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)))) ==
+        IXS_TRUNC);
+
+  assumption = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  CHECK(ixs_node_tag(ixs_simplify(ctx, truncated, &assumption, 1)) ==
+        IXS_FLOOR);
+  assumption = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 0));
+  CHECK(ixs_node_tag(ixs_simplify(ctx, truncated, &assumption, 1)) == IXS_CEIL);
+  assumption = ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0));
+  CHECK(ixs_simplify(ctx, truncated, &assumption, 1) == truncated);
+
+  CHECK(ixs_node_int_val(ixs_subs(ctx, truncated, x, ixs_int(ctx, -5))) == -1);
+}
+
 static void test_mod_rules(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -1101,6 +1129,7 @@ static void test_sentinel_propagation(void) {
   CHECK(ixs_neg(ctx, NULL) == NULL);
   CHECK(ixs_floor(ctx, NULL) == NULL);
   CHECK(ixs_ceil(ctx, NULL) == NULL);
+  CHECK(ixs_trunc(ctx, NULL) == NULL);
   CHECK(ixs_not(ctx, NULL) == NULL);
 
   {
@@ -1122,6 +1151,9 @@ static void test_sentinel_propagation(void) {
   r = ixs_floor(ctx, err);
   CHECK(ixs_is_domain_error(r));
 
+  r = ixs_trunc(ctx, err);
+  CHECK(ixs_is_domain_error(r));
+
   {
     ixs_node *parse = ixs_parse(ctx, "?", 1);
     ixs_node *target = ixs_sym(ctx, "sentinel_target");
@@ -1129,6 +1161,7 @@ static void test_sentinel_propagation(void) {
     ixs_node *replacements[2] = {err, parse};
     CHECK(ixs_is_parse_error(parse));
     ixs_ctx_clear_errors(ctx);
+    CHECK(ixs_trunc(ctx, parse) == parse);
     CHECK(ixs_subs(ctx, err, NULL, x) == NULL);
     CHECK(ixs_subs(ctx, err, parse, x) == parse);
     CHECK(ixs_subs(ctx, x, target, err) == err);
@@ -2704,6 +2737,11 @@ static void test_print_c(void) {
   ixs_print_c(fl, buf, sizeof(buf));
   CHECK(strstr(buf, "ixs_floor_i") != NULL);
 
+  /* Trunc -> ixs_trunc_i */
+  ixs_node *tr = ixs_trunc(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)));
+  ixs_print_c(tr, buf, sizeof(buf));
+  CHECK(strstr(buf, "ixs_trunc_i") != NULL);
+
   /* Mod -> ixs_mod_i */
   ixs_node *m = ixs_mod(ctx, x, ixs_int(ctx, 8));
   ixs_print_c(m, buf, sizeof(buf));
@@ -4033,6 +4071,7 @@ int main(void) {
   test_mul_canonicalize();
   test_hash_consing();
   test_floor_rules();
+  test_trunc_rules();
   test_mod_rules();
   test_mod_extract_constant_residue();
   test_mod_divisor_contract();

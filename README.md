@@ -133,7 +133,7 @@ API. Key functions:
 | `ixs_ctx_create` / `ixs_ctx_destroy` | Context lifecycle |
 | `ixs_session_init` / `ixs_session_destroy` | Reusable scratch and diagnostics |
 | `ixs_parse`, `ixs_parse_expr`, `ixs_parse_pred` | Parse SymPy-format strings |
-| `ixs_int`, `ixs_sym`, `ixs_add`, ... | Build expressions programmatically |
+| `ixs_int`, `ixs_sym`, `ixs_add`, `ixs_trunc`, ... | Build expressions programmatically, including exact truncation toward zero |
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
 | `ixs_check`, `ixs_range`, `ixs_integer_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |

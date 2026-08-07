@@ -208,6 +208,8 @@ static ixs_node *do_expand(ixs_ctx *ctx, ixs_node *node, int depth) {
     return simp_floor(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
   case IXS_CEIL:
     return simp_ceil(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
+  case IXS_TRUNC:
+    return simp_trunc(ctx, do_expand(ctx, node->u.unary.arg, depth + 1));
 
   case IXS_MOD:
   case IXS_CMP:

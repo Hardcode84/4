@@ -522,6 +522,25 @@ static void test_bounds_propagate_floor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_propagate_trunc(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds b;
+  ixs_node *x = ixs_sym(ctx, "trunc_bounds_x");
+  ixs_node *expr = ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_interval iv;
+
+  CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
+  ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -8)));
+  ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 7)));
+  iv = ixs_bounds_get(&b, expr);
+  CHECK(iv.valid);
+  CHECK(ixs_rat_cmp(iv.lo_p, iv.lo_q, -2, 1) == 0);
+  CHECK(ixs_rat_cmp(iv.hi_p, iv.hi_q, 2, 1) == 0);
+
+  ixs_bounds_destroy(&b);
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Bounds: unknown symbol                                            */
 /* ------------------------------------------------------------------ */
@@ -6540,7 +6559,7 @@ static void test_public_defined_reciprocal_and_children(void) {
   ixs_node *mixed[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -1)),
                         ixs_cmp(ctx, x, IXS_CMP_LE, one)};
   ixs_node *contradictory[2] = {nonzero, is_zero};
-  ixs_node *strict_nodes[10];
+  ixs_node *strict_nodes[11];
   ixs_mulfactor strict_factor;
   size_t i;
 
@@ -6559,12 +6578,13 @@ static void test_public_defined_reciprocal_and_children(void) {
   strict_nodes[1] = ixs_node_mul(ctx, one, 1, &strict_factor);
   strict_nodes[2] = ixs_floor(ctx, reciprocal);
   strict_nodes[3] = ixs_ceil(ctx, reciprocal);
-  strict_nodes[4] = ixs_max(ctx, reciprocal, one);
-  strict_nodes[5] = ixs_min(ctx, reciprocal, one);
-  strict_nodes[6] = ixs_xor(ctx, reciprocal, one);
-  strict_nodes[7] = ixs_cmp(ctx, reciprocal, IXS_CMP_GT, zero);
-  strict_nodes[8] = ixs_and(ctx, strict_nodes[7], ixs_true(ctx));
-  strict_nodes[9] = ixs_not(ctx, strict_nodes[7]);
+  strict_nodes[4] = ixs_trunc(ctx, reciprocal);
+  strict_nodes[5] = ixs_max(ctx, reciprocal, one);
+  strict_nodes[6] = ixs_min(ctx, reciprocal, one);
+  strict_nodes[7] = ixs_xor(ctx, reciprocal, one);
+  strict_nodes[8] = ixs_cmp(ctx, reciprocal, IXS_CMP_GT, zero);
+  strict_nodes[9] = ixs_and(ctx, strict_nodes[8], ixs_true(ctx));
+  strict_nodes[10] = ixs_not(ctx, strict_nodes[8]);
   for (i = 0; i < sizeof(strict_nodes) / sizeof(strict_nodes[0]); i++)
     CHECK(ixs_check_defined(ctx, strict_nodes[i], &is_zero, 1) ==
           IXS_CHECK_FALSE);
@@ -7239,6 +7259,7 @@ int main(void) {
   test_bounds_propagate_mod();
   test_bounds_propagate_mod_tight();
   test_bounds_propagate_floor();
+  test_bounds_propagate_trunc();
 
   /* Bounds: fork */
   test_bounds_fork();

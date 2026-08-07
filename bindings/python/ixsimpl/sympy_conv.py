@@ -45,6 +45,23 @@ class bitor(sympy.Function):  # type: ignore[misc]
         return None
 
 
+class Trunc(sympy.Function):  # type: ignore[misc]
+    """SymPy representation of exact integer truncation toward zero."""
+
+    nargs = 1
+
+    @classmethod
+    def eval(cls, arg: sympy.Basic) -> sympy.Basic | None:
+        if isinstance(arg, sympy.Integer):
+            return arg
+        if arg.is_number is True:
+            if arg.is_nonnegative is True:
+                return sympy.floor(arg)
+            if arg.is_nonpositive is True:
+                return sympy.ceiling(arg)
+        return None
+
+
 def to_sympy(
     expr: ixsimpl.Expr,
     *,
@@ -138,6 +155,9 @@ def to_sympy(
     if tag == ixsimpl.CEIL:
         # Same SymPy evaluation bug as floor; see above.
         return sympy.ceiling(_convert(expr.child(0)), evaluate=False)
+
+    if tag == ixsimpl.TRUNC:
+        return Trunc(_convert(expr.child(0)), evaluate=False)
 
     if tag == ixsimpl.MOD:
         # evaluate=False: SymPy 1.14 Mod evaluation is buggy on some
@@ -247,6 +267,9 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
     if isinstance(expr, sympy.ceiling):
         return ixsimpl.ceil(from_sympy(ctx, expr.args[0]))
 
+    if isinstance(expr, Trunc):
+        return ixsimpl.trunc(from_sympy(ctx, expr.args[0]))
+
     if isinstance(expr, sympy.Mod):
         return ixsimpl.mod(from_sympy(ctx, expr.args[0]), from_sympy(ctx, expr.args[1]))
 
@@ -306,6 +329,10 @@ def from_sympy(ctx: ixsimpl.Context, expr: sympy.Basic) -> ixsimpl.Expr:
     # Custom sympy.Function subclasses matched by name.
     if isinstance(expr, sympy.Function):
         name = type(expr).__name__
+        if name == "Trunc":
+            if len(expr.args) != 1:
+                raise ValueError(f"Trunc requires exactly 1 argument, got {len(expr.args)}")
+            return ixsimpl.trunc(from_sympy(ctx, expr.args[0]))
         if name == "xor":
             args = [from_sympy(ctx, a) for a in expr.args]
             if len(args) < 2:

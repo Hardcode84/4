@@ -17,6 +17,7 @@ int main() {
   ixs::Expr zero = ixs::Expr::integer(ctx, 0);
   ixs::Expr one = ixs::Expr::integer(ctx, 1);
   ixs::Expr eight = ixs::Expr::integer(ctx, 8);
+  ixs::Expr truncated = ixs::trunc(ixs::Expr::parse_expr(ctx, "x/3"));
   ixs::Expr nonnegative = ixs::Expr::parse_pred(ctx, "x >= 0");
   ixs::Expr congruent = ixs::Expr::parse_pred(ctx, "Mod(x, 8) == 0");
   ixs::Expr assumptions[1] = {nonnegative};
@@ -30,7 +31,11 @@ int main() {
       !x.range(range, assumptions, 1) || !range.has_lower ||
       !x.integer_range(integer_range, assumptions, 1) ||
       !integer_range.has_lower || integer_range.lower != 0 ||
-      integer_range.has_upper || (x * (y + one)).expand().is_null())
+      integer_range.has_upper || (x * (y + one)).expand().is_null() ||
+      ixs_node_tag(truncated.raw()) != IXS_TRUNC ||
+      truncated.raw() != ixs::Expr::parse_expr(ctx, "Trunc(x/3)").raw() ||
+      ixs_node_int_val(ixs::trunc(ixs::Expr::parse_expr(ctx, "-3/8")).raw()) !=
+          0)
     return 1;
 
   const ixs::Expr &const_expr = x + one;

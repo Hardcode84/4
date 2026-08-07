@@ -2938,6 +2938,18 @@ static PyObject *mod_ceil(PyObject *Py_UNUSED(module), PyObject *arg) {
   return (PyObject *)Expr_wrap(e->ctx_obj, result);
 }
 
+static PyObject *mod_trunc(PyObject *Py_UNUSED(module), PyObject *arg) {
+  ExprObject *e;
+  const ixs_node *result;
+  if (!PyObject_TypeCheck(arg, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "ixsimpl.trunc() requires an Expr");
+    return NULL;
+  }
+  e = (ExprObject *)arg;
+  result = ixs_trunc(Context_session(e->ctx_obj), e->node);
+  return (PyObject *)Expr_wrap(e->ctx_obj, result);
+}
+
 static PyObject *mod_binary_op(PyObject *args,
                                const ixs_node *(*op)(ixs_session *,
                                                      const ixs_node *,
@@ -3154,6 +3166,8 @@ static PyMethodDef module_methods[] = {
      "floor(expr) -> Expr: apply floor function."},
     {"ceil", (PyCFunction)mod_ceil, METH_O,
      "ceil(expr) -> Expr: apply ceiling function."},
+    {"trunc", (PyCFunction)mod_trunc, METH_O,
+     "trunc(expr) -> Expr: truncate toward zero."},
     {"mod", (PyCFunction)mod_mod, METH_VARARGS,
      "mod(a, b) -> Expr: floored modulo, defined for b > 0."},
     {"max_", (PyCFunction)mod_max_, METH_VARARGS,
@@ -3234,6 +3248,7 @@ PyMODINIT_FUNC PyInit__ixsimpl(void) {
   PyModule_AddIntConstant(m, "MUL", IXS_MUL);
   PyModule_AddIntConstant(m, "FLOOR", IXS_FLOOR);
   PyModule_AddIntConstant(m, "CEIL", IXS_CEIL);
+  PyModule_AddIntConstant(m, "TRUNC", IXS_TRUNC);
   PyModule_AddIntConstant(m, "MOD", IXS_MOD);
   PyModule_AddIntConstant(m, "PIECEWISE", IXS_PIECEWISE);
   PyModule_AddIntConstant(m, "MAX", IXS_MAX);

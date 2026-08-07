@@ -145,6 +145,8 @@ const ixs_node *ixs_div(ixs_session *s, const ixs_node *a, const ixs_node *b);
 
 const ixs_node *ixs_floor(ixs_session *s, const ixs_node *x);
 const ixs_node *ixs_ceil(ixs_session *s, const ixs_node *x);
+/* Exact integer truncation toward zero. */
+const ixs_node *ixs_trunc(ixs_session *s, const ixs_node *x);
 
 /* Floored modulo a - b*floor(a/b), defined only for b > 0.
  * Returns ERROR when b is a known nonpositive constant.  A symbolic divisor
@@ -591,7 +593,8 @@ typedef enum {
   IXS_OR,
   IXS_NOT,
   IXS_ERROR,
-  IXS_PARSE_ERROR
+  IXS_PARSE_ERROR,
+  IXS_TRUNC
 } ixs_tag;
 
 /* All introspection functions require a non-NULL node. */
@@ -626,7 +629,7 @@ uint32_t ixs_node_mul_nfactors(const ixs_node *node);
 const ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
 int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 
-/* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
+/* Only valid when tag is IXS_FLOOR, IXS_CEIL, IXS_TRUNC, or IXS_NOT. */
 const ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
 /* Only valid when tag is IXS_MOD or IXS_CMP. */

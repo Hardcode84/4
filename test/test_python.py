@@ -34,6 +34,7 @@ import pytest
 import sympy
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
+from ixsimpl.sympy_conv import Trunc as SympyTrunc
 from ixsimpl.sympy_conv import from_sympy as conv_from_sympy
 from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 
@@ -221,6 +222,7 @@ _OPS_BASE = [
     "div",
     "floor",
     "ceiling",
+    "trunc",
     "mod",
     "max",
     "min",
@@ -262,7 +264,7 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
             )
         return (op, *args)
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op in ("floor", "ceiling"):
+    if op in ("floor", "ceiling", "trunc"):
         choice = draw(st.sampled_from(["div", "rat_add", "mul", "sub", "add", "plain"]))
         if choice == "div":
             d = draw(pos_ints)
@@ -370,6 +372,8 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.floor(to_sympy(tree[1]), evaluate=False)
     if op == "ceiling":
         return sympy.ceiling(to_sympy(tree[1]), evaluate=False)
+    if op == "trunc":
+        return SympyTrunc(to_sympy(tree[1]), evaluate=False)
     if op == "mod":
         # evaluate=False avoids SymPy Mod bugs (e.g. #28744) that silently
         # produce wrong results for certain inputs.
@@ -443,6 +447,8 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
         return ixsimpl.floor(to_ixsimpl(ctx, tree[1]))
     if op == "ceiling":
         return ixsimpl.ceil(to_ixsimpl(ctx, tree[1]))
+    if op == "trunc":
+        return ixsimpl.trunc(to_ixsimpl(ctx, tree[1]))
     if op == "mod":
         return ixsimpl.mod(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "max":
@@ -537,6 +543,9 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if op == "ceiling":
         v = eval_expr(tree[1], env)
         return math.ceil(v)
+    if op == "trunc":
+        v = eval_expr(tree[1], env)
+        return math.trunc(v)
     if op == "mod":
         return _floored_mod(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "max":
@@ -864,6 +873,17 @@ def test_simplify_consistency_mixed(expr: ExprTree, envs: list[Env]) -> None:
     _check_simplify_consistency(expr, envs)
 
 
+@given(
+    numerator=expressions(max_depth=4),
+    denominator=st.integers(min_value=2, max_value=32),
+    envs=st.lists(_mixed_env_st(), min_size=1, max_size=10),
+)
+def test_trunc_simplify_consistency(numerator: ExprTree, denominator: int, envs: list[Env]) -> None:
+    """Truncation toward zero agrees with exact rational evaluation."""
+    expr: ExprTree = ("trunc", ("div", numerator, denominator))
+    _check_simplify_consistency(expr, envs)
+
+
 @given(expr=expressions(), envs=st.lists(_env_st(0, 100), min_size=1, max_size=10))
 def test_simplify_bounds_aware_uniform(expr: ExprTree, envs: list[Env]) -> None:
     """Bounds-aware simplification preserves semantics (uniform env).
@@ -1167,6 +1187,35 @@ def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
     assert ixsimpl.same_node(decoded, decoded_again)
     assert roundtrip_data == data
     assert ixsimpl.same_node(roundtripped, original)
+
+
+def test_trunc_binding_constructs_toward_zero_rounding() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("trunc_binding_x")
+    truncated = ixsimpl.trunc(x / 3)
+
+    assert truncated.tag == ixsimpl.TRUNC
+    assert ixsimpl.same_node(truncated, ctx.parse_expr("Trunc(trunc_binding_x/3)"))
+    assert int(truncated.subs(x, -5)) == -1
+    assert int(truncated.subs(x, 5)) == 1
+    with pytest.raises(TypeError, match="requires an Expr"):
+        ixsimpl.trunc(1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator"),
+    [
+        ((1 << 63) - 1, 3),
+        (-(1 << 63) + 1, 3),
+        (-1, 2),
+        (1, 2),
+    ],
+)
+def test_trunc_binding_matches_exact_fraction_semantics(numerator: int, denominator: int) -> None:
+    ctx = ixsimpl.Context()
+    truncated = ixsimpl.trunc(ctx.rat(numerator, denominator))
+
+    assert int(truncated) == math.trunc(Fraction(numerator, denominator))
 
 
 def test_node_ptr_exposes_canonical_node_address() -> None:

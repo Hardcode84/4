@@ -50,6 +50,7 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n, bool is_ceil);
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
+static ixs_node *simp_trunc_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -59,6 +60,7 @@ static inline ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                                   int32_t exp);
 IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
+IXS_STATIC ixs_node *simp_trunc(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 
 /* ------------------------------------------------------------------ */
@@ -2909,6 +2911,39 @@ IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x) {
   return simp_ceil_bnds(ctx, NULL, x);
 }
 
+static ixs_node *simp_trunc_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x) {
+  ixs_node *prop;
+  ixs_node *pred;
+  if (!x)
+    return NULL;
+  prop = ixs_propagate1(x);
+  if (prop)
+    return prop;
+  if (x->tag == IXS_INT)
+    return x;
+  if (x->tag == IXS_RAT)
+    return ixs_node_int(ctx, x->u.rat.p / x->u.rat.q);
+  if (ixs_node_is_integer_valued(x))
+    return x;
+  if (bnds) {
+    pred = simp_cmp(ctx, x, IXS_CMP_GE, ctx->node_zero);
+    if (!pred)
+      return NULL;
+    if (ixs_bounds_check(bnds, pred) == IXS_CHECK_TRUE)
+      return simp_floor_bnds(ctx, bnds, x);
+    pred = simp_cmp(ctx, x, IXS_CMP_LE, ctx->node_zero);
+    if (!pred)
+      return NULL;
+    if (ixs_bounds_check(bnds, pred) == IXS_CHECK_TRUE)
+      return simp_ceil_bnds(ctx, bnds, x);
+  }
+  return ixs_node_trunc(ctx, x);
+}
+
+IXS_STATIC ixs_node *simp_trunc(ixs_ctx *ctx, ixs_node *x) {
+  return simp_trunc_bnds(ctx, NULL, x);
+}
+
 /* ------------------------------------------------------------------ */
 /*  simp_mod                                                          */
 /* ------------------------------------------------------------------ */
@@ -4752,12 +4787,16 @@ static bool subs_leaf_tag(ixs_tag tag) {
 static ixs_node *subs_round(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                             ixs_node *const *targets,
                             ixs_node *const *replacements, subs_memo_slot *memo,
-                            bool is_ceil) {
+                            ixs_tag tag) {
   ixs_node *na =
       subs_rec(ctx, expr->u.unary.arg, nsubs, targets, replacements, memo);
   if (!na)
     return NULL;
-  return is_ceil ? simp_ceil(ctx, na) : simp_floor(ctx, na);
+  if (tag == IXS_FLOOR)
+    return simp_floor(ctx, na);
+  if (tag == IXS_CEIL)
+    return simp_ceil(ctx, na);
+  return simp_trunc(ctx, na);
 }
 
 static ixs_node *subs_binary_node(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
@@ -4852,10 +4891,16 @@ static ixs_node *subs_rec(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
     result = subs_mul(ctx, expr, nsubs, targets, replacements, memo);
     break;
   case IXS_FLOOR:
-    result = subs_round(ctx, expr, nsubs, targets, replacements, memo, false);
+    result =
+        subs_round(ctx, expr, nsubs, targets, replacements, memo, IXS_FLOOR);
     break;
   case IXS_CEIL:
-    result = subs_round(ctx, expr, nsubs, targets, replacements, memo, true);
+    result =
+        subs_round(ctx, expr, nsubs, targets, replacements, memo, IXS_CEIL);
+    break;
+  case IXS_TRUNC:
+    result =
+        subs_round(ctx, expr, nsubs, targets, replacements, memo, IXS_TRUNC);
     break;
   case IXS_MOD:
   case IXS_CMP:
@@ -5713,13 +5758,15 @@ static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
 
 static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                     rewrite_memo_slot *memo,
-                                    rewrite_shared_cache *shared,
-                                    bool is_ceil) {
+                                    rewrite_shared_cache *shared, ixs_tag tag) {
   ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo, shared);
   if (!arg)
     return NULL;
-  return is_ceil ? simp_ceil_bnds(ctx, bnds, arg)
-                 : simp_floor_bnds(ctx, bnds, arg);
+  if (tag == IXS_FLOOR)
+    return simp_floor_bnds(ctx, bnds, arg);
+  if (tag == IXS_CEIL)
+    return simp_ceil_bnds(ctx, bnds, arg);
+  return simp_trunc_bnds(ctx, bnds, arg);
 }
 
 static ixs_node *rewrite_assoc_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
@@ -5780,9 +5827,11 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   case IXS_MUL:
     return rewrite_mul_node(ctx, n, bnds, memo, shared);
   case IXS_FLOOR:
-    return rewrite_round_node(ctx, n, bnds, memo, shared, false);
+    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_FLOOR);
   case IXS_CEIL:
-    return rewrite_round_node(ctx, n, bnds, memo, shared, true);
+    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_CEIL);
+  case IXS_TRUNC:
+    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_TRUNC);
   case IXS_MOD:
   case IXS_CMP:
     return rewrite_binary(ctx, n, bnds, memo, shared);

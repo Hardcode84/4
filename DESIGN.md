@@ -55,7 +55,7 @@ A typical expression (929 chars average, 2994 chars max, depth up to 11):
 | Category | Items | Total occurrences |
 |---|---|---|
 | Arithmetic | `+`, `-`, `*`, `/` (integer division context) | ~59,000 |
-| Rounding | `floor()`, `ceiling()` | 25,601 |
+| Rounding | `floor()`, `ceiling()`, `Trunc()` | 25,601 source occurrences plus generated truncation nodes |
 | Modular | `Mod(a, b)` | 6,481 |
 | Conditional | `Piecewise((val, cond), ..., (val, True))` | 1,136 |
 | Min/Max | `Max(a, b)`, `Min(a, b)` | 1,140 |
@@ -454,6 +454,7 @@ typedef enum {
     IXS_NOT,         // logical not: (a == 0) ? 1 : 0
     IXS_ERROR,       // sentinel: domain error (div/0, overflow, etc.)
     IXS_PARSE_ERROR, // sentinel: syntax error from ixs_parse
+    IXS_TRUNC,       // truncation toward zero
 } ixs_tag;
 
 typedef enum {
@@ -492,7 +493,7 @@ struct ixs_node_impl {
             uint32_t nfactors;
             const struct ixs_mulfactor *factors; // sorted array (see below)
         } mul;
-        struct {                          // IXS_FLOOR, IXS_CEIL
+        struct {                          // IXS_FLOOR, IXS_CEIL, IXS_TRUNC
             ixs_node *arg;
         } unary;
         struct {                          // IXS_MOD, IXS_CMP
@@ -664,6 +665,7 @@ unary    = '-'* atom
 atom     = INT | SYMBOL
          | 'floor' '(' expr ')'
          | 'ceiling' '(' expr ')'
+         | 'Trunc' '(' expr ')'
          | 'Mod' '(' expr ',' expr ')'
          | 'Max' '(' expr_list ')'
          | 'Min' '(' expr_list ')'
@@ -701,7 +703,10 @@ Symbols: any identifier matching `[A-Za-z_$][A-Za-z0-9_$]*`. All parsed as
 `IXS_SYM`. The `$` and `_` prefixes carry no special semantics.
 
 The parser accepts SymPy's `ceiling`; the C API uses `ixs_ceil` for brevity.
-Similarly, the parser accepts `True`/`False`; both parse to integer `1`/`0`.
+`Trunc` is ixsimpl's stable spelling for truncation toward zero because SymPy
+has no built-in exact-integer truncation node with the required structural
+round trip. Similarly, the parser accepts `True`/`False`; both parse to integer
+`1`/`0`.
 The API convenience functions `ixs_true`/`ixs_false` return the same integer
 nodes.
 
@@ -729,6 +734,8 @@ bounds-dependent rules also fire. `rewrite_impl` is just:
 ```c
 case IXS_FLOOR:
     return simp_floor_bnds(ctx, bnds, rewrite(ctx, arg, ...));
+case IXS_TRUNC:
+    return simp_trunc_bnds(ctx, bnds, rewrite(ctx, arg, ...));
 ```
 There is one rule table per type, used by both construction and rewriting.
 
@@ -807,7 +814,7 @@ Construction rules:
   distribute). Distribution is not performed by the simplifier.
   Use `ixs_expand` to distribute on demand.
 
-#### 4.4 Floor / Ceiling Rules
+#### 4.4 Floor / Ceiling / Truncation Rules
 
 Both `floor` and `ceiling` are kept as first-class nodes. They appear in
 roughly equal frequency (12,198 and 13,403 occurrences) and normalizing one
@@ -835,6 +842,11 @@ ceiling(integer_valued)            → identity
 ceiling(n + intval_terms + rest)   → n + intval_terms + ceiling(rest)
     (same congruence-aware integrality check as floor)
 ceiling(outer * (a + b + ...))     → distribute, extract integer-valued products
+
+trunc(integer)                     -> identity
+trunc(p/q)                         -> p/q rounded toward zero (constant fold)
+trunc(x)                           -> floor(x) when bounds prove x >= 0
+trunc(x)                           -> ceiling(x) when bounds prove x <= 0
 ```
 
 The ADD and MUL-over-ADD extraction rules share implementation via
@@ -2058,6 +2070,7 @@ ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
 ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
+ixs_node *ixs_trunc(ixs_session *s, ixs_node *x);
 ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
@@ -2398,7 +2411,7 @@ uint32_t ixs_node_mul_nfactors(const ixs_node *node);
 ixs_node *ixs_node_mul_factor_base(const ixs_node *node, uint32_t i);
 int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 
-/* Only valid when tag is IXS_FLOOR, IXS_CEIL, or IXS_NOT. */
+/* Only valid when tag is IXS_FLOOR, IXS_CEIL, IXS_TRUNC, or IXS_NOT. */
 ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
 /* Only valid when tag is IXS_MOD or IXS_CMP. */
@@ -3249,6 +3262,7 @@ ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_floor(ixs_session *s, ixs_node *x);
 ixs_node *ixs_ceil(ixs_session *s, ixs_node *x);
+ixs_node *ixs_trunc(ixs_session *s, ixs_node *x);
 ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_max(ixs_session *s, ixs_node *a, ixs_node *b);
 ixs_node *ixs_min(ixs_session *s, ixs_node *a, ixs_node *b);
@@ -3599,6 +3613,7 @@ Version 2 stores MAX, MIN, XOR, AND, and OR uniformly as their tag followed by
 flat arrays; the decoder rebuilds each record with one `*_many` call. Boolean
 singletons are ordinary integer 0/1 records. Valid noncanonical lists are
 canonicalized; constructor-domain or arity failures are malformed input.
+`Trunc` is a unary record with stable wire tag 18 and one earlier-node index.
 
 The decoder accepts version 2 only. A bad version returns `IXS_PARSE_ERROR`
 immediately after the header; there is no legacy decoder, migration, or

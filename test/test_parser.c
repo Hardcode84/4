@@ -124,6 +124,21 @@ static void test_floor_ceil(void) {
   n = ixs_parse_expr(ctx, "floor(floor(x))", 15);
   CHECK(n && ixs_node_tag(n) == IXS_SYM);
 
+  n = ixs_parse_expr(ctx, "Trunc(7/3)", strlen("Trunc(7/3)"));
+  CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 2);
+
+  n = ixs_parse_expr(ctx, "Trunc(-7/3)", strlen("Trunc(-7/3)"));
+  CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == -2);
+
+  n = ixs_parse_expr(ctx, "Trunc(x/3)", strlen("Trunc(x/3)"));
+  CHECK(n && ixs_node_tag(n) == IXS_TRUNC);
+  CHECK(strcmp(pr(n), "Trunc(1/3*x)") == 0);
+  CHECK(ixs_parse_expr(ctx, pr(n), strlen(pr(n))) == n);
+
+  ixs_ctx_clear_errors(ctx);
+  n = ixs_parse_expr(ctx, "Trunc(x, y)", strlen("Trunc(x, y)"));
+  CHECK(n && ixs_is_parse_error(n));
+
   ixs_ctx_destroy(ctx);
 }
 

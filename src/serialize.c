@@ -39,7 +39,8 @@ typedef enum {
   WIRE_OR = 14,
   WIRE_NOT = 15,
   WIRE_ERROR = 16,
-  WIRE_PARSE_ERROR = 17
+  WIRE_PARSE_ERROR = 17,
+  WIRE_TRUNC = 18
 } wire_tag;
 
 typedef enum {
@@ -329,6 +330,7 @@ static bool serial_child_count(const ixs_node *node, uint32_t *out) {
     return true;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_NOT:
     *out = 1u;
     return true;
@@ -367,6 +369,7 @@ static const ixs_node *serial_child_at(const ixs_node *node, uint32_t child) {
     return node->u.mul.factors[child - 1u].base;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return node->u.unary.arg;
   case IXS_NOT:
     return node->u.unary_bool.arg;
@@ -477,6 +480,8 @@ static bool serial_collect(ixs_ctx *ctx, const ixs_node *root,
 
       if (!child)
         return serial_error(ctx, "node has a NULL child reference");
+      if (ixs_node_is_sentinel(child))
+        return serial_error(ctx, "compound node contains a sentinel child");
 
       child_slot = serial_memo_get_or_insert(ctx, state, child, &is_new);
       if (!child_slot)
@@ -735,6 +740,8 @@ static bool serial_write_node(ixs_ctx *ctx, const ixs_writer *w,
     return serial_write_unary(ctx, w, state, WIRE_FLOOR, node->u.unary.arg);
   case IXS_CEIL:
     return serial_write_unary(ctx, w, state, WIRE_CEIL, node->u.unary.arg);
+  case IXS_TRUNC:
+    return serial_write_unary(ctx, w, state, WIRE_TRUNC, node->u.unary.arg);
   case IXS_MOD:
     return serial_write_mod(ctx, w, state, node);
   case IXS_PIECEWISE:
@@ -1247,6 +1254,7 @@ static decode_status decode_read_record(ixs_ctx *ctx, decode_input *in,
 
   case WIRE_FLOOR:
   case WIRE_CEIL:
+  case WIRE_TRUNC:
   case WIRE_NOT:
     return decode_read_unary(ctx, in, nodes, index, node, (wire_tag)raw_tag);
 
@@ -1467,6 +1475,8 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
     return ixs_node_floor(ctx, built[node->u.unary.arg]);
   case WIRE_CEIL:
     return ixs_node_ceil(ctx, built[node->u.unary.arg]);
+  case WIRE_TRUNC:
+    return ixs_node_trunc(ctx, built[node->u.unary.arg]);
   case WIRE_MOD:
     return simp_mod(ctx, built[node->u.binary.lhs], built[node->u.binary.rhs]);
   case WIRE_PIECEWISE:

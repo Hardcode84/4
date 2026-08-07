@@ -65,6 +65,7 @@ static uint32_t compute_hash(const ixs_node *n) {
   }
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     h = hash_mix(h, n->u.unary.arg->hash);
     break;
   case IXS_MOD:
@@ -170,6 +171,8 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return true;
   if (a->tag != b->tag)
     return false;
+  if (ixs_node_is_sentinel(a))
+    return true;
   switch (a->tag) {
   case IXS_INT:
     return a->u.ival == b->u.ival;
@@ -183,6 +186,7 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return node_equal_mul(a, b);
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return a->u.unary.arg == b->u.unary.arg;
   case IXS_CMP:
     return a->u.binary.lhs == b->u.binary.lhs &&
@@ -201,9 +205,6 @@ IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
     return node_equal_assoc(a, b);
   case IXS_NOT:
     return a->u.unary_bool.arg == b->u.unary_bool.arg;
-  case IXS_ERROR:
-  case IXS_PARSE_ERROR:
-    return true;
   }
   return false;
 }
@@ -487,6 +488,7 @@ static int node_cmp_step(node_cmp_state *state, node_cmp_frame *frame) {
     return node_cmp_step_mul(state, frame);
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return node_cmp_step_single(state, frame, frame->a->u.unary.arg,
                                 frame->b->u.unary.arg);
   case IXS_CMP:
@@ -854,6 +856,7 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
     break;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     integer = true;
     total = node_property_total(node->u.unary.arg);
     break;
@@ -1134,6 +1137,26 @@ IXS_STATIC ixs_node *ixs_node_ceil(ixs_ctx *ctx, ixs_node *arg) {
   return ixs_htab_intern(ctx, n);
 }
 
+IXS_STATIC ixs_node *ixs_node_trunc(ixs_ctx *ctx, ixs_node *arg) {
+  struct ixs_node_impl tmp;
+  ixs_node *found;
+  struct ixs_node_impl *n;
+  memset(&tmp, 0, sizeof(tmp));
+  tmp.tag = IXS_TRUNC;
+  tmp.u.unary.arg = arg;
+  tmp.hash = compute_hash(&tmp);
+
+  found = htab_lookup(ctx, &tmp);
+  if (found)
+    return found;
+
+  n = alloc_node(ctx);
+  if (!n)
+    return NULL;
+  *n = tmp;
+  return ixs_htab_intern(ctx, n);
+}
+
 IXS_STATIC ixs_node *ixs_node_binary(ixs_ctx *ctx, ixs_tag tag, ixs_node *lhs,
                                      ixs_node *rhs, ixs_cmp_op op) {
   struct ixs_node_impl tmp;
@@ -1330,6 +1353,7 @@ IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n) {
   case IXS_MUL:
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_MOD:
   case IXS_PIECEWISE:
   case IXS_MAX:
@@ -1542,6 +1566,7 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_INT:
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_SYM:
   case IXS_CMP:
   case IXS_NOT:
@@ -1627,7 +1652,7 @@ int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i) {
 
 ixs_node *ixs_node_unary_arg(const ixs_node *node) {
   assert(node && (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
-                  node->tag == IXS_NOT));
+                  node->tag == IXS_TRUNC || node->tag == IXS_NOT));
   if (node->tag == IXS_NOT)
     return node->u.unary_bool.arg;
   return node->u.unary.arg;
@@ -1692,6 +1717,7 @@ uint32_t ixs_node_nchildren(const ixs_node *node) {
     return 1 + node->u.mul.nfactors;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_NOT:
     return 1;
   case IXS_MOD:
@@ -1728,6 +1754,7 @@ ixs_node *ixs_node_child(const ixs_node *node, uint32_t i) {
     return node->u.mul.factors[i - 1].base;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return node->u.unary.arg;
   case IXS_NOT:
     return node->u.unary_bool.arg;

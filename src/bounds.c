@@ -2987,6 +2987,7 @@ static bool bounds_get_bitfacts_depth(ixs_bounds *b, ixs_node *expr,
   case IXS_MOD:
     return bitfacts_apply_mod(b, expr, out, depth);
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_PIECEWISE:
   case IXS_MAX:
   case IXS_MIN:
@@ -3884,6 +3885,17 @@ static inline ixs_interval bounds_get_round(ixs_bounds *b, ixs_node *expr,
   return result;
 }
 
+static inline ixs_interval bounds_get_trunc(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval ai = ixs_bounds_get(b, expr->u.unary.arg);
+  ixs_interval result;
+  if (!ai.valid)
+    return ixs_interval_unknown();
+  result = ixs_interval_range(ai.lo_p / ai.lo_q, 1, ai.hi_p / ai.hi_q, 1);
+  result.lo_inf = ai.lo_inf;
+  result.hi_inf = ai.hi_inf;
+  return result;
+}
+
 static inline void interval_set_max_lower(ixs_interval *result,
                                           const ixs_interval *li,
                                           const ixs_interval *ri) {
@@ -4169,6 +4181,8 @@ static inline ixs_interval bounds_get_propagated(ixs_bounds *b,
     return bounds_get_round(b, expr, false);
   case IXS_CEIL:
     return bounds_get_round(b, expr, true);
+  case IXS_TRUNC:
+    return bounds_get_trunc(b, expr);
   case IXS_MAX:
     return bounds_get_extrema(b, expr, true);
   case IXS_MIN:
@@ -4669,6 +4683,7 @@ static int defined_fixed_child_count(ixs_tag tag) {
     return 0;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
   case IXS_NOT:
     return 1;
   case IXS_MOD:
@@ -4737,6 +4752,7 @@ static ixs_node *defined_child_at(ixs_node *node, uint32_t child) {
                       : node->u.mul.factors[child - 1u].base;
   case IXS_FLOOR:
   case IXS_CEIL:
+  case IXS_TRUNC:
     return node->u.unary.arg;
   case IXS_NOT:
     return node->u.unary_bool.arg;

@@ -112,6 +112,23 @@ static void test_expand_inside_floor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_expand_inside_trunc(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "trunc_expand_a");
+  ixs_node *b = ixs_sym(ctx, "trunc_expand_b");
+  ixs_node *inner = ixs_div(
+      ctx, ixs_mul(ctx, ixs_int(ctx, 2), ixs_add(ctx, a, b)), ixs_int(ctx, 3));
+  ixs_node *expr = ixs_trunc(ctx, inner);
+  ixs_node *expected = ixs_trunc(
+      ctx,
+      ixs_add(ctx,
+              ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, 2), a), ixs_int(ctx, 3)),
+              ixs_div(ctx, ixs_mul(ctx, ixs_int(ctx, 2), b), ixs_int(ctx, 3))));
+
+  CHECK(ixs_expand(ctx, expr) == expected);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_expand_already_expanded(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *a = ixs_sym(ctx, "a");
@@ -355,6 +372,7 @@ int main(void) {
   test_expand_sym_times_add();
   test_expand_nested_add();
   test_expand_inside_floor();
+  test_expand_inside_trunc();
   test_expand_already_expanded();
   test_expand_three_factors();
   test_expand_piecewise();

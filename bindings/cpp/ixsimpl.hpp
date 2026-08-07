@@ -509,6 +509,10 @@ inline Expr floor(Expr x) {
 inline Expr ceil(Expr x) {
   return Expr(x.raw_ctx(), x.raw_session(), ixs_ceil(x.raw_session(), x.raw()));
 }
+inline Expr trunc(Expr x) {
+  return Expr(x.raw_ctx(), x.raw_session(),
+              ixs_trunc(x.raw_session(), x.raw()));
+}
 inline Expr mod(Expr a, Expr b) {
   return Expr(a.raw_ctx(), a.raw_session(),
               ixs_mod(a.raw_session(), a.raw(), b.raw()));
