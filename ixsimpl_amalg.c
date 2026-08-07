@@ -20985,6 +20985,572 @@ cleanup:
   return status;
 }
 
+static ixs_redistribution_relation_result
+redistribution_relation_result(ixs_finite_domain_status status) {
+  ixs_redistribution_relation_result result;
+  memset(&result, 0, sizeof(result));
+  result.status = status;
+  result.validation = IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE;
+  result.exhausted_phase = IXS_REDISTRIBUTION_EXHAUSTED_NONE;
+  result.same_block = IXS_CHECK_UNKNOWN;
+  result.same_item = IXS_CHECK_UNKNOWN;
+  result.same_wave = IXS_CHECK_UNKNOWN;
+  result.same_slot = IXS_CHECK_UNKNOWN;
+  result.witness = SIZE_MAX;
+  result.witness_coordinate = IXS_REDISTRIBUTION_COORDINATE_NONE;
+  return result;
+}
+
+static bool
+redistribution_relation_count(ixs_ctx *ctx,
+                              const ixs_redistribution_relation_query *query,
+                              size_t *point_count) {
+  size_t blocks;
+  size_t items;
+  size_t slots;
+
+  if (query->blocks <= 0 || query->items <= 0 || query->source_slots <= 0 ||
+      query->result_slots <= 0 || query->wave_width <= 0) {
+    ixs_ctx_push_error(ctx,
+                       "redistribution relation: extents must be positive");
+    return false;
+  }
+  if ((uint64_t)query->blocks > (uint64_t)SIZE_MAX ||
+      (uint64_t)query->items > (uint64_t)SIZE_MAX ||
+      (uint64_t)query->result_slots > (uint64_t)SIZE_MAX) {
+    ixs_ctx_push_error(ctx,
+                       "redistribution relation: Cartesian extent overflows");
+    return false;
+  }
+  blocks = (size_t)query->blocks;
+  items = (size_t)query->items;
+  slots = (size_t)query->result_slots;
+  if (blocks > SIZE_MAX / items || blocks * items > SIZE_MAX / slots) {
+    ixs_ctx_push_error(ctx,
+                       "redistribution relation: Cartesian domain overflows");
+    return false;
+  }
+  *point_count = blocks * items * slots;
+  return true;
+}
+
+static bool redistribution_relation_nodes_valid(
+    ixs_ctx *ctx, const ixs_redistribution_relation_query *query) {
+  ixs_node *symbols[3] = {(ixs_node *)query->block, (ixs_node *)query->item,
+                          (ixs_node *)query->slot};
+  ixs_node *sources[3] = {(ixs_node *)query->source_block,
+                          (ixs_node *)query->source_item,
+                          (ixs_node *)query->source_slot};
+  size_t i;
+
+  for (i = 0; i < 3u; i++) {
+    if (!facts_query_node_ok(ctx, symbols[i], "redistribution relation") ||
+        symbols[i]->tag != IXS_SYM) {
+      if (symbols[i] && !ixs_node_is_sentinel(symbols[i]) &&
+          ixs_ctx_owns_node(ctx, symbols[i]) && symbols[i]->tag != IXS_SYM)
+        ixs_ctx_push_error(
+            ctx, "redistribution relation: destination must be a symbol");
+      return false;
+    }
+    if (!facts_query_node_ok(ctx, sources[i], "redistribution relation") ||
+        !finite_domain_expression_kind(sources[i])) {
+      if (sources[i] && !ixs_node_is_sentinel(sources[i]) &&
+          ixs_ctx_owns_node(ctx, sources[i]) &&
+          !finite_domain_expression_kind(sources[i]))
+        ixs_ctx_push_error(ctx,
+                           "redistribution relation: source must be scalar");
+      return false;
+    }
+  }
+  if (symbols[0] == symbols[1] || symbols[0] == symbols[2] ||
+      symbols[1] == symbols[2]) {
+    ixs_ctx_push_error(
+        ctx, "redistribution relation: destination symbols are not distinct");
+    return false;
+  }
+  return true;
+}
+
+static ixs_finite_domain_status redistribution_relation_constrain_facts(
+    ixs_facts *facts, const ixs_redistribution_relation_query *query,
+    ixs_facts *constrained) {
+  ixs_node *symbols[3] = {(ixs_node *)query->block, (ixs_node *)query->item,
+                          (ixs_node *)query->slot};
+  int64_t uppers[3] = {query->blocks, query->items, query->result_slots};
+  size_t component;
+
+  *constrained = *facts;
+  if (!ixs_bounds_fork(&constrained->bounds, &facts->bounds))
+    return IXS_FINITE_DOMAIN_OOM;
+  for (component = 0; component < 3u; component++) {
+    ixs_bounds_add_expr(&constrained->bounds, symbols[component],
+                        ixs_interval_range(0, 1, uppers[component] - 1, 1));
+    if (constrained->bounds.oom) {
+      ixs_bounds_destroy(&constrained->bounds);
+      return IXS_FINITE_DOMAIN_OOM;
+    }
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static void redistribution_relation_clear_movement(
+    ixs_redistribution_relation_result *result) {
+  result->same_block = IXS_CHECK_UNKNOWN;
+  result->same_item = IXS_CHECK_UNKNOWN;
+  result->same_wave = IXS_CHECK_UNKNOWN;
+  result->same_slot = IXS_CHECK_UNKNOWN;
+}
+
+static ixs_finite_domain_status
+redistribution_relation_fact_status(ixs_fact_query_status status) {
+  if (status == IXS_FACT_QUERY_INVALID)
+    return IXS_FINITE_DOMAIN_INVALID;
+  if (status == IXS_FACT_QUERY_OOM)
+    return IXS_FINITE_DOMAIN_OOM;
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+redistribution_relation_range_predicate(ixs_ctx *ctx, ixs_node *value,
+                                        int64_t upper, ixs_node **predicate) {
+  ixs_node *upper_node = ixs_node_int(ctx, upper);
+  ixs_node *lower_bound;
+  ixs_node *upper_bound;
+
+  *predicate = NULL;
+  if (!upper_node)
+    return IXS_FINITE_DOMAIN_OOM;
+  lower_bound = simp_cmp(ctx, value, IXS_CMP_GE, ctx->node_zero);
+  upper_bound = simp_cmp(ctx, value, IXS_CMP_LT, upper_node);
+  if (!lower_bound || !upper_bound)
+    return IXS_FINITE_DOMAIN_OOM;
+  if (ixs_node_is_sentinel(lower_bound) || ixs_node_is_sentinel(upper_bound))
+    return IXS_FINITE_DOMAIN_INVALID;
+  *predicate = simp_and(ctx, lower_bound, upper_bound);
+  if (!*predicate)
+    return IXS_FINITE_DOMAIN_OOM;
+  if (ixs_node_is_sentinel(*predicate)) {
+    *predicate = NULL;
+    return IXS_FINITE_DOMAIN_INVALID;
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+redistribution_relation_check(ixs_fact_check_result query,
+                              ixs_check_result *check) {
+  ixs_finite_domain_status status =
+      redistribution_relation_fact_status(query.status);
+  *check =
+      query.status == IXS_FACT_QUERY_COMPLETE ? query.check : IXS_CHECK_UNKNOWN;
+  return status;
+}
+
+static ixs_finite_domain_status redistribution_relation_direct_validation(
+    ixs_facts *facts, ixs_ctx *ctx,
+    const ixs_redistribution_relation_query *query, bool *proven) {
+  ixs_node *sources[3] = {(ixs_node *)query->source_block,
+                          (ixs_node *)query->source_item,
+                          (ixs_node *)query->source_slot};
+  int64_t uppers[3] = {query->blocks, query->items, query->source_slots};
+  ixs_check_result check;
+  ixs_finite_domain_status status;
+  size_t i;
+
+  *proven = false;
+  for (i = 0; i < 3u; i++) {
+    status = redistribution_relation_check(
+        ixs_check_defined_facts(facts, sources[i]), &check);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (check != IXS_CHECK_TRUE)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  for (i = 0; i < 3u; i++) {
+    status = redistribution_relation_check(
+        ixs_check_integer_valued_facts(facts, sources[i]), &check);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (check != IXS_CHECK_TRUE)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  for (i = 0; i < 3u; i++) {
+    ixs_node *predicate;
+    status = redistribution_relation_range_predicate(ctx, sources[i], uppers[i],
+                                                     &predicate);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    status = redistribution_relation_check(
+        ixs_check_predicate_facts(facts, predicate), &check);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (check != IXS_CHECK_TRUE)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  *proven = true;
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+redistribution_relation_equivalent(ixs_facts *facts, ixs_node *lhs,
+                                   ixs_node *rhs, ixs_check_result *check) {
+  return redistribution_relation_check(ixs_equivalent_facts(facts, lhs, rhs),
+                                       check);
+}
+
+static ixs_finite_domain_status redistribution_relation_same_wave(
+    ixs_facts *facts, ixs_ctx *ctx,
+    const ixs_redistribution_relation_query *query, ixs_check_result *check) {
+  ixs_node *width = ixs_node_int(ctx, query->wave_width);
+  ixs_node *source_div;
+  ixs_node *destination_div;
+  ixs_node *source_wave;
+  ixs_node *destination_wave;
+
+  if (!width)
+    return IXS_FINITE_DOMAIN_OOM;
+  source_div = simp_div(ctx, (ixs_node *)query->source_item, width);
+  destination_div = simp_div(ctx, (ixs_node *)query->item, width);
+  if (!source_div || !destination_div)
+    return IXS_FINITE_DOMAIN_OOM;
+  if (ixs_node_is_sentinel(source_div) || ixs_node_is_sentinel(destination_div))
+    return IXS_FINITE_DOMAIN_INVALID;
+  source_wave = simp_floor(ctx, source_div);
+  destination_wave = simp_floor(ctx, destination_div);
+  if (!source_wave || !destination_wave)
+    return IXS_FINITE_DOMAIN_OOM;
+  if (ixs_node_is_sentinel(source_wave) ||
+      ixs_node_is_sentinel(destination_wave))
+    return IXS_FINITE_DOMAIN_INVALID;
+  return redistribution_relation_equivalent(facts, source_wave,
+                                            destination_wave, check);
+}
+
+static ixs_finite_domain_status redistribution_relation_direct_movement(
+    ixs_facts *facts, ixs_ctx *ctx,
+    const ixs_redistribution_relation_query *query,
+    ixs_redistribution_relation_result *result, bool *complete) {
+  ixs_finite_domain_status status;
+
+  *complete = false;
+  status = redistribution_relation_equivalent(
+      facts, (ixs_node *)query->source_block, (ixs_node *)query->block,
+      &result->same_block);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE)
+    return status;
+  if (result->same_block == IXS_CHECK_FALSE) {
+    *complete = true;
+    return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  if (result->same_block != IXS_CHECK_TRUE)
+    return IXS_FINITE_DOMAIN_COMPLETE;
+
+  status = redistribution_relation_equivalent(
+      facts, (ixs_node *)query->source_item, (ixs_node *)query->item,
+      &result->same_item);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE)
+    return status;
+  if (result->same_item == IXS_CHECK_TRUE) {
+    status = redistribution_relation_equivalent(
+        facts, (ixs_node *)query->source_slot, (ixs_node *)query->slot,
+        &result->same_slot);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    *complete = result->same_slot != IXS_CHECK_UNKNOWN;
+    return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+
+  status =
+      redistribution_relation_same_wave(facts, ctx, query, &result->same_wave);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE)
+    return status;
+  *complete = result->same_wave != IXS_CHECK_UNKNOWN;
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status redistribution_relation_specialize(
+    ixs_facts *facts, ixs_ctx *ctx, ixs_node *const *sources,
+    ixs_node *const *targets, ixs_node *const *replacements,
+    ixs_node **specialized, int64_t *values,
+    ixs_redistribution_relation_result *result, size_t point,
+    bool *point_complete) {
+  bool exact[3] = {false, false, false};
+  size_t component;
+
+  *point_complete = false;
+  for (component = 0; component < 3u; component++) {
+    bool undefined = false;
+    specialized[component] = finite_domain_batch_specialize(
+        ctx, sources[component], 3u, targets, replacements, &undefined);
+    if (!specialized[component])
+      return IXS_FINITE_DOMAIN_OOM;
+    if (undefined) {
+      result->validation = IXS_REDISTRIBUTION_RELATION_NOT_TOTAL;
+      result->witness = point;
+      result->witness_coordinate = (ixs_redistribution_coordinate)component;
+      return IXS_FINITE_DOMAIN_COMPLETE;
+    }
+    if (ixs_node_is_sentinel(specialized[component]))
+      return IXS_FINITE_DOMAIN_INVALID;
+    exact[component] =
+        node_get_int_const(specialized[component], &values[component]);
+  }
+
+  for (component = 0; component < 3u; component++) {
+    bool oom = false;
+    bool limited = false;
+    ixs_check_result defined;
+    if (exact[component])
+      continue;
+    defined = bounds_check_defined_detail(
+        &facts->bounds, specialized[component], &oom, &limited);
+    if (oom)
+      return IXS_FINITE_DOMAIN_OOM;
+    if (limited)
+      return IXS_FINITE_DOMAIN_LIMITED;
+    if (defined == IXS_CHECK_FALSE) {
+      result->validation = IXS_REDISTRIBUTION_RELATION_NOT_TOTAL;
+      result->witness = point;
+      result->witness_coordinate = (ixs_redistribution_coordinate)component;
+      return IXS_FINITE_DOMAIN_COMPLETE;
+    }
+    if (defined == IXS_CHECK_UNKNOWN)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  for (component = 0; component < 3u; component++) {
+    ixs_check_result integer;
+    size_t limit_blocks;
+    if (exact[component])
+      continue;
+    limit_blocks = facts->bounds.query_state
+                       ? facts->bounds.query_state->limit_blocks
+                       : 0u;
+    integer =
+        ixs_bounds_check_integer_valued(&facts->bounds, specialized[component]);
+    if (facts->bounds.oom)
+      return IXS_FINITE_DOMAIN_OOM;
+    if (bounds_query_limited_since(&facts->bounds, limit_blocks))
+      return IXS_FINITE_DOMAIN_LIMITED;
+    if (integer == IXS_CHECK_FALSE) {
+      result->validation = IXS_REDISTRIBUTION_RELATION_NOT_TOTAL;
+      result->witness = point;
+      result->witness_coordinate = (ixs_redistribution_coordinate)component;
+      return IXS_FINITE_DOMAIN_COMPLETE;
+    }
+    if (integer == IXS_CHECK_UNKNOWN)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  for (component = 0; component < 3u; component++) {
+    ixs_finite_domain_status status;
+    bool matched = false;
+    if (exact[component])
+      continue;
+    status = constant_difference_query_bound_detail(
+        ctx, &facts->bounds, specialized[component], ctx->node_zero,
+        &values[component], &matched);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (!matched)
+      return IXS_FINITE_DOMAIN_COMPLETE;
+  }
+  *point_complete = true;
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+redistribution_relation_evaluate(ixs_facts *facts, ixs_ctx *ctx,
+                                 const ixs_redistribution_relation_query *query,
+                                 ixs_redistribution_relation_result *result) {
+  ixs_node *targets[3] = {(ixs_node *)query->block, (ixs_node *)query->item,
+                          (ixs_node *)query->slot};
+  ixs_node *sources[3] = {(ixs_node *)query->source_block,
+                          (ixs_node *)query->source_item,
+                          (ixs_node *)query->source_slot};
+  int64_t uppers[3] = {query->blocks, query->items, query->source_slots};
+  ixs_node *replacements[3];
+  ixs_node *specialized[3];
+  int64_t values[3];
+  size_t point = 0u;
+  int64_t block;
+  int64_t item;
+  int64_t slot;
+
+  result->same_block = IXS_CHECK_TRUE;
+  result->same_item = IXS_CHECK_TRUE;
+  result->same_wave = IXS_CHECK_TRUE;
+  result->same_slot = IXS_CHECK_TRUE;
+  for (block = 0; block < query->blocks; block++) {
+    replacements[0] = ixs_node_int(ctx, block);
+    if (!replacements[0])
+      return IXS_FINITE_DOMAIN_OOM;
+    for (item = 0; item < query->items; item++) {
+      replacements[1] = ixs_node_int(ctx, item);
+      if (!replacements[1])
+        return IXS_FINITE_DOMAIN_OOM;
+      for (slot = 0; slot < query->result_slots; slot++, point++) {
+        ixs_finite_domain_status status;
+        bool point_complete;
+        size_t component;
+        replacements[2] = ixs_node_int(ctx, slot);
+        if (!replacements[2])
+          return IXS_FINITE_DOMAIN_OOM;
+        status = redistribution_relation_specialize(
+            facts, ctx, sources, targets, replacements, specialized, values,
+            result, point, &point_complete);
+        if (status != IXS_FINITE_DOMAIN_COMPLETE || !point_complete)
+          return status;
+        for (component = 0; component < 3u; component++) {
+          if (values[component] >= 0 && values[component] < uppers[component])
+            continue;
+          result->validation = IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS;
+          result->witness = point;
+          result->witness_value = values[component];
+          result->witness_coordinate = (ixs_redistribution_coordinate)component;
+          return IXS_FINITE_DOMAIN_COMPLETE;
+        }
+        if (values[0] != block)
+          result->same_block = IXS_CHECK_FALSE;
+        if (values[1] != item)
+          result->same_item = IXS_CHECK_FALSE;
+        if (values[1] / query->wave_width != item / query->wave_width)
+          result->same_wave = IXS_CHECK_FALSE;
+        if (values[2] != slot)
+          result->same_slot = IXS_CHECK_FALSE;
+      }
+    }
+  }
+  result->validation = IXS_REDISTRIBUTION_RELATION_VALID;
+  result->witness = SIZE_MAX;
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_redistribution_relation_result
+redistribution_relation_sanitize(ixs_redistribution_relation_result result) {
+  if (result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+      result.validation != IXS_REDISTRIBUTION_RELATION_VALID)
+    redistribution_relation_clear_movement(&result);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE &&
+      result.status != IXS_FINITE_DOMAIN_EXHAUSTED)
+    return redistribution_relation_result(result.status);
+  return result;
+}
+
+ixs_redistribution_relation_result ixs_analyze_redistribution_relation_facts(
+    ixs_facts *facts, const ixs_redistribution_relation_query *query,
+    size_t *remaining_work) {
+  ixs_redistribution_relation_result result =
+      redistribution_relation_result(IXS_FINITE_DOMAIN_INVALID);
+  ixs_session_binding binding;
+  facts_read_query_scope read_scope;
+  ixs_facts constrained;
+  ixs_ctx *ctx;
+  ixs_node *sources[3];
+  ixs_arena_mark constrained_mark;
+  ixs_arena_mark mark;
+  size_t point_count;
+  ixs_finite_domain_status status;
+  bool validation_proven = false;
+  bool movement_complete = false;
+  bool constrained_mark_held = false;
+  bool constrained_ready = false;
+  bool read_started = false;
+  bool query_held = false;
+  bool scratch_held = false;
+
+  if (!facts_bind(facts, &binding, &ctx))
+    return result;
+  if (!facts_ready(facts)) {
+    result.status =
+        facts->bounds.oom ? IXS_FINITE_DOMAIN_OOM : IXS_FINITE_DOMAIN_INVALID;
+    ixs_ctx_push_error(ctx, "redistribution relation: fact set is unusable");
+    goto cleanup;
+  }
+  if (!query || !remaining_work) {
+    ixs_ctx_push_error(ctx,
+                       "redistribution relation: NULL query or work budget");
+    goto cleanup;
+  }
+  if (!redistribution_relation_count(ctx, query, &point_count) ||
+      !redistribution_relation_nodes_valid(ctx, query))
+    goto cleanup;
+  constrained_mark = ixs_arena_save(&ctx->scratch);
+  constrained_mark_held = true;
+  status = redistribution_relation_constrain_facts(facts, query, &constrained);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = status;
+    goto cleanup;
+  }
+  constrained_ready = true;
+  if (ixs_bounds_has_empty(&constrained.bounds)) {
+    result.status = IXS_FINITE_DOMAIN_COMPLETE;
+    goto cleanup;
+  }
+
+  status = redistribution_relation_direct_validation(&constrained, ctx, query,
+                                                     &validation_proven);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = status;
+    goto cleanup;
+  }
+  if (validation_proven) {
+    status = redistribution_relation_direct_movement(
+        &constrained, ctx, query, &result, &movement_complete);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE) {
+      result.status = status;
+      goto cleanup;
+    }
+    if (movement_complete) {
+      result.status = IXS_FINITE_DOMAIN_COMPLETE;
+      result.validation = IXS_REDISTRIBUTION_RELATION_VALID;
+      goto cleanup;
+    }
+  }
+
+  if (point_count > *remaining_work) {
+    result = redistribution_relation_result(IXS_FINITE_DOMAIN_EXHAUSTED);
+    result.exhausted_phase = validation_proven
+                                 ? IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT
+                                 : IXS_REDISTRIBUTION_EXHAUSTED_VALIDATION;
+    goto cleanup;
+  }
+  *remaining_work -= point_count;
+  facts_read_query_begin_deferred(&read_scope, &constrained.bounds, ctx,
+                                  "redistribution relation");
+  read_started = true;
+  sources[0] = (ixs_node *)query->source_block;
+  sources[1] = (ixs_node *)query->source_item;
+  sources[2] = (ixs_node *)query->source_slot;
+  status = finite_domain_query_hold_begin(
+      &constrained.bounds,
+      finite_domain_query_root(&constrained.bounds, sources[0],
+                               (const ixs_node *const *)sources, 3u),
+      &query_held);
+  if (status != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = status;
+    goto cleanup;
+  }
+  mark = ixs_arena_save(&ctx->scratch);
+  scratch_held = true;
+  result = redistribution_relation_result(IXS_FINITE_DOMAIN_COMPLETE);
+  status = redistribution_relation_evaluate(&constrained, ctx, query, &result);
+  result.status = status;
+
+cleanup:
+  if (scratch_held)
+    ixs_arena_restore(&ctx->scratch, mark);
+  if (query_held)
+    ixs_bounds_query_hold_end(&constrained.bounds);
+  if (read_started)
+    result.status = finite_domain_finish_read_query(&read_scope, result.status);
+  result = redistribution_relation_sanitize(result);
+  if (constrained_ready)
+    ixs_bounds_destroy(&constrained.bounds);
+  if (constrained_mark_held)
+    ixs_arena_restore(&ctx->scratch, constrained_mark);
+  ixs_session_unbind(&binding);
+  return result;
+}
+
 typedef struct {
   ixs_session_binding binding;
   ixs_facts *facts;

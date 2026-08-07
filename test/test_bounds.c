@@ -9573,6 +9573,257 @@ static void test_public_finite_domain_batch(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void check_redistribution_movement_cleared(
+    ixs_redistribution_relation_result result) {
+  CHECK(result.same_block == IXS_CHECK_UNKNOWN &&
+        result.same_item == IXS_CHECK_UNKNOWN &&
+        result.same_wave == IXS_CHECK_UNKNOWN &&
+        result.same_slot == IXS_CHECK_UNKNOWN);
+}
+
+static void test_public_redistribution_relation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *block = ixs_sym(ctx, "redistribution_block");
+  ixs_node *item = ixs_sym(ctx, "redistribution_item");
+  ixs_node *slot = ixs_sym(ctx, "redistribution_slot");
+  ixs_node *unknown = ixs_sym(ctx, "redistribution_unknown");
+  ixs_node *foreign = ixs_sym(other, "redistribution_foreign");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *item_rotated = ixs_mod(ctx, ixs_add(ctx, item, one), four);
+  ixs_node *item_xor_one = ixs_xor(ctx, item, one);
+  ixs_node *block_xor_one = ixs_xor(ctx, block, one);
+  ixs_node *slot_is_zero = ixs_cmp(ctx, slot, IXS_CMP_EQ, zero);
+  ixs_node *half_slot = ixs_div(ctx, slot, two);
+  ixs_node *partial_block_values[1] = {block};
+  ixs_node *partial_block_conditions[1] = {
+      ixs_cmp(ctx, block, IXS_CMP_EQ, zero)};
+  ixs_node *partial_block =
+      ixs_pw(ctx, 1, partial_block_values, partial_block_conditions);
+  ixs_node *partial_slot_values[1] = {zero};
+  ixs_node *partial_slot_conditions[1] = {slot_is_zero};
+  ixs_node *partial_slot =
+      ixs_pw(ctx, 1, partial_slot_values, partial_slot_conditions);
+  ixs_node *unknown_item = ixs_mod(ctx, ixs_add(ctx, item, unknown), four);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  const ixs_node *false_predicate[1] = {ixs_false(ctx)};
+  ixs_facts *contradictory =
+      ixs_facts_create_preds(IXS_TEST_SESSION(ctx), false_predicate, 1);
+  ixs_redistribution_relation_query query;
+  ixs_redistribution_relation_result result;
+  size_t budget;
+
+  CHECK(ctx && other && block && item && slot && unknown && foreign && zero &&
+        one && two && four && item_rotated && item_xor_one && block_xor_one &&
+        slot_is_zero && half_slot && partial_block && partial_slot &&
+        unknown_item && facts && contradictory);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item, slot, 2, 4, 2, 2, 2};
+  budget = 0;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_NONE &&
+        result.same_block == IXS_CHECK_TRUE &&
+        result.same_item == IXS_CHECK_TRUE &&
+        result.same_wave == IXS_CHECK_UNKNOWN &&
+        result.same_slot == IXS_CHECK_TRUE && result.witness == SIZE_MAX &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_COORDINATE_NONE &&
+        budget == 0);
+
+  CHECK(ixs_node_is_expr(slot_is_zero));
+  query.blocks = 1;
+  query.items = 1;
+  query.source_slot = slot_is_zero;
+  budget = 1;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT &&
+        budget == 1);
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_block == IXS_CHECK_TRUE &&
+        result.same_item == IXS_CHECK_TRUE &&
+        result.same_slot == IXS_CHECK_FALSE && budget == 0);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item_rotated, slot, 1, 4, 2, 2, 2};
+  budget = 7;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT &&
+        result.witness == SIZE_MAX && budget == 7);
+  check_redistribution_movement_cleared(result);
+  budget = 8;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_block == IXS_CHECK_TRUE &&
+        result.same_item == IXS_CHECK_FALSE &&
+        result.same_wave == IXS_CHECK_FALSE &&
+        result.same_slot == IXS_CHECK_TRUE && budget == 0);
+
+  query.source_item = item_xor_one;
+  budget = 8;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_block == IXS_CHECK_TRUE &&
+        result.same_item != IXS_CHECK_TRUE &&
+        result.same_wave == IXS_CHECK_TRUE && budget == 0);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block_xor_one, item, slot, 2, 1, 1, 1, 1};
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_block == IXS_CHECK_FALSE);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, partial_block, item, slot, 2, 2, 2, 2, 1};
+  budget = 7;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_VALIDATION &&
+        result.witness == SIZE_MAX && budget == 7);
+  check_redistribution_movement_cleared(result);
+  budget = 8;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_NOT_TOTAL &&
+        result.witness == 4 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_BLOCK && budget == 0);
+  check_redistribution_movement_cleared(result);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item, partial_slot, 1, 1, 2, 2, 1};
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_NOT_TOTAL &&
+        result.witness == 1 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_SLOT && budget == 0);
+  check_redistribution_movement_cleared(result);
+
+  query.source_slot = half_slot;
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_NOT_TOTAL &&
+        result.witness == 1 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_SLOT && budget == 0);
+  check_redistribution_movement_cleared(result);
+
+  query.source_slot = unknown;
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE &&
+        result.witness == SIZE_MAX && result.witness_value == 0 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_COORDINATE_NONE &&
+        budget == 0);
+  check_redistribution_movement_cleared(result);
+
+  query = (ixs_redistribution_relation_query){block, item, slot, two, four, two,
+                                              2,     4,    2,    2,   1};
+  budget = 16;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS &&
+        result.witness == 0 && result.witness_value == 2 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_BLOCK && budget == 0);
+  check_redistribution_movement_cleared(result);
+  query.source_block = block;
+  budget = 16;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.validation == IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS &&
+        result.witness == 0 && result.witness_value == 4 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_ITEM && budget == 0);
+  query.source_item = item;
+  budget = 16;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.validation == IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS &&
+        result.witness == 0 && result.witness_value == 2 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_SLOT && budget == 0);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item, slot, 2, 4, 2, 2, 2};
+  budget = 0;
+  result =
+      ixs_analyze_redistribution_relation_facts(contradictory, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE &&
+        result.witness == SIZE_MAX && budget == 0);
+  check_redistribution_movement_cleared(result);
+
+  ixs_ctx_clear_errors(ctx);
+  query.blocks = 0;
+  budget = 9;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == 9 &&
+        result.witness == SIZE_MAX);
+  query.blocks = INT64_MAX;
+  query.items = 2;
+  query.result_slots = 2;
+  budget = SIZE_MAX;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == SIZE_MAX);
+  query = (ixs_redistribution_relation_query){
+      block, block, slot, block, item, slot, 1, 1, 1, 1, 1};
+  budget = 1;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == 1);
+  query = (ixs_redistribution_relation_query){
+      block, item, zero, block, item, slot, 1, 1, 1, 1, 1};
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == 1);
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item, foreign, 1, 1, 1, 1, 1};
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == 1);
+  result = ixs_analyze_redistribution_relation_facts(facts, NULL, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && budget == 1);
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, NULL);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, unknown_item, slot, 1, 4, 1, 1, 2};
+  budget = 3;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT &&
+        budget == 3);
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  budget = 4;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_FINITE_DOMAIN_OOM && budget == 0 &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE &&
+        result.witness == SIZE_MAX);
+  check_redistribution_movement_cleared(result);
+  CHECK(test_ixs_check_defined_facts(facts, item) == IXS_CHECK_TRUE);
+  check_nested_query_tracking_clean(ctx, facts);
+  budget = 4;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE &&
+        result.witness == SIZE_MAX && budget == 0 && !facts->bounds.oom &&
+        facts->bounds.query_tracking_depth == 0);
+  CHECK(test_ixs_check_defined_facts(facts, item) == IXS_CHECK_TRUE);
+  check_nested_query_tracking_clean(ctx, facts);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_finite_domain_query_hold_oom_retry(void) {
   {
     ixs_ctx *ctx = ixs_ctx_create();
@@ -13970,6 +14221,7 @@ int main(void) {
   test_public_mapped_expression_failures();
   test_public_mapped_constant_differences();
   test_public_finite_domain_batch();
+  test_public_redistribution_relation();
   test_public_finite_domain_query_hold_oom_retry();
   test_public_finite_domain_composed_synthesis();
   test_total_equivalence_new_proof_oom();

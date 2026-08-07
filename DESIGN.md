@@ -2002,6 +2002,42 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   representable and its pointer is non-null, every payload is reset before any
   other validation can return.
 
+  `ixs_analyze_redistribution_relation_facts` owns the fixed block/item/slot
+  specialization used by redistribution consumers. Its query supplies three
+  distinct destination symbols, three scalar source coordinates, positive
+  block/item/source-slot/result-slot extents, and a positive wave width. The
+  destination domain is `[0, blocks) x [0, items) x [0, result_slots)` with
+  slot varying fastest. The query applies those destination ranges to a
+  transient fork of the incoming facts; callers do not duplicate them as
+  assumptions. Source block, item, and slot must be defined, integer-valued,
+  and respectively in `[0, blocks)`, `[0, items)`, and
+  `[0, source_slots)`.
+
+  The direct path first proves that validation contract from facts and charges
+  no finite work. It then records universal same-block, same-item, same-wave,
+  and same-slot facts only as far as needed for a decisive movement result:
+  proved different block is sufficient; proved same block and item requires a
+  decisive same-slot result; otherwise a proved or disproved same-wave result
+  is sufficient. The API does not apply packet-type or lowering policy to
+  those facts. Irrelevant direct fields may remain `UNKNOWN`.
+
+  If direct proof is insufficient, the checked Cartesian point count `P` is
+  reserved exactly once. Insufficient budget returns `EXHAUSTED` without a
+  charge and identifies whether validation or movement required enumeration.
+  An admitted query keeps all `P` units on `LIMITED`, `INVALID`, or `OOM`.
+  Evaluation performs one row-major traversal. At each point it simultaneously
+  specializes all three source expressions once, checks definedness and
+  integrality, obtains exact signed values, checks source bounds, and folds the
+  four movement relations. Thus the relation orchestration performs `O(P)`
+  specializations and keeps `O(1)` relation state, apart from the expression
+  proof engine's query-local storage. The first proved undefined or
+  non-integer source returns `NOT_TOTAL`; the first exact range failure returns
+  `OUT_OF_BOUNDS` with coordinate and value. Both carry the first point ordinal.
+  A proof that remains unknown returns `INCONCLUSIVE` without a witness.
+  Movement fields are meaningful only for `VALID`; every other semantic result
+  clears them. Contradictory incoming facts also return complete,
+  inconclusive, witness-free output without reserving work.
+
   Relation and synthesis validate scalar headers first: query kind, owned
   symbol/candidate handles, non-null array pointers, count/allocation bounds,
   and point count. They then reject an insufficient `remaining_work` budget

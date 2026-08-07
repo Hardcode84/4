@@ -264,6 +264,59 @@ static void test_mapped_predicate_fallback_budget_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_redistribution_relation_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *block = ixs_sym(ctx, "redistribution_contract_block");
+  ixs_node *item = ixs_sym(ctx, "redistribution_contract_item");
+  ixs_node *slot = ixs_sym(ctx, "redistribution_contract_slot");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *rotated_item = ixs_mod(ctx, ixs_add(ctx, item, one), four);
+  ixs_node *partial_values[1] = {zero};
+  ixs_node *partial_conditions[1] = {ixs_cmp(ctx, slot, IXS_CMP_EQ, zero)};
+  ixs_node *partial_slot = ixs_pw(ctx, 1, partial_values, partial_conditions);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_redistribution_relation_query query = {
+      block, item, slot, block, item, slot, 1, 4, 1, 1, 2};
+  ixs_redistribution_relation_result result;
+  size_t budget = 0;
+
+  CHECK(ctx && block && item && slot && zero && one && four && rotated_item &&
+        partial_slot && facts);
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_block == IXS_CHECK_TRUE &&
+        result.same_item == IXS_CHECK_TRUE &&
+        result.same_slot == IXS_CHECK_TRUE && result.witness == SIZE_MAX &&
+        budget == 0);
+
+  query.source_item = rotated_item;
+  budget = 3;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.exhausted_phase == IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT &&
+        budget == 3);
+  budget = 4;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_VALID &&
+        result.same_item == IXS_CHECK_FALSE &&
+        result.same_wave == IXS_CHECK_FALSE && budget == 0);
+
+  query = (ixs_redistribution_relation_query){
+      block, item, slot, block, item, partial_slot, 1, 1, 2, 2, 1};
+  budget = 2;
+  result = ixs_analyze_redistribution_relation_facts(facts, &query, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.validation == IXS_REDISTRIBUTION_RELATION_NOT_TOTAL &&
+        result.witness == 1 &&
+        result.witness_coordinate == IXS_REDISTRIBUTION_SLOT && budget == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_mapped_bundle_atomic_contract(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "mapped_bundle_contract_item");
@@ -416,6 +469,7 @@ int main(void) {
   test_relational_exact_equality_noise_contract();
   test_relational_loop_bound_production_witness();
   test_mapped_predicate_fallback_budget_contract();
+  test_redistribution_relation_contract();
   test_mapped_bundle_atomic_contract();
   test_modulo_recurrence_plan_contract();
   test_modulo_recurrence_plan_fixed_width_contract();

@@ -394,6 +394,56 @@ typedef struct {
   size_t witness;
 } ixs_finite_domain_batch_result;
 
+typedef enum {
+  IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE,
+  IXS_REDISTRIBUTION_RELATION_VALID,
+  IXS_REDISTRIBUTION_RELATION_NOT_TOTAL,
+  IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS
+} ixs_redistribution_relation_validation;
+
+typedef enum {
+  IXS_REDISTRIBUTION_EXHAUSTED_NONE,
+  IXS_REDISTRIBUTION_EXHAUSTED_VALIDATION,
+  IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT
+} ixs_redistribution_exhausted_phase;
+
+typedef enum {
+  IXS_REDISTRIBUTION_BLOCK,
+  IXS_REDISTRIBUTION_ITEM,
+  IXS_REDISTRIBUTION_SLOT,
+  IXS_REDISTRIBUTION_COORDINATE_NONE
+} ixs_redistribution_coordinate;
+
+/* Fixed block/item/slot relation. Destination coordinates range over
+ * [0, blocks) x [0, items) x [0, result_slots). Source coordinates must lie
+ * in the corresponding block, item, and source-slot ranges. */
+typedef struct {
+  const ixs_node *block;
+  const ixs_node *item;
+  const ixs_node *slot;
+  const ixs_node *source_block;
+  const ixs_node *source_item;
+  const ixs_node *source_slot;
+  int64_t blocks;
+  int64_t items;
+  int64_t source_slots;
+  int64_t result_slots;
+  int64_t wave_width;
+} ixs_redistribution_relation_query;
+
+typedef struct {
+  ixs_finite_domain_status status;
+  ixs_redistribution_relation_validation validation;
+  ixs_redistribution_exhausted_phase exhausted_phase;
+  ixs_check_result same_block;
+  ixs_check_result same_item;
+  ixs_check_result same_wave;
+  ixs_check_result same_slot;
+  size_t witness;
+  int64_t witness_value;
+  ixs_redistribution_coordinate witness_coordinate;
+} ixs_redistribution_relation_result;
+
 /* Signedness of a fixed-width integer remainder. */
 typedef enum {
   IXS_REMAINDER_SIGNED,
@@ -943,6 +993,17 @@ ixs_finite_domain_status ixs_finite_domain_batch_facts(
     ixs_facts *facts, const ixs_finite_integer_domain *domains, size_t ndomains,
     const ixs_finite_domain_batch_query *queries, size_t nqueries,
     ixs_finite_domain_batch_result *results, size_t *remaining_work);
+/* Prove and classify one fixed block/item/slot redistribution relation. Direct
+ * proof consumes no finite work. Otherwise the row-major Cartesian point count
+ * is reserved once; slot varies fastest. EXHAUSTED reports whether validation
+ * or movement still required enumeration. COMPLETE plus NOT_TOTAL or
+ * OUT_OF_BOUNDS carries the first failing point ordinal. The latter also
+ * carries its source coordinate and exact signed value. INCONCLUSIVE carries
+ * no witness or movement result. Non-complete results carry no proof payload,
+ * and failed reserved work is not refunded. */
+ixs_redistribution_relation_result ixs_analyze_redistribution_relation_facts(
+    ixs_facts *facts, const ixs_redistribution_relation_query *query,
+    size_t *remaining_work);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
 ixs_constant_difference_result
