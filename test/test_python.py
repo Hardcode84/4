@@ -46,7 +46,6 @@ ModSymbolCase = tuple[str, int, int, int, int, str]
 ModCompositeCase = tuple[str, str, int, int, int, int, int, int, int, str, str]
 BitMaskCase = tuple[str, str, int, int, int, int, str]
 Pow2Case = tuple[str, bool, str, int, str]
-
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
 
@@ -1218,6 +1217,20 @@ def test_trunc_binding_matches_exact_fraction_semantics(numerator: int, denomina
     assert int(truncated) == math.trunc(Fraction(numerator, denominator))
 
 
+def test_serialized_bytes_are_stable_and_outlive_the_source_context() -> None:
+    source = ixsimpl.Context()
+    expr = 4 * source.sym("x") + source.sym("y")
+    data = source.serialize(expr)
+
+    foreign = ixsimpl.Context()
+
+    del expr
+    del source
+    decoded = foreign.deserialize(data)
+    assert str(decoded) == "4*x + y"
+    assert foreign.serialize(decoded) == data
+
+
 def test_node_ptr_exposes_canonical_node_address() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
@@ -2243,7 +2256,8 @@ def test_integrality_and_divisibility_invalid_inputs() -> None:
     assert ctx.divisible(ctx.int_(64), 32, contradictory) is None
     assert not sentinel.is_integer_valued
     assert ctx.integer_valued(sentinel) is None
-    assert ctx.divisible(sentinel, 8, facts) is None
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.divisible(sentinel, 8, facts)
 
     with pytest.raises(ValueError, match="different context"):
         ctx.integer_valued(other.sym("x"))
@@ -2296,7 +2310,7 @@ def test_known_bits_and_congruence_binding_failures() -> None:
     contradictory.assume(x <= 5)
     sentinel = ctx.parse_expr("(")
 
-    assert ctx.known_bits(x, contradictory) is None
+    assert ctx.known_bits(x, contradictory) == (0, 0, None)
     assert ctx.symbol_congruence(x, contradictory) is None
     assert ctx.congruent(ctx.int_(1), 2, 1, contradictory) is None
 
@@ -2507,26 +2521,133 @@ def test_total_equivalence_discrete_cut_and_mod_shift_property(
     assert result is (True if 0 <= residue + shift < modulus else None)
 
 
-def test_finite_domain_equivalence_binding() -> None:
+def test_truncating_remainder_equivalence_projection() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
-    finite = ctx.parse_expr("Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))")
-    facts = ctx.facts()
-    facts.assume(x >= 0)
-    facts.assume(x <= 3)
+    d = ctx.sym("d")
+    scaled_zero = ctx.parse_expr(
+        "16*x - 16*d*Piecewise((floor(x/d), "
+        "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
+        "(ceiling(x/d), True))"
+    )
+    scaled_next = ctx.parse_expr(
+        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+        "((1 + x) >= 0 & d > 0) | ((1 + x) <= 0 & d < 0)), "
+        "(ceiling((1 + x)/d), True))"
+    )
+    wave_negative_zero = ctx.parse_expr(
+        "16*x - 16*d*Piecewise((floor(x/d), x <= 0 & d < 0), " "(ceiling(x/d), True))"
+    )
+    wave_negative_next = ctx.parse_expr(
+        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+        "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), True))"
+    )
+    floor_quotient = ctx.parse_expr("floor(x/d)")
+    ceiling_quotient = ctx.parse_expr("ceiling(x/d)")
+    positive_remainder_quotient = ctx.parse_expr("(x - Mod(x, 4))/d")
+    negative_remainder_quotient = ctx.parse_expr("(x + Mod(-x, 4))/d")
 
-    assert ctx.equivalent(finite, ctx.int_(1), facts) is None
-    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 4) == (
-        True,
-        0,
+    positive = ctx.facts()
+    positive.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, 4), ctx.eq(x % 2, 0)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive) is True
+    assert ctx.constant_difference(scaled_next, scaled_zero, positive) == 16
+    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, positive) is True
+    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, positive) is not True
+
+    dynamic_positive = ctx.facts()
+    dynamic_positive.assume_many(
+        [
+            x >= 0,
+            x <= 2**30 - 2,
+            ctx.eq(x % 2, 0),
+            d >= 4,
+            d <= 2**30,
+            ctx.eq(d % 4, 0),
+        ]
     )
-    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 3) == (
-        None,
-        3,
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, dynamic_positive) is True
+    assert ctx.constant_difference(scaled_next, scaled_zero, dynamic_positive) == 16
+
+    negative_divisor = ctx.facts()
+    negative_divisor.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
+    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, negative_divisor) is True
+    assert ctx.constant_difference(wave_negative_next, wave_negative_zero, negative_divisor) == 16
+    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, negative_divisor) is True
+    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, negative_divisor) is not True
+
+    at_zero = ctx.facts()
+    at_zero.assume_many([ctx.eq(x, 0), ctx.eq(d, -4)])
+    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, at_zero) is True
+
+    for divisor in (4, -4):
+        negative = ctx.facts()
+        negative.assume_many([x >= -100, x <= -2, ctx.eq(d, divisor), ctx.eq(x % 4, 2)])
+        assert ctx.equivalent(scaled_next, scaled_zero + 16, negative) is True
+        rounded = ceiling_quotient if divisor > 0 else floor_quotient
+        wrong_round = floor_quotient if divisor > 0 else ceiling_quotient
+        assert ctx.equivalent(rounded, negative_remainder_quotient, negative) is True
+        assert ctx.equivalent(wrong_round, negative_remainder_quotient, negative) is not True
+
+    positive_wrap = ctx.facts()
+    positive_wrap.assume_many([ctx.eq(x, 3), ctx.eq(d, 4)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive_wrap) is not True
+    negative_wrap = ctx.facts()
+    negative_wrap.assume_many([ctx.eq(x, -4), ctx.eq(d, -4)])
+    assert ctx.equivalent(scaled_next, scaled_zero + 16, negative_wrap) is not True
+
+
+def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    d = ctx.sym("d")
+
+    def pair(condition: str, fallback: str = "True") -> tuple[ixsimpl.Expr, ixsimpl.Expr]:
+        zero = ctx.parse_expr(
+            f"16*x - 16*d*Piecewise((floor(x/d), {condition}), " f"(ceiling(x/d), {fallback}))"
+        )
+        next_condition = condition.replace("x", "(1 + x)")
+        next_fallback = fallback.replace("x", "(1 + x)")
+        next_ = ctx.parse_expr(
+            "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
+            f"{next_condition}), (ceiling((1 + x)/d), {next_fallback}))"
+        )
+        return zero, next_
+
+    facts = ctx.facts()
+    facts.assume_many([x >= 0, x <= 100, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
+
+    wrong_zero, wrong_next = pair("x < 0 & d < 0")
+    assert ctx.equivalent(wrong_next, wrong_zero + 16, facts) is None
+    overlap_zero, overlap_next = pair("(x <= 0 & d < 0) | x == 1")
+    assert ctx.equivalent(overlap_next, overlap_zero + 16, facts) is None
+    uncovered_zero, uncovered_next = pair("x <= 0 & d < 0", "x >= 0")
+    assert ctx.equivalent(uncovered_next, uncovered_zero + 16, facts) is None
+
+    zero_divisor = ctx.facts()
+    zero_divisor.assume_many([x >= 0, ctx.eq(d, 0)])
+    assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is None
+    assert ctx.constant_difference(wrong_next, wrong_zero, zero_divisor) is None
+
+    unknown_divisor = ctx.facts()
+    unknown_divisor.assume_many([x >= 0, ctx.ne(d, 0), ctx.eq(x % 2, 0)])
+    exact_zero, exact_next = pair("(x >= 0 & d > 0) | (x <= 0 & d < 0)")
+    assert ctx.equivalent(exact_next, exact_zero + 16, unknown_divisor) is None
+
+    nonintegral_zero = ctx.parse_expr(
+        "16*Max(x/2, 0) - 16*d*Piecewise((floor(Max(x/2, 0)/d), "
+        "(Max(x/2, 0) >= 0 & d > 0) | (Max(x/2, 0) <= 0 & d < 0)), "
+        "(ceiling(Max(x/2, 0)/d), True))"
     )
-    assert ctx.equivalent_finite_domain(x, x, facts, 0) == (True, 0)
-    with pytest.raises(OverflowError):
-        ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, -1)
+    nonintegral_next = ctx.parse_expr(
+        "16 + 16*Max(x/2, 0) - 16*d*Piecewise("
+        "(floor((1 + Max(x/2, 0))/d), "
+        "((1 + Max(x/2, 0)) >= 0 & d > 0) | "
+        "((1 + Max(x/2, 0)) <= 0 & d < 0)), "
+        "(ceiling((1 + Max(x/2, 0))/d), True))"
+    )
+    nonintegral = ctx.facts()
+    nonintegral.assume_many([x >= 0, x <= 100, ctx.eq(d, -4)])
+    assert ctx.equivalent(nonintegral_next, nonintegral_zero + 16, nonintegral) is None
 
 
 def test_equivalence_binding_invalid_inputs() -> None:
@@ -2688,7 +2809,8 @@ def test_fact_backed_algebra_helpers() -> None:
     assert quadratic_difference is not None
     assert ixsimpl.same_node(quadratic_difference, 2 * i + 1)
     assert ctx.finite_difference(i, i, i, facts) is None
-    assert ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts) is None
+    with pytest.raises(ValueError, match="invalid internal relation state"):
+        ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts)
 
     split = ctx.split_additive_constant(base + 96, facts)
     assert split is not None
@@ -2702,62 +2824,6 @@ def test_fact_backed_algebra_helpers() -> None:
         assert ixsimpl.same_node(residual, base)
         assert constant == limit
     assert ctx.split_additive_constant(base + ctx.rat(1, 2), facts) is None
-
-
-def test_exact_quotient_decomposition_binding() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("quotient_binding_x")
-    y = ctx.sym("quotient_binding_y")
-    z = ctx.sym("quotient_binding_z")
-    i = ctx.sym("quotient_binding_i")
-    facts = ctx.facts()
-
-    product = ctx.rat(3, 4) * x * x / (y * y)
-    parts = ctx.decompose_exact_quotient(product, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, 3 * x * x)
-    assert ixsimpl.same_node(denominator, 4 * y * y)
-    assert ixsimpl.same_node(numerator / denominator, product)
-
-    common_denominator = 2 * y
-    common_sum = x / common_denominator + 3 * z / common_denominator + 5
-    parts = ctx.decompose_exact_quotient(common_sum, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
-    assert ixsimpl.same_node(denominator, common_denominator)
-    assert ixsimpl.same_node((numerator / denominator).expand(), common_sum)
-
-    parts = ctx.decompose_exact_quotient(ctx.rat(-3, 4), facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, ctx.int_(-3))
-    assert ixsimpl.same_node(denominator, ctx.int_(4))
-    assert ctx.decompose_exact_quotient(ctx.int_(3), facts) is None
-    assert ctx.decompose_exact_quotient(2 * x, facts) is None
-    assert ctx.decompose_exact_quotient(x / y + z / x, facts) is None
-    assert ctx.decompose_exact_quotient(x / 2 + z / 4, facts) is None
-
-    large_denominator = ctx.int_(1)
-    for _ in range(65):
-        large_denominator *= y
-    parts = ctx.decompose_exact_quotient(x / large_denominator, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x)
-    assert ixsimpl.same_node(denominator, large_denominator)
-
-    condition = i >= 0
-    piecewise = ixsimpl.pw((common_sum, condition), (x, ctx.true_()))
-    assert ctx.decompose_exact_quotient(piecewise, facts) is None
-    nonnegative = ctx.facts()
-    nonnegative.assume(condition)
-    parts = ctx.decompose_exact_quotient(piecewise, nonnegative)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
-    assert ixsimpl.same_node(denominator, common_denominator)
 
 
 def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
@@ -2802,10 +2868,6 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
     with pytest.raises(ValueError, match="different context"):
         ctx.affine_decompose(x, other.sym("x"), facts)
     with pytest.raises(ValueError, match="different context"):
-        ctx.decompose_exact_quotient(other.sym("x"), facts)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.decompose_exact_quotient(x, other.facts())
-    with pytest.raises(ValueError, match="different context"):
         ctx.finite_difference(x, x, other.sym("step"), facts)
     with pytest.raises(ValueError, match="different context"):
         ctx.split_additive_constant(other.sym("x"), facts)
@@ -2815,8 +2877,6 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
         ctx.constant_difference(sentinel, x, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.affine_decompose(sentinel, x, facts)
-    with pytest.raises(ValueError, match="sentinel"):
-        ctx.decompose_exact_quotient(sentinel, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):
@@ -3382,57 +3442,18 @@ def test_range_basic() -> None:
         Fraction(1, 2),
         Fraction(3, 2),
     )
+    bounded_integer = ctx.facts()
+    bounded_integer.assume_range(x, Fraction(1, 2), Fraction(19, 2))
+    assert ctx.range(x, facts=bounded_integer) == (1, 9)
+    empty_integer = ctx.facts()
+    empty_integer.assume_range(x, Fraction(1, 4), Fraction(3, 4))
+    assert ctx.range(x, facts=empty_integer) is None
     assert ctx.range(x % 8) == (0, 7)
     assert ctx.range(x) is None
     assert ctx.range(x, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.range(-x, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.range(ctx.int_(int64_min)) == (int64_min, int64_min)
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
-
-
-def test_integer_range_normalizes_inside_ixsimpl() -> None:
-    ctx = ixsimpl.Context()
-    other = ixsimpl.Context()
-    x, y = ctx.sym("integer_range_x"), ctx.sym("integer_range_y")
-
-    assert ctx.integer_range(x, assumptions=[x >= ctx.rat(1, 2), x <= ctx.rat(19, 2)]) == (1, 9)
-    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 3]) is None
-    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 10, ctx.eq(x % 2, 0)]) == (1, 5)
-    assert ctx.integer_range(1 / y) is None
-
-    lower_only = ctx.facts()
-    lower_only.assume_range(x, Fraction(1, 2), None)
-    assert ctx.integer_range(x, facts=lower_only) == (1, None)
-
-    upper_only = ctx.facts()
-    upper_only.assume_range(x, None, Fraction(19, 2))
-    assert ctx.integer_range(x, facts=upper_only) == (None, 9)
-
-    composite = 2 * x * y + 1
-    aligned = ctx.facts()
-    aligned.assume_range(composite, 0, 10)
-    assert ctx.range(composite, facts=aligned) == (0, 10)
-    assert ctx.integer_range(composite, facts=aligned) == (1, 9)
-
-    empty = ctx.facts()
-    empty.assume_range(x, Fraction(1, 4), Fraction(3, 4))
-    assert ctx.integer_range(x, facts=empty) is None
-
-    contradictory = ctx.facts()
-    contradictory.assume(x >= 2)
-    contradictory.assume(x <= 1)
-    assert ctx.integer_range(x, facts=contradictory) is None
-
-    with pytest.raises(TypeError, match="expr must be an Expr"):
-        ctx.integer_range(1)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="expression from different context"):
-        ctx.integer_range(other.sym("integer_range_x"))
-    with pytest.raises(ValueError, match="assumption from different context"):
-        ctx.integer_range(x, assumptions=[other.sym("integer_range_bound") >= 0])
-    with pytest.raises(ValueError, match="facts from different context"):
-        ctx.integer_range(x, facts=other.facts())
-    with pytest.raises(ValueError, match="either assumptions or facts"):
-        ctx.integer_range(x, assumptions=[x >= 0], facts=lower_only)
 
 
 def test_range_composite_predicate_fact() -> None:
@@ -3597,7 +3618,8 @@ def test_fact_check_nested_xor_cancellation_parity() -> None:
 
     assert different != x
     assert ctx.check(nonmatching, assumptions=[pred]) is None
-    assert ctx.check(nonmatching, facts=facts) is None
+    # Closed facts exhaust this 32-point domain; the legacy query does not.
+    assert ctx.check(nonmatching, facts=facts) is False
 
 
 def test_fact_backed_simplification() -> None:
@@ -3764,7 +3786,12 @@ def test_facts_canonical_affine_spelling_fuzz(
 
     facts.assume_range(expanded, lo, hi)
 
-    assert ctx.range(factored, facts=facts) == (lo, hi)
+    modulus = abs(scale)
+    aligned_lo = lo + (offset - lo) % modulus
+    aligned_hi = hi - (hi - offset) % modulus
+    expected = None if aligned_lo > aligned_hi else (aligned_lo, aligned_hi)
+    assert ctx.range(expanded, facts=facts) == expected
+    assert ctx.range(factored, facts=facts) == expected
 
 
 def test_has_basic() -> None:

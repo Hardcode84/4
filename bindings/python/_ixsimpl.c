@@ -126,23 +126,6 @@ static int raise_new_prefixed_error(ixs_session *session, size_t before,
   return 0;
 }
 
-static int raise_new_finite_equivalence_error(ixs_session *session,
-                                              size_t before) {
-  size_t i;
-  size_t after = ixs_session_nerrors(session);
-  for (i = before; i < after; i++) {
-    const char *message = ixs_session_error(session, i);
-    if (!message || strncmp(message, "finite equivalence:", 19) != 0)
-      continue;
-    if (strstr(message, "out of memory"))
-      PyErr_NoMemory();
-    else
-      PyErr_SetString(PyExc_ValueError, message);
-    return -1;
-  }
-  return 0;
-}
-
 static int raise_new_divisibility_error(ixs_session *session, size_t before) {
   return raise_new_prefixed_error(session, before, "divisibility:");
 }
@@ -1762,70 +1745,6 @@ static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
   return check_result_to_py(result);
 }
 
-static PyObject *Context_equivalent_finite_domain(ContextObject *self,
-                                                  PyObject *args,
-                                                  PyObject *kwargs) {
-  static char *kwlist[] = {"lhs", "rhs", "facts", "remaining_points", NULL};
-  PyObject *lhs_obj;
-  PyObject *rhs_obj;
-  PyObject *facts_obj;
-  PyObject *remaining_obj;
-  PyObject *answer;
-  PyObject *remaining_answer;
-  PyObject *pair;
-  ixs_session *session = Context_session(self);
-  ixs_check_result result;
-  size_t remaining_points;
-  size_t errors_before;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
-                                   &rhs_obj, &facts_obj, &remaining_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
-      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
-    return NULL;
-  }
-  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
-      ((ExprObject *)rhs_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: expression from different context");
-    return NULL;
-  }
-  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-    return NULL;
-  }
-  if (((FactsObject *)facts_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
-    return NULL;
-  }
-  remaining_points = PyLong_AsSize_t(remaining_obj);
-  if (remaining_points == (size_t)-1 && PyErr_Occurred())
-    return NULL;
-  errors_before = ixs_session_nerrors(session);
-  result = ixs_equivalent_finite_domain_facts(
-      ((FactsObject *)facts_obj)->facts, ((ExprObject *)lhs_obj)->node,
-      ((ExprObject *)rhs_obj)->node, &remaining_points);
-  if (raise_new_finite_equivalence_error(session, errors_before) < 0)
-    return NULL;
-  answer = check_result_to_py(result);
-  remaining_answer = PyLong_FromSize_t(remaining_points);
-  if (!answer || !remaining_answer) {
-    Py_XDECREF(answer);
-    Py_XDECREF(remaining_answer);
-    return NULL;
-  }
-  pair = PyTuple_New(2);
-  if (!pair) {
-    Py_DECREF(answer);
-    Py_DECREF(remaining_answer);
-    return NULL;
-  }
-  PyTuple_SET_ITEM(pair, 0, answer);
-  PyTuple_SET_ITEM(pair, 1, remaining_answer);
-  return pair;
-}
-
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
                                    PyObject *kwargs) {
   static char *kwlist[] = {"expr", "modulus", "facts", NULL};
@@ -2051,34 +1970,6 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
   if (!ok)
     Py_RETURN_NONE;
   return context_expr_pair(self, coefficient, residual);
-}
-
-static PyObject *Context_decompose_exact_quotient(ContextObject *self,
-                                                  PyObject *args,
-                                                  PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "facts", NULL};
-  PyObject *expr_obj;
-  PyObject *facts_obj;
-  const ixs_node *expr;
-  const ixs_node *numerator;
-  const ixs_node *denominator;
-  ixs_facts *facts;
-  size_t errors_before;
-  bool ok;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
-                                   &facts_obj))
-    return NULL;
-  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(Context_session(self));
-  ok =
-      ixs_decompose_exact_quotient_facts(facts, expr, &numerator, &denominator);
-  if (raise_new_prefixed_error(Context_session(self), errors_before,
-                               "exact quotient decomposition:") < 0)
-    return NULL;
-  if (!ok)
-    Py_RETURN_NONE;
-  return context_expr_pair(self, numerator, denominator);
 }
 
 static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
@@ -2503,113 +2394,6 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   return result;
 }
 
-static PyObject *Context_integer_range(ContextObject *self, PyObject *args,
-                                       PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
-  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
-  Py_ssize_t i, n_assumptions = 0;
-  const ixs_node *expr, **assumptions = NULL;
-  ixs_session *session = Context_session(self);
-  size_t errors_before;
-  ixs_integer_range_result r;
-  bool ok;
-  PyObject *lo, *hi, *result;
-
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
-                                   &assumptions_obj, &facts_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
-    return NULL;
-  }
-  if (((ExprObject *)expr_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: expression from different context");
-    return NULL;
-  }
-  expr = ((ExprObject *)expr_obj)->node;
-
-  if (facts_obj && facts_obj != Py_None) {
-    if (assumptions_obj && assumptions_obj != Py_None) {
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: pass either assumptions or facts, not both");
-      return NULL;
-    }
-    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-      return NULL;
-    }
-    if (((FactsObject *)facts_obj)->ctx_obj != self) {
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: facts from different context");
-      return NULL;
-    }
-    if (!ixs_integer_range_facts(((FactsObject *)facts_obj)->facts, expr, &r))
-      Py_RETURN_NONE;
-  } else {
-    if (assumptions_obj && assumptions_obj != Py_None) {
-      n_assumptions = PySequence_Size(assumptions_obj);
-      if (n_assumptions < 0)
-        return NULL;
-      if (n_assumptions > 0) {
-        assumptions =
-            PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
-        if (!assumptions)
-          return PyErr_NoMemory();
-        for (i = 0; i < n_assumptions; i++) {
-          PyObject *item = PySequence_GetItem(assumptions_obj, i);
-          if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
-            Py_XDECREF(item);
-            PyMem_Free(assumptions);
-            PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
-            return NULL;
-          }
-          if (((ExprObject *)item)->ctx_obj != self) {
-            Py_DECREF(item);
-            PyMem_Free(assumptions);
-            PyErr_SetString(PyExc_ValueError,
-                            "ixsimpl: assumption from different context");
-            return NULL;
-          }
-          assumptions[i] = ((ExprObject *)item)->node;
-          Py_DECREF(item);
-        }
-      }
-    }
-    errors_before = ixs_session_nerrors(session);
-    ok = ixs_integer_range(session, expr, assumptions, (size_t)n_assumptions,
-                           &r);
-    PyMem_Free(assumptions);
-    if (raise_new_assumption_error(session, errors_before) < 0)
-      return NULL;
-    if (!ok)
-      Py_RETURN_NONE;
-  }
-
-  if (r.has_lower)
-    lo = PyLong_FromLongLong((long long)r.lower);
-  else {
-    lo = Py_None;
-    Py_INCREF(lo);
-  }
-  if (!lo)
-    return NULL;
-  if (r.has_upper)
-    hi = PyLong_FromLongLong((long long)r.upper);
-  else {
-    hi = Py_None;
-    Py_INCREF(hi);
-  }
-  if (!hi) {
-    Py_DECREF(lo);
-    return NULL;
-  }
-  result = PyTuple_Pack(2, lo, hi);
-  Py_DECREF(lo);
-  Py_DECREF(hi);
-  return result;
-}
-
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
   static char *kwlist[] = {"exprs", "assumptions", "facts", NULL};
@@ -2816,19 +2600,12 @@ static PyMethodDef Context_methods[] = {
     {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
-    {"equivalent_finite_domain", (PyCFunction)Context_equivalent_finite_domain,
-     METH_VARARGS | METH_KEYWORDS,
-     "Try ordinary equivalence, then finite-domain enumeration; return "
-     "(result, remaining_points)."},
     {"constant_difference", (PyCFunction)Context_constant_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return the proven integer lhs-rhs difference, or None."},
     {"affine_decompose", (PyCFunction)Context_affine_decompose,
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
-    {"decompose_exact_quotient", (PyCFunction)Context_decompose_exact_quotient,
-     METH_VARARGS | METH_KEYWORDS,
-     "Return an exact (numerator, denominator) pair, or None."},
     {"finite_difference", (PyCFunction)Context_finite_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return expr(symbol+step)-expr(symbol), or None."},
@@ -2856,10 +2633,6 @@ static PyMethodDef Context_methods[] = {
      "Return an inclusive range or None, including supported powers, XOR, "
      "and first-match piecewise expressions. Assumptions accept CMP/boolean "
      "or AND predicates."},
-    {"integer_range", (PyCFunction)Context_integer_range,
-     METH_VARARGS | METH_KEYWORDS,
-     "Return a proved inclusive integer range or None. Rational bounds and "
-     "congruences are normalized internally."},
     {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS,
      "Simplify in-place with either assumptions or a reusable fact set."},

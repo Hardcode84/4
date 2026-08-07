@@ -17,13 +17,10 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "check_predicate",
         "congruent",
         "constant_difference",
-        "decompose_exact_quotient",
         "defined",
         "divisible",
         "equivalent",
-        "equivalent_finite_domain",
         "finite_difference",
-        "integer_range",
         "integer_valued",
         "known_bits",
         "pow2_fact",
@@ -40,12 +37,19 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "derive_affine",
         "subs",
     }
-    expr_members = {"expand", "is_integer_valued", "simplify", "subs"}
+    expr_members = {"expand", "is_integer_valued", "node_ptr", "simplify", "subs"}
 
     assert context_methods <= set(dir(ixsimpl.Context))
     assert facts_methods <= set(dir(ixsimpl.Facts))
     assert expr_members <= set(dir(ixsimpl.Expr))
     assert {"Context", "Expr", "Facts"} <= set(ixsimpl.__all__)
+    removed_query_methods = {
+        "decompose_exact_quotient",
+        "equivalent_finite_domain",
+        "integer_range",
+    }
+    assert removed_query_methods.isdisjoint(dir(ixsimpl.Context))
+    assert removed_query_methods.isdisjoint(dir(_ixsimpl.Context))
     retained_module_members = {"TRUNC", "trunc"}
     assert retained_module_members <= set(ixsimpl.__all__)
     assert retained_module_members <= set(dir(ixsimpl))
@@ -57,12 +61,8 @@ def _typecheck_package_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
-    finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
     difference: int | None = ctx.constant_difference(expr, expr, facts)
-    integer_range: tuple[int | None, int | None] | None
-    integer_range = ctx.integer_range(expr, facts=facts)
-    quotient: tuple[ixsimpl.Expr, ixsimpl.Expr] | None
-    quotient = ctx.decompose_exact_quotient(expr, facts)
+    pointer: int = expr.node_ptr
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
     batch = [expr]
@@ -72,10 +72,8 @@ def _typecheck_package_surface(
     _ = (
         tri,
         equivalent,
-        finite_equivalent,
         difference,
-        integer_range,
-        quotient,
+        pointer,
         exact,
         transferred,
     )
@@ -86,12 +84,12 @@ def _typecheck_extension_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
-    finite_equivalent: tuple[bool | None, int] = ctx.equivalent_finite_domain(expr, expr, facts, 0)
-    integer_range: tuple[int | None, int | None] | None
-    integer_range = ctx.integer_range(expr, facts=facts)
-    quotient: tuple[_ixsimpl._Expr, _ixsimpl._Expr] | None
-    quotient = ctx.decompose_exact_quotient(expr, facts)
+    pointer: int = expr.node_ptr
     batch = [expr]
     ctx.simplify_batch(batch, facts=facts)
     facts.assume_many(batch)
-    _ = tri, equivalent, finite_equivalent, integer_range, quotient
+    _ = (
+        tri,
+        equivalent,
+        pointer,
+    )

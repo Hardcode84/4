@@ -26,6 +26,8 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
+typedef struct ixs_equality_edge ixs_equality_edge;
+typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
 typedef struct {
   ixs_difference_constraint *incoming;
@@ -56,12 +58,33 @@ typedef struct {
 } ixs_expr_bound;
 
 typedef struct {
+  size_t expr_index; /* stable dense index, never an exprs-array pointer */
+  size_t next;       /* one-based watcher index, zero ends the list */
+} ixs_mod_inverse_watcher;
+
+typedef struct {
+  uint64_t lo;
+  uint64_t hi;
+  bool negative;
+} ixs_wide_offset;
+
+typedef struct {
+  ixs_node *expr;
+  ixs_equality_edge *edges;
+  size_t parent;
+  size_t rank;
+  ixs_wide_offset offset;
+} ixs_equality_endpoint;
+
+typedef struct {
   ixs_node *expr;
   ixs_interval iv;
+  bool equality_disabled;
 } ixs_bounds_cache_entry;
 
 typedef struct {
   ixs_ctx *ctx;        /* optional; enables expression canonical aliases */
+  ixs_ctx *store_ctx;  /* stable owner while ctx is temporarily disabled */
   ixs_var_bound *vars; /* arena-allocated growable array */
   size_t nvars;
   size_t cap;
@@ -72,6 +95,15 @@ typedef struct {
   size_t nexprs;
   size_t expr_cap;
   size_t expr_index_cap;
+  /* Reverse incident lists for Mod(raw_symbol, positive_literal) overrides.
+   * Heads are indexed by the stable variable index; watcher nodes reference
+   * stable dense expression indices so array growth cannot invalidate them. */
+  size_t *mod_inverse_heads;
+  size_t mod_inverse_head_cap;
+  ixs_mod_inverse_watcher *mod_inverse_watchers;
+  size_t nmod_inverse_watchers;
+  size_t mod_inverse_watcher_cap;
+  size_t mod_inverse_watch_visits; /* internal work-bound test counter */
   ixs_difference_constraint **difference_index;
   ixs_difference_var *difference_vars;
   size_t ndifferences;
@@ -84,38 +116,109 @@ typedef struct {
   size_t nexact_vars;
   size_t exact_var_cap;
   size_t exact_index_cap;
+  ixs_equality_endpoint *equality_endpoints;
+  size_t *equality_endpoint_index;
+  size_t nequality_endpoints;
+  size_t equality_endpoint_cap;
+  size_t equality_endpoint_index_cap;
+  ixs_equality_edge **equality_index;
+  size_t nequalities;
+  size_t equality_index_cap;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
-  unsigned range_pw_depth;
+  size_t range_pw_depth;
   bool has_modrem;
   bool contradiction;
   bool empty_cache_valid;
   bool empty_cache_value;
   bool oom;
+  /* Contextless query state and its growable tables live here.  Context-backed
+   * bounds use the context arena instead, but still own this empty arena so a
+   * fork never aliases arena ownership with its source. */
+  ixs_arena query_arena;
+  ixs_bounds_query_state *query_state;
+  uint64_t query_owner;
+  /* Owner-local exact-component projection memo.  Persistent fact bounds reuse
+   * one table across scalar queries; forks use scratch-local transient tables
+   * and facts_commit reuses the destination's persistent allocation. */
+  void *equality_projection_cache;
+  size_t equality_projection_cache_count;
+  size_t equality_projection_cache_capacity;
+  size_t query_tracking_depth;
+  /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
+   * use the relation being justified to prove its own domain. */
+  unsigned equality_disabled_depth;
+  /* Prevent predicate EQ/NE fallback from recursively re-entering itself. */
+  unsigned predicate_equivalence_depth;
+  /* Exact proofs own their structural traversal.  Auxiliary interval and
+   * predicate probes may re-enter once, but cannot form an unbounded C call
+   * chain through another exact proof. */
+  unsigned exact_proof_call_depth;
+  bool interval_evaluating;
+  bool query_state_owner;
+  bool query_state_borrowed;
+  bool equality_projection_cache_transient;
   bool *semantic_changed; /* optional fact-mutation observer */
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
 struct ixs_facts {
   ixs_session_impl *impl;
+  ixs_facts *session_next;
   ixs_ctx *ctx;
   uint64_t epoch;
   bool usable;
   ixs_bounds bounds;
 };
 
+/* Internal hooks emitted only by the test-instrumented library. */
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+typedef enum {
+  IXS_BOUNDS_TEST_TRANSPORT_VALUE,
+  IXS_BOUNDS_TEST_TRANSPORT_LIMITED,
+  IXS_BOUNDS_TEST_TRANSPORT_INVALID
+} ixs_bounds_test_transport;
+
+IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
+                                       size_t *stride_visits,
+                                       size_t *range_pw_case_visits,
+                                       size_t *range_pw_limit_blocks,
+                                       size_t *cache_hits, size_t *cycle_blocks,
+                                       size_t *limit_blocks,
+                                       size_t *active_count, size_t *nesting);
+/* Test hook: re-enter one active interval key and verify clean unwind. */
+IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
+/* Test hooks keep private query-cache and residue-walker types out of tests. */
+IXS_STATIC bool
+ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
+                                 ixs_bounds_test_transport injected,
+                                 ixs_bounds_test_transport *observed);
+IXS_STATIC bool ixs_bounds_known_residue_probe(ixs_bounds *b, ixs_node *expr,
+                                               uint64_t modulus,
+                                               uint64_t *residue);
+#endif
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
                                     ixs_arena *scratch);
 
-/* No-op; bounds memory is reclaimed by scratch arena restore. */
+/* Bound one complete fact-backed query.  Nested holds share the same
+ * generation, recursion guard, and Piecewise budget.  `entered` distinguishes
+ * a real tracked hold from the intentional direct path for a flat root. */
+IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
+                                            bool *entered);
+IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b);
+
+/* Release bounds-owned contextless query workspace; arena-backed bounds
+ * storage remains owned by the caller. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
 
-/* Deep-copy bounds onto the scratch arena. Returns false on OOM. */
+/* Deep-copy bounds onto the shared scratch arena.  An active source query is
+ * borrowed by the fork, so the source hold and scratch arena must outlive the
+ * fork.  The fork owns a separate, initially empty query arena. */
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
 /* Extract variable bounds from one validated CMP assumption. */
@@ -170,6 +273,7 @@ IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
 typedef enum {
   IXS_BOUNDS_BUILD_OK,
   IXS_BOUNDS_BUILD_INVALID,
+  IXS_BOUNDS_BUILD_LIMIT,
   IXS_BOUNDS_BUILD_OOM
 } ixs_bounds_build_status;
 

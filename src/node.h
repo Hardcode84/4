@@ -31,6 +31,7 @@ typedef struct ixs_pwcase {
 typedef struct ixs_session_impl {
   ixs_ctx *ctx;
   uint64_t epoch;
+  ixs_facts *facts_head;
   ixs_arena scratch;
   ixs_arena diag;
   const char **errors;
@@ -50,12 +51,16 @@ typedef enum {
 typedef struct {
   ixs_node *source;
   ixs_node *results[IXS_NODE_TRANSFORM_COUNT];
+  unsigned expand_depth_plus_one;
 } ixs_node_transform_cache_entry;
 
 #define IXS_NODE_PROPERTY_VALID 1u
 #define IXS_NODE_PROPERTY_INTEGER 2u
 #define IXS_NODE_PROPERTY_BOOL 4u
 #define IXS_NODE_PROPERTY_TOTAL 8u
+#define IXS_NODE_PROPERTY_ROUNDING 16u
+#define IXS_NODE_PROPERTY_PIECEWISE 32u
+#define IXS_NODE_PROPERTY_NESTED_PIECEWISE 64u
 
 /* Only pre-intern builders and unpublished stack probes spell this tag. */
 struct ixs_node_impl {
@@ -100,6 +105,21 @@ struct ixs_node_impl {
     } unary_bool;
   } u;
 };
+
+static inline bool ixs_node_contains_rounding(const ixs_node *node) {
+  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&
+         (node->properties & IXS_NODE_PROPERTY_ROUNDING) != 0;
+}
+
+static inline bool ixs_node_contains_piecewise(const ixs_node *node) {
+  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&
+         (node->properties & IXS_NODE_PROPERTY_PIECEWISE) != 0;
+}
+
+static inline bool ixs_node_contains_nested_piecewise(const ixs_node *node) {
+  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&
+         (node->properties & IXS_NODE_PROPERTY_NESTED_PIECEWISE) != 0;
+}
 
 /* --- Rule-hit statistics (compile with -DIXS_STATS to enable) --- */
 
@@ -147,6 +167,8 @@ struct ixs_ctx {
   size_t transform_cache_cap;
   size_t transform_cache_used;
 
+  /* Lazily allocated, context-lifetime workspace for bounds proof queries. */
+  void *bounds_query_state;
   /* Bound session mirrors. Session-owned state is copied in on entry to
    * session-taking APIs and copied back out on return. */
   ixs_arena scratch;
@@ -157,9 +179,12 @@ struct ixs_ctx {
   ixs_session_impl *active_session;
   size_t active_session_depth;
   uint64_t next_session_epoch;
+  bool transport_undefined;
 
   /* Singletons */
   ixs_node *sentinel_error;
+  /* Internal transport for a valid expression undefined after substitution. */
+  ixs_node *sentinel_undefined;
   ixs_node *sentinel_parse_error;
   ixs_node *node_true;
   ixs_node *node_false;
@@ -188,6 +213,11 @@ ixs_node_transform_cache_lookup(const ixs_ctx *ctx, const ixs_node *source,
 IXS_STATIC void ixs_node_transform_cache_store(ixs_ctx *ctx, ixs_node *source,
                                                ixs_node_transform_kind kind,
                                                ixs_node *result);
+IXS_STATIC ixs_node *ixs_node_expand_cache_lookup(const ixs_ctx *ctx,
+                                                  const ixs_node *source,
+                                                  unsigned depth);
+IXS_STATIC void ixs_node_expand_cache_store(ixs_ctx *ctx, ixs_node *source,
+                                            ixs_node *result, unsigned depth);
 IXS_STATIC void ixs_node_transform_cache_clear(ixs_ctx *ctx);
 
 /*

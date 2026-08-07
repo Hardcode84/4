@@ -225,18 +225,16 @@ def test_to_sympy_piecewise_truthy_conditions(
 
     pw = ixsimpl.pw((ctx.int_(1), x), (ctx.int_(0), ctx.true_()))
     sp = to_sympy(pw)
-    assert isinstance(sp, sympy.Piecewise)
-    assert sp.subs({sx: 2}) == 1
-    assert sp.subs({sx: 0}) == 0
+    assert isinstance(sp, sympy.Ne)
+    assert sp.subs({sx: 2}) == sympy.true
+    assert sp.subs({sx: 0}) == sympy.false
 
     bitwise_pw = ixsimpl.pw((ctx.int_(1), x & y), (ctx.int_(0), ctx.true_()))
     bitwise_sp = to_sympy(bitwise_pw)
-    assert isinstance(bitwise_sp, sympy.Piecewise)
-    cond = bitwise_sp.args[0].cond
-    assert isinstance(cond, sympy.Ne)
-    assert cond.lhs.func.__name__ == "bitand"
-    assert cond.lhs.args == (sx, sy)
-    assert cond.rhs == 0
+    assert isinstance(bitwise_sp, sympy.Ne)
+    assert bitwise_sp.lhs.func.__name__ == "bitand"
+    assert bitwise_sp.lhs.args == (sx, sy)
+    assert bitwise_sp.rhs == 0
 
 
 def test_to_sympy_xor_default(
@@ -448,7 +446,8 @@ def test_roundtrip_floor(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) ->
 
 def test_roundtrip_trunc(ctx: ixsimpl.Context, syms: dict[str, ixsimpl.Expr]) -> None:
     e = ixsimpl.trunc((syms["x"] + syms["y"]) / 3)
-    e2 = from_sympy(ctx, to_sympy(e))
+    sp = to_sympy(e)
+    e2 = from_sympy(ctx, sp)
     assert ctx.equivalent(e2, e, ctx.facts()) is True
 
 

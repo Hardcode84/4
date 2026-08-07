@@ -159,10 +159,6 @@ static inline void ixs_test_ctx_destroy(ixs_ctx *ctx) {
 #define ixs_range(ctx, expr, assumptions, n_assumptions, out)                  \
   IXS_TEST_WITH_CTX((ctx), (ixs_range)(IXS_TEST_SESSION(ctx), (expr),          \
                                        (assumptions), (n_assumptions), (out)))
-#define ixs_integer_range(ctx, expr, assumptions, n_assumptions, out)          \
-  IXS_TEST_WITH_CTX((ctx), (ixs_integer_range)(IXS_TEST_SESSION(ctx), (expr),  \
-                                               (assumptions), (n_assumptions), \
-                                               (out)))
 #define ixs_facts_create(ctx)                                                  \
   IXS_TEST_WITH_CTX((ctx), (ixs_facts_create)(IXS_TEST_SESSION(ctx)))
 #define ixs_simplify(ctx, expr, assumptions, n_assumptions)                    \

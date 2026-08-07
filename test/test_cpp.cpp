@@ -22,16 +22,13 @@ int main() {
   ixs::Expr congruent = ixs::Expr::parse_pred(ctx, "Mod(x, 8) == 0");
   ixs::Expr assumptions[1] = {nonnegative};
   ixs_range_result range = {};
-  ixs_integer_range_result integer_range = {};
 
   if (nonnegative.check(assumptions, 1) != IXS_CHECK_TRUE ||
       x.check_integer_valued() != IXS_CHECK_TRUE ||
       x.check_defined() != IXS_CHECK_TRUE ||
       eight.get_pow2_fact() != IXS_POW2_POSITIVE ||
       !x.range(range, assumptions, 1) || !range.has_lower ||
-      !x.integer_range(integer_range, assumptions, 1) ||
-      !integer_range.has_lower || integer_range.lower != 0 ||
-      integer_range.has_upper || (x * (y + one)).expand().is_null() ||
+      (x * (y + one)).expand().is_null() ||
       ixs_node_tag(truncated.raw()) != IXS_TRUNC ||
       truncated.raw() != ixs::Expr::parse_expr(ctx, "Trunc(x/3)").raw() ||
       ixs_node_int_val(ixs::trunc(ixs::Expr::parse_expr(ctx, "-3/8")).raw()) !=
@@ -56,7 +53,6 @@ int main() {
     return 3;
 
   std::vector<ixs::Expr> batch = {x + zero, twice_x + zero};
-  size_t finite_budget = 0;
   facts.simplify_batch(batch);
   if (facts.simplify(x + zero).is_null() ||
       facts.check(nonnegative) != IXS_CHECK_TRUE ||
@@ -64,13 +60,8 @@ int main() {
       facts.check_defined(x) != IXS_CHECK_TRUE ||
       facts.check_predicate(nonnegative) != IXS_CHECK_TRUE ||
       facts.equivalent(x, x) != IXS_CHECK_TRUE ||
-      facts.equivalent_finite_domain(x, x, finite_budget) != IXS_CHECK_TRUE ||
-      finite_budget != 0 ||
       facts.check_divisible(twice_x, 2) != IXS_CHECK_TRUE ||
-      facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE ||
-      !facts.range(x, range) || !facts.integer_range(x, integer_range) ||
-      !integer_range.has_lower || integer_range.lower != 0 ||
-      !integer_range.has_upper || integer_range.upper != 56)
+      facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE || !facts.range(x, range))
     return 4;
 
   int64_t delta = 0;
@@ -81,27 +72,14 @@ int main() {
   ixs::Expr coefficient = zero;
   ixs::Expr residual = zero;
   ixs::Expr difference = zero;
-  ixs::Expr numerator = zero;
-  ixs::Expr denominator = zero;
-  ixs::Expr rational_product = ixs::Expr::rational(ctx, 3, 4) * x;
   if (!facts.constant_difference(x + eight, x + one, delta) || delta != 7 ||
       !facts.affine_decompose(twice_x + one, x, coefficient, residual) ||
-      !facts.decompose_exact_quotient(rational_product, numerator,
-                                      denominator) ||
-      !(numerator == ixs::Expr::integer(ctx, 3) * x) ||
-      !(denominator == ixs::Expr::integer(ctx, 4)) ||
       !facts.finite_difference(twice_x, x, one, difference) ||
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||
       !facts.get_symbol_congruence(x, modulus, residue) || modulus != 8 ||
       facts.check_congruent(x, 8, 0) != IXS_CHECK_TRUE)
     return 5;
-
-  numerator = one;
-  denominator = eight;
-  if (facts.decompose_exact_quotient(x, numerator, denominator) ||
-      !(numerator == one) || !(denominator == eight))
-    return 6;
 
   ixs::ExactDivideResult exact = facts.try_exact_divide(twice_x, 2);
   if (exact.status != IXS_EXACT_DIVIDE_PROVEN || exact.quotient.is_null())
@@ -129,11 +107,11 @@ int main() {
   for (std::size_t i = 0; i < 5; ++i) {
     const ixs::Expr &expr = assoc_nodes[i];
     if (ixs_node_tag(expr.raw()) != assoc_tags[i])
-      return 9;
-    if (ixs_node_assoc_nargs(expr.raw()) != 3)
       return 10;
-    if (expr.raw() != canonical_nodes[i].raw())
+    if (ixs_node_assoc_nargs(expr.raw()) != 3)
       return 11;
+    if (expr.raw() != canonical_nodes[i].raw())
+      return 12;
   }
   bool rejected_empty = false;
   try {
@@ -143,7 +121,7 @@ int main() {
     rejected_empty = true;
   }
   if (!rejected_empty)
-    return 12;
+    return 13;
 
   bool rejected_foreign = false;
   try {
@@ -154,7 +132,7 @@ int main() {
     rejected_foreign = true;
   }
   if (!rejected_foreign)
-    return 13;
+    return 14;
 
   return 0;
 }

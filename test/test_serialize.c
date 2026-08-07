@@ -37,6 +37,16 @@ static int failures;
     }                                                                          \
   } while (0)
 
+static bool test_ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
+                                 ixs_range_result *out) {
+  return ixs_range_facts(facts, expr, out);
+}
+
+static ixs_check_result test_ixs_check_facts(ixs_facts *facts,
+                                             const ixs_node *expr) {
+  return ixs_check_facts(facts, expr);
+}
+
 typedef struct {
   unsigned char *data;
   size_t len;
@@ -641,13 +651,13 @@ static void test_bounds_canonical_alias_public(void) {
   input.upper_q = 1;
 
   CHECK(ixs_facts_assume_range(raw_facts, raw, &input));
-  CHECK(ixs_range_facts(raw_facts, canonical, &result));
+  CHECK(test_ixs_range_facts(raw_facts, canonical, &result));
   CHECK(result.has_lower && result.lower_p == 0 && result.lower_q == 1);
   CHECK(result.has_upper && result.upper_p == 2147483632 &&
         result.upper_q == 1);
 
   CHECK(ixs_facts_assume_range(canonical_facts, canonical, &input));
-  CHECK(ixs_range_facts(canonical_facts, raw, &result));
+  CHECK(test_ixs_range_facts(canonical_facts, raw, &result));
   CHECK(result.has_lower && result.lower_p == 0 && result.lower_q == 1);
   CHECK(result.has_upper && result.upper_p == 2147483632 &&
         result.upper_q == 1);
@@ -725,21 +735,21 @@ static void test_facts_create_preds_public(void) {
   raw = ixs_facts_create_preds(&s, predicates, 2);
   CHECK(raw != NULL);
   CHECK(ixs_check(&s, query, predicates, 2) == IXS_CHECK_UNKNOWN);
-  CHECK(ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
 
   closed = ixs_facts_create(&s);
   CHECK(closed != NULL);
   CHECK(ixs_facts_assume_preds(closed, predicates, 2));
-  CHECK(ixs_check_facts(closed, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(closed, query) == IXS_CHECK_TRUE);
 
   empty = ixs_facts_create_preds(&s, NULL, 0);
   CHECK(empty != NULL);
-  CHECK(ixs_check_facts(empty, query) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(empty, query) == IXS_CHECK_UNKNOWN);
 
   contradiction = ixs_false(&s);
   contradictory = ixs_facts_create_preds(&s, &contradiction, 1);
   CHECK(contradictory != NULL);
-  CHECK(ixs_check_facts(contradictory, query) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(contradictory, query) == IXS_CHECK_UNKNOWN);
 
   domain = ixs_and(&s, divisor_eight, projected);
   CHECK(serialize_to_buffer(&s, domain, &buf));
@@ -753,8 +763,9 @@ static void test_facts_create_preds_public(void) {
       ixs_cmp(&other_s, other_divisor, IXS_CMP_EQ, ixs_int(&other_s, 8));
   other_query = ixs_cmp(&other_s, ixs_sym(&other_s, "create_preds_base"),
                         IXS_CMP_GE, ixs_int(&other_s, 0));
-  CHECK(ixs_check_facts(serialized, other_divisor_eight) == IXS_CHECK_TRUE);
-  CHECK(ixs_check_facts(serialized, other_query) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(serialized, other_divisor_eight) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(serialized, other_query) == IXS_CHECK_UNKNOWN);
 
   invalid[0] = divisor_eight;
   invalid[1] = ixs_or(&s, divisor_eight, projected);
@@ -764,7 +775,7 @@ static void test_facts_create_preds_public(void) {
   CHECK(arena_is_at_mark(scratch, mark));
   CHECK(ixs_session_nerrors(&s) == 1);
   CHECK(strstr(ixs_session_error(&s, 0), "assumptions: OR") != NULL);
-  CHECK(ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(raw, query) == IXS_CHECK_UNKNOWN);
 
   ixs_session_clear_errors(&s);
   mark = arena_test_mark(scratch);
@@ -799,14 +810,14 @@ static void test_facts_create_preds_public(void) {
 
   fresh = ixs_facts_create_preds(&s, predicates, 2);
   CHECK(fresh != NULL);
-  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_TRUE);
   ixs_session_reset(&s);
-  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
 
   fresh = ixs_facts_create_preds(&s, predicates, 2);
   CHECK(fresh != NULL);
   ixs_session_destroy(&s);
-  CHECK(ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(fresh, divisor_eight) == IXS_CHECK_UNKNOWN);
   ixs_session_init(&s, ctx);
 
   buffer_destroy(&buf);
@@ -868,7 +879,7 @@ static void test_facts_assume_preds_order_and_identity(void) {
   first_position = ixs_facts_create(&s);
   CHECK(first_position != NULL);
   CHECK(ixs_facts_assume_preds(first_position, repeated, 3));
-  CHECK(ixs_check_facts(first_position, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(first_position, query) == IXS_CHECK_TRUE);
 
   distinct[0] = raw_predicate;
   distinct[1] = divisor_eight;
@@ -876,7 +887,7 @@ static void test_facts_assume_preds_order_and_identity(void) {
   distinct_inputs = ixs_facts_create(&s);
   CHECK(distinct_inputs != NULL);
   CHECK(ixs_facts_assume_preds(distinct_inputs, distinct, 3));
-  CHECK(ixs_check_facts(distinct_inputs, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(distinct_inputs, query) == IXS_CHECK_TRUE);
 
   buffer_destroy(&buf);
   destroy_session(ctx, &s);
@@ -945,7 +956,7 @@ static void test_facts_assume_preds_duplicate_skip(void) {
   CHECK(test_scratch->fail_after == 0);
   test_scratch->fail_after = IXS_ARENA_FAILURE_DISABLED;
   CHECK(!arena_is_at_mark(test_scratch, before_batch));
-  CHECK(ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_TRUE);
 
   prefix =
       ixs_cmp(&test_session, ixs_sym(&test_session, "duplicate_set_oom_prefix"),
@@ -983,7 +994,7 @@ static void test_facts_assume_preds_duplicate_skip(void) {
   ixs_session_reset(&test_session);
   test_scratch = &ixs_session_get(&test_session)->scratch;
   CHECK(arena_is_at_mark(test_scratch, base_mark));
-  CHECK(ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(test_facts, test_predicate) == IXS_CHECK_UNKNOWN);
 
   destroy_session(test_ctx, &test_session);
   destroy_session(measure_ctx, &measure_session);

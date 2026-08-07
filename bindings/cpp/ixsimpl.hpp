@@ -147,16 +147,6 @@ public:
   bool range(ixs_range_result &out) const {
     return ixs_range(session_, node_, nullptr, 0, &out);
   }
-  bool integer_range(ixs_integer_range_result &out, const Expr *assumptions,
-                     size_t n) const {
-    std::vector<const ixs_node *> raw(n);
-    for (size_t i = 0; i < n; ++i)
-      raw[i] = assumptions[i].raw();
-    return ixs_integer_range(session_, node_, raw.data(), n, &out);
-  }
-  bool integer_range(ixs_integer_range_result &out) const {
-    return ixs_integer_range(session_, node_, nullptr, 0, &out);
-  }
   Expr expand() const {
     return Expr(session_ctx(), session_, ixs_expand(session_, node_));
   }
@@ -311,11 +301,6 @@ public:
   ixs_check_result equivalent(const Expr &lhs, const Expr &rhs) const {
     return ixs_equivalent_facts(facts_, lhs.raw(), rhs.raw());
   }
-  ixs_check_result equivalent_finite_domain(const Expr &lhs, const Expr &rhs,
-                                            size_t &remaining_points) const {
-    return ixs_equivalent_finite_domain_facts(facts_, lhs.raw(), rhs.raw(),
-                                              &remaining_points);
-  }
   bool constant_difference(const Expr &lhs, const Expr &rhs,
                            int64_t &delta) const {
     return ixs_constant_difference_facts(facts_, lhs.raw(), rhs.raw(), &delta);
@@ -329,17 +314,6 @@ public:
       return false;
     coefficient = Expr(ctx_, session_, raw_coefficient);
     residual = Expr(ctx_, session_, raw_residual);
-    return true;
-  }
-  bool decompose_exact_quotient(const Expr &expr, Expr &numerator,
-                                Expr &denominator) const {
-    const ixs_node *raw_numerator = nullptr;
-    const ixs_node *raw_denominator = nullptr;
-    if (!ixs_decompose_exact_quotient_facts(facts_, expr.raw(), &raw_numerator,
-                                            &raw_denominator))
-      return false;
-    numerator = Expr(ctx_, session_, raw_numerator);
-    denominator = Expr(ctx_, session_, raw_denominator);
     return true;
   }
   bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
@@ -380,9 +354,6 @@ public:
   }
   bool range(const Expr &expr, ixs_range_result &out) const {
     return ixs_range_facts(facts_, expr.raw(), &out);
-  }
-  bool integer_range(const Expr &expr, ixs_integer_range_result &out) const {
-    return ixs_integer_range_facts(facts_, expr.raw(), &out);
   }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {

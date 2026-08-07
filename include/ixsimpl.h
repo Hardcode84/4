@@ -74,11 +74,13 @@ void ixs_ctx_destroy(ixs_ctx *ctx);
 /* Initialize a reusable workspace bound to ctx. */
 void ixs_session_init(ixs_session *s, ixs_ctx *ctx);
 
-/* Restore scratch to the post-init mark and clear accumulated errors.
- * Valid only after successful initialization. */
+/* Restore scratch to the post-init mark, release owned fact payloads, and
+ * clear accumulated errors. Existing fact handles become invalid and fail
+ * conservatively. Valid only after successful initialization. */
 void ixs_session_reset(ixs_session *s);
 
-/* Destroy s and release any heap-grown session storage.
+/* Destroy s and release owned fact payloads and heap-grown session storage.
+ * Existing fact handles become invalid and fail conservatively.
  * Valid only after successful initialization. */
 void ixs_session_destroy(ixs_session *s);
 
@@ -324,11 +326,13 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, const ixs_node *const *preds,
  * only after a complete successful mutation, so no partial weaker context is
  * observable. */
 
-/* Import predicates under one transaction. n == 0 accepts a NULL array. */
+/* Import one closed predicate domain under one transaction. Every predicate
+ * must be provably defined after batch saturation. n == 0 accepts NULL. */
 bool ixs_facts_assume_preds(ixs_facts *facts, const ixs_node *const *preds,
                             size_t n_preds);
 
-/* Single-predicate form of ixs_facts_assume_preds. */
+/* Import one predicate for incremental fact construction. Unlike the batch
+ * form, this permits a later predicate to close the expression domain. */
 bool ixs_facts_assume_pred(ixs_facts *facts, const ixs_node *pred);
 
 /* Attach an explicit inclusive range to expr.  Missing endpoints are allowed;
@@ -361,15 +365,16 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
                                 const ixs_node *const *replacements);
 
 /* Simplify directly against an existing fact set without rebuilding bounds.
- * NULL reports OOM or an expired/reset session.  Sentinel input propagates;
- * invalid live input returns the fact set context's domain-error sentinel.
- * Detected contradictory facts return expr unchanged. */
+ * NULL reports OOM, a resource limit, or an expired/reset session.  Sentinel
+ * input propagates; invalid live input returns the fact set context's
+ * domain-error sentinel.  Detected contradictory facts return expr unchanged.
+ * Live failures append a session diagnostic. */
 const ixs_node *ixs_simplify_facts(ixs_facts *facts, const ixs_node *expr);
 
-/* Fact-backed batch simplification.  On OOM or an expired/reset session all
- * entries become NULL.  Invalid live input replaces the entire batch with the
- * domain-error sentinel.  NULL and sentinel entries otherwise propagate;
- * detected contradictory facts leave every entry unchanged. */
+/* Fact-backed batch simplification.  On failure the operation is
+ * transactional and leaves every entry unchanged.  NULL and sentinel entries
+ * are invalid input.  Detected contradictory facts leave every entry
+ * unchanged.  Live failures append a session diagnostic. */
 void ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs,
                               size_t n);
 
@@ -382,10 +387,10 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            const ixs_node *predicate);
 /* Prove total equivalence over the full domain admitted by facts.  TRUE is
- * returned only after both operands are proved defined everywhere.  FALSE is
- * returned only for a universal proof of different values; insufficient
- * facts, contradictory facts, invalid input, and resource limits return
- * UNKNOWN. */
+ * returned only after both operands are proved defined everywhere. FALSE is
+ * returned only for a universal proof of different values;
+ * insufficient facts, contradictory facts, invalid input, and resource
+ * limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
 /* Try ordinary equivalence first, then enumerate the Cartesian product of
@@ -438,15 +443,16 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
  * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
  * not prove the input defined.  Invalid input, divisor zero, unrepresentable
- * results, and OOM return ERROR and append a diagnostic to the fact set's
- * session when one is available. */
+ * results, resource limits, and OOM return ERROR and append a diagnostic to
+ * the fact set's session when one is available. */
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    const ixs_node *expr,
                                                    int64_t divisor);
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, const ixs_node *expr);
 /* Return sound low-64-bit facts.  True with zero masks means that the query
- * was valid but proved no bits.  Invalid input, contradictory facts, and OOM
- * return false and leave out initialized to the no-information value. */
+ * was valid but proved no bits.  Invalid input, contradictory facts, resource
+ * limits, and OOM return false and leave out initialized to the no-information
+ * value.  Live failures append a session diagnostic. */
 bool ixs_get_known_bits_facts(ixs_facts *facts, const ixs_node *expr,
                               ixs_known_bits *out);
 /* Export the stored congruence record for a symbol.  Output pointers must be
@@ -487,7 +493,8 @@ void ixs_simplify_batch(ixs_session *s, const ixs_node **exprs, size_t n,
 
 /* Distribute MUL over ADD (expand products of sums into sums of products).
  * Recurses into subexpressions (floor args, piecewise branches, etc.).
- * Powers are expanded by repeated multiplication (capped at exponent 64).
+ * Positive powers use exponentiation by squaring. Negative powers retain their
+ * exact signed int32 exponent. There is no traversal-depth or exponent cap.
  * NULL-safe. */
 const ixs_node *ixs_expand(ixs_session *s, const ixs_node *expr);
 

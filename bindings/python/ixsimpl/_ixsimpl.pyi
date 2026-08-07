@@ -183,14 +183,10 @@ class Context:
     ) -> bool | None: ...
     def check_predicate(self, predicate: _Expr, facts: Facts) -> bool | None: ...
     def equivalent(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> bool | None: ...
-    def equivalent_finite_domain(
-        self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_points: int
-    ) -> tuple[bool | None, int]: ...
     def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
     def affine_decompose(
         self, expr: _Expr, symbol: _Expr, facts: Facts
     ) -> tuple[_Expr, _Expr] | None: ...
-    def decompose_exact_quotient(self, expr: _Expr, facts: Facts) -> tuple[_Expr, _Expr] | None: ...
     def finite_difference(
         self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
     ) -> _Expr | None: ...
@@ -219,15 +215,6 @@ class Context:
         facts: Facts | None = None,
     ) -> tuple[int | Fraction | None, int | Fraction | None] | None:
         """Infer bounds through supported powers, XOR, and first-match Piecewise."""
-
-    def integer_range(
-        self,
-        expr: _Expr,
-        *,
-        assumptions: Sequence[_Expr] | None = None,
-        facts: Facts | None = None,
-    ) -> tuple[int | None, int | None] | None:
-        """Infer bounds after proving the expression total and integer-valued."""
 
     def simplify_batch(
         self,

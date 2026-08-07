@@ -234,7 +234,9 @@ static void test_expand_cache_failure_semantics(void) {
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
   ixs_mulfactor factor;
-  ixs_node *too_large;
+  ixs_node *large_power;
+  ixs_node *large_sum_power;
+  ixs_node *min_negative_power;
   ixs_node *result;
 
   ixs_arena_set_fail_after(&ctx->arena, 0);
@@ -246,21 +248,142 @@ static void test_expand_cache_failure_semantics(void) {
 
   factor.base = x;
   factor.exp = 65;
-  too_large = ixs_node_mul(ctx, ixs_int(ctx, 1), 1, &factor);
-  CHECK(too_large != NULL);
+  large_power = ixs_node_mul(ctx, ixs_int(ctx, 1), 1, &factor);
+  CHECK(large_power != NULL);
   ixs_ctx_clear_errors(ctx);
-  result = ixs_expand(ctx, too_large);
-  CHECK(result != NULL && ixs_is_error(result));
-  CHECK(ctx->transform_cache_used == 1);
-  CHECK(ixs_ctx_nerrors(ctx) == 1);
-  CHECK(strstr(ixs_ctx_error(ctx, 0), "exponent magnitude") != NULL);
+  result = ixs_expand(ctx, large_power);
+  CHECK(result == large_power);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
 
-  ixs_ctx_clear_errors(ctx);
-  result = ixs_expand(ctx, too_large);
+  factor.base = ixs_add(ctx, x, ixs_int(ctx, 1));
+  factor.exp = 65;
+  large_sum_power = ixs_node_mul(ctx, ixs_int(ctx, 1), 1, &factor);
+  CHECK(large_sum_power != NULL);
+  result = ixs_expand(ctx, large_sum_power);
+  CHECK(result != NULL && !ixs_is_error(result));
+  CHECK(ixs_node_tag(result) == IXS_ADD);
+  CHECK(ixs_node_add_nterms(result) == 65u);
+
+  factor.base = x;
+  factor.exp = INT32_MIN;
+  min_negative_power = ixs_node_mul(ctx, ixs_int(ctx, 1), 1, &factor);
+  CHECK(min_negative_power != NULL);
+  result = ixs_expand(ctx, min_negative_power);
+  CHECK(result == min_negative_power);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_expand_deep_iterative(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "expand_depth_x");
+  ixs_node *child = x;
+  size_t cached;
+  unsigned i;
+
+  for (i = 0; i < 4096u; i++)
+    child = ixs_node_floor(ctx, child);
+  CHECK(ixs_expand(ctx, child) == x);
+  cached = ctx->transform_cache_used;
+  CHECK(cached == 4096u);
+  CHECK(ixs_expand(ctx, child) == x);
+  CHECK(ctx->transform_cache_used == cached);
+  CHECK(ixs_ctx_nerrors(ctx) == 0u);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_expand_oom_retry(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "expand_oom_x");
+  ixs_node *a = ixs_sym(ctx, "expand_oom_a");
+  ixs_node *b = ixs_sym(ctx, "expand_oom_b");
+  ixs_node *deep = x;
+  ixs_node *product = ixs_mul(ctx, ixs_add(ctx, a, b), x);
+  ixs_node *result;
+  unsigned i;
+
+  for (i = 0; i < 300u; i++)
+    deep = ixs_node_floor(ctx, deep);
+
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_expand(ctx, deep) == NULL);
+  CHECK(ctx->transform_cache_used == 0u);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_expand(ctx, deep) == x);
+
+  ixs_ctx_stats_reset(ctx);
+  ixs_arena_set_fail_after(&ctx->arena, 0);
+  CHECK(ixs_expand(ctx, product) == NULL);
+  CHECK(ixs_node_transform_cache_lookup(ctx, product,
+                                        IXS_NODE_TRANSFORM_EXPAND) == NULL);
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  result = ixs_expand(ctx, product);
+  CHECK(result != NULL && !ixs_is_error(result));
+  CHECK(strstr(pr(result), "a*expand_oom_x") != NULL);
+  CHECK(strstr(pr(result), "b*expand_oom_x") != NULL);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_expand_cycle_rejected(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  struct ixs_node_impl cycle;
+  ixs_node *result;
+  memset(&cycle, 0, sizeof(cycle));
+  cycle.tag = IXS_FLOOR;
+  cycle.u.unary.arg = (ixs_node *)&cycle;
+  result = (ixs_expand)(IXS_TEST_SESSION(ctx), (ixs_node *)&cycle);
   CHECK(result != NULL && ixs_is_error(result));
-  CHECK(ctx->transform_cache_used == 1);
-  CHECK(ixs_ctx_nerrors(ctx) == 1);
-  CHECK(strstr(ixs_ctx_error(ctx, 0), "exponent magnitude") != NULL);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  if (ixs_ctx_nerrors(ctx) > 0u)
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "cyclic expression graph") != NULL);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_simplify_signed_exponent_boundaries(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "signed_exp_x");
+  ixs_node *k = ixs_sym(ctx, "signed_exp_k");
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_mulfactor factor;
+  ixs_node *power;
+  ixs_node *arg;
+  ixs_node *expr;
+  ixs_node *result;
+
+  /* A representable inverse exponent above the former eager-fold cap still
+   * participates in the rounding unwrap. */
+  factor.base = k;
+  factor.exp = -65;
+  power = ixs_node_mul(ctx, one, 1, &factor);
+  arg = ixs_mul(ctx, ixs_floor(ctx, x), power);
+  expr = ixs_node_floor(ctx, arg);
+  result = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(result != NULL && !ixs_is_error(result));
+  CHECK(strstr(pr(result), "floor(floor(") == NULL);
+
+  /* Inverting INT32_MIN is not representable and would change definedness at
+   * k == 0 if encoded as a nested reciprocal. The optional rule stays put. */
+  factor.exp = INT32_MIN;
+  power = ixs_node_mul(ctx, one, 1, &factor);
+  arg = ixs_mul(ctx, ixs_floor(ctx, x), power);
+  expr = ixs_node_floor(ctx, arg);
+  result = ixs_simplify(ctx, expr, NULL, 0);
+  CHECK(result != NULL && !ixs_is_error(result));
+  CHECK(ixs_node_tag(result) == IXS_FLOOR);
+  arg = ixs_node_unary_arg(result);
+  CHECK(ixs_node_tag(arg) == IXS_MUL);
+  {
+    bool found = false;
+    uint32_t i;
+    for (i = 0; i < ixs_node_mul_nfactors(arg); i++) {
+      if (ixs_node_mul_factor_base(arg, i) == k &&
+          ixs_node_mul_factor_exp(arg, i) == INT32_MIN)
+        found = true;
+    }
+    CHECK(found);
+  }
+  CHECK(ixs_ctx_nerrors(ctx) == 0u);
+
   ixs_ctx_destroy(ctx);
 }
 
@@ -381,6 +504,10 @@ int main(void) {
 #ifndef IXS_TEST_AMALGAMATION
   test_expand_cache();
   test_expand_cache_failure_semantics();
+  test_expand_deep_iterative();
+  test_expand_oom_retry();
+  test_expand_cycle_rejected();
+  test_simplify_signed_exponent_boundaries();
   test_add_without_const_cache();
 #endif
 

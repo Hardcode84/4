@@ -1,11 +1,13 @@
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "bounds.h"
 #include "expand.h"
 #include "node.h"
 #include "parser.h"
 #include "print.h"
 #include "simplify.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -85,6 +87,16 @@ static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
   return ixs_htab_intern(ctx, n);
 }
 
+static ixs_node *make_undefined_sentinel(ixs_ctx *ctx) {
+  /* Preserve the public domain-error tag while retaining transport identity. */
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(*n), sizeof(void *));
+  if (!n)
+    return NULL;
+  *n = *ctx->sentinel_error;
+  return n;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Context lifecycle                                                 */
 /* ------------------------------------------------------------------ */
@@ -101,9 +113,11 @@ ixs_ctx *ixs_ctx_create(void) {
 
   /* Create singletons. */
   tmp.sentinel_error = make_singleton(&tmp, IXS_ERROR, 0xDEAD);
+  tmp.sentinel_undefined = make_undefined_sentinel(&tmp);
   tmp.sentinel_parse_error = make_singleton(&tmp, IXS_PARSE_ERROR, 0xBEEF);
 
-  if (!tmp.sentinel_error || !tmp.sentinel_parse_error)
+  if (!tmp.sentinel_error || !tmp.sentinel_undefined ||
+      !tmp.sentinel_parse_error)
     goto fail;
 
   tmp.node_zero = ixs_node_int(&tmp, 0);
@@ -155,6 +169,26 @@ static uint64_t session_next_epoch(ixs_ctx *ctx) {
   return ctx->next_session_epoch;
 }
 
+/* Fact handles live in the context arena, but their bounds own a heap-backed
+ * query arena.  The creating session therefore retains an intrusive owner
+ * list and releases every such arena before invalidating the session epoch or
+ * its scratch storage.  This teardown is infallible and visits each fact
+ * exactly once. */
+static void session_destroy_facts(ixs_session_impl *impl) {
+  ixs_facts *facts = impl->facts_head;
+  impl->facts_head = NULL;
+  while (facts) {
+    ixs_facts *next = facts->session_next;
+    assert(facts->impl == impl);
+    facts->session_next = NULL;
+    ixs_bounds_destroy(&facts->bounds);
+    facts->impl = NULL;
+    facts->epoch = 0;
+    facts->usable = false;
+    facts = next;
+  }
+}
+
 void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
   ixs_arena scratch;
   ixs_session_impl *impl;
@@ -175,6 +209,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
 
 void ixs_session_reset(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  session_destroy_facts(impl);
   ixs_arena_restore(session_scratch(impl), impl->base_mark);
   session_clear_errors_impl(impl);
   impl->epoch = session_next_epoch(impl->ctx);
@@ -182,6 +217,7 @@ void ixs_session_reset(ixs_session *s) {
 
 void ixs_session_destroy(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  session_destroy_facts(impl);
   ixs_arena_destroy(&impl->diag);
   ixs_arena_destroy(&impl->scratch);
   memset(s, 0, sizeof(*s));
