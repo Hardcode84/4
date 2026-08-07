@@ -22275,9 +22275,10 @@ modulo_plan_query_status(ixs_modulo_recurrence_status status) {
   switch (status) {
   case IXS_MODULO_RECURRENCE_PROVEN:
   case IXS_MODULO_RECURRENCE_UNKNOWN:
-    return IXS_FINITE_DOMAIN_COMPLETE;
   case IXS_MODULO_RECURRENCE_LIMITED:
-    return IXS_FINITE_DOMAIN_LIMITED;
+    /* A scalar proof limit rejects only that candidate. The atomic planner
+     * still has useful independent groups, targets, and references to visit. */
+    return IXS_FINITE_DOMAIN_COMPLETE;
   case IXS_MODULO_RECURRENCE_INVALID:
     return IXS_FINITE_DOMAIN_INVALID;
   case IXS_MODULO_RECURRENCE_OOM:

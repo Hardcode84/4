@@ -2225,6 +2225,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   group divisor to the referenced target's already proved increment. Cycles
   without a direct anchor remain unplanned.
 
+  A scalar proof traversal limit is proof-local. A limited successor suppresses
+  only its divisor group, a limited direct proof leaves only that target
+  unplanned, and a limited explicit relation rejects only that edge. Planning
+  continues in every case and returns `COMPLETE` with the independently proved
+  entries. `INVALID` and `OOM` still abort the complete plan; admission
+  exhaustion remains the distinct plan-level `EXHAUSTED` status.
+
   A target's local induction is a structural representation of the common loop
   induction, not an independently proved relation. Once a signed successor
   proof establishes that common induction nonnegative, signed target queries
@@ -2238,13 +2245,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   reference count: at most one successor proof per target-sized group, one
   direct proof per target, and one peer proof per reference. Overflow and all
   fact/node/context validation precede admission. An insufficient budget
-  returns `EXHAUSTED` unchanged. After reservation, later `LIMITED`, `INVALID`,
-  or `OOM` results retain the charge. Group hashing, reverse adjacency, target
-  state, and the FIFO live in session scratch and use space linear in the
-  supplied descriptor counts. Outputs are cleared before validation and copied
-  only after complete planning, so bounded stops and allocation failure never
-  expose a partial plan. `COMPLETE` may legitimately return zero groups or
-  individual `SIZE_MAX` entries when facts are inconclusive.
+  returns `EXHAUSTED` unchanged. After reservation, proof-local limits and later
+  `INVALID` or `OOM` results retain the charge. Group hashing, reverse
+  adjacency, target state, and the FIFO live in session scratch and use space
+  linear in the supplied descriptor counts. Outputs are cleared before
+  validation and copied only after complete planning, so admission exhaustion
+  and allocation failure never expose a partial plan. `COMPLETE` may
+  legitimately return zero groups or individual `SIZE_MAX` entries when facts
+  are inconclusive or a local proof reaches its traversal limit.
 - **Cyclic decomposition** (`ixs_decompose_cyclic_facts`, C++
   `Facts::decompose_cyclic`): proves the fact-domain identity
 

@@ -13662,6 +13662,48 @@ static void test_public_modulo_recurrence_plan_failures(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_modulo_recurrence_plan_local_limits(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "modulo_plan_limit_i");
+  ixs_node *nested = make_nested_query_root(ctx, "modulo_plan_limit_nested");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_target target = {
+      facts, i, i, NULL, 0u, IXS_REMAINDER_UNSIGNED, 5u};
+  ixs_modulo_recurrence_plan_group group;
+  ixs_modulo_recurrence_plan_entry entry;
+  ixs_modulo_recurrence_plan_result result;
+  ixs_modulo_recurrence_result scalar;
+  ixs_bounds_test_transport observed;
+  size_t budget;
+  bool held = false;
+
+  CHECK(ctx && i && nested && facts);
+  CHECK(ixs_bounds_query_hold_begin(&facts->bounds, nested, &held) && held);
+  CHECK(ixs_bounds_query_transport_probe(
+      &facts->bounds, nested, IXS_BOUNDS_TEST_TRANSPORT_LIMITED, &observed));
+  CHECK(observed == IXS_BOUNDS_TEST_TRANSPORT_LIMITED);
+
+  scalar = ixs_modulo_recurrence_facts(facts, nested, i, i,
+                                       IXS_REMAINDER_UNSIGNED, 8u, 5u);
+  CHECK(scalar.status == IXS_MODULO_RECURRENCE_LIMITED &&
+        scalar.remainder == NULL);
+
+  /* A limited successor proof suppresses only its divisor group. */
+  group.divisor = 99u;
+  entry.group_index = 0u;
+  entry.increment = 99u;
+  budget = 2u;
+  result = ixs_plan_modulo_recurrences_facts(
+      facts, nested, i, i, 8u, &target, 1u, &group, 1u, &entry, 1u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE && result.ngroups == 0u &&
+        budget == 0u && group.divisor == 0u && entry.group_index == SIZE_MAX &&
+        entry.increment == 0u);
+
+  if (held)
+    ixs_bounds_query_hold_end(&facts->bounds);
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   /* Interval arithmetic */
   test_iv_add_basic();
@@ -13842,6 +13884,7 @@ int main(void) {
   test_public_modulo_recurrence();
   test_public_modulo_recurrence_failures();
   test_public_modulo_recurrence_plan_failures();
+  test_public_modulo_recurrence_plan_local_limits();
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();

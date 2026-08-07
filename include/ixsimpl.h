@@ -984,6 +984,11 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
  * every distinct value and reference operand must still prove nonnegative in
  * its target fact domain.
  *
+ * A scalar proof traversal limit is local to the attempted group, target, or
+ * reference. That candidate remains unplanned and planning continues; it does
+ * not produce a plan-level LIMITED status. INVALID and OOM remain global hard
+ * failures.
+ *
  * ngroup_capacity and nentries must both equal ntargets. Every entry is reset
  * to {SIZE_MAX, 0}, every group is cleared, and ngroups is zero before semantic
  * work. Payload is committed only on COMPLETE. COMPLETE may contain no groups
@@ -992,9 +997,9 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
  * Admission reserves 2 * ntargets + the total reference count from
  * *remaining_work after complete validation and before allocation or proof.
  * Insufficient work returns EXHAUSTED without changing the budget. Reserved
- * work is not refunded after a later LIMITED, INVALID, or OOM result. Planning
- * visits each target and reference a bounded number of times and uses scratch
- * arena storage proportional to their counts. */
+ * work is not refunded after a proof-local limit or a later INVALID or OOM
+ * result. Planning visits each target and reference a bounded number of times
+ * and uses scratch arena storage proportional to their counts. */
 ixs_modulo_recurrence_plan_result ixs_plan_modulo_recurrences_facts(
     ixs_facts *loop_facts, const ixs_node *successor, const ixs_node *current,
     const ixs_node *induction, unsigned width,
