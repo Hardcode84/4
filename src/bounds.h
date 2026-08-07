@@ -151,6 +151,7 @@ typedef struct {
 
 struct ixs_facts {
   ixs_session_impl *impl;
+  ixs_facts *session_next;
   ixs_ctx *ctx;
   uint64_t epoch;
   bool usable;

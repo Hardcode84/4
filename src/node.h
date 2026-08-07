@@ -31,6 +31,7 @@ typedef struct ixs_pwcase {
 typedef struct ixs_session_impl {
   ixs_ctx *ctx;
   uint64_t epoch;
+  ixs_facts *facts_head;
   ixs_arena scratch;
   ixs_arena diag;
   const char **errors;

@@ -12220,6 +12220,8 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
          bounds.query_arena.inline_chunk == NULL);
   facts->bounds = bounds;
   facts->usable = true;
+  facts->session_next = binding.impl->facts_head;
+  binding.impl->facts_head = facts;
   ixs_session_unbind(&binding);
   return facts;
 
@@ -21139,6 +21141,44 @@ typedef struct {
   size_t query_index;
 } group_union_query_order;
 
+/* Semantic queries containing rounding and Piecewise nodes can expand into
+ * substantially more proof work than their root count suggests.  Admission
+ * uses a structural estimate without charging it to the caller's runtime work
+ * counter.  Repeated query operands are weighted on every use, while one
+ * iterative postorder memo computes each reachable node's expanded subtree
+ * cost once across the complete call. */
+#define GROUP_UNION_DAG_NODE_WEIGHT 1u
+#define GROUP_UNION_DAG_ROUNDING_EXTRA 32u
+#define GROUP_UNION_DAG_PIECEWISE_EXTRA 64u
+#define GROUP_UNION_DAG_PIECEWISE_ARM_EXTRA 16u
+#define GROUP_UNION_DAG_QUERY_WEIGHT 1u
+#define GROUP_UNION_DAG_ADMISSION_FLOOR 65536u
+#define GROUP_UNION_DAG_MEMO_INIT_CAP 32u
+
+typedef struct {
+  ixs_node *node;
+  size_t cost;
+  unsigned char state;
+} group_union_dag_cost_entry;
+
+typedef struct {
+  ixs_node *node;
+  size_t cost;
+  uint32_t next_child;
+} group_union_dag_cost_frame;
+
+typedef struct {
+  group_union_dag_cost_entry *entries;
+  size_t capacity;
+  size_t count;
+  group_union_dag_cost_frame *stack;
+  size_t stack_capacity;
+  size_t stack_count;
+} group_union_dag_cost_memo;
+
+#define GROUP_UNION_DAG_COST_VISITING 1u
+#define GROUP_UNION_DAG_COST_COMPLETE 2u
+
 /* The dependency graph is indexed once for every unique root in the call.
  * Per-closure epochs select the exact common, lane, or pair union without
  * rebuilding that immutable symbol index. */
@@ -21172,6 +21212,224 @@ static bool group_union_reserve(size_t amount, size_t *remaining_work) {
     return false;
   *remaining_work -= amount;
   return true;
+}
+
+static size_t group_union_dag_cost_add(size_t lhs, size_t rhs) {
+  if (rhs > SIZE_MAX - lhs)
+    return SIZE_MAX;
+  return lhs + rhs;
+}
+
+static size_t group_union_dag_cost_multiply(size_t lhs, size_t rhs) {
+  if (lhs != 0 && rhs > SIZE_MAX / lhs)
+    return SIZE_MAX;
+  return lhs * rhs;
+}
+
+static size_t group_union_dag_node_cost(ixs_node *node) {
+  size_t cost = GROUP_UNION_DAG_NODE_WEIGHT;
+  if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL || node->tag == IXS_TRUNC)
+    return group_union_dag_cost_add(cost, GROUP_UNION_DAG_ROUNDING_EXTRA);
+  if (node->tag == IXS_PIECEWISE) {
+    size_t arm_cost = group_union_dag_cost_multiply(
+        (size_t)node->u.pw.ncases, (size_t)GROUP_UNION_DAG_PIECEWISE_ARM_EXTRA);
+    cost = group_union_dag_cost_add(cost, GROUP_UNION_DAG_PIECEWISE_EXTRA);
+    return group_union_dag_cost_add(cost, arm_cost);
+  }
+  return cost;
+}
+
+static bool group_union_dag_cost_memo_grow(ixs_ctx *ctx,
+                                           group_union_dag_cost_memo *memo) {
+  size_t new_capacity =
+      memo->capacity ? memo->capacity * 2u : GROUP_UNION_DAG_MEMO_INIT_CAP;
+  group_union_dag_cost_entry *entries;
+  size_t index;
+  if (new_capacity <= memo->capacity ||
+      new_capacity > SIZE_MAX / sizeof(*entries))
+    return false;
+  entries = ixs_arena_alloc(&ctx->scratch, new_capacity * sizeof(*entries),
+                            sizeof(void *));
+  if (!entries)
+    return false;
+  memset(entries, 0, new_capacity * sizeof(*entries));
+  for (index = 0; index < memo->capacity; index++) {
+    group_union_dag_cost_entry old = memo->entries[index];
+    size_t destination;
+    if (!old.node)
+      continue;
+    destination = old.node->hash & (new_capacity - 1u);
+    while (entries[destination].node)
+      destination = (destination + 1u) & (new_capacity - 1u);
+    entries[destination] = old;
+  }
+  memo->entries = entries;
+  memo->capacity = new_capacity;
+  return true;
+}
+
+static group_union_dag_cost_entry *
+group_union_dag_cost_memo_find(group_union_dag_cost_memo *memo,
+                               ixs_node *node) {
+  size_t index;
+  if (!memo->capacity)
+    return NULL;
+  index = node->hash & (memo->capacity - 1u);
+  while (memo->entries[index].node && memo->entries[index].node != node)
+    index = (index + 1u) & (memo->capacity - 1u);
+  return memo->entries[index].node ? &memo->entries[index] : NULL;
+}
+
+static group_union_dag_cost_entry *
+group_union_dag_cost_memo_insert(ixs_ctx *ctx, group_union_dag_cost_memo *memo,
+                                 ixs_node *node) {
+  size_t index;
+  if (!memo->capacity || memo->count >= memo->capacity / 2u) {
+    if (!group_union_dag_cost_memo_grow(ctx, memo))
+      return NULL;
+  }
+  index = node->hash & (memo->capacity - 1u);
+  while (memo->entries[index].node && memo->entries[index].node != node)
+    index = (index + 1u) & (memo->capacity - 1u);
+  if (!memo->entries[index].node) {
+    memo->entries[index].node = node;
+    memo->count++;
+  }
+  return &memo->entries[index];
+}
+
+static bool group_union_dag_cost_stack_push(ixs_ctx *ctx,
+                                            group_union_dag_cost_memo *memo,
+                                            ixs_node *node) {
+  group_union_dag_cost_frame *frame;
+  if (memo->stack_count >= memo->stack_capacity) {
+    size_t new_capacity = memo->stack_capacity ? memo->stack_capacity * 2u
+                                               : GROUP_UNION_DAG_MEMO_INIT_CAP;
+    group_union_dag_cost_frame *stack;
+    if (new_capacity <= memo->stack_capacity ||
+        new_capacity > SIZE_MAX / sizeof(*stack))
+      return false;
+    stack = ixs_arena_grow(&ctx->scratch, memo->stack,
+                           memo->stack_capacity * sizeof(*memo->stack),
+                           new_capacity * sizeof(*memo->stack), sizeof(void *));
+    if (!stack)
+      return false;
+    memo->stack = stack;
+    memo->stack_capacity = new_capacity;
+  }
+  frame = &memo->stack[memo->stack_count++];
+  frame->node = node;
+  frame->cost = group_union_dag_node_cost(node);
+  frame->next_child = 0;
+  return true;
+}
+
+static ixs_group_union_status
+group_union_get_dag_cost(ixs_ctx *ctx, group_union_dag_cost_memo *memo,
+                         ixs_node *root, size_t *cost) {
+  group_union_dag_cost_entry *entry =
+      group_union_dag_cost_memo_find(memo, root);
+  if (entry && entry->state == GROUP_UNION_DAG_COST_COMPLETE) {
+    *cost = entry->cost;
+    return IXS_GROUP_UNION_COMPLETE;
+  }
+  if (entry && entry->state == GROUP_UNION_DAG_COST_VISITING) {
+    assert(entry->state != GROUP_UNION_DAG_COST_VISITING &&
+           "group-union expression graph contains a cycle");
+    ixs_ctx_push_error(ctx, "group unions: cyclic expression graph");
+    return IXS_GROUP_UNION_INVALID;
+  }
+  entry = group_union_dag_cost_memo_insert(ctx, memo, root);
+  if (!entry)
+    return IXS_GROUP_UNION_OOM;
+  entry->state = GROUP_UNION_DAG_COST_VISITING;
+  if (!group_union_dag_cost_stack_push(ctx, memo, root))
+    return IXS_GROUP_UNION_OOM;
+  while (memo->stack_count != 0) {
+    group_union_dag_cost_frame *frame = &memo->stack[memo->stack_count - 1u];
+    uint32_t child_count = ixs_node_nchildren(frame->node);
+    if (frame->next_child < child_count) {
+      ixs_node *child = ixs_node_child(frame->node, frame->next_child);
+      group_union_dag_cost_entry *child_entry =
+          group_union_dag_cost_memo_find(memo, child);
+      if (child_entry && child_entry->state == GROUP_UNION_DAG_COST_COMPLETE) {
+        frame->cost = group_union_dag_cost_add(frame->cost, child_entry->cost);
+        frame->next_child++;
+        continue;
+      }
+      if (child_entry && child_entry->state == GROUP_UNION_DAG_COST_VISITING) {
+        assert(child_entry->state != GROUP_UNION_DAG_COST_VISITING &&
+               "group-union expression graph contains a cycle");
+        ixs_ctx_push_error(ctx, "group unions: cyclic expression graph");
+        return IXS_GROUP_UNION_INVALID;
+      }
+      child_entry = group_union_dag_cost_memo_insert(ctx, memo, child);
+      if (!child_entry)
+        return IXS_GROUP_UNION_OOM;
+      child_entry->state = GROUP_UNION_DAG_COST_VISITING;
+      if (!group_union_dag_cost_stack_push(ctx, memo, child))
+        return IXS_GROUP_UNION_OOM;
+      continue;
+    }
+    entry = group_union_dag_cost_memo_find(memo, frame->node);
+    if (!entry || entry->state != GROUP_UNION_DAG_COST_VISITING) {
+      assert(entry && entry->state == GROUP_UNION_DAG_COST_VISITING &&
+             "group-union DAG cost memo lost its active node");
+      ixs_ctx_push_error(ctx, "group unions: DAG cost memo invariant failed");
+      return IXS_GROUP_UNION_INVALID;
+    }
+    entry->cost = frame->cost;
+    entry->state = GROUP_UNION_DAG_COST_COMPLETE;
+    memo->stack_count--;
+  }
+  entry = group_union_dag_cost_memo_find(memo, root);
+  if (!entry || entry->state != GROUP_UNION_DAG_COST_COMPLETE) {
+    ixs_ctx_push_error(ctx, "group unions: DAG cost memo invariant failed");
+    return IXS_GROUP_UNION_INVALID;
+  }
+  *cost = entry->cost;
+  return IXS_GROUP_UNION_COMPLETE;
+}
+
+static ixs_group_union_status
+group_union_admit_dag_work(ixs_ctx *ctx, ixs_node *const *roots, size_t n_roots,
+                           const ixs_group_union_query *queries,
+                           size_t n_queries, size_t remaining_work) {
+  group_union_dag_cost_memo memo;
+  size_t admission_limit = remaining_work;
+  size_t cost = 0;
+  size_t index;
+  if (admission_limit < GROUP_UNION_DAG_ADMISSION_FLOOR)
+    admission_limit = GROUP_UNION_DAG_ADMISSION_FLOOR;
+  memset(&memo, 0, sizeof(memo));
+  for (index = 0; index < n_roots; index++) {
+    size_t root_cost;
+    ixs_group_union_status status =
+        group_union_get_dag_cost(ctx, &memo, roots[index], &root_cost);
+    if (status != IXS_GROUP_UNION_COMPLETE)
+      return status;
+    cost = group_union_dag_cost_add(cost, root_cost);
+    if (cost == SIZE_MAX || cost > admission_limit)
+      return IXS_GROUP_UNION_EXHAUSTED;
+  }
+  for (index = 0; index < n_queries; index++) {
+    size_t lhs_cost;
+    size_t rhs_cost;
+    ixs_group_union_status status = group_union_get_dag_cost(
+        ctx, &memo, (ixs_node *)queries[index].lhs, &lhs_cost);
+    if (status != IXS_GROUP_UNION_COMPLETE)
+      return status;
+    status = group_union_get_dag_cost(
+        ctx, &memo, (ixs_node *)queries[index].rhs, &rhs_cost);
+    if (status != IXS_GROUP_UNION_COMPLETE)
+      return status;
+    cost = group_union_dag_cost_add(cost, GROUP_UNION_DAG_QUERY_WEIGHT);
+    cost = group_union_dag_cost_add(cost, lhs_cost);
+    cost = group_union_dag_cost_add(cost, rhs_cost);
+    if (cost == SIZE_MAX || cost > admission_limit)
+      return IXS_GROUP_UNION_EXHAUSTED;
+  }
+  return IXS_GROUP_UNION_COMPLETE;
 }
 
 static ixs_group_union_status
@@ -22195,12 +22453,14 @@ ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
       group_union_validate_inputs(ctx, groups, n_groups, queries, n_queries);
   if (status != IXS_GROUP_UNION_COMPLETE || n_queries == 0)
     goto cleanup;
+  if (*remaining_work == 0) {
+    status = IXS_GROUP_UNION_EXHAUSTED;
+    goto cleanup;
+  }
 
   states = ixs_arena_alloc(&ctx->scratch, n_groups * sizeof(*states),
                            sizeof(void *));
-  order = ixs_arena_alloc(&ctx->scratch, n_queries * sizeof(*order),
-                          sizeof(void *));
-  if (!states || !order) {
+  if (!states) {
     status = IXS_GROUP_UNION_OOM;
     goto cleanup;
   }
@@ -22209,6 +22469,19 @@ ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
                                   &n_roots, &common_ids, &n_common);
   if (status != IXS_GROUP_UNION_COMPLETE)
     goto cleanup;
+  status = group_union_admit_dag_work(ctx, roots, n_roots, queries, n_queries,
+                                      *remaining_work);
+  if (status != IXS_GROUP_UNION_COMPLETE) {
+    if (status == IXS_GROUP_UNION_EXHAUSTED)
+      *remaining_work = 0;
+    goto cleanup;
+  }
+  order = ixs_arena_alloc(&ctx->scratch, n_queries * sizeof(*order),
+                          sizeof(void *));
+  if (!order) {
+    status = IXS_GROUP_UNION_OOM;
+    goto cleanup;
+  }
   if (n_roots != 0) {
     pair_ids = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(*pair_ids),
                                sizeof(void *));

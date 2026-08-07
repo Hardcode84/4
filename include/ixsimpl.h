@@ -74,11 +74,13 @@ void ixs_ctx_destroy(ixs_ctx *ctx);
 /* Initialize a reusable workspace bound to ctx. */
 void ixs_session_init(ixs_session *s, ixs_ctx *ctx);
 
-/* Restore scratch to the post-init mark and clear accumulated errors.
- * Valid only after successful initialization. */
+/* Restore scratch to the post-init mark, release owned fact payloads, and
+ * clear accumulated errors. Existing fact handles become invalid and fail
+ * conservatively. Valid only after successful initialization. */
 void ixs_session_reset(ixs_session *s);
 
-/* Destroy s and release any heap-grown session storage.
+/* Destroy s and release owned fact payloads and heap-grown session storage.
+ * Existing fact handles become invalid and fail conservatively.
  * Valid only after successful initialization. */
 void ixs_session_destroy(ixs_session *s);
 
@@ -859,11 +861,27 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
  *
  * The implementation shares the all-group intersection and each individual
  * group closure, then transiently saturates each distinct selected union.
- * There is no persistent fact domain per group pair. One work unit is one
- * predicate-root replay or one internally bounded semantic query. Every
- * reservation is deducted from *remaining_work before that work starts.
- * Replay-support scratch is allocated only after its reservation succeeds;
- * a failed allocation does not refund reserved work.
+ * There is no persistent fact domain per group pair. After complete input
+ * validation, a nonempty query batch with zero budget returns EXHAUSTED before
+ * planning or structural admission. Invalid input and validation OOM
+ * therefore take precedence over zero-budget exhaustion.
+ *
+ * Before constructing closures, an uncharged structural scan estimates
+ * nonlinear batch work. One iterative memo computes the expanded subtree cost
+ * of every reachable node once, with extra weight for rounding and Piecewise;
+ * each predicate root contributes once and every query operand use
+ * contributes. Estimates at or below 65536 leave the ordinary work counter
+ * authoritative.
+ * Above that floor, an estimate exceeding *remaining_work, or one that cannot
+ * be represented in size_t, returns EXHAUSTED, sets *remaining_work to zero,
+ * and constructs no closure. Successful admission does not deduct the
+ * estimate.
+ *
+ * Runtime work remains exact: one work unit is one predicate-root replay or
+ * one internally bounded semantic query. Every runtime reservation is
+ * deducted from *remaining_work before that work starts. Replay-support
+ * scratch is allocated only after its reservation succeeds; a failed
+ * allocation does not refund reserved work.
  * Insufficient work, an internal traversal limit, invalid input, and OOM are
  * reported as EXHAUSTED, LIMITED, INVALID, and OOM respectively. Results are
  * meaningful only on COMPLETE. After scalar array sizes are validated, every

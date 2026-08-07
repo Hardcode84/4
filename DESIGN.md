@@ -3750,6 +3750,8 @@ session is bound):
 - temporary parse state
 - import memo tables
 - temporary buffers used by simplify, bounds, expand, and walk
+- the proof payload of every fact handle created in the current session epoch,
+  including each fact's heap-backed query arena
 
 The older "all state lives in one context" design was convenient for a
 standalone library, but it coupled unrelated lifetimes. The shipped split keeps
@@ -3777,9 +3779,12 @@ Contract:
   initialization cannot fail once the preconditions are met.
 - `ixs_session_reset` and `ixs_session_destroy` are only valid after
   initialization and before the matching destroy.
+- Reset or destroy during an active public API call, including an active fact
+  query, is outside the valid contract. Public calls are synchronous and the
+  session must remain alive and unchanged until they return.
 - `ixs_session_destroy` releases heap-grown scratch storage, clears
-  diagnostics, and returns `*s` to an uninitialized byte blob. Reinitialize a
-  session only after destroying it.
+  diagnostics, destroys the payload of every owned fact, and returns `*s` to
+  an uninitialized byte blob. Reinitialize a session only after destroying it.
 - `ixs_ctx_destroy(NULL)` remains a no-op. For a non-NULL store, every session
   bound to that store must already have been destroyed. Destroying the store
   invalidates all nodes obtained from it.
@@ -3790,16 +3795,22 @@ raw bytes duplicates interior pointers and is invalid.
 
 `ixs_session_reset`:
 
+- destroys the payload of every fact created in the current epoch
 - clears diagnostics
 - restores scratch to the session's post-init `base_mark`
 - retains one cached spare heap chunk for reuse
 
 Each initialization and reset assigns a new store-local session epoch. A fact
-handle keeps its creating epoch in a store-arena header while all bounds
-payload remains in session scratch. This header survives scratch rewind long
-enough to reject a stale handle before following any rewound pointers. Destroy
-zeros the inline session header; reinitializing the same public storage receives
-a different epoch. The fact handle itself is released with the store.
+handle keeps its creating epoch in a store-arena header. Relation tables live
+in session scratch, while query-local recursion and memo storage uses a
+heap-backed arena embedded in the handle. The session records each new handle
+in an intrusive owner list. Reset and destroy walk that list exactly once,
+destroy every embedded query arena before rewinding scratch, and turn each
+store-arena header into a tombstone by clearing its session identity and epoch.
+The header survives until context destruction, so calls through stale handles
+reject the tombstone before following any released payload pointer. Destroy
+then zeros the inline session header; reinitializing the same public storage
+receives a different epoch. The fact handle itself is released with the store.
 
 This is the critical performance property: hot paths stop paying allocator
 setup cost on every parse/simplify/import call.
@@ -4276,23 +4287,43 @@ Groups and query/result arrays are borrowed for the call. The API retains no
 pointer from those arrays, and results contain only value data. A zero count
 accepts a null array for that corresponding input or output.
 
-One `remaining_work` counter governs the whole batch. One work unit reserves
-one predicate-root replay or one internally bounded semantic query, and the
-reservation is deducted before work begins. Replay-support scratch is
-allocated only after that reservation succeeds; allocation failure does not
-refund attempted work. Finite Cartesian point products are reserved atomically
-after the exact proof is unknown; an insufficient point budget charges no
-points, while a later proof stop keeps the reservation. The exact fast path
-therefore consumes only its dispatcher/query work. `IXS_GROUP_UNION_COMPLETE`
-is the only status for which
-any result is meaningful. Caller-budget exhaustion, a bounded semantic
-traversal ceiling, invalid input or an internal
-invariant failure, and scratch OOM return `IXS_GROUP_UNION_EXHAUSTED`,
-`IXS_GROUP_UNION_LIMITED`, `IXS_GROUP_UNION_INVALID`, and
-`IXS_GROUP_UNION_OOM`, respectively. Once scalar array sizes are representable,
-every non-complete return resets all results to `UNKNOWN` and zero difference,
-preventing partially answered batches from being consumed. An unrepresentable
-result count is rejected before the output array is touched.
+One `remaining_work` counter governs the whole batch. Full node, predicate, and
+query validation precedes budget handling, so malformed input and validation
+OOM retain `INVALID`/`OOM` precedence even when the budget is zero. After that
+validation, a nonempty query batch with zero budget returns `EXHAUSTED` before
+root planning or structural admission.
+
+Large batches have an uncharged structural admission scan before any closure
+is constructed. A shared iterative postorder memo visits every reachable DAG
+node and edge once across all predicate and operand roots. Its expanded
+subtree cost counts a shared child at each parent edge, adds 32 units to each
+floor, ceiling, or truncation node, and adds 64 units plus 16 per arm to each
+`Piecewise`. Each distinct predicate root contributes once; every query adds
+one unit and the cached costs of both operand roots, deliberately weighting
+repeated nonlinear uses. Saturating arithmetic makes an unrepresentable cost
+reject rather than wrap. Estimates at or below 65536 do not participate in
+admission, leaving scalar and small-batch accounting unchanged. Above that
+floor, a cost greater than `remaining_work` returns `EXHAUSTED`, drains the
+counter to zero, and builds no common, lane, or pair closure. An admitted scan
+does not consume work. Its running time is linear in the unique reachable DAG
+nodes and edges plus predicate/query root uses.
+
+Runtime accounting remains exact. One work unit reserves one predicate-root
+replay or one internally bounded semantic query, and the reservation is
+deducted before work begins. Replay-support scratch is allocated only after
+that reservation succeeds; allocation failure does not refund attempted work.
+Finite Cartesian point products are reserved atomically after the exact proof
+is unknown; an insufficient point budget charges no points, while a later
+proof stop keeps the reservation. The exact fast path therefore consumes only
+its dispatcher/query work. `IXS_GROUP_UNION_COMPLETE` is the only status for
+which any result is meaningful. Caller-budget exhaustion, a bounded semantic
+traversal ceiling, invalid input or an internal invariant failure, and scratch
+OOM return `IXS_GROUP_UNION_EXHAUSTED`, `IXS_GROUP_UNION_LIMITED`,
+`IXS_GROUP_UNION_INVALID`, and `IXS_GROUP_UNION_OOM`, respectively. Once scalar
+array sizes are representable, every non-complete return resets all results to
+`UNKNOWN` and zero difference, preventing partially answered batches from
+being consumed. An unrepresentable result count is rejected before the output
+array is touched.
 
 The implementation builds one call-wide deduplicated root registry and one
 immutable symbol-dependency index. It partitions and saturates the all-group
