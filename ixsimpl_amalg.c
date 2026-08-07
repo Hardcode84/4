@@ -14071,6 +14071,8 @@ cleanup:
   return bounds->oom ? IXS_CHECK_UNKNOWN : answer;
 }
 
+/* General predicate fallback budget: inspect at most 4096 expression nodes
+ * and enumerate at most 64 points across at most 8 finite-range symbols. */
 #define PREDICATE_FINITE_MAX_SYMBOLS 8u
 #define PREDICATE_FINITE_MAX_POINTS 64u
 #define PREDICATE_FINITE_MAX_NODES 4096u
@@ -14238,8 +14240,7 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
 }
 
 static ixs_check_result
-predicate_query_finite_domain(ixs_bounds *bounds, ixs_node *predicate,
-                              size_t *remaining_points) {
+predicate_query_bounded_finite_domain(ixs_bounds *bounds, ixs_node *predicate) {
   predicate_finite_symbol symbols[PREDICATE_FINITE_MAX_SYMBOLS];
   ixs_node *targets[PREDICATE_FINITE_MAX_SYMBOLS];
   size_t symbol_count = 0;
@@ -14252,11 +14253,6 @@ predicate_query_finite_domain(ixs_bounds *bounds, ixs_node *predicate,
                                        &point_count))
     return IXS_CHECK_UNKNOWN;
 
-  if (remaining_points) {
-    if (point_count > *remaining_points)
-      return IXS_CHECK_UNKNOWN;
-    *remaining_points -= point_count;
-  }
   return predicate_finite_evaluate(bounds, predicate, symbols, symbol_count,
                                    targets, point_count);
 }
@@ -18261,7 +18257,7 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
                                                &predicate_limited);
     if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
       result.check =
-          predicate_query_finite_domain(&facts->bounds, predicate, NULL);
+          predicate_query_bounded_finite_domain(&facts->bounds, predicate);
     result.status =
         predicate_limited ? IXS_FACT_QUERY_LIMITED : IXS_FACT_QUERY_COMPLETE;
   }
@@ -19648,49 +19644,6 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
       facts_query_equivalent(facts, (ixs_node *)lhs, (ixs_node *)rhs);
   return result.status == IXS_FACT_QUERY_COMPLETE ? result.check
                                                   : IXS_CHECK_UNKNOWN;
-}
-
-ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
-                                                    const ixs_node *lhs,
-                                                    const ixs_node *rhs,
-                                                    size_t *remaining_points) {
-  ixs_fact_check_result direct;
-  ixs_session_binding binding;
-  ixs_ctx *ctx;
-  ixs_node *predicate;
-  ixs_check_result result = IXS_CHECK_UNKNOWN;
-  bool query_held = false;
-
-  if (!remaining_points) {
-    facts_public_output_error(facts, "finite equivalence",
-                              "remaining_points is NULL");
-    return IXS_CHECK_UNKNOWN;
-  }
-  direct = facts_query_equivalent(facts, (ixs_node *)lhs, (ixs_node *)rhs);
-  if (direct.status != IXS_FACT_QUERY_COMPLETE ||
-      direct.check != IXS_CHECK_UNKNOWN)
-    return direct.status == IXS_FACT_QUERY_COMPLETE ? direct.check
-                                                    : IXS_CHECK_UNKNOWN;
-  if (!facts_bind(facts, &binding, &ctx))
-    return IXS_CHECK_UNKNOWN;
-  if (!facts_ready(facts) ||
-      !facts_query_node_ok(ctx, (ixs_node *)lhs, "finite equivalence") ||
-      !facts_query_node_ok(ctx, (ixs_node *)rhs, "finite equivalence") ||
-      ixs_bounds_has_empty(&facts->bounds))
-    goto cleanup;
-  predicate = simp_cmp(ctx, (ixs_node *)lhs, IXS_CMP_EQ, (ixs_node *)rhs);
-  if (!predicate || ixs_node_is_sentinel(predicate))
-    goto cleanup;
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, predicate, &query_held))
-    goto cleanup;
-  result = predicate_query_finite_domain(&facts->bounds, predicate,
-                                         remaining_points);
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  ixs_session_unbind(&binding);
-  return result;
 }
 
 bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,

@@ -159,6 +159,11 @@ integer-valuedness with `ixs_check_integer_valued`, then round the returned
 finite endpoints inward. A separate `integer_range` API would duplicate those
 two contracts and is intentionally absent from C, C++, and Python.
 
+Equivalence has one public contract as well: `ixs_equivalent_facts`. General
+predicate checking may exhaustively check a small finite symbol domain, but
+that fixed-budget fallback is an implementation detail. There is no separately
+budgeted `equivalent_finite_domain` endpoint.
+
 ## Rule-Hit Statistics
 
 Build with `-DENABLE_STATS=ON` to count how many times each

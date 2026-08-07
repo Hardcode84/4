@@ -1592,6 +1592,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   combine this canonical range with the definedness and integer-valued proof
   queries; internal exact proofs refine the same interval representation
   rather than materializing a second result type.
+- **Public predicate and equivalence queries** (`ixs_check_predicate_facts`,
+  `ixs_equivalent_facts`): equivalence owns one public proof contract. General
+  predicate checking may inspect at most 4096 nodes and enumerate at most 64
+  Cartesian points across at most 8 finite-range symbols. Those fixed limits
+  bound one private fallback; there is no caller-budgeted finite-domain query
+  contract.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer
