@@ -12735,6 +12735,221 @@ static bool facts_predicate_seen_or_insert(ixs_node **slots, size_t capacity,
   return false;
 }
 
+#define FACTS_CLOSURE_CACHE_CAP 32u
+#define FACTS_CLOSURE_CACHE_SLOT_BYTES (3u * 1024u)
+#define FACTS_CLOSURE_CACHE_RETAINED_LIMIT (128u * 1024u)
+#define FACTS_CLOSURE_CACHE_SLOT_NODES                                         \
+  (FACTS_CLOSURE_CACHE_SLOT_BYTES / sizeof(ixs_node *))
+
+typedef struct {
+  uint64_t hash;
+  size_t n_predicates;
+  size_t n_replay;
+  ixs_node *nodes[FACTS_CLOSURE_CACHE_SLOT_NODES];
+  bool valid;
+} facts_closure_cache_entry;
+
+typedef struct {
+  facts_closure_cache_entry *entries[FACTS_CLOSURE_CACHE_CAP];
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  size_t lookups;
+  size_t hits;
+  size_t stores;
+  size_t bypasses;
+  size_t entry_count;
+#endif
+} facts_closure_cache;
+
+typedef char facts_closure_cache_must_fit_retained_limit
+    [(sizeof(facts_closure_cache) +
+          FACTS_CLOSURE_CACHE_CAP * sizeof(facts_closure_cache_entry) <=
+      FACTS_CLOSURE_CACHE_RETAINED_LIMIT)
+         ? 1
+         : -1];
+
+typedef struct {
+  ixs_node *replay[FACTS_CLOSURE_CACHE_SLOT_NODES];
+  size_t n_replay;
+  size_t replay_limit;
+  bool overflow;
+} facts_closure_capture;
+
+static facts_closure_cache *facts_closure_cache_get(ixs_ctx *ctx) {
+  facts_closure_cache *cache;
+  if (!ctx)
+    return NULL;
+  cache = ctx->facts_closure_cache;
+  if (cache)
+    return cache;
+  cache = ixs_arena_alloc(&ctx->arena, sizeof(*cache), sizeof(void *));
+  if (!cache)
+    return NULL;
+  memset(cache, 0, sizeof(*cache));
+  ctx->facts_closure_cache = cache;
+  return cache;
+}
+
+static uint64_t facts_closure_hash(ixs_node *const *predicates,
+                                   size_t n_predicates) {
+  uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ (uint64_t)n_predicates;
+  size_t i;
+  for (i = 0; i < n_predicates; i++) {
+    uint64_t value = (uint64_t)(uintptr_t)predicates[i];
+    hash ^= value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+  }
+  hash ^= hash >> 33;
+  hash *= UINT64_C(0xff51afd7ed558ccd);
+  hash ^= hash >> 33;
+  return hash;
+}
+
+/* Lookup is O(n) in the explicit batch size and never scans context state. */
+static facts_closure_cache_entry *
+facts_closure_cache_lookup(ixs_ctx *ctx, ixs_node *const *predicates,
+                           size_t n_predicates, uint64_t *hash_out) {
+  facts_closure_cache *cache;
+  facts_closure_cache_entry *entry;
+  uint64_t hash;
+  size_t i;
+  if (n_predicates > FACTS_CLOSURE_CACHE_SLOT_NODES) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache = facts_closure_cache_get(ctx);
+    if (cache) {
+      cache->lookups++;
+      cache->bypasses++;
+    }
+#endif
+    return NULL;
+  }
+  hash = facts_closure_hash(predicates, n_predicates);
+  *hash_out = hash;
+  cache = facts_closure_cache_get(ctx);
+  if (!cache)
+    return NULL;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->lookups++;
+#endif
+  entry = cache->entries[(size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u)];
+  if (!entry || !entry->valid || entry->hash != hash ||
+      entry->n_predicates != n_predicates)
+    return NULL;
+  for (i = 0; i < n_predicates; i++) {
+    if (entry->nodes[i] != predicates[i])
+      return NULL;
+  }
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->hits++;
+#endif
+  return entry;
+}
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+static void facts_closure_cache_note_bypass(ixs_ctx *ctx) {
+  facts_closure_cache *cache = facts_closure_cache_get(ctx);
+  if (cache)
+    cache->bypasses++;
+}
+#endif
+
+/* Store is O(n + r) in the exact key and replay sequence. Collisions replace
+ * an entry in place, so retained cache memory cannot grow after 32 slots. */
+static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
+                                      size_t n_predicates,
+                                      const facts_closure_capture *capture,
+                                      uint64_t hash) {
+  facts_closure_cache *cache;
+  facts_closure_cache_entry *entry;
+  size_t slot;
+  if (!capture || capture->overflow ||
+      n_predicates > FACTS_CLOSURE_CACHE_SLOT_NODES ||
+      capture->n_replay > FACTS_CLOSURE_CACHE_SLOT_NODES - n_predicates) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    facts_closure_cache_note_bypass(ctx);
+#endif
+    return;
+  }
+  cache = facts_closure_cache_get(ctx);
+  if (!cache)
+    return;
+  slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
+  entry = cache->entries[slot];
+  if (!entry) {
+    entry = ixs_arena_alloc(&ctx->arena, sizeof(*entry), sizeof(void *));
+    if (!entry)
+      return;
+    memset(entry, 0, sizeof(*entry));
+    cache->entries[slot] = entry;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->entry_count++;
+#endif
+  }
+  entry->valid = false;
+  if (n_predicates)
+    memcpy(entry->nodes, predicates, n_predicates * sizeof(*predicates));
+  if (capture->n_replay)
+    memcpy(entry->nodes + n_predicates, capture->replay,
+           capture->n_replay * sizeof(*capture->replay));
+  entry->hash = hash;
+  entry->n_predicates = n_predicates;
+  entry->n_replay = capture->n_replay;
+  entry->valid = true;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->stores++;
+#endif
+}
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC void
+ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
+                              ixs_facts_closure_cache_stats_result *stats) {
+  const facts_closure_cache *cache = ctx ? ctx->facts_closure_cache : NULL;
+  if (!stats)
+    return;
+  memset(stats, 0, sizeof(*stats));
+  stats->retained_limit = FACTS_CLOSURE_CACHE_RETAINED_LIMIT;
+  stats->slot_node_capacity = FACTS_CLOSURE_CACHE_SLOT_NODES;
+  if (!cache)
+    return;
+  stats->lookups = cache->lookups;
+  stats->hits = cache->hits;
+  stats->stores = cache->stores;
+  stats->bypasses = cache->bypasses;
+  stats->entries = cache->entry_count;
+  stats->retained_bytes =
+      sizeof(*cache) + cache->entry_count * sizeof(facts_closure_cache_entry);
+}
+#endif
+
+static bool facts_bounds_is_empty_domain(const ixs_bounds *bounds) {
+  return bounds && bounds->nvars == 0 && bounds->nexprs == 0 &&
+         bounds->nmod_inverse_watchers == 0 && bounds->ndifferences == 0 &&
+         bounds->ndifference_vars == 0 && bounds->nexact_vars == 0 &&
+         bounds->nequality_endpoints == 0 && bounds->nequalities == 0 &&
+         bounds->nnonzero == 0 && !bounds->has_modrem &&
+         !bounds->contradiction && !bounds->oom;
+}
+
+static void facts_closure_capture_init(facts_closure_capture *capture,
+                                       size_t n_predicates) {
+  memset(capture, 0, sizeof(*capture));
+  if (n_predicates > FACTS_CLOSURE_CACHE_SLOT_NODES) {
+    capture->overflow = true;
+    return;
+  }
+  capture->replay_limit = FACTS_CLOSURE_CACHE_SLOT_NODES - n_predicates;
+}
+
+static void facts_closure_capture_append(facts_closure_capture *capture,
+                                         ixs_node *predicate) {
+  if (!capture || capture->overflow)
+    return;
+  if (capture->n_replay >= capture->replay_limit) {
+    capture->overflow = true;
+    return;
+  }
+  capture->replay[capture->n_replay++] = predicate;
+}
+
 typedef struct {
   const char *name;
   size_t first_occurrence;
@@ -13084,10 +13299,9 @@ static bool facts_worklist_enqueue_dependencies(facts_worklist *work,
   return true;
 }
 
-static ixs_bounds_build_status
-facts_ingest_original_predicates(ixs_bounds *candidate,
-                                 ixs_node *const *predicates,
-                                 const facts_worklist *work) {
+static ixs_bounds_build_status facts_ingest_original_predicates(
+    ixs_bounds *candidate, ixs_node *const *predicates,
+    const facts_worklist *work, facts_closure_capture *capture) {
   size_t i;
   for (i = 0; i < work->n_predicates; i++) {
     ixs_bounds_build_status status;
@@ -13096,14 +13310,14 @@ facts_ingest_original_predicates(ixs_bounds *candidate,
     status = bounds_ingest_predicate(candidate, predicates[i]);
     if (status != IXS_BOUNDS_BUILD_OK)
       return status;
+    facts_closure_capture_append(capture, predicates[i]);
   }
   return IXS_BOUNDS_BUILD_OK;
 }
 
-static ixs_bounds_build_status
-facts_process_predicate_worklist(ixs_ctx *ctx, ixs_bounds *candidate,
-                                 ixs_node *const *predicates,
-                                 facts_worklist *work) {
+static ixs_bounds_build_status facts_process_predicate_worklist(
+    ixs_ctx *ctx, ixs_bounds *candidate, ixs_node *const *predicates,
+    facts_worklist *work, facts_closure_capture *capture) {
   while (work->queue_count > 0) {
     size_t predicate_index = facts_worklist_pop(work);
     ixs_node *predicate;
@@ -13125,6 +13339,8 @@ facts_process_predicate_worklist(ixs_ctx *ctx, ixs_bounds *candidate,
     candidate->semantic_changed = NULL;
     if (status != IXS_BOUNDS_BUILD_OK)
       return status;
+    if (changed)
+      facts_closure_capture_append(capture, predicate);
     if (candidate->contradiction || ixs_bounds_has_empty(candidate))
       return IXS_BOUNDS_BUILD_OK;
     if (changed && !facts_worklist_enqueue_dependencies(work, predicate_index))
@@ -13134,12 +13350,35 @@ facts_process_predicate_worklist(ixs_ctx *ctx, ixs_bounds *candidate,
 }
 
 static ixs_bounds_build_status
+facts_replay_predicate_closure(ixs_bounds *candidate,
+                               const facts_closure_cache_entry *entry) {
+  ixs_node *const *replay = entry->nodes + entry->n_predicates;
+  return bounds_ingest_predicates(candidate, replay, entry->n_replay);
+}
+
+static ixs_bounds_build_status
 facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
-                               ixs_node *const *predicates,
-                               size_t n_predicates) {
+                               ixs_node *const *predicates, size_t n_predicates,
+                               facts_closure_capture *capture,
+                               uint64_t *cache_hash, bool *store_closure) {
+  facts_closure_cache_entry *cached = NULL;
+  facts_closure_capture *capture_ptr = NULL;
   facts_work_storage storage;
   facts_worklist work;
   ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OOM;
+  bool cacheable = facts_bounds_is_empty_domain(candidate);
+
+  *store_closure = false;
+  if (cacheable) {
+    cached =
+        facts_closure_cache_lookup(ctx, predicates, n_predicates, cache_hash);
+    if (cached)
+      return facts_replay_predicate_closure(candidate, cached);
+    if (n_predicates <= FACTS_CLOSURE_CACHE_SLOT_NODES) {
+      facts_closure_capture_init(capture, n_predicates);
+      capture_ptr = capture;
+    }
+  }
   if (!facts_worklist_init(&work, &storage, n_predicates))
     return IXS_BOUNDS_BUILD_OOM;
   if (!facts_worklist_build(&work, predicates))
@@ -13147,17 +13386,21 @@ facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
 
   /* Preserve original expression identities before fact-conditioned
    * rewrites. */
-  status = facts_ingest_original_predicates(candidate, predicates, &work);
+  status = facts_ingest_original_predicates(candidate, predicates, &work,
+                                            capture_ptr);
   if (status != IXS_BOUNDS_BUILD_OK || candidate->contradiction ||
       ixs_bounds_has_empty(candidate))
     goto cleanup;
 
   /* A rewrite cannot introduce a symbol absent from its original predicate.
    * Revisit only predicates that share a symbol with a semantic refinement. */
-  status = facts_process_predicate_worklist(ctx, candidate, predicates, &work);
+  status = facts_process_predicate_worklist(ctx, candidate, predicates, &work,
+                                            capture_ptr);
 
 cleanup:
   candidate->semantic_changed = NULL;
+  if (status == IXS_BOUNDS_BUILD_OK && cacheable && capture_ptr)
+    *store_closure = true;
   facts_worklist_destroy(&work);
   return status;
 }
@@ -13245,7 +13488,10 @@ static bool facts_assume_predicates(ixs_facts *facts,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_bounds_build_status status;
+  facts_closure_capture closure_capture;
+  uint64_t closure_hash = 0;
   bool candidate_ready = false;
+  bool store_closure = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts)) {
@@ -13273,11 +13519,15 @@ static bool facts_assume_predicates(ixs_facts *facts,
   status = bounds_validate_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
-                                            n_predicates);
+                                            n_predicates, &closure_capture,
+                                            &closure_hash, &store_closure);
   if (status == IXS_BOUNDS_BUILD_OK && require_closed)
     status =
         facts_validate_closed_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
+    if (store_closure)
+      facts_closure_cache_store(ctx, predicates, n_predicates, &closure_capture,
+                                closure_hash);
     facts_commit(facts, &candidate);
   } else {
     if (candidate_ready)

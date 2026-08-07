@@ -167,6 +167,9 @@ struct ixs_ctx {
   size_t transform_cache_cap;
   size_t transform_cache_used;
 
+  /* Exact empty-domain fact closures, shared by short-lived sessions. */
+  void *facts_closure_cache;
+
   /* Lazily allocated, context-lifetime workspace for bounds proof queries. */
   void *bounds_query_state;
   /* Bound session mirrors. Session-owned state is copied in on entry to

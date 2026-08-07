@@ -176,12 +176,26 @@ struct ixs_facts {
 
 /* Internal hooks emitted only by the test-instrumented library. */
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+typedef struct {
+  size_t lookups;
+  size_t hits;
+  size_t stores;
+  size_t bypasses;
+  size_t entries;
+  size_t retained_bytes;
+  size_t retained_limit;
+  size_t slot_node_capacity;
+} ixs_facts_closure_cache_stats_result;
+
 typedef enum {
   IXS_BOUNDS_TEST_TRANSPORT_VALUE,
   IXS_BOUNDS_TEST_TRANSPORT_LIMITED,
   IXS_BOUNDS_TEST_TRANSPORT_INVALID
 } ixs_bounds_test_transport;
 
+IXS_STATIC void
+ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
+                              ixs_facts_closure_cache_stats_result *stats);
 IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *stride_visits,
                                        size_t *range_pw_case_visits,

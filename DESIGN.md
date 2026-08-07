@@ -1336,6 +1336,30 @@ successful commit. Allocation failure fails the transaction. Store
 hash-consing makes structurally equal live nodes pointer-identical. Distinct
 pointers, including noncanonical predicates that later normalize to the same
 node, remain separate inputs and participate independently in closure.
+
+Fresh empty-domain mutations also admit an exact context-lifetime closure
+cache. Its direct-mapped 32-slot key is the full ordered predicate-pointer
+array; a hash match is verified by count and pointer-by-pointer comparison.
+The cold worklist records every first-position-unique original predicate,
+followed by each simplified root whose ingestion strictly refined the semantic
+domain. A hit replays that exact sequence into the transaction fork without
+rebuilding the dependency index or sharing mutable bounds storage. The
+caller's closed-domain validation remains separate: a closed batch is stored
+only after validation succeeds, and every hit is validated again. Nonempty
+incoming domains always use the worklist.
+
+Each cache slot has one 3 KiB combined key-and-replay budget. There is no
+separate input-count or derived-root limit: a sequence that does not fit is not
+truncated and completes through the ordinary worklist path. Slots are
+allocated lazily and collision replacement reuses their storage, bounding all
+cache objects below 128 KiB per context. Cache allocation failure is an
+optimization miss, while any allocation or validation failure during closure
+construction or replay retains the normal transaction-poisoning contract.
+Cached nodes are context-owned and immutable, so entries survive session reset
+and are released with the context. Lookup is O(n) in explicit batch size;
+replay is O(u + r) for `u` unique originals and `r` recorded refinements. Both
+bounds are independent of total context state.
+
 `ixs_facts_assume_pred` is its one-element form.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
 Rejection or OOM leaves the stored payload unchanged but poisons the fact set,

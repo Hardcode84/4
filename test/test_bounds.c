@@ -4813,6 +4813,315 @@ static void test_public_facts_assume_batch_saturates_until_stable(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_facts_assume_batch_closure_cache_keys(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "batch_cache_x");
+  ixs_node *y = ixs_sym(ctx, "batch_cache_y");
+  ixs_node *z = ixs_sym(ctx, "batch_cache_z");
+  ixs_node *w = ixs_sym(ctx, "batch_cache_w");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *predicates[3] = {ixs_cmp(ctx, ixs_add(ctx, x, y), IXS_CMP_GE, zero),
+                             ixs_cmp(ctx, ixs_add(ctx, y, z), IXS_CMP_EQ, zero),
+                             ixs_cmp(ctx, z, IXS_CMP_EQ, zero)};
+  ixs_node *reordered[3] = {predicates[2], predicates[1], predicates[0]};
+  ixs_node *nearby[3] = {predicates[0], predicates[1],
+                         ixs_cmp(ctx, z, IXS_CMP_EQ, one)};
+  ixs_node *query = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
+  ixs_facts *cold = ixs_facts_create(ctx);
+  ixs_facts *replay = ixs_facts_create(ctx);
+  ixs_facts *ordered = ixs_facts_create(ctx);
+  ixs_facts *changed = ixs_facts_create(ctx);
+  ixs_facts *nonempty = ixs_facts_create(ctx);
+  ixs_facts *rewarm;
+  ixs_facts *after_reset;
+  ixs_range_result w_range = {.has_lower = true,
+                              .has_upper = true,
+                              .lower_p = 0,
+                              .lower_q = 1,
+                              .upper_p = 4,
+                              .upper_q = 1};
+  ixs_facts_closure_cache_stats_result stats;
+  ixs_facts_closure_cache_stats_result before;
+
+  CHECK(ixs_facts_assume_preds(cold, predicates, 3));
+  CHECK(test_ixs_check_facts(cold, query) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 1 && stats.hits == 0 && stats.stores == 1);
+
+  CHECK(ixs_facts_assume_preds(replay, predicates, 3));
+  CHECK(test_ixs_check_facts(replay, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(replay, predicates[0]) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 1 && stats.stores == 1);
+
+  CHECK(ixs_facts_assume_preds(ordered, reordered, 3));
+  CHECK(test_ixs_check_facts(ordered, query) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 3 && stats.hits == 1 && stats.stores == 2);
+
+  CHECK(ixs_facts_assume_preds(changed, nearby, 3));
+  CHECK(test_ixs_check_facts(changed, query) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 4 && stats.hits == 1 && stats.stores == 3);
+
+  CHECK(ixs_facts_assume_range(nonempty, w, &w_range));
+  ixs_facts_closure_cache_stats(ctx, &before);
+  CHECK(ixs_facts_assume_preds(nonempty, predicates, 3));
+  CHECK(test_ixs_check_facts(nonempty, query) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == before.lookups && stats.hits == before.hits &&
+        stats.stores == before.stores);
+
+  rewarm = ixs_facts_create(ctx);
+  CHECK(ixs_facts_assume_preds(rewarm, predicates, 3));
+  ixs_facts_closure_cache_stats(ctx, &before);
+  (ixs_session_reset)(IXS_TEST_SESSION(ctx));
+  after_reset = ixs_facts_create(ctx);
+  CHECK(ixs_facts_assume_preds(after_reset, predicates, 3));
+  CHECK(test_ixs_check_facts(after_reset, query) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == before.lookups + 1u &&
+        stats.hits == before.hits + 1u && stats.stores == before.stores);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_assume_batch_closure_cache_duplicates(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "batch_cache_duplicate_x");
+  ixs_node *y = ixs_sym(ctx, "batch_cache_duplicate_y");
+  ixs_node *z = ixs_sym(ctx, "batch_cache_duplicate_z");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *first = ixs_cmp(ctx, ixs_add(ctx, x, y), IXS_CMP_GE, zero);
+  ixs_node *second = ixs_cmp(ctx, ixs_add(ctx, y, z), IXS_CMP_EQ, zero);
+  ixs_node *third = ixs_cmp(ctx, z, IXS_CMP_EQ, zero);
+  ixs_node *predicates[5] = {first, second, second, third, first};
+  ixs_node *query = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
+  ixs_facts *cold = ixs_facts_create(ctx);
+  ixs_facts *warm = ixs_facts_create(ctx);
+  ixs_range_result cold_range;
+  ixs_range_result warm_range;
+  ixs_facts_closure_cache_stats_result stats;
+
+  CHECK(ixs_facts_assume_preds(cold, predicates, 5));
+  CHECK(ixs_facts_assume_preds(warm, predicates, 5));
+  CHECK(test_ixs_check_facts(cold, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(warm, query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(warm, predicates[2]) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_range_facts(cold, x, &cold_range));
+  CHECK(test_ixs_range_facts(warm, x, &warm_range));
+  CHECK(cold_range.has_lower == warm_range.has_lower);
+  CHECK(cold_range.has_upper == warm_range.has_upper);
+  CHECK(cold_range.lower_p == warm_range.lower_p);
+  CHECK(cold_range.lower_q == warm_range.lower_q);
+  CHECK(cold_range.upper_p == warm_range.upper_p);
+  CHECK(cold_range.upper_q == warm_range.upper_q);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 1 && stats.stores == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_assume_batch_closure_cache_collisions(void) {
+  enum { BATCH_COUNT = 33 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *predicates[BATCH_COUNT][3];
+  ixs_node *queries[BATCH_COUNT];
+  ixs_facts_closure_cache_stats_result stats;
+  size_t cold_stores;
+  size_t i;
+
+  for (i = 0; i < BATCH_COUNT; i++) {
+    char x_name[48];
+    char y_name[48];
+    char z_name[48];
+    ixs_node *x;
+    ixs_node *y;
+    ixs_node *z;
+    ixs_facts *facts;
+    (void)snprintf(x_name, sizeof(x_name), "batch_collision_x_%lu",
+                   (unsigned long)i);
+    (void)snprintf(y_name, sizeof(y_name), "batch_collision_y_%lu",
+                   (unsigned long)i);
+    (void)snprintf(z_name, sizeof(z_name), "batch_collision_z_%lu",
+                   (unsigned long)i);
+    x = ixs_sym(ctx, x_name);
+    y = ixs_sym(ctx, y_name);
+    z = ixs_sym(ctx, z_name);
+    predicates[i][0] = ixs_cmp(ctx, ixs_add(ctx, x, y), IXS_CMP_GE, zero);
+    predicates[i][1] = ixs_cmp(ctx, ixs_add(ctx, y, z), IXS_CMP_EQ, zero);
+    predicates[i][2] = ixs_cmp(ctx, z, IXS_CMP_EQ, zero);
+    queries[i] = ixs_cmp(ctx, x, IXS_CMP_GE, zero);
+    facts = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_preds(facts, predicates[i], 3));
+    CHECK(test_ixs_check_facts(facts, queries[i]) == IXS_CHECK_TRUE);
+  }
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == BATCH_COUNT && stats.hits == 0 &&
+        stats.stores == BATCH_COUNT);
+  CHECK(stats.entries <= 32u);
+  CHECK(stats.retained_bytes <= stats.retained_limit);
+  cold_stores = stats.stores;
+
+  for (i = 0; i < BATCH_COUNT; i++) {
+    ixs_facts *facts = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_preds(facts, predicates[i], 3));
+    CHECK(test_ixs_check_facts(facts, queries[i]) == IXS_CHECK_TRUE);
+  }
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 2u * BATCH_COUNT);
+  CHECK(stats.stores > cold_stores);
+  CHECK(stats.hits < BATCH_COUNT);
+  CHECK(stats.retained_bytes <= stats.retained_limit);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_assume_large_batch_closure_cache(void) {
+  enum { PREDICATE_COUNT = 160 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *predicates[PREDICATE_COUNT];
+  ixs_facts *cold = ixs_facts_create(ctx);
+  ixs_facts *replay = ixs_facts_create(ctx);
+  ixs_facts_closure_cache_stats_result stats;
+  size_t i;
+
+  for (i = 0; i < PREDICATE_COUNT; i++) {
+    char name[48];
+    ixs_node *symbol;
+    (void)snprintf(name, sizeof(name), "large_batch_cache_%lu",
+                   (unsigned long)i);
+    symbol = ixs_sym(ctx, name);
+    predicates[i] = ixs_cmp(ctx, symbol, IXS_CMP_GE, zero);
+  }
+
+  CHECK(ixs_facts_assume_preds(cold, predicates, PREDICATE_COUNT));
+  CHECK(test_ixs_check_facts(cold, predicates[0]) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.slot_node_capacity >= 2u * PREDICATE_COUNT);
+  CHECK(stats.lookups == 1 && stats.hits == 0 && stats.stores == 1 &&
+        stats.bypasses == 0);
+
+  CHECK(ixs_facts_assume_preds(replay, predicates, PREDICATE_COUNT));
+  CHECK(test_ixs_check_facts(replay, predicates[PREDICATE_COUNT - 1u]) ==
+        IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 1 && stats.stores == 1 &&
+        stats.bypasses == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_closure_cache_allocation_is_optional(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *predicates[1] = {ixs_true(ctx)};
+  ixs_facts *uncached = ixs_facts_create(ctx);
+  ixs_facts *cold = ixs_facts_create(ctx);
+  ixs_facts *warm = ixs_facts_create(ctx);
+  ixs_facts_closure_cache_stats_result stats;
+
+  /* The root allocation succeeds; the first slot allocation fails. */
+  ixs_arena_set_fail_after(&ctx->arena, 1);
+  CHECK(ixs_facts_assume_preds(uncached, predicates, 1));
+  ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(uncached->usable);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 1 && stats.stores == 0 && stats.entries == 0);
+
+  CHECK(ixs_facts_assume_preds(cold, predicates, 1));
+  CHECK(ixs_facts_assume_preds(warm, predicates, 1));
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 3 && stats.hits == 1 && stats.stores == 1 &&
+        stats.entries == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_closure_cache_replay_failure_is_atomic(void) {
+  enum { MAX_FAIL_BUDGET = 64 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "cache_replay_oom_x");
+  ixs_node *predicate = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_facts *cold = ixs_facts_create(ctx);
+  ixs_facts_closure_cache_stats_result before_stats;
+  ixs_facts_closure_cache_stats_result after_stats;
+  bool found_replay_failure = false;
+  size_t budget;
+
+  CHECK(ixs_facts_assume_pred(cold, predicate));
+  ixs_facts_closure_cache_stats(ctx, &before_stats);
+  CHECK(before_stats.lookups == 1 && before_stats.hits == 0 &&
+        before_stats.stores == 1);
+
+  for (budget = 0; budget < MAX_FAIL_BUDGET; budget++) {
+    ixs_facts *failed = ixs_facts_create(ctx);
+    ixs_bounds before = failed->bounds;
+    bool ok;
+    ixs_facts_closure_cache_stats(ctx, &before_stats);
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), budget);
+    ok = ixs_facts_assume_pred(failed, predicate);
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+    ixs_facts_closure_cache_stats(ctx, &after_stats);
+    if (!ok && after_stats.hits == before_stats.hits + 1u) {
+      /* A hit precedes replay, and this path has no closed-domain check. */
+      CHECK(!failed->usable);
+      CHECK(failed->bounds.vars == before.vars);
+      CHECK(failed->bounds.nvars == before.nvars);
+      CHECK(failed->bounds.exprs == before.exprs);
+      CHECK(failed->bounds.nexprs == before.nexprs);
+      found_replay_failure = true;
+      break;
+    }
+  }
+  CHECK(found_replay_failure);
+
+  {
+    ixs_facts *recovered = ixs_facts_create(ctx);
+    ixs_facts_closure_cache_stats(ctx, &before_stats);
+    CHECK(ixs_facts_assume_pred(recovered, predicate));
+    CHECK(test_ixs_check_facts(recovered, predicate) == IXS_CHECK_TRUE);
+    ixs_facts_closure_cache_stats(ctx, &after_stats);
+    CHECK(after_stats.hits == before_stats.hits + 1u &&
+          after_stats.stores == before_stats.stores);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_closure_cache_hit_rejects_open_domain(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "cache_open_x");
+  ixs_node *d = ixs_sym(ctx, "cache_open_d");
+  ixs_node *predicate = ixs_cmp(ctx, ixs_floor(ctx, ixs_div(ctx, x, d)),
+                                IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *predicates[1] = {predicate};
+  ixs_facts *incremental = ixs_facts_create(ctx);
+  ixs_facts *closed = ixs_facts_create(ctx);
+  ixs_bounds before = closed->bounds;
+  ixs_facts_closure_cache_stats_result stats;
+
+  CHECK(ixs_facts_assume_pred(incremental, predicate));
+  CHECK(incremental->usable);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 1 && stats.hits == 0 && stats.stores == 1);
+
+  CHECK(!ixs_facts_assume_preds(closed, predicates, 1));
+  CHECK(!closed->usable);
+  CHECK(closed->bounds.vars == before.vars);
+  CHECK(closed->bounds.nvars == before.nvars);
+  CHECK(closed->bounds.exprs == before.exprs);
+  CHECK(closed->bounds.nexprs == before.nexprs);
+  CHECK(closed->bounds.nonzero == before.nonzero);
+  CHECK(closed->bounds.nnonzero == before.nnonzero);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 1 && stats.stores == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_facts_assume_batch_has_no_round_limit(void) {
   enum { CHAIN_LINKS = 1024, PREDICATE_COUNT = CHAIN_LINKS + 1 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -4820,6 +5129,7 @@ static void test_public_facts_assume_batch_has_no_round_limit(void) {
   ixs_node *predicates[PREDICATE_COUNT];
   ixs_node *zero = ixs_int(ctx, 0);
   ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts_closure_cache_stats_result stats;
   char name[32];
   size_t i;
 
@@ -4838,6 +5148,9 @@ static void test_public_facts_assume_batch_has_no_round_limit(void) {
   CHECK(ixs_facts_assume_preds(facts, predicates, PREDICATE_COUNT));
   CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, symbols[0], IXS_CMP_GE,
                                             zero)) == IXS_CHECK_TRUE);
+  ixs_facts_closure_cache_stats(ctx, &stats);
+  CHECK(stats.lookups == 1 && stats.hits == 0 && stats.stores == 0 &&
+        stats.bypasses == 1);
 
   ixs_ctx_destroy(ctx);
 }
@@ -8847,6 +9160,7 @@ static void test_public_facts_closed_batch_contract(void) {
   ixs_node *nested_unclosed = ixs_cmp(ctx, nested_floor, IXS_CMP_EQ, zero);
   ixs_node *contradictory_predicates[2] = {unclosed, ixs_false(ctx)};
   ixs_facts *rejected = ixs_facts_create(ctx);
+  ixs_facts *closure_seed = ixs_facts_create(ctx);
   ixs_facts *calibration = ixs_facts_create(ctx);
   ixs_facts *validation_oom = ixs_facts_create(ctx);
   ixs_facts *nested_rejected = ixs_facts_create(ctx);
@@ -8870,6 +9184,7 @@ static void test_public_facts_closed_batch_contract(void) {
                                ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0))));
   CHECK(test_ixs_check_defined_facts(rejected, floored) == IXS_CHECK_UNKNOWN);
 
+  CHECK(ixs_facts_assume_pred(closure_seed, unclosed));
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), budget);
   CHECK(ixs_facts_assume_pred(calibration, unclosed));
   prefix_allocations = budget - ixs_test_scratch(ctx)->fail_after;
@@ -9600,6 +9915,13 @@ int main(void) {
   test_public_facts_assume_batch();
   test_public_facts_assume_batch_closure();
   test_public_facts_assume_batch_saturates_until_stable();
+  test_public_facts_assume_batch_closure_cache_keys();
+  test_public_facts_assume_batch_closure_cache_duplicates();
+  test_public_facts_assume_batch_closure_cache_collisions();
+  test_public_facts_assume_large_batch_closure_cache();
+  test_public_facts_closure_cache_allocation_is_optional();
+  test_public_facts_closure_cache_replay_failure_is_atomic();
+  test_public_facts_closure_cache_hit_rejects_open_domain();
   test_public_facts_assume_batch_has_no_round_limit();
   test_public_facts_assume_batch_mid_simplify_oom();
   test_public_difference_constraint_oom_is_atomic();
