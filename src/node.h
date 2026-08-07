@@ -179,9 +179,12 @@ struct ixs_ctx {
   ixs_session_impl *active_session;
   size_t active_session_depth;
   uint64_t next_session_epoch;
+  bool transport_undefined;
 
   /* Singletons */
   ixs_node *sentinel_error;
+  /* Internal transport for a valid expression undefined after substitution. */
+  ixs_node *sentinel_undefined;
   ixs_node *sentinel_parse_error;
   ixs_node *node_true;
   ixs_node *node_false;

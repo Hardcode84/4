@@ -806,8 +806,10 @@ ixs_finite_domain_result ixs_mapped_constant_differences_facts(
  * nonempty and strictly increasing, and domain symbols must be distinct. The
  * product is visited in row-major order with the last domain varying fastest.
  * Every query is evaluated under `facts` after simultaneous substitution of
- * the current point. Per-query truth is universal: FALSE dominates UNKNOWN,
- * and `witness` still records that query's first non-TRUE point.
+ * the current point. A valid expression that becomes undefined at a point
+ * makes every query kind FALSE at that point. Per-query truth is universal:
+ * FALSE dominates UNKNOWN, and `witness` still records that query's first
+ * non-TRUE point.
  *
  * Work is the checked product of the Cartesian point count and query count.
  * Invalid scalar sizes and multiplication overflow are rejected before the

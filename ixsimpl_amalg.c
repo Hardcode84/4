@@ -20197,6 +20197,31 @@ static bool finite_domain_batch_validate_queries(
   return true;
 }
 
+static ixs_node *finite_domain_batch_specialize(ixs_ctx *ctx, ixs_node *value,
+                                                uint32_t nsubs,
+                                                ixs_node *const *targets,
+                                                ixs_node *const *replacements,
+                                                bool *undefined) {
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  bool saved_transport = ctx->transport_undefined;
+  ctx->transport_undefined = true;
+  ixs_node *specialized =
+      simp_subs_multi(ctx, value, nsubs, targets, replacements);
+  ctx->transport_undefined = saved_transport;
+
+  *undefined = specialized == ctx->sentinel_undefined;
+  if (*undefined || (specialized && !ixs_node_is_sentinel(specialized))) {
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+  }
+  return specialized;
+}
+
 static ixs_finite_domain_status finite_domain_batch_evaluate(
     ixs_facts *facts, ixs_ctx *ctx, const ixs_finite_integer_domain *domains,
     size_t ndomains, const ixs_finite_domain_batch_query *queries,
@@ -20238,12 +20263,17 @@ static ixs_finite_domain_status finite_domain_batch_evaluate(
       }
     }
     for (query = 0; query < nqueries; query++) {
-      ixs_node *specialized =
-          simp_subs_multi(ctx, (ixs_node *)queries[query].value,
-                          (uint32_t)ndomains, targets, replacements);
+      bool undefined = false;
+      ixs_node *specialized = finite_domain_batch_specialize(
+          ctx, (ixs_node *)queries[query].value, (uint32_t)ndomains, targets,
+          replacements, &undefined);
       ixs_check_result point_check = IXS_CHECK_UNKNOWN;
-      status = finite_domain_batch_check_one(facts, ctx, &queries[query],
-                                             specialized, &point_check);
+      /* A semantically undefined specialization is false, not malformed. */
+      if (undefined)
+        point_check = IXS_CHECK_FALSE;
+      else
+        status = finite_domain_batch_check_one(facts, ctx, &queries[query],
+                                               specialized, &point_check);
       if (status != IXS_FINITE_DOMAIN_COMPLETE)
         goto cleanup;
       if (point_check != IXS_CHECK_TRUE && results[query].witness == SIZE_MAX)
@@ -24323,6 +24353,16 @@ static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
   return ixs_htab_intern(ctx, n);
 }
 
+static ixs_node *make_undefined_sentinel(ixs_ctx *ctx) {
+  /* Preserve the public domain-error tag while retaining transport identity. */
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(*n), sizeof(void *));
+  if (!n)
+    return NULL;
+  *n = *ctx->sentinel_error;
+  return n;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Context lifecycle                                                 */
 /* ------------------------------------------------------------------ */
@@ -24339,9 +24379,11 @@ ixs_ctx *ixs_ctx_create(void) {
 
   /* Create singletons. */
   tmp.sentinel_error = make_singleton(&tmp, IXS_ERROR, 0xDEAD);
+  tmp.sentinel_undefined = make_undefined_sentinel(&tmp);
   tmp.sentinel_parse_error = make_singleton(&tmp, IXS_PARSE_ERROR, 0xBEEF);
 
-  if (!tmp.sentinel_error || !tmp.sentinel_parse_error)
+  if (!tmp.sentinel_error || !tmp.sentinel_undefined ||
+      !tmp.sentinel_parse_error)
     goto fail;
 
   tmp.node_zero = ixs_node_int(&tmp, 0);
@@ -33953,6 +33995,12 @@ static ixs_node *simp_err(ixs_ctx *ctx, const char *msg) {
   return ctx->sentinel_error;
 }
 
+static ixs_node *simp_undefined(ixs_ctx *ctx, const char *msg) {
+  ixs_ctx_push_error(ctx, "%s", msg);
+  return ctx->transport_undefined ? ctx->sentinel_undefined
+                                  : ctx->sentinel_error;
+}
+
 /*
  * Double a scratch-allocated array.  Returns the (possibly moved)
  * pointer and updates *cap, or NULL on overflow/OOM.
@@ -35932,7 +35980,7 @@ IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
 
   /* Division by zero */
   if (ixs_node_is_zero(b))
-    return simp_err(ctx, "division by zero");
+    return simp_undefined(ctx, "division by zero");
 
   /* Constant / constant -> rational fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
@@ -37502,7 +37550,7 @@ static ixs_node *rule_mod_const_fold(ixs_ctx *ctx, ixs_bounds *bnds,
   ixs_node_get_rat(n->u.binary.lhs, &ap, &aq);
   ixs_node_get_rat(n->u.binary.rhs, &bp, &bq);
   if (ixs_rat_is_neg(bp))
-    return simp_err(ctx, "Mod: divisor is negative");
+    return simp_undefined(ctx, "Mod: divisor is negative");
   if (!ixs_rat_mod(ap, aq, bp, bq, &rp, &rq))
     return simp_err(ctx, "rational overflow in Mod");
   return make_const(ctx, rp, rq);
@@ -37589,11 +37637,12 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   }
   domain = mod_divisor_domain(bnds, b);
   if (domain == MOD_DOMAIN_ZERO)
-    return simp_err(ctx, "Mod: divisor is zero");
+    return simp_undefined(ctx, "Mod: divisor is zero");
   if (domain == MOD_DOMAIN_NEGATIVE)
-    return simp_err(ctx, "Mod: divisor is negative");
+    return simp_undefined(ctx, "Mod: divisor is negative");
   if (domain == MOD_DOMAIN_NONPOSITIVE)
-    return simp_err(ctx, "Mod: divisor is not positive under assumptions");
+    return simp_undefined(ctx,
+                          "Mod: divisor is not positive under assumptions");
   node = ixs_node_binary(ctx, IXS_MOD, a, b, (ixs_cmp_op)0);
   if (!node)
     return NULL;
@@ -37917,7 +37966,7 @@ static bool xor_partition_constants(ixs_ctx *ctx, assoc_vec *flat,
   for (read = 0; read < flat->count; read++) {
     ixs_node *arg = flat->items[read];
     if (arg->tag == IXS_RAT && arg->u.rat.q != 1) {
-      *failure = simp_err(ctx, "xor: operand is not integer-valued");
+      *failure = simp_undefined(ctx, "xor: operand is not integer-valued");
       return false;
     }
     if (arg->tag == IXS_INT)
@@ -38440,9 +38489,9 @@ static bool logic_partition_constants(ixs_ctx *ctx, ixs_tag tag,
     ixs_node *arg = flat->items[read];
     int64_t value;
     if (arg->tag == IXS_RAT && arg->u.rat.q != 1) {
-      *failure =
-          simp_err(ctx, tag == IXS_AND ? "and: operand is not integer-valued"
-                                       : "or: operand is not integer-valued");
+      *failure = simp_undefined(ctx, tag == IXS_AND
+                                         ? "and: operand is not integer-valued"
+                                         : "or: operand is not integer-valued");
       return false;
     }
     if (arg->tag != IXS_INT && arg->tag != IXS_RAT) {
@@ -38746,7 +38795,7 @@ static ixs_node *simp_pw_impl(ixs_ctx *ctx, uint32_t n, ixs_node *const *values,
   }
 
   if (ncases == 0)
-    return simp_err(ctx, "Piecewise: all conditions are False");
+    return simp_undefined(ctx, "Piecewise: all conditions are False");
 
   if (ncases == 1 && ixs_node_is_known_true(cases[0].cond))
     return cases[0].value;

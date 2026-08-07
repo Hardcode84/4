@@ -87,6 +87,16 @@ static ixs_node *make_singleton(ixs_ctx *ctx, ixs_tag tag, uint32_t seed) {
   return ixs_htab_intern(ctx, n);
 }
 
+static ixs_node *make_undefined_sentinel(ixs_ctx *ctx) {
+  /* Preserve the public domain-error tag while retaining transport identity. */
+  struct ixs_node_impl *n =
+      ixs_arena_alloc(&ctx->arena, sizeof(*n), sizeof(void *));
+  if (!n)
+    return NULL;
+  *n = *ctx->sentinel_error;
+  return n;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Context lifecycle                                                 */
 /* ------------------------------------------------------------------ */
@@ -103,9 +113,11 @@ ixs_ctx *ixs_ctx_create(void) {
 
   /* Create singletons. */
   tmp.sentinel_error = make_singleton(&tmp, IXS_ERROR, 0xDEAD);
+  tmp.sentinel_undefined = make_undefined_sentinel(&tmp);
   tmp.sentinel_parse_error = make_singleton(&tmp, IXS_PARSE_ERROR, 0xBEEF);
 
-  if (!tmp.sentinel_error || !tmp.sentinel_parse_error)
+  if (!tmp.sentinel_error || !tmp.sentinel_undefined ||
+      !tmp.sentinel_parse_error)
     goto fail;
 
   tmp.node_zero = ixs_node_int(&tmp, 0);

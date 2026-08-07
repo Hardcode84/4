@@ -8956,6 +8956,79 @@ static void test_public_finite_domain_batch(void) {
   CHECK(results[5].check == IXS_CHECK_TRUE && results[5].witness == SIZE_MAX);
   CHECK(results[6].check == IXS_CHECK_FALSE && results[6].witness == 0);
 
+  {
+    const int64_t partial_points[2] = {0, 1};
+    ixs_node *partial_values[1] = {one};
+    ixs_node *partial_conditions[1] = {ixs_cmp(ctx, slot, IXS_CMP_EQ, zero)};
+    ixs_node *partial_piecewise =
+        ixs_pw(ctx, 1, partial_values, partial_conditions);
+    ixs_node *partial_mod = ixs_mod(ctx, slot, slot);
+    ixs_node *partial_negative_mod = ixs_mod(ctx, slot, ixs_neg(ctx, slot));
+    ixs_node *half = ixs_div(ctx, slot, two);
+    ixs_node *partial_xor = ixs_xor(ctx, half, one);
+    ixs_node *partial_and = ixs_and(ctx, half, one);
+    ixs_node *partial_or = ixs_or(ctx, half, one);
+    ixs_node *guarded_values[2] = {partial_mod, zero};
+    ixs_node *guarded_conditions[2] = {ixs_cmp(ctx, slot, IXS_CMP_NE, zero),
+                                       ixs_true(ctx)};
+    ixs_node *guarded_mod = ixs_pw(ctx, 2, guarded_values, guarded_conditions);
+    ixs_node *nested_predicate =
+        ixs_cmp(ctx, ixs_add(ctx, partial_xor, one), IXS_CMP_EQ, two);
+    ixs_finite_integer_domain partial_domain = {slot, partial_points, 2};
+    ixs_finite_domain_batch_query partial_queries[9] = {
+        {IXS_FINITE_DOMAIN_DEFINED, partial_piecewise},
+        {IXS_FINITE_DOMAIN_INTEGER_VALUED, partial_piecewise},
+        {IXS_FINITE_DOMAIN_PREDICATE_TRUE, nested_predicate},
+        {IXS_FINITE_DOMAIN_DEFINED, partial_mod},
+        {IXS_FINITE_DOMAIN_DEFINED, partial_negative_mod},
+        {IXS_FINITE_DOMAIN_DEFINED, partial_xor},
+        {IXS_FINITE_DOMAIN_DEFINED, partial_and},
+        {IXS_FINITE_DOMAIN_DEFINED, partial_or},
+        {IXS_FINITE_DOMAIN_DEFINED, guarded_mod}};
+    ixs_finite_domain_batch_result partial_results[9];
+    size_t errors = ixs_ctx_nerrors(ctx);
+
+    CHECK(partial_piecewise && partial_mod && partial_negative_mod && half &&
+          partial_xor && partial_and && partial_or && guarded_mod &&
+          nested_predicate);
+    budget = 18;
+    status = ixs_finite_domain_batch_facts(facts, &partial_domain, 1,
+                                           partial_queries, 9, partial_results,
+                                           &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_COMPLETE && budget == 0);
+    for (size_t query = 0; query < 8; query++)
+      CHECK(partial_results[query].check == IXS_CHECK_FALSE);
+    CHECK(partial_results[0].witness == 1 && partial_results[1].witness == 1 &&
+          partial_results[2].witness == 1 && partial_results[3].witness == 0 &&
+          partial_results[4].witness == 0 && partial_results[5].witness == 1 &&
+          partial_results[6].witness == 1 && partial_results[7].witness == 1);
+    CHECK(partial_results[8].check == IXS_CHECK_TRUE &&
+          partial_results[8].witness == SIZE_MAX);
+    CHECK(ixs_ctx_nerrors(ctx) == errors);
+  }
+
+  {
+    const int64_t overflow_points[1] = {1};
+    ixs_node *overflow = ixs_add(ctx, slot, ixs_int(ctx, INT64_MAX));
+    ixs_finite_integer_domain overflow_domain = {slot, overflow_points, 1};
+    ixs_finite_domain_batch_query overflow_query = {IXS_FINITE_DOMAIN_DEFINED,
+                                                    overflow};
+    ixs_finite_domain_batch_result overflow_result;
+
+    CHECK(overflow);
+    ixs_ctx_clear_errors(ctx);
+    budget = 1;
+    status = ixs_finite_domain_batch_facts(facts, &overflow_domain, 1,
+                                           &overflow_query, 1, &overflow_result,
+                                           &budget);
+    CHECK(status == IXS_FINITE_DOMAIN_INVALID && budget == 0);
+    CHECK(overflow_result.check == IXS_CHECK_UNKNOWN &&
+          overflow_result.witness == SIZE_MAX);
+    CHECK(ixs_ctx_nerrors(ctx) == 1 &&
+          strstr(ixs_ctx_error(ctx, 0), "rational overflow in add") != NULL);
+    ixs_ctx_clear_errors(ctx);
+  }
+
   for (size_t query = 0; query < 7; query++) {
     results[query].check = IXS_CHECK_TRUE;
     results[query].witness = 0;

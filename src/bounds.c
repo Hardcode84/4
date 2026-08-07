@@ -19959,6 +19959,31 @@ static bool finite_domain_batch_validate_queries(
   return true;
 }
 
+static ixs_node *finite_domain_batch_specialize(ixs_ctx *ctx, ixs_node *value,
+                                                uint32_t nsubs,
+                                                ixs_node *const *targets,
+                                                ixs_node *const *replacements,
+                                                bool *undefined) {
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  bool saved_transport = ctx->transport_undefined;
+  ctx->transport_undefined = true;
+  ixs_node *specialized =
+      simp_subs_multi(ctx, value, nsubs, targets, replacements);
+  ctx->transport_undefined = saved_transport;
+
+  *undefined = specialized == ctx->sentinel_undefined;
+  if (*undefined || (specialized && !ixs_node_is_sentinel(specialized))) {
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+  }
+  return specialized;
+}
+
 static ixs_finite_domain_status finite_domain_batch_evaluate(
     ixs_facts *facts, ixs_ctx *ctx, const ixs_finite_integer_domain *domains,
     size_t ndomains, const ixs_finite_domain_batch_query *queries,
@@ -20000,12 +20025,17 @@ static ixs_finite_domain_status finite_domain_batch_evaluate(
       }
     }
     for (query = 0; query < nqueries; query++) {
-      ixs_node *specialized =
-          simp_subs_multi(ctx, (ixs_node *)queries[query].value,
-                          (uint32_t)ndomains, targets, replacements);
+      bool undefined = false;
+      ixs_node *specialized = finite_domain_batch_specialize(
+          ctx, (ixs_node *)queries[query].value, (uint32_t)ndomains, targets,
+          replacements, &undefined);
       ixs_check_result point_check = IXS_CHECK_UNKNOWN;
-      status = finite_domain_batch_check_one(facts, ctx, &queries[query],
-                                             specialized, &point_check);
+      /* A semantically undefined specialization is false, not malformed. */
+      if (undefined)
+        point_check = IXS_CHECK_FALSE;
+      else
+        status = finite_domain_batch_check_one(facts, ctx, &queries[query],
+                                               specialized, &point_check);
       if (status != IXS_FINITE_DOMAIN_COMPLETE)
         goto cleanup;
       if (point_check != IXS_CHECK_TRUE && results[query].witness == SIZE_MAX)
