@@ -12231,7 +12231,9 @@ static void test_public_group_union_dag_work_admission(void) {
   };
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *complex = group_union_complex_repeated_operand(ctx);
-  ixs_node *predicate_storage[GROUP_COUNT];
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *predicate_storage[GROUP_COUNT][2];
   ixs_predicate_group groups[GROUP_COUNT];
   ixs_group_union_query dense_queries[DENSE_QUERY_COUNT];
   ixs_group_union_result dense_results[DENSE_QUERY_COUNT];
@@ -12239,30 +12241,31 @@ static void test_public_group_union_dag_work_admission(void) {
   ixs_group_union_result sparse_results[SPARSE_QUERY_COUNT];
   size_t dense_count = 0;
   size_t sparse_count = 0;
-  size_t remaining_work = 4000000;
+  size_t remaining_work = 1024 * 1024;
   size_t group;
 
-  CHECK(ctx && complex);
+  CHECK(ctx && complex && zero && one);
   for (group = 0; group < GROUP_COUNT; group++) {
     char name[48];
     ixs_node *symbol;
     snprintf(name, sizeof(name), "group_union_admission_group_%zu", group);
     symbol = ixs_sym(ctx, name);
-    predicate_storage[group] =
+    predicate_storage[group][0] =
         ixs_cmp(ctx, symbol, IXS_CMP_EQ, ixs_int(ctx, (int64_t)group));
-    groups[group].predicates = &predicate_storage[group];
-    groups[group].n_predicates = 1;
+    predicate_storage[group][1] = ixs_cmp(
+        ctx, complex, IXS_CMP_NE, ixs_int(ctx, (int64_t)group + 1024));
+    groups[group].predicates = predicate_storage[group];
+    groups[group].n_predicates = 2;
   }
   for (group = 0; group < GROUP_COUNT; group++) {
     size_t peer;
     for (peer = group + 1u; peer < GROUP_COUNT; peer++) {
       dense_queries[dense_count++] = (ixs_group_union_query){
-          group, peer, IXS_GROUP_UNION_EQUIVALENT, complex, complex};
+          group, peer, IXS_GROUP_UNION_EQUIVALENT, zero, zero};
       dense_queries[dense_count++] = (ixs_group_union_query){
-          group, peer, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, complex, complex};
+          group, peer, IXS_GROUP_UNION_EQUIVALENT, one, one};
       dense_queries[dense_count++] = (ixs_group_union_query){
-          group, peer, IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT, complex,
-          complex};
+          group, peer, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, zero, zero};
     }
   }
   CHECK(dense_count == DENSE_QUERY_COUNT && PAIR_COUNT == 2016);
@@ -12280,21 +12283,19 @@ static void test_public_group_union_dag_work_admission(void) {
 
   for (group = 0; group + 1u < GROUP_COUNT; group++) {
     sparse_queries[sparse_count++] = (ixs_group_union_query){
-        group, group + 1u, IXS_GROUP_UNION_EQUIVALENT, complex, complex};
+        group, group + 1u, IXS_GROUP_UNION_EQUIVALENT, zero, zero};
     sparse_queries[sparse_count++] = (ixs_group_union_query){
-        group, group + 1u, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, complex,
-        complex};
+        group, group + 1u, IXS_GROUP_UNION_EQUIVALENT, one, one};
     sparse_queries[sparse_count++] = (ixs_group_union_query){
-        group, group + 1u, IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT, complex,
-        complex};
+        group, group + 1u, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, zero, zero};
   }
   CHECK(sparse_count == SPARSE_QUERY_COUNT);
-  remaining_work = 4000000;
+  remaining_work = 4 * 1024 * 1024;
   CHECK((ixs_query_group_unions)(IXS_TEST_SESSION(ctx), groups, GROUP_COUNT,
                                  sparse_queries, SPARSE_QUERY_COUNT,
                                  sparse_results,
                                  &remaining_work) == IXS_GROUP_UNION_COMPLETE);
-  CHECK(remaining_work < 4000000);
+  CHECK(remaining_work < 4 * 1024 * 1024);
   for (group = 0; group < SPARSE_QUERY_COUNT; group++) {
     CHECK(sparse_results[group].status == IXS_CHECK_TRUE);
     if (sparse_queries[group].kind == IXS_GROUP_UNION_CONSTANT_DIFFERENCE)

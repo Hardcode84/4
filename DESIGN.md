@@ -4298,15 +4298,21 @@ is constructed. A shared iterative postorder memo visits every reachable DAG
 node and edge once across all predicate and operand roots. Its expanded
 subtree cost counts a shared child at each parent edge, adds 32 units to each
 floor, ceiling, or truncation node, and adds 64 units plus 16 per arm to each
-`Piecewise`. Each distinct predicate root contributes once; every query adds
-one unit and the cached costs of both operand roots, deliberately weighting
-repeated nonlinear uses. Saturating arithmetic makes an unrepresentable cost
-reject rather than wrap. Estimates at or below 65536 do not participate in
-admission, leaving scalar and small-batch accounting unchanged. Above that
-floor, a cost greater than `remaining_work` returns `EXHAUSTED`, drains the
-counter to zero, and builds no common, lane, or pair closure. An admitted scan
-does not consume work. Its running time is linear in the unique reachable DAG
-nodes and edges plus predicate/query root uses.
+`Piecewise`. Each distinct predicate root contributes once to the base scan.
+Every query adds one unit and the cached costs of both operand roots,
+deliberately weighting repeated nonlinear uses. It also adds four times the
+cached predicate-root cost of its selected lhs group and, when distinct, its
+selected rhs group. Those four bounded structural passes correspond to direct
+replay, fact-conditioned rewrite, semantic ingestion with dependency wakeups,
+and closed-domain validation. Group costs are computed once after root
+planning; query weighting is constant time. Saturating arithmetic makes an
+unrepresentable cost reject rather than wrap. Estimates at or below 65536 do
+not participate in admission, leaving scalar and small-batch accounting
+unchanged. Above that floor, a cost greater than `remaining_work` returns
+`EXHAUSTED`, drains the counter to zero, and builds no common, lane, or pair
+closure. An admitted scan does not consume work. Its running time is linear in
+the unique reachable DAG nodes and edges plus planned group-predicate and query
+root uses.
 
 Runtime accounting remains exact. One work unit reserves one predicate-root
 replay or one internally bounded semantic query, and the reservation is

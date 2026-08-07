@@ -21144,14 +21144,18 @@ typedef struct {
 /* Semantic queries containing rounding and Piecewise nodes can expand into
  * substantially more proof work than their root count suggests.  Admission
  * uses a structural estimate without charging it to the caller's runtime work
- * counter.  Repeated query operands are weighted on every use, while one
- * iterative postorder memo computes each reachable node's expanded subtree
- * cost once across the complete call. */
+ * counter.  Repeated query operands and both selected group domains are
+ * weighted on every use, while one iterative postorder memo computes each
+ * reachable node's expanded subtree cost once across the complete call. */
 #define GROUP_UNION_DAG_NODE_WEIGHT 1u
 #define GROUP_UNION_DAG_ROUNDING_EXTRA 32u
 #define GROUP_UNION_DAG_PIECEWISE_EXTRA 64u
 #define GROUP_UNION_DAG_PIECEWISE_ARM_EXTRA 16u
 #define GROUP_UNION_DAG_QUERY_WEIGHT 1u
+/* A selected predicate domain is structurally consumed by four bounded
+ * phases: direct replay, fact-conditioned rewrite, semantic ingestion with
+ * dependency wakeups, and closed-domain validation. */
+#define GROUP_UNION_DAG_PREDICATE_REPLAY_WEIGHT 4u
 #define GROUP_UNION_DAG_ADMISSION_FLOOR 65536u
 #define GROUP_UNION_DAG_MEMO_INIT_CAP 32u
 
@@ -21392,10 +21396,14 @@ group_union_get_dag_cost(ixs_ctx *ctx, group_union_dag_cost_memo *memo,
 }
 
 static ixs_group_union_status
-group_union_admit_dag_work(ixs_ctx *ctx, ixs_node *const *roots, size_t n_roots,
+group_union_admit_dag_work(ixs_ctx *ctx,
+                           const group_union_group_state *states,
+                           size_t n_groups, ixs_node *const *roots,
+                           size_t n_roots,
                            const ixs_group_union_query *queries,
                            size_t n_queries, size_t remaining_work) {
   group_union_dag_cost_memo memo;
+  size_t *group_costs;
   size_t admission_limit = remaining_work;
   size_t cost = 0;
   size_t index;
@@ -21412,6 +21420,39 @@ group_union_admit_dag_work(ixs_ctx *ctx, ixs_node *const *roots, size_t n_roots,
     if (cost == SIZE_MAX || cost > admission_limit)
       return IXS_GROUP_UNION_EXHAUSTED;
   }
+  if (n_groups > SIZE_MAX / sizeof(*group_costs))
+    return IXS_GROUP_UNION_INVALID;
+  group_costs = ixs_arena_alloc(&ctx->scratch,
+                                n_groups * sizeof(*group_costs),
+                                sizeof(void *));
+  if (!group_costs)
+    return IXS_GROUP_UNION_OOM;
+  for (index = 0; index < n_groups; index++) {
+    const group_union_group_state *state = &states[index];
+    size_t root_index;
+    group_costs[index] = 0;
+    for (root_index = 0; root_index < state->n_roots; root_index++) {
+      size_t root_id = state->root_ids[root_index];
+      group_union_dag_cost_entry *entry;
+      if (root_id >= n_roots) {
+        ixs_ctx_push_error(ctx,
+                           "group unions: group root registry invariant failed");
+        return IXS_GROUP_UNION_INVALID;
+      }
+      entry = group_union_dag_cost_memo_find(&memo, roots[root_id]);
+      if (!entry || entry->state != GROUP_UNION_DAG_COST_COMPLETE) {
+        ixs_ctx_push_error(ctx,
+                           "group unions: DAG cost memo invariant failed");
+        return IXS_GROUP_UNION_INVALID;
+      }
+      group_costs[index] =
+          group_union_dag_cost_add(group_costs[index], entry->cost);
+    }
+    group_costs[index] = group_union_dag_cost_multiply(
+        group_costs[index], GROUP_UNION_DAG_PREDICATE_REPLAY_WEIGHT);
+    if (group_costs[index] == SIZE_MAX)
+      return IXS_GROUP_UNION_EXHAUSTED;
+  }
   for (index = 0; index < n_queries; index++) {
     size_t lhs_cost;
     size_t rhs_cost;
@@ -21423,9 +21464,20 @@ group_union_admit_dag_work(ixs_ctx *ctx, ixs_node *const *roots, size_t n_roots,
         ctx, &memo, (ixs_node *)queries[index].rhs, &rhs_cost);
     if (status != IXS_GROUP_UNION_COMPLETE)
       return status;
+    if (queries[index].lhs_group >= n_groups ||
+        queries[index].rhs_group >= n_groups) {
+      ixs_ctx_push_error(ctx,
+                         "group unions: query group registry invariant failed");
+      return IXS_GROUP_UNION_INVALID;
+    }
     cost = group_union_dag_cost_add(cost, GROUP_UNION_DAG_QUERY_WEIGHT);
     cost = group_union_dag_cost_add(cost, lhs_cost);
     cost = group_union_dag_cost_add(cost, rhs_cost);
+    cost = group_union_dag_cost_add(
+        cost, group_costs[queries[index].lhs_group]);
+    if (queries[index].rhs_group != queries[index].lhs_group)
+      cost = group_union_dag_cost_add(
+          cost, group_costs[queries[index].rhs_group]);
     if (cost == SIZE_MAX || cost > admission_limit)
       return IXS_GROUP_UNION_EXHAUSTED;
   }
@@ -22469,8 +22521,8 @@ ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
                                   &n_roots, &common_ids, &n_common);
   if (status != IXS_GROUP_UNION_COMPLETE)
     goto cleanup;
-  status = group_union_admit_dag_work(ctx, roots, n_roots, queries, n_queries,
-                                      *remaining_work);
+  status = group_union_admit_dag_work(ctx, states, n_groups, roots, n_roots,
+                                      queries, n_queries, *remaining_work);
   if (status != IXS_GROUP_UNION_COMPLETE) {
     if (status == IXS_GROUP_UNION_EXHAUSTED)
       *remaining_work = 0;

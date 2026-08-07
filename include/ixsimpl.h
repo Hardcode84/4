@@ -869,8 +869,11 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
  * Before constructing closures, an uncharged structural scan estimates
  * nonlinear batch work. One iterative memo computes the expanded subtree cost
  * of every reachable node once, with extra weight for rounding and Piecewise;
- * each predicate root contributes once and every query operand use
- * contributes. Estimates at or below 65536 leave the ordinary work counter
+ * each predicate root contributes once. Every query contributes both operand
+ * uses plus four bounded structural passes over its selected lhs group and,
+ * for a distinct rhs group, its selected rhs group: direct replay,
+ * fact-conditioned rewrite, semantic ingestion/dependency wakeup, and closed
+ * validation. Estimates at or below 65536 leave the ordinary work counter
  * authoritative.
  * Above that floor, an estimate exceeding *remaining_work, or one that cannot
  * be represented in size_t, returns EXHAUSTED, sets *remaining_work to zero,
