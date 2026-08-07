@@ -312,6 +312,7 @@ static void test_modulo_recurrence_plan_contract(void) {
   ixs_node *successor = ixs_add(ctx, i, one);
   ixs_node *minus_one = ixs_sub(ctx, i, one);
   ixs_facts *loop_facts = ixs_facts_create(ctx);
+  ixs_facts *target_facts = ixs_facts_create(ctx);
   ixs_facts *derived_facts = ixs_facts_create(ctx);
   ixs_facts *identity_facts = ixs_facts_create(ctx);
   ixs_modulo_recurrence_reference derived_reference[1] = {{0u, y}};
@@ -320,18 +321,16 @@ static void test_modulo_recurrence_plan_contract(void) {
   ixs_modulo_recurrence_plan_group groups[4];
   ixs_modulo_recurrence_plan_entry entries[4];
   ixs_modulo_recurrence_plan_result result;
+  ixs_modulo_recurrence_result scalar;
   size_t budget;
 
   CHECK(ctx && i && k && x && y && z && zero && one && hundred && successor &&
-        minus_one && loop_facts && derived_facts && identity_facts);
+        minus_one && loop_facts && target_facts && derived_facts &&
+        identity_facts);
   CHECK(ixs_facts_assume_pred(loop_facts,
                               ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 1))));
   CHECK(
       ixs_facts_assume_pred(loop_facts, ixs_cmp(ctx, i, IXS_CMP_LE, hundred)));
-  CHECK(
-      ixs_facts_assume_pred(derived_facts, ixs_cmp(ctx, k, IXS_CMP_GE, zero)));
-  CHECK(ixs_facts_assume_pred(derived_facts,
-                              ixs_cmp(ctx, k, IXS_CMP_LE, hundred)));
   CHECK(
       ixs_facts_assume_pred(derived_facts, ixs_cmp(ctx, x, IXS_CMP_GE, zero)));
   CHECK(ixs_facts_assume_pred(derived_facts,
@@ -344,14 +343,14 @@ static void test_modulo_recurrence_plan_contract(void) {
       derived_facts,
       ixs_cmp(ctx, ixs_sub(ctx, x, y), IXS_CMP_EQ, ixs_int(ctx, 2))));
   CHECK(
-      ixs_facts_assume_pred(identity_facts, ixs_cmp(ctx, k, IXS_CMP_GE, zero)));
-  CHECK(ixs_facts_assume_pred(identity_facts,
-                              ixs_cmp(ctx, k, IXS_CMP_LE, hundred)));
-  CHECK(
       ixs_facts_assume_pred(identity_facts, ixs_cmp(ctx, z, IXS_CMP_GE, zero)));
 
+  scalar = ixs_modulo_recurrence_facts(target_facts, i, i, i,
+                                       IXS_REMAINDER_SIGNED, 32u, 5u);
+  CHECK(scalar.status == IXS_MODULO_RECURRENCE_UNKNOWN);
+
   targets[0] = (ixs_modulo_recurrence_target){
-      loop_facts, i, i, NULL, 0u, IXS_REMAINDER_SIGNED, 5u};
+      target_facts, i, i, NULL, 0u, IXS_REMAINDER_SIGNED, 5u};
   targets[1] = (ixs_modulo_recurrence_target){
       loop_facts,           minus_one,           i, NULL, 0u,
       IXS_REMAINDER_SIGNED, UINT64_C(4294967291)};

@@ -21512,12 +21512,16 @@ modulo_recurrence_operand_status(ixs_bounds *bounds, ixs_node *const *nodes) {
 
 static ixs_modulo_recurrence_status
 modulo_recurrence_signed_operand_status(ixs_ctx *ctx, ixs_bounds *bounds,
-                                        ixs_node *const *nodes) {
+                                        ixs_node *const *nodes,
+                                        bool induction_nonnegative) {
   size_t i;
   for (i = 0; i < 3u; ++i) {
     ixs_check_result nonnegative;
-    ixs_modulo_recurrence_status status = modulo_recurrence_predicate(
-        ctx, bounds, nodes[i], IXS_CMP_GE, ctx->node_zero, &nonnegative);
+    ixs_modulo_recurrence_status status;
+    if (induction_nonnegative && nodes[i] == nodes[2])
+      continue;
+    status = modulo_recurrence_predicate(ctx, bounds, nodes[i], IXS_CMP_GE,
+                                         ctx->node_zero, &nonnegative);
     if (status != IXS_MODULO_RECURRENCE_PROVEN)
       return status;
     if (nonnegative != IXS_CHECK_TRUE)
@@ -21647,9 +21651,10 @@ modulo_recurrence_adjust_increment(modulo_recurrence_difference *difference) {
   return IXS_MODULO_RECURRENCE_PROVEN;
 }
 
-ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
+static ixs_modulo_recurrence_result modulo_recurrence_facts_impl(
     ixs_facts *facts, ixs_node *value, ixs_node *reference, ixs_node *induction,
-    ixs_remainder_signedness signedness, unsigned width, uint64_t divisor) {
+    ixs_remainder_signedness signedness, unsigned width, uint64_t divisor,
+    bool induction_nonnegative) {
   ixs_modulo_recurrence_result result =
       modulo_recurrence_result(IXS_MODULO_RECURRENCE_UNKNOWN);
   algebra_query_scope scope;
@@ -21690,8 +21695,8 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
     goto cleanup;
 
   if (signedness == IXS_REMAINDER_SIGNED) {
-    result.status =
-        modulo_recurrence_signed_operand_status(ctx, &facts->bounds, nodes);
+    result.status = modulo_recurrence_signed_operand_status(
+        ctx, &facts->bounds, nodes, induction_nonnegative);
     if (result.status != IXS_MODULO_RECURRENCE_PROVEN)
       goto cleanup;
     difference_status = constant_difference_query_bound_detail(
@@ -21746,6 +21751,13 @@ cleanup:
     result.remainder = NULL;
   }
   return result;
+}
+
+ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
+    ixs_facts *facts, ixs_node *value, ixs_node *reference, ixs_node *induction,
+    ixs_remainder_signedness signedness, unsigned width, uint64_t divisor) {
+  return modulo_recurrence_facts_impl(facts, value, reference, induction,
+                                      signedness, width, divisor, false);
 }
 
 typedef enum {
@@ -22158,9 +22170,10 @@ modulo_plan_seed_targets(modulo_plan_work *work) {
     group = &work->groups[planned->group_index];
     if (!group->successor_proven)
       continue;
-    proof = ixs_modulo_recurrence_facts(
+    proof = modulo_recurrence_facts_impl(
         input->facts, input->value, input->induction, input->induction,
-        group->signedness, work->width, group->divisor);
+        group->signedness, work->width, group->divisor,
+        group->signedness == IXS_REMAINDER_SIGNED);
     status = modulo_plan_query_status(proof.status);
     if (status != IXS_FINITE_DOMAIN_COMPLETE)
       return status;
@@ -22193,9 +22206,10 @@ modulo_plan_propagate_references(modulo_plan_work *work) {
       if (!group->successor_proven)
         continue;
       if (edge->expression) {
-        ixs_modulo_recurrence_result proof = ixs_modulo_recurrence_facts(
+        ixs_modulo_recurrence_result proof = modulo_recurrence_facts_impl(
             input->facts, input->value, edge->expression, input->induction,
-            group->signedness, work->width, group->divisor);
+            group->signedness, work->width, group->divisor,
+            group->signedness == IXS_REMAINDER_SIGNED);
         ixs_finite_domain_status status =
             modulo_plan_query_status(proof.status);
         if (status != IXS_FINITE_DOMAIN_COMPLETE)

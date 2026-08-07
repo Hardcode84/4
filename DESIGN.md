@@ -2225,6 +2225,15 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   group divisor to the referenced target's already proved increment. Cycles
   without a direct anchor remain unplanned.
 
+  A target's local induction is a structural representation of the common loop
+  induction, not an independently proved relation. Once a signed successor
+  proof establishes that common induction nonnegative, signed target queries
+  trust operands pointer-identical to their local induction as nonnegative.
+  Every distinct target value and explicit reference still proves its own sign
+  in the target's exact fact domain. The standalone scalar recurrence API does
+  not receive this structural guarantee and retains its original requirement
+  that all three operand signs be proved from its one fact domain.
+
   The work admission cost is exactly twice the target count plus the total
   reference count: at most one successor proof per target-sized group, one
   direct proof per target, and one peer proof per reference. Overflow and all

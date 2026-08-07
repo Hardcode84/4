@@ -426,10 +426,12 @@ typedef struct {
   const ixs_node *expression;
 } ixs_modulo_recurrence_reference;
 
-/* One fixed-width remainder rewrite target. value and induction are expressed
- * in facts; references provide alternate, explicitly related anchors when a
- * direct value-to-induction proof is inconclusive. divisor is the raw width-bit
- * divisor encoding, including two's-complement negative signed divisors. */
+/* One fixed-width remainder rewrite target. value and the target-local form of
+ * the loop induction are expressed in facts; references provide alternate,
+ * explicitly related anchors when a direct value-to-induction proof is
+ * inconclusive. The caller guarantees that induction denotes the common loop
+ * induction supplied to the plan query. divisor is the raw width-bit divisor
+ * encoding, including two's-complement negative signed divisors. */
 typedef struct {
   ixs_facts *facts;
   const ixs_node *value;
@@ -977,6 +979,10 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
  * relation chains therefore require no caller retry machinery. Direct identity
  * references inherit the peer increment. Other references prove a constant
  * fixed-width remainder difference in the dependent target's exact facts.
+ * A proved signed loop successor establishes the common induction as
+ * nonnegative. Signed target queries trust that structural induction identity;
+ * every distinct value and reference operand must still prove nonnegative in
+ * its target fact domain.
  *
  * ngroup_capacity and nentries must both equal ntargets. Every entry is reset
  * to {SIZE_MAX, 0}, every group is cleared, and ngroups is zero before semantic
