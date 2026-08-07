@@ -202,6 +202,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
   memset(impl, 0, sizeof(*impl));
   impl->ctx = ctx;
   impl->epoch = session_next_epoch(ctx);
+  ixs_arena_init(&impl->assumption_bounds_arena, IXS_ARENA_DEFAULT_SIZE);
   impl->scratch = scratch;
   ixs_arena_init(&impl->diag, IXS_ARENA_DEFAULT_SIZE);
   impl->base_mark = ixs_arena_save(&impl->scratch);
@@ -209,6 +210,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
 
 void ixs_session_reset(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  simp_assumption_cache_reset(impl);
   session_destroy_facts(impl);
   ixs_arena_restore(session_scratch(impl), impl->base_mark);
   session_clear_errors_impl(impl);
@@ -217,6 +219,7 @@ void ixs_session_reset(ixs_session *s) {
 
 void ixs_session_destroy(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  simp_assumption_cache_reset(impl);
   session_destroy_facts(impl);
   ixs_arena_destroy(&impl->diag);
   ixs_arena_destroy(&impl->scratch);

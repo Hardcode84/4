@@ -235,6 +235,9 @@ IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);
  * fork.  The fork owns a separate, initially empty query arena. */
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 
+/* Discard query results after a failed read while preserving semantic facts. */
+IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom);
+
 /* Extract variable bounds from one validated CMP assumption. */
 IXS_STATIC bool ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
 

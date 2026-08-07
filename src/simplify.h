@@ -9,6 +9,23 @@
 #include "bounds.h"
 #include "node.h"
 
+/* Release the session-local prepared direct-assumption domain. */
+IXS_STATIC void simp_assumption_cache_reset(ixs_session_impl *impl);
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+typedef struct {
+  size_t lookups;
+  size_t hits;
+  size_t misses;
+  size_t n_assumptions;
+  bool present;
+} simp_assumption_cache_stats_result;
+
+IXS_STATIC void
+simp_assumption_cache_stats(const ixs_session_impl *impl,
+                            simp_assumption_cache_stats_result *stats);
+#endif
+
 /*
  * Smart constructors: apply canonicalization rules, then hash-cons.
  * Called by the public API in ctx.c and by the parser.

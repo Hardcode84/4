@@ -1105,6 +1105,12 @@ static void bounds_cache_store(ixs_bounds *b, ixs_node *expr, ixs_interval iv) {
   b->cache[idx].equality_disabled = b->equality_disabled_depth != 0;
 }
 
+IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
+  bounds_cache_clear(b);
+  if (b)
+    b->oom = old_oom;
+}
+
 static bool bounds_cacheable_expr(ixs_node *expr) {
   return expr && expr->tag != IXS_INT && expr->tag != IXS_RAT &&
          expr->tag != IXS_SYM;
@@ -5302,7 +5308,8 @@ static bool bounds_propagate_added_expr_ranges(ixs_bounds *b, ixs_node *expr,
   size_t i;
 
   for (i = first_expr; i < added_expr_end; i++)
-    if (b->exprs[i].expr->tag == IXS_SYM)
+    if (b->exprs[i].expr->tag == IXS_SYM && b->exprs[i].expr != expr &&
+        b->exprs[i].expr != canon)
       bounds_sync_raw_symbol_range(b, b->exprs[i].expr);
   if (expr->tag == IXS_SYM)
     bounds_sync_raw_symbol_range(b, expr);
@@ -5347,7 +5354,8 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                           added_expr_end))
     return;
   for (i = first_expr; i < added_expr_end; i++)
-    bounds_refine_mod_inverse_for_expr(b, b->exprs[i].expr);
+    if (b->exprs[i].expr != expr && b->exprs[i].expr != canon)
+      bounds_refine_mod_inverse_for_expr(b, b->exprs[i].expr);
   bounds_refine_mod_inverse_for_expr(b, expr);
   if (canon && canon != expr)
     bounds_refine_mod_inverse_for_expr(b, canon);
@@ -5359,6 +5367,17 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
   if (canon && canon != expr && canon->tag == IXS_FLOOR)
     bounds_refine_symbol_from_floor_range(b, canon,
                                           bounds_get_expr_overrides(b, canon));
+}
+
+/* apply_sym_cmp_const has already intersected the raw symbol table and
+ * propagated difference constraints.  Record the parallel expression range
+ * without repeating those operations on the assumption-ingestion hot path. */
+static void bounds_record_applied_symbol_range(ixs_bounds *b, ixs_node *symbol,
+                                               ixs_interval iv) {
+  assert(symbol != NULL && symbol->tag == IXS_SYM);
+  bounds_add_expr_raw(b, symbol, iv);
+  if (!b->oom && !b->contradiction)
+    bounds_refine_mod_inverse_symbol(b, symbol);
 }
 
 static bool bounds_is_known_nonzero(const ixs_bounds *b, const ixs_node *expr) {
@@ -5473,7 +5492,7 @@ static bool bounds_add_sym_cmp_const(ixs_bounds *b, ixs_node *lhs,
   apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
   sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
   if (sym_iv.valid)
-    ixs_bounds_add_expr(b, sym, sym_iv);
+    bounds_record_applied_symbol_range(b, sym, sym_iv);
   return true;
 }
 
@@ -5511,7 +5530,7 @@ static bool bounds_add_affine_zero_cmp(ixs_bounds *b, ixs_node *lhs,
   apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
   sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
   if (sym_iv.valid)
-    ixs_bounds_add_expr(b, sym, sym_iv);
+    bounds_record_applied_symbol_range(b, sym, sym_iv);
   return true;
 }
 
@@ -11844,6 +11863,40 @@ static ixs_bounds_build_status bounds_start_predicate_frame(
              : IXS_BOUNDS_BUILD_OOM;
 }
 
+/* False means the validated root is an AND and needs the iterative walker. */
+static bool bounds_process_flat_predicate(ixs_bounds *b, ixs_node *pred,
+                                          bool ingest,
+                                          ixs_bounds_build_status *status) {
+  if (!pred)
+    *status = assumption_invalid(b, "NULL predicate");
+  else if (!ixs_ctx_owns_node(b->ctx, pred))
+    *status = assumption_invalid(b, "predicate belongs to a different context");
+  else if (ixs_node_is_sentinel(pred))
+    *status = assumption_invalid(b, "sentinel predicates are not accepted");
+  else if (pred == b->ctx->node_true)
+    *status = IXS_BOUNDS_BUILD_OK;
+  else if (pred == b->ctx->node_false) {
+    bounds_ingest_validated_leaf(b, pred, ingest);
+    *status = b->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_OK;
+  } else if (pred->tag == IXS_CMP) {
+    *status = bounds_validate_cmp_leaf(b, pred);
+    if (*status == IXS_BOUNDS_BUILD_OK) {
+      bounds_ingest_validated_leaf(b, pred, ingest);
+      *status = b->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_OK;
+    }
+  } else if (pred->tag == IXS_AND) {
+    return false;
+  } else if (pred->tag == IXS_OR) {
+    *status = assumption_invalid(b, "OR predicates are not supported");
+  } else if (pred->tag == IXS_NOT) {
+    *status = assumption_invalid(b, "NOT predicates are not supported");
+  } else {
+    *status = assumption_invalid(
+        b, "expected a CMP, AND, or boolean constant predicate");
+  }
+  return true;
+}
+
 static ixs_bounds_build_status
 bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   ixs_arena traversal;
@@ -11857,8 +11910,14 @@ bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   size_t i;
   ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OK;
 
-  if (!pred)
-    return assumption_invalid(b, "NULL predicate");
+  /* Published assumptions are almost always individual CMP leaves.  Validate
+   * those without constructing the growable cycle-detection worklist needed
+   * only for AND DAGs. */
+  if (bounds_process_flat_predicate(b, pred, ingest, &status))
+    return status;
+
+  assert(pred != NULL && pred->tag == IXS_AND);
+
   ixs_arena_init(&traversal, IXS_ARENA_DEFAULT_SIZE);
   memset(&memo, 0, sizeof(memo));
   {
@@ -11989,6 +12048,7 @@ bounds_ingest_predicates(ixs_bounds *b, ixs_node *const *predicates,
 IXS_STATIC ixs_bounds_build_status
 ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
                      ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds_cache_entry *interval_cache;
   ixs_bounds_build_status status;
   if (n_assumptions > 0 && !assumptions) {
     ixs_ctx_push_error(ctx, "assumptions: NULL array with nonzero count");
@@ -11996,7 +12056,13 @@ ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
   }
   if (!ixs_bounds_init_ctx(b, ctx, scratch))
     return IXS_BOUNDS_BUILD_OOM;
+  /* A fresh bounds object has no interval result to invalidate while its
+   * assumptions are loaded.  Keep the zeroed query cache detached so each
+   * published fact does not clear the same empty table. */
+  interval_cache = b->cache;
+  b->cache = NULL;
   status = bounds_ingest_predicates(b, assumptions, n_assumptions);
+  b->cache = interval_cache;
   if (status != IXS_BOUNDS_BUILD_OK)
     ixs_bounds_destroy(b);
   return status;

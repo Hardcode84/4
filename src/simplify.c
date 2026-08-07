@@ -6978,21 +6978,135 @@ failed:
   return false;
 }
 
+/* Repeated scalar simplification commonly reuses one direct assumption array.
+ * Retain only the first bounded-key domain in a session: memory is
+ * proportional to that explicit domain and cannot grow with the number of
+ * calls. Ordered pointer comparison is O(n); immutable context-owned nodes
+ * make a hit exact. */
+enum { SIMP_ASSUMPTION_CACHE_NODES = 64 };
+
+typedef struct {
+  ixs_bounds bounds;
+  size_t n_assumptions;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  size_t lookups;
+  size_t hits;
+  size_t misses;
+#endif
+  ixs_node *assumptions[SIMP_ASSUMPTION_CACHE_NODES];
+} simp_assumption_cache;
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+#define SIMP_ASSUMPTION_CACHE_NOTE(cache, field) ((cache)->field++)
+#else
+#define SIMP_ASSUMPTION_CACHE_NOTE(cache, field) ((void)(cache))
+#endif
+
+IXS_STATIC void simp_assumption_cache_reset(ixs_session_impl *impl) {
+  simp_assumption_cache *cache;
+  if (!impl)
+    return;
+  if (impl->assumption_bounds_cache) {
+    cache = impl->assumption_bounds_cache;
+    ixs_bounds_destroy(&cache->bounds);
+  }
+  ixs_arena_destroy(&impl->assumption_bounds_arena);
+  ixs_arena_init(&impl->assumption_bounds_arena, IXS_ARENA_DEFAULT_SIZE);
+  impl->assumption_bounds_cache = NULL;
+}
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC void
+simp_assumption_cache_stats(const ixs_session_impl *impl,
+                            simp_assumption_cache_stats_result *stats) {
+  const simp_assumption_cache *cache =
+      impl ? impl->assumption_bounds_cache : NULL;
+  if (!stats)
+    return;
+  memset(stats, 0, sizeof(*stats));
+  if (!cache)
+    return;
+  stats->lookups = cache->lookups;
+  stats->hits = cache->hits;
+  stats->misses = cache->misses;
+  stats->n_assumptions = cache->n_assumptions;
+  stats->present = true;
+}
+#endif
+
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    ixs_node *const *assumptions,
                                    size_t n_assumptions) {
-  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_session_impl *impl = ctx->active_session;
+  simp_assumption_cache *cache = impl ? impl->assumption_bounds_cache : NULL;
+  ixs_arena_mark m;
   ixs_bounds bnds;
-  ixs_bounds_build_status status = ixs_bounds_build_ctx(
-      &bnds, ctx, &ctx->scratch, assumptions, n_assumptions);
+  ixs_bounds *active_bounds = &bnds;
+  ixs_bounds_build_status status;
+  bool cached_read = false;
+  bool limited = false;
+  bool old_oom = false;
+  size_t i;
+
+  if (impl && !cache && n_assumptions > 0 &&
+      n_assumptions <= SIMP_ASSUMPTION_CACHE_NODES) {
+    ixs_arena *cache_arena = &impl->assumption_bounds_arena;
+    ixs_arena_mark cache_mark = ixs_arena_save(cache_arena);
+    cache = ixs_arena_alloc(cache_arena, sizeof(*cache), sizeof(void *));
+    if (!cache) {
+      ixs_arena_restore(cache_arena, cache_mark);
+      goto build_temporary;
+    }
+    memset(cache, 0, sizeof(*cache));
+    status = ixs_bounds_build_ctx(&cache->bounds, ctx, cache_arena, assumptions,
+                                  n_assumptions);
+    if (status != IXS_BOUNDS_BUILD_OK) {
+      ixs_arena_restore(cache_arena, cache_mark);
+      if (status == IXS_BOUNDS_BUILD_OOM)
+        goto build_temporary;
+      return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
+    }
+    cache->n_assumptions = n_assumptions;
+    memcpy(cache->assumptions, assumptions,
+           n_assumptions * sizeof(*assumptions));
+    impl->assumption_bounds_cache = cache;
+  }
+
+  if (cache && assumptions && cache->n_assumptions == n_assumptions) {
+    SIMP_ASSUMPTION_CACHE_NOTE(cache, lookups);
+    for (i = 0; i < n_assumptions; i++)
+      if (cache->assumptions[i] != assumptions[i])
+        break;
+    if (i == n_assumptions) {
+      SIMP_ASSUMPTION_CACHE_NOTE(cache, hits);
+      m = ixs_arena_save(&ctx->scratch);
+      active_bounds = &cache->bounds;
+      active_bounds->scratch = &ctx->scratch;
+      old_oom = active_bounds->oom;
+      cached_read = true;
+      goto simplify;
+    }
+    SIMP_ASSUMPTION_CACHE_NOTE(cache, misses);
+  }
+
+build_temporary:
+  m = ixs_arena_save(&ctx->scratch);
+  status = ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                                n_assumptions);
   if (status != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
     return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
   }
-  expr = simp_simplify_bounds(ctx, expr, &bnds);
+simplify:
+  expr = simp_simplify_bounds_status(ctx, expr, active_bounds, &limited);
   if (expr && !ixs_node_is_sentinel(expr))
-    expr = simp_normalize_rational_carrier(ctx, &bnds, expr);
-  ixs_bounds_destroy(&bnds);
+    expr = simp_normalize_rational_carrier(ctx, active_bounds, expr);
+  if (cached_read) {
+    if (limited || !expr || (!old_oom && active_bounds->oom))
+      ixs_bounds_reset_read_cache(active_bounds, old_oom);
+  } else {
+    ixs_bounds_destroy(&bnds);
+  }
   ixs_arena_restore(&ctx->scratch, m);
   return expr;
 }

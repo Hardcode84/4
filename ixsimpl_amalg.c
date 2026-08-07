@@ -1343,6 +1343,12 @@ static void bounds_cache_store(ixs_bounds *b, ixs_node *expr, ixs_interval iv) {
   b->cache[idx].equality_disabled = b->equality_disabled_depth != 0;
 }
 
+IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
+  bounds_cache_clear(b);
+  if (b)
+    b->oom = old_oom;
+}
+
 static bool bounds_cacheable_expr(ixs_node *expr) {
   return expr && expr->tag != IXS_INT && expr->tag != IXS_RAT &&
          expr->tag != IXS_SYM;
@@ -5540,7 +5546,8 @@ static bool bounds_propagate_added_expr_ranges(ixs_bounds *b, ixs_node *expr,
   size_t i;
 
   for (i = first_expr; i < added_expr_end; i++)
-    if (b->exprs[i].expr->tag == IXS_SYM)
+    if (b->exprs[i].expr->tag == IXS_SYM && b->exprs[i].expr != expr &&
+        b->exprs[i].expr != canon)
       bounds_sync_raw_symbol_range(b, b->exprs[i].expr);
   if (expr->tag == IXS_SYM)
     bounds_sync_raw_symbol_range(b, expr);
@@ -5585,7 +5592,8 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                           added_expr_end))
     return;
   for (i = first_expr; i < added_expr_end; i++)
-    bounds_refine_mod_inverse_for_expr(b, b->exprs[i].expr);
+    if (b->exprs[i].expr != expr && b->exprs[i].expr != canon)
+      bounds_refine_mod_inverse_for_expr(b, b->exprs[i].expr);
   bounds_refine_mod_inverse_for_expr(b, expr);
   if (canon && canon != expr)
     bounds_refine_mod_inverse_for_expr(b, canon);
@@ -5597,6 +5605,17 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
   if (canon && canon != expr && canon->tag == IXS_FLOOR)
     bounds_refine_symbol_from_floor_range(b, canon,
                                           bounds_get_expr_overrides(b, canon));
+}
+
+/* apply_sym_cmp_const has already intersected the raw symbol table and
+ * propagated difference constraints.  Record the parallel expression range
+ * without repeating those operations on the assumption-ingestion hot path. */
+static void bounds_record_applied_symbol_range(ixs_bounds *b, ixs_node *symbol,
+                                               ixs_interval iv) {
+  assert(symbol != NULL && symbol->tag == IXS_SYM);
+  bounds_add_expr_raw(b, symbol, iv);
+  if (!b->oom && !b->contradiction)
+    bounds_refine_mod_inverse_symbol(b, symbol);
 }
 
 static bool bounds_is_known_nonzero(const ixs_bounds *b, const ixs_node *expr) {
@@ -5711,7 +5730,7 @@ static bool bounds_add_sym_cmp_const(ixs_bounds *b, ixs_node *lhs,
   apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
   sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
   if (sym_iv.valid)
-    ixs_bounds_add_expr(b, sym, sym_iv);
+    bounds_record_applied_symbol_range(b, sym, sym_iv);
   return true;
 }
 
@@ -5749,7 +5768,7 @@ static bool bounds_add_affine_zero_cmp(ixs_bounds *b, ixs_node *lhs,
   apply_sym_cmp_const(b, sym->u.name, effective_op, p, q);
   sym_iv = interval_from_sym_cmp_const(effective_op, p, q);
   if (sym_iv.valid)
-    ixs_bounds_add_expr(b, sym, sym_iv);
+    bounds_record_applied_symbol_range(b, sym, sym_iv);
   return true;
 }
 
@@ -12082,6 +12101,40 @@ static ixs_bounds_build_status bounds_start_predicate_frame(
              : IXS_BOUNDS_BUILD_OOM;
 }
 
+/* False means the validated root is an AND and needs the iterative walker. */
+static bool bounds_process_flat_predicate(ixs_bounds *b, ixs_node *pred,
+                                          bool ingest,
+                                          ixs_bounds_build_status *status) {
+  if (!pred)
+    *status = assumption_invalid(b, "NULL predicate");
+  else if (!ixs_ctx_owns_node(b->ctx, pred))
+    *status = assumption_invalid(b, "predicate belongs to a different context");
+  else if (ixs_node_is_sentinel(pred))
+    *status = assumption_invalid(b, "sentinel predicates are not accepted");
+  else if (pred == b->ctx->node_true)
+    *status = IXS_BOUNDS_BUILD_OK;
+  else if (pred == b->ctx->node_false) {
+    bounds_ingest_validated_leaf(b, pred, ingest);
+    *status = b->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_OK;
+  } else if (pred->tag == IXS_CMP) {
+    *status = bounds_validate_cmp_leaf(b, pred);
+    if (*status == IXS_BOUNDS_BUILD_OK) {
+      bounds_ingest_validated_leaf(b, pred, ingest);
+      *status = b->oom ? IXS_BOUNDS_BUILD_OOM : IXS_BOUNDS_BUILD_OK;
+    }
+  } else if (pred->tag == IXS_AND) {
+    return false;
+  } else if (pred->tag == IXS_OR) {
+    *status = assumption_invalid(b, "OR predicates are not supported");
+  } else if (pred->tag == IXS_NOT) {
+    *status = assumption_invalid(b, "NOT predicates are not supported");
+  } else {
+    *status = assumption_invalid(
+        b, "expected a CMP, AND, or boolean constant predicate");
+  }
+  return true;
+}
+
 static ixs_bounds_build_status
 bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   ixs_arena traversal;
@@ -12095,8 +12148,14 @@ bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   size_t i;
   ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OK;
 
-  if (!pred)
-    return assumption_invalid(b, "NULL predicate");
+  /* Published assumptions are almost always individual CMP leaves.  Validate
+   * those without constructing the growable cycle-detection worklist needed
+   * only for AND DAGs. */
+  if (bounds_process_flat_predicate(b, pred, ingest, &status))
+    return status;
+
+  assert(pred != NULL && pred->tag == IXS_AND);
+
   ixs_arena_init(&traversal, IXS_ARENA_DEFAULT_SIZE);
   memset(&memo, 0, sizeof(memo));
   {
@@ -12227,6 +12286,7 @@ bounds_ingest_predicates(ixs_bounds *b, ixs_node *const *predicates,
 IXS_STATIC ixs_bounds_build_status
 ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
                      ixs_node *const *assumptions, size_t n_assumptions) {
+  ixs_bounds_cache_entry *interval_cache;
   ixs_bounds_build_status status;
   if (n_assumptions > 0 && !assumptions) {
     ixs_ctx_push_error(ctx, "assumptions: NULL array with nonzero count");
@@ -12234,7 +12294,13 @@ ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
   }
   if (!ixs_bounds_init_ctx(b, ctx, scratch))
     return IXS_BOUNDS_BUILD_OOM;
+  /* A fresh bounds object has no interval result to invalidate while its
+   * assumptions are loaded.  Keep the zeroed query cache detached so each
+   * published fact does not clear the same empty table. */
+  interval_cache = b->cache;
+  b->cache = NULL;
   status = bounds_ingest_predicates(b, assumptions, n_assumptions);
+  b->cache = interval_cache;
   if (status != IXS_BOUNDS_BUILD_OK)
     ixs_bounds_destroy(b);
   return status;
@@ -20824,6 +20890,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
   memset(impl, 0, sizeof(*impl));
   impl->ctx = ctx;
   impl->epoch = session_next_epoch(ctx);
+  ixs_arena_init(&impl->assumption_bounds_arena, IXS_ARENA_DEFAULT_SIZE);
   impl->scratch = scratch;
   ixs_arena_init(&impl->diag, IXS_ARENA_DEFAULT_SIZE);
   impl->base_mark = ixs_arena_save(&impl->scratch);
@@ -20831,6 +20898,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
 
 void ixs_session_reset(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  simp_assumption_cache_reset(impl);
   session_destroy_facts(impl);
   ixs_arena_restore(session_scratch(impl), impl->base_mark);
   session_clear_errors_impl(impl);
@@ -20839,6 +20907,7 @@ void ixs_session_reset(ixs_session *s) {
 
 void ixs_session_destroy(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
+  simp_assumption_cache_reset(impl);
   session_destroy_facts(impl);
   ixs_arena_destroy(&impl->diag);
   ixs_arena_destroy(&impl->scratch);
@@ -23155,27 +23224,16 @@ static bool node_equal_assoc(const ixs_node *a, const ixs_node *b) {
   return true;
 }
 
-static bool node_equal_rat(const ixs_node *a, const ixs_node *b) {
-  return a->u.rat.p == b->u.rat.p && a->u.rat.q == b->u.rat.q;
-}
-
-static bool node_equal_cmp(const ixs_node *a, const ixs_node *b) {
-  return a->u.binary.lhs == b->u.binary.lhs &&
-         a->u.binary.rhs == b->u.binary.rhs &&
-         a->u.binary.cmp_op == b->u.binary.cmp_op;
-}
-
-static bool node_equal_binary(const ixs_node *a, const ixs_node *b) {
-  return a->u.binary.lhs == b->u.binary.lhs &&
-         a->u.binary.rhs == b->u.binary.rhs;
-}
-
-static bool node_equal_same_tag(const ixs_node *a, const ixs_node *b) {
+IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
+  if (a == b)
+    return true;
+  if (a->tag != b->tag)
+    return false;
   switch (a->tag) {
   case IXS_INT:
     return a->u.ival == b->u.ival;
   case IXS_RAT:
-    return node_equal_rat(a, b);
+    return a->u.rat.p == b->u.rat.p && a->u.rat.q == b->u.rat.q;
   case IXS_SYM:
     return strcmp(a->u.name, b->u.name) == 0;
   case IXS_ADD:
@@ -23187,9 +23245,12 @@ static bool node_equal_same_tag(const ixs_node *a, const ixs_node *b) {
   case IXS_TRUNC:
     return a->u.unary.arg == b->u.unary.arg;
   case IXS_CMP:
-    return node_equal_cmp(a, b);
+    return a->u.binary.lhs == b->u.binary.lhs &&
+           a->u.binary.rhs == b->u.binary.rhs &&
+           a->u.binary.cmp_op == b->u.binary.cmp_op;
   case IXS_MOD:
-    return node_equal_binary(a, b);
+    return a->u.binary.lhs == b->u.binary.lhs &&
+           a->u.binary.rhs == b->u.binary.rhs;
   case IXS_PIECEWISE:
     return node_equal_pw(a, b);
   case IXS_MAX:
@@ -23200,19 +23261,9 @@ static bool node_equal_same_tag(const ixs_node *a, const ixs_node *b) {
     return node_equal_assoc(a, b);
   case IXS_NOT:
     return a->u.unary_bool.arg == b->u.unary_bool.arg;
-  case IXS_ERROR:
-  case IXS_PARSE_ERROR:
-    return true;
+  default:
+    return a->tag == IXS_ERROR || a->tag == IXS_PARSE_ERROR;
   }
-  return false;
-}
-
-IXS_STATIC bool ixs_node_equal(const ixs_node *a, const ixs_node *b) {
-  if (a == b)
-    return true;
-  if (a->tag != b->tag)
-    return false;
-  return node_equal_same_tag(a, b);
 }
 
 /* ------------------------------------------------------------------ */
@@ -23829,56 +23880,49 @@ static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
   return properties;
 }
 
+static uint8_t node_descendant_properties(const ixs_node *node) {
+  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0
+             ? node->properties
+             : 0;
+}
+
 static uint8_t node_compute_add_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.add.coeff);
   bool total = node_property_total(node->u.add.coeff);
-  bool rounding = ixs_node_contains_rounding(node->u.add.coeff);
-  bool piecewise = ixs_node_contains_piecewise(node->u.add.coeff);
-  bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.add.coeff);
+  uint8_t descendants = node_descendant_properties(node->u.add.coeff);
 
   for (i = 0; i < node->u.add.nterms; i++) {
     integer = integer && node_property_integer(node->u.add.terms[i].coeff) &&
               node_property_integer(node->u.add.terms[i].term);
     total = total && node_property_total(node->u.add.terms[i].coeff) &&
             node_property_total(node->u.add.terms[i].term);
-    rounding = rounding ||
-               ixs_node_contains_rounding(node->u.add.terms[i].coeff) ||
-               ixs_node_contains_rounding(node->u.add.terms[i].term);
-    piecewise = piecewise ||
-                ixs_node_contains_piecewise(node->u.add.terms[i].coeff) ||
-                ixs_node_contains_piecewise(node->u.add.terms[i].term);
-    nested_piecewise =
-        nested_piecewise ||
-        ixs_node_contains_nested_piecewise(node->u.add.terms[i].coeff) ||
-        ixs_node_contains_nested_piecewise(node->u.add.terms[i].term);
+    descendants |= node_descendant_properties(node->u.add.terms[i].coeff) |
+                   node_descendant_properties(node->u.add.terms[i].term);
   }
-  return node_pack_properties(integer, false, total, rounding, piecewise,
-                              nested_piecewise);
+  return node_pack_properties(
+      integer, false, total, (descendants & IXS_NODE_PROPERTY_ROUNDING) != 0,
+      (descendants & IXS_NODE_PROPERTY_PIECEWISE) != 0,
+      (descendants & IXS_NODE_PROPERTY_NESTED_PIECEWISE) != 0);
 }
 
 static uint8_t node_compute_mul_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.mul.coeff);
   bool total = node_property_total(node->u.mul.coeff);
-  bool rounding = ixs_node_contains_rounding(node->u.mul.coeff);
-  bool piecewise = ixs_node_contains_piecewise(node->u.mul.coeff);
-  bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.mul.coeff);
+  uint8_t descendants = node_descendant_properties(node->u.mul.coeff);
 
   for (i = 0; i < node->u.mul.nfactors; i++) {
     integer = integer && node->u.mul.factors[i].exp > 0 &&
               node_property_integer(node->u.mul.factors[i].base);
     total = total && node->u.mul.factors[i].exp > 0 &&
             node_property_total(node->u.mul.factors[i].base);
-    rounding =
-        rounding || ixs_node_contains_rounding(node->u.mul.factors[i].base);
-    piecewise =
-        piecewise || ixs_node_contains_piecewise(node->u.mul.factors[i].base);
-    nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
-                                               node->u.mul.factors[i].base);
+    descendants |= node_descendant_properties(node->u.mul.factors[i].base);
   }
-  return node_pack_properties(integer, false, total, rounding, piecewise,
-                              nested_piecewise);
+  return node_pack_properties(
+      integer, false, total, (descendants & IXS_NODE_PROPERTY_ROUNDING) != 0,
+      (descendants & IXS_NODE_PROPERTY_PIECEWISE) != 0,
+      (descendants & IXS_NODE_PROPERTY_NESTED_PIECEWISE) != 0);
 }
 
 static uint8_t node_compute_pw_properties(const ixs_node *node) {
@@ -23887,23 +23931,19 @@ static uint8_t node_compute_pw_properties(const ixs_node *node) {
   bool boolean = integer;
   bool total = integer && ixs_node_is_known_true(
                               node->u.pw.cases[node->u.pw.ncases - 1u].cond);
-  bool rounding = false;
-  bool nested_piecewise = false;
+  uint8_t descendants = 0;
 
   for (i = 0; i < node->u.pw.ncases; i++) {
     integer = integer && node_property_integer(node->u.pw.cases[i].value);
     boolean = boolean && node_property_bool(node->u.pw.cases[i].value);
     total = total && node_property_total(node->u.pw.cases[i].value) &&
             node_property_total(node->u.pw.cases[i].cond);
-    rounding = rounding ||
-               ixs_node_contains_rounding(node->u.pw.cases[i].value) ||
-               ixs_node_contains_rounding(node->u.pw.cases[i].cond);
-    nested_piecewise = nested_piecewise ||
-                       ixs_node_contains_piecewise(node->u.pw.cases[i].value) ||
-                       ixs_node_contains_piecewise(node->u.pw.cases[i].cond);
+    descendants |= node_descendant_properties(node->u.pw.cases[i].value) |
+                   node_descendant_properties(node->u.pw.cases[i].cond);
   }
-  return node_pack_properties(integer, boolean, total, rounding, true,
-                              nested_piecewise);
+  return node_pack_properties(
+      integer, boolean, total, (descendants & IXS_NODE_PROPERTY_ROUNDING) != 0,
+      true, (descendants & IXS_NODE_PROPERTY_PIECEWISE) != 0);
 }
 
 static uint8_t node_compute_assoc_properties(const ixs_node *node) {
@@ -23913,24 +23953,21 @@ static uint8_t node_compute_assoc_properties(const ixs_node *node) {
   bool boolean =
       canonical_arity && (node->tag == IXS_AND || node->tag == IXS_OR);
   bool total = canonical_arity;
-  bool rounding = false;
-  bool piecewise = false;
-  bool nested_piecewise = false;
+  uint8_t descendants = 0;
 
   for (i = 0; i < node->u.assoc.nargs; i++) {
     integer = integer && node_property_integer(node->u.assoc.args[i]);
     if (boolean)
       boolean = node_property_bool(node->u.assoc.args[i]);
     total = total && node_property_total(node->u.assoc.args[i]);
-    rounding = rounding || ixs_node_contains_rounding(node->u.assoc.args[i]);
-    piecewise = piecewise || ixs_node_contains_piecewise(node->u.assoc.args[i]);
-    nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
-                                               node->u.assoc.args[i]);
+    descendants |= node_descendant_properties(node->u.assoc.args[i]);
   }
   if (node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR)
     total = total && integer;
-  return node_pack_properties(integer, boolean, total, rounding, piecewise,
-                              nested_piecewise);
+  return node_pack_properties(
+      integer, boolean, total, (descendants & IXS_NODE_PROPERTY_ROUNDING) != 0,
+      (descendants & IXS_NODE_PROPERTY_PIECEWISE) != 0,
+      (descendants & IXS_NODE_PROPERTY_NESTED_PIECEWISE) != 0);
 }
 
 static uint8_t node_compute_simple_properties(const ixs_node *node) {
@@ -25016,6 +25053,28 @@ static ixs_node *parse_expr(parser *p);
 static ixs_node *parse_arith_expr(parser *p);
 static ixs_node *parse_cond(parser *p, bool allow_top_level_expr);
 
+static ixs_node *parse_piecewise_value(parser *p) {
+  parser_state state;
+  size_t start_pos = p->pos;
+  int start_depth = p->depth;
+  ixs_node *value;
+
+  /* Numeric values dominate production Piecewise nodes. Accept that grammar
+   * when it reaches the case delimiter; predicate syntax falls back to the
+   * condition parser without reparsing every ordinary arithmetic value. */
+  parser_state_save(p->ctx, &state);
+  value = parse_expr(p);
+  if (!value)
+    return NULL;
+  if (peek(p) == ',')
+    return value;
+
+  parser_state_restore(p->ctx, &state);
+  p->pos = start_pos;
+  p->depth = start_depth;
+  return parse_cond(p, true);
+}
+
 /* --- Grammar implementation --- */
 
 static ixs_node *parse_int(parser *p, bool negative) {
@@ -25207,11 +25266,7 @@ static ixs_node *parse_piecewise_impl(parser *p) {
     if (!match_char(p, '('))
       return parse_error(p, "expected '(' for Piecewise case");
 
-    /* A Piecewise value is a numeric expression, including the canonical
-     * 0/1 value of a structured predicate.  The condition parser's
-     * allow_top_level_expr mode preserves ordinary arithmetic while also
-     * accepting comparison/boolean-valued branches. */
-    ixs_node *val = parse_cond(p, true);
+    ixs_node *val = parse_piecewise_value(p);
     if (!val)
       return NULL;
 
@@ -35495,21 +35550,135 @@ failed:
   return false;
 }
 
+/* Repeated scalar simplification commonly reuses one direct assumption array.
+ * Retain only the first bounded-key domain in a session: memory is
+ * proportional to that explicit domain and cannot grow with the number of
+ * calls. Ordered pointer comparison is O(n); immutable context-owned nodes
+ * make a hit exact. */
+enum { SIMP_ASSUMPTION_CACHE_NODES = 64 };
+
+typedef struct {
+  ixs_bounds bounds;
+  size_t n_assumptions;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  size_t lookups;
+  size_t hits;
+  size_t misses;
+#endif
+  ixs_node *assumptions[SIMP_ASSUMPTION_CACHE_NODES];
+} simp_assumption_cache;
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+#define SIMP_ASSUMPTION_CACHE_NOTE(cache, field) ((cache)->field++)
+#else
+#define SIMP_ASSUMPTION_CACHE_NOTE(cache, field) ((void)(cache))
+#endif
+
+IXS_STATIC void simp_assumption_cache_reset(ixs_session_impl *impl) {
+  simp_assumption_cache *cache;
+  if (!impl)
+    return;
+  if (impl->assumption_bounds_cache) {
+    cache = impl->assumption_bounds_cache;
+    ixs_bounds_destroy(&cache->bounds);
+  }
+  ixs_arena_destroy(&impl->assumption_bounds_arena);
+  ixs_arena_init(&impl->assumption_bounds_arena, IXS_ARENA_DEFAULT_SIZE);
+  impl->assumption_bounds_cache = NULL;
+}
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC void
+simp_assumption_cache_stats(const ixs_session_impl *impl,
+                            simp_assumption_cache_stats_result *stats) {
+  const simp_assumption_cache *cache =
+      impl ? impl->assumption_bounds_cache : NULL;
+  if (!stats)
+    return;
+  memset(stats, 0, sizeof(*stats));
+  if (!cache)
+    return;
+  stats->lookups = cache->lookups;
+  stats->hits = cache->hits;
+  stats->misses = cache->misses;
+  stats->n_assumptions = cache->n_assumptions;
+  stats->present = true;
+}
+#endif
+
 IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
                                    ixs_node *const *assumptions,
                                    size_t n_assumptions) {
-  ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
+  ixs_session_impl *impl = ctx->active_session;
+  simp_assumption_cache *cache = impl ? impl->assumption_bounds_cache : NULL;
+  ixs_arena_mark m;
   ixs_bounds bnds;
-  ixs_bounds_build_status status = ixs_bounds_build_ctx(
-      &bnds, ctx, &ctx->scratch, assumptions, n_assumptions);
+  ixs_bounds *active_bounds = &bnds;
+  ixs_bounds_build_status status;
+  bool cached_read = false;
+  bool limited = false;
+  bool old_oom = false;
+  size_t i;
+
+  if (impl && !cache && n_assumptions > 0 &&
+      n_assumptions <= SIMP_ASSUMPTION_CACHE_NODES) {
+    ixs_arena *cache_arena = &impl->assumption_bounds_arena;
+    ixs_arena_mark cache_mark = ixs_arena_save(cache_arena);
+    cache = ixs_arena_alloc(cache_arena, sizeof(*cache), sizeof(void *));
+    if (!cache) {
+      ixs_arena_restore(cache_arena, cache_mark);
+      goto build_temporary;
+    }
+    memset(cache, 0, sizeof(*cache));
+    status = ixs_bounds_build_ctx(&cache->bounds, ctx, cache_arena, assumptions,
+                                  n_assumptions);
+    if (status != IXS_BOUNDS_BUILD_OK) {
+      ixs_arena_restore(cache_arena, cache_mark);
+      if (status == IXS_BOUNDS_BUILD_OOM)
+        goto build_temporary;
+      return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
+    }
+    cache->n_assumptions = n_assumptions;
+    memcpy(cache->assumptions, assumptions,
+           n_assumptions * sizeof(*assumptions));
+    impl->assumption_bounds_cache = cache;
+  }
+
+  if (cache && assumptions && cache->n_assumptions == n_assumptions) {
+    SIMP_ASSUMPTION_CACHE_NOTE(cache, lookups);
+    for (i = 0; i < n_assumptions; i++)
+      if (cache->assumptions[i] != assumptions[i])
+        break;
+    if (i == n_assumptions) {
+      SIMP_ASSUMPTION_CACHE_NOTE(cache, hits);
+      m = ixs_arena_save(&ctx->scratch);
+      active_bounds = &cache->bounds;
+      active_bounds->scratch = &ctx->scratch;
+      old_oom = active_bounds->oom;
+      cached_read = true;
+      goto simplify;
+    }
+    SIMP_ASSUMPTION_CACHE_NOTE(cache, misses);
+  }
+
+build_temporary:
+  m = ixs_arena_save(&ctx->scratch);
+  status = ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
+                                n_assumptions);
   if (status != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);
     return status == IXS_BOUNDS_BUILD_INVALID ? ctx->sentinel_error : NULL;
   }
-  expr = simp_simplify_bounds(ctx, expr, &bnds);
+simplify:
+  expr = simp_simplify_bounds_status(ctx, expr, active_bounds, &limited);
   if (expr && !ixs_node_is_sentinel(expr))
-    expr = simp_normalize_rational_carrier(ctx, &bnds, expr);
-  ixs_bounds_destroy(&bnds);
+    expr = simp_normalize_rational_carrier(ctx, active_bounds, expr);
+  if (cached_read) {
+    if (limited || !expr || (!old_oom && active_bounds->oom))
+      ixs_bounds_reset_read_cache(active_bounds, old_oom);
+  } else {
+    ixs_bounds_destroy(&bnds);
+  }
   ixs_arena_restore(&ctx->scratch, m);
   return expr;
 }

@@ -9,6 +9,7 @@
 
 #ifdef IXS_TEST_INTERNAL
 #include "node.h"
+#include "simplify.h"
 #endif
 
 #include "test_check.h"
@@ -1363,6 +1364,91 @@ static void test_substitution_collision_dag(void) {
 }
 
 #ifdef IXS_TEST_INTERNAL
+static void test_simplify_assumption_cache(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_ctx *other = ctx_create_or_die();
+  ixs_session *session = IXS_TEST_SESSION(ctx);
+  ixs_session_impl *impl = ixs_session_get(session);
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  simp_assumption_cache_stats_result stats;
+  ixs_node *x = ixs_sym(ctx, "assumption_cache_x");
+  ixs_node *y = ixs_sym(ctx, "assumption_cache_y");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *limit = ixs_int(ctx, 64);
+  ixs_node *expr = ixs_mod(ctx, x, limit);
+  ixs_node *assumptions[4] = {
+      ixs_cmp(ctx, x, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, x, IXS_CMP_LT, limit),
+      ixs_cmp(ctx, y, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, y, IXS_CMP_LT, limit),
+  };
+  ixs_node *reordered[4] = {assumptions[1], assumptions[0], assumptions[2],
+                            assumptions[3]};
+  ixs_node *invalid[4];
+  ixs_node *too_many[65];
+  size_t i;
+
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == x);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.present && stats.n_assumptions == 4);
+  CHECK(stats.lookups == 1 && stats.hits == 1 && stats.misses == 0);
+
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == x);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 2 && stats.misses == 0);
+
+  CHECK(ixs_is_domain_error(ixs_simplify(ctx, expr, NULL, 4)));
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.lookups == 2 && stats.hits == 2 && stats.misses == 0);
+
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == NULL);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == x);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.lookups == 4 && stats.hits == 4 && stats.misses == 0);
+
+  CHECK(ixs_simplify(ctx, expr, reordered, 4) == x);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.lookups == 5 && stats.hits == 4 && stats.misses == 1);
+
+  (ixs_session_reset)(session);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == x);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(stats.present && stats.hits == 1);
+
+  (ixs_session_reset)(session);
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) == expr);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+  for (i = 0; i < 65; i++)
+    too_many[i] = ixs_true(ctx);
+  CHECK(ixs_simplify(ctx, expr, too_many, 65) == expr);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+
+  ixs_arena_set_fail_after(&impl->assumption_bounds_arena, 0);
+  CHECK(ixs_simplify(ctx, expr, assumptions, 4) == x);
+  ixs_arena_set_fail_after(&impl->assumption_bounds_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+
+  memcpy(invalid, assumptions, sizeof(invalid));
+  invalid[3] =
+      ixs_cmp(other, ixs_sym(other, "foreign"), IXS_CMP_GE, ixs_int(other, 0));
+  CHECK(ixs_is_domain_error(ixs_simplify(ctx, expr, invalid, 4)));
+  simp_assumption_cache_stats(impl, &stats);
+  CHECK(!stats.present);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_substitution_failure_retry(void) {
   enum { SCRATCH_DEPTH = 256, STORE_DEPTH = 32 };
   ixs_ctx *ctx = ctx_create_or_die();
@@ -4705,6 +4791,7 @@ int main(void) {
   test_substitution_deep_iterative();
   test_substitution_collision_dag();
 #ifdef IXS_TEST_INTERNAL
+  test_simplify_assumption_cache();
   test_substitution_failure_retry();
 #endif
   test_sentinel_propagation();

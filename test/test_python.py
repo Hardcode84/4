@@ -1192,13 +1192,14 @@ def test_trunc_binding_constructs_toward_zero_rounding() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("trunc_binding_x")
     truncated = ixsimpl.trunc(x / 3)
+    trunc_dynamic: Any = ixsimpl.trunc
 
     assert truncated.tag == ixsimpl.TRUNC
     assert ixsimpl.same_node(truncated, ctx.parse_expr("Trunc(trunc_binding_x/3)"))
     assert int(truncated.subs(x, -5)) == -1
     assert int(truncated.subs(x, 5)) == 1
     with pytest.raises(TypeError, match="requires an Expr"):
-        ixsimpl.trunc(1)
+        trunc_dynamic(1)
 
 
 @pytest.mark.parametrize(

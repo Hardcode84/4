@@ -113,6 +113,28 @@ static ixs_node *parse_expr(parser *p);
 static ixs_node *parse_arith_expr(parser *p);
 static ixs_node *parse_cond(parser *p, bool allow_top_level_expr);
 
+static ixs_node *parse_piecewise_value(parser *p) {
+  parser_state state;
+  size_t start_pos = p->pos;
+  int start_depth = p->depth;
+  ixs_node *value;
+
+  /* Numeric values dominate production Piecewise nodes. Accept that grammar
+   * when it reaches the case delimiter; predicate syntax falls back to the
+   * condition parser without reparsing every ordinary arithmetic value. */
+  parser_state_save(p->ctx, &state);
+  value = parse_expr(p);
+  if (!value)
+    return NULL;
+  if (peek(p) == ',')
+    return value;
+
+  parser_state_restore(p->ctx, &state);
+  p->pos = start_pos;
+  p->depth = start_depth;
+  return parse_cond(p, true);
+}
+
 /* --- Grammar implementation --- */
 
 static ixs_node *parse_int(parser *p, bool negative) {
@@ -304,11 +326,7 @@ static ixs_node *parse_piecewise_impl(parser *p) {
     if (!match_char(p, '('))
       return parse_error(p, "expected '(' for Piecewise case");
 
-    /* A Piecewise value is a numeric expression, including the canonical
-     * 0/1 value of a structured predicate.  The condition parser's
-     * allow_top_level_expr mode preserves ordinary arithmetic while also
-     * accepting comparison/boolean-valued branches. */
-    ixs_node *val = parse_cond(p, true);
+    ixs_node *val = parse_piecewise_value(p);
     if (!val)
       return NULL;
 

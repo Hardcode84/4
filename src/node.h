@@ -32,6 +32,8 @@ typedef struct ixs_session_impl {
   ixs_ctx *ctx;
   uint64_t epoch;
   ixs_facts *facts_head;
+  void *assumption_bounds_cache;
+  ixs_arena assumption_bounds_arena;
   ixs_arena scratch;
   ixs_arena diag;
   const char **errors;

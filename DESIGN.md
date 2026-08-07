@@ -523,6 +523,11 @@ MUL, Piecewise, and associative child arrays are const after publication.
 This makes mutation through a node handle a compile-time error in both C and
 C++; it is not merely an API convention.
 
+Construction computes the property byte in the same child-array pass that
+checks integer and total classification. ADD, MUL, Piecewise, and associative
+nodes OR the already-published descendant property bytes once; they do not
+walk each child separately for rounding, Piecewise, and nested-Piecewise bits.
+
 `ixs_true(s)` returns the interned integer `1`, and `ixs_false(s)` returns the
 interned integer `0`.
 
@@ -707,6 +712,11 @@ The parser accepts SymPy's `ceiling`; the C API uses `ixs_ceil` for brevity.
 has no built-in exact-integer truncation node with the required structural
 round trip. Similarly, the parser accepts `True`/`False`; both parse to integer
 `1`/`0`.
+Piecewise values try the arithmetic grammar first, which is the common corpus
+path. Reaching the case comma commits that parse; any other following token
+restores parser and diagnostic state before using the predicate-valued grammar.
+Thus boolean-valued branches retain their syntax without parsing every numeric
+branch twice.
 The API convenience functions `ixs_true`/`ixs_false` return the same integer
 nodes.
 
@@ -1303,6 +1313,10 @@ OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
 Legacy array ingestion discards the whole temporary bound context when any
 entry is rejected or fails; it never queries a partially ingested prefix.
+Individual CMP and true/false roots validate without allocating an AND-cycle
+worklist. Only an AND root takes the bounded iterative walker path. A fresh
+bounds build also keeps its empty interval-result cache detached during
+ingestion, because no published query result exists to invalidate yet.
 `ixs_facts_create_preds` uses the same direct one-shot builder. It imports one
 exact assumption domain without simplifying predicates against earlier
 entries. Invalid input or OOM returns NULL without exposing a partial fact set.
@@ -1359,6 +1373,20 @@ Cached nodes are context-owned and immutable, so entries survive session reset
 and are released with the context. Lookup is O(n) in explicit batch size;
 replay is O(u + r) for `u` unique originals and `r` recorded refinements. Both
 bounds are independent of total context state.
+
+Scalar `ixs_simplify` has a separate session-local reuse path for its direct
+assumption array. The first nonempty array containing at most 64 roots retains
+its prepared semantic bounds domain. Later calls reuse it only after an exact
+ordered pointer comparison; a different key builds ordinary temporary bounds
+and never replaces the retained entry. The cache therefore grows with at most
+one explicit input domain, not with call count or context state. OOM or a proof
+limit clears query results before the domain is reused, and a rejected build is
+never published. Cache-storage OOM falls through to the ordinary temporary
+builder. Retained semantic storage uses a separate session-owned arena, so it
+does not move parser or rewrite temporaries past the ordinary scratch mark;
+read-query temporaries still use ordinary session scratch. Session reset and
+destroy release both cache arenas. This changes no assumption semantics and
+does not apply the reusable-facts closure algorithm.
 
 `ixs_facts_assume_pred` is its one-element form.
 Python `Facts.assume_many` and C++ `Facts::assume_many` expose the same batch.
@@ -3172,6 +3200,7 @@ raw bytes duplicates interior pointers and is invalid.
 
 - clears diagnostics
 - restores scratch to the session's post-init `base_mark`
+- discards the prepared direct-assumption domain
 - retains one cached spare heap chunk for reuse
 
 Each initialization and reset assigns a new store-local session epoch. A fact
