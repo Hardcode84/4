@@ -23,7 +23,6 @@ else()
         src/parser.c
         src/print.c
         src/rational.c
-        src/rational_intermediates.c
         src/serialize.c
         src/simplify.c
         src/walk.c
@@ -90,7 +89,7 @@ target_include_directories(ixsimpl_stats
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_compile_definitions(ixsimpl_stats PRIVATE IXS_STATS)
+target_compile_definitions(ixsimpl_stats PRIVATE IXS_STATS IXS_TEST_INTERNAL)
 
 add_executable(test_simplify test/test_simplify.c)
 target_link_libraries(test_simplify ixsimpl_stats)
@@ -173,8 +172,9 @@ if(NOT USE_AMALGAMATION)
     add_test(NAME test_arena COMMAND test_arena)
 
     add_executable(test_bounds test/test_bounds.c)
-    target_link_libraries(test_bounds ixsimpl)
+    target_link_libraries(test_bounds ixsimpl_stats)
     target_include_directories(test_bounds PRIVATE src)
+    target_compile_definitions(test_bounds PRIVATE IXS_TEST_INTERNAL)
     add_test(NAME test_bounds COMMAND test_bounds)
 endif()
 

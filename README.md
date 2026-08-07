@@ -136,19 +136,8 @@ API. Key functions:
 | `ixs_int`, `ixs_sym`, `ixs_add`, `ixs_trunc`, ... | Build expressions programmatically, including exact truncation toward zero |
 | `ixs_simplify` | Simplify with optional assumptions |
 | `ixs_simplify_batch` | Simplify multiple expressions sharing assumptions |
-| `ixs_check`, `ixs_range`, `ixs_integer_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
-| `ixs_check_rational_intermediates_facts` | Prove every order-independent rational materialization intermediate fits a machine word |
-| `ixs_plan_rational_materialization_facts` | Return the exact numerator/denominator plan authorized by that proof |
+| `ixs_check`, `ixs_range`, `ixs_get_pow2_fact` | Bounds-only queries under assumptions |
 | `ixs_facts_*` | First-class predicate and expression-range fact sets |
-| `ixs_equivalent_modulo_pow2_facts` | Total low-bit equivalence under facts |
-| `ixs_finite_domain_facts` | Typed, budgeted finite-domain equivalence, relation verification, and synthesis with separate call status and proof result |
-| `ixs_synthesize_mapped_expression_facts` / `ixs_verify_mapped_expression_facts` | Budgeted synthesis and universal verification for caller-ordered source/candidate point mappings and additive offsets |
-| `ixs_synthesize_mapped_bundle_facts` | Atomic multi-component mapped synthesis with exact per-row fact domains and one shared budget |
-| `ixs_mapped_constant_differences_facts` | Atomically prove an exact signed scalar difference for every caller-ordered mapped row |
-| `ixs_finite_domain_batch_facts` | Mixed logical property checks over one ordered Cartesian integer domain, with universal results and first row-major witnesses |
-| `ixs_decompose_cyclic_facts` | Prove a cyclic residual-plus-scaled-Mod decomposition |
-| `ixs_check_invariant_under_step_facts` | Prove `expr[symbol := symbol + step] == expr` under one closed fact domain |
-| `ixs_query_group_unions` | Bulk ordinary/finite-domain equivalence and exact/finite-domain constant-difference queries over exact pairwise predicate-group unions |
 | `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |
 | `ixs_import_node` / `ixs_import_many` | Structural import across contexts |
@@ -163,42 +152,6 @@ Interned nodes are immutable. The opaque `ixs_node` typedef is itself
 const-qualified, so constructors, transforms, child accessors, walks, proof
 queries, and pointer arrays all use immutable handles without losing direct
 composition between APIs.
-
-Finite-domain calls return `COMPLETE`, `EXHAUSTED`, `INVALID`, or `OOM`
-separately from the semantic `TRUE`/`FALSE`/`UNKNOWN` check. Only `COMPLETE`
-makes the check and optional synthesized value meaningful. A valid unsupported
-table is `COMPLETE` plus `UNKNOWN`; an insufficient caller budget or internal
-walk ceiling is `EXHAUSTED`; malformed input is `INVALID`; and allocation
-failure is `OOM`. Every non-complete result resets its check to `UNKNOWN` and
-its value to null.
-
-### Exact pair-union queries
-
-`ixs_query_group_unions` owns bulk symbolic-memory-style relation reasoning.
-Each query names two predicate groups and sees exactly their set union. Facts
-from any third group are excluded, including when the implementation shares
-work across the batch. All operands are scalar expressions: semantic predicate
-values participate as their canonical integer `0`/`1` values. Ordinary
-and finite-domain equivalence queries return `TRUE`, `FALSE`, or `UNKNOWN`;
-finite-domain mode may enumerate integer points proved bounded by the selected
-union. Constant-difference queries return `TRUE` with the exact signed
-difference or `UNKNOWN`. Finite-domain constant difference first uses that
-exact proof, then enumerates the complete selected Cartesian domain and
-requires one common signed `int64_t` `lhs - rhs` value; it never returns
-`FALSE`.
-
-The caller supplies one work budget for the entire call. Predicate-root
-replays, bounded semantic queries, and finite-domain points consume that budget
-before they run. Replay-support scratch is allocated only after the matching
-reservation succeeds; insufficient work returns `EXHAUSTED` without attempting
-that allocation. A finite-domain point product is reserved atomically, while
-the exact fast path consumes no point work.
-`COMPLETE`, caller-budget `EXHAUSTED`, internal-proof-ceiling `LIMITED`,
-`INVALID`, and `OOM` are distinct call statuses. Results are valid only after
-`COMPLETE`; every other status resets every result to `UNKNOWN` with a zero
-difference. Nodes remain owned by the session's store. All common, per-group,
-and selected-pair proof state is transient session scratch and is discarded
-before the function returns.
 
 ## Rule-Hit Statistics
 

@@ -13,8 +13,6 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <ixsimpl.h>
-#include <limits.h>
-#include <stdint.h>
 #include <string.h>
 
 /* Forward declarations */
@@ -128,28 +126,8 @@ static int raise_new_prefixed_error(ixs_session *session, size_t before,
   return 0;
 }
 
-static int raise_fact_query_status(ixs_session *session, size_t before,
-                                   ixs_fact_query_status status,
-                                   const char *operation) {
-  const char *message = NULL;
-  size_t after;
-  if (status == IXS_FACT_QUERY_COMPLETE)
-    return 0;
-  if (status == IXS_FACT_QUERY_OOM) {
-    PyErr_NoMemory();
-    return -1;
-  }
-  after = ixs_session_nerrors(session);
-  if (after > before)
-    message = ixs_session_error(session, before);
-  if (!message)
-    message = operation;
-  if (status == IXS_FACT_QUERY_INVALID)
-    PyErr_SetString(PyExc_ValueError, message);
-  else
-    PyErr_Format(PyExc_RuntimeError, "ixsimpl: %s proof resource limit reached",
-                 operation);
-  return -1;
+static int raise_new_divisibility_error(ixs_session *session, size_t before) {
+  return raise_new_prefixed_error(session, before, "divisibility:");
 }
 
 static PyObject *raise_exact_divide_error(ixs_session *session, size_t before) {
@@ -255,38 +233,6 @@ static size_t BytesReader_remaining(void *userdata) {
   if (state->pos > state->len)
     return 0;
   return (size_t)(state->len - state->pos);
-}
-
-static PyObject *serialize_node_to_bytes(ContextObject *ctx_obj,
-                                         const ixs_node *node) {
-  ixs_session *session = Context_session(ctx_obj);
-  size_t before_nerrors = ixs_session_nerrors(session);
-  size_t after_nerrors;
-  PyObject *tmp = PyByteArray_FromStringAndSize(NULL, 0);
-  PyObject *result;
-  BytesWriterState state;
-  const ixs_writer writer = {BytesWriter_write, &state};
-
-  if (!tmp)
-    return NULL;
-  state.buf_obj = tmp;
-  if (!ixs_serialize_node(session, node, &writer)) {
-    after_nerrors = ixs_session_nerrors(session);
-    Py_DECREF(tmp);
-    if (PyErr_Occurred())
-      return NULL;
-    if (after_nerrors > before_nerrors) {
-      PyErr_SetString(PyExc_RuntimeError,
-                      ixs_session_error(session, before_nerrors));
-      return NULL;
-    }
-    return PyErr_NoMemory();
-  }
-
-  result = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(tmp),
-                                     PyByteArray_GET_SIZE(tmp));
-  Py_DECREF(tmp);
-  return result;
 }
 
 static void Expr_dealloc(ExprObject *self) {
@@ -584,7 +530,6 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   size_t errors_before;
   ixs_session *session = Context_session(self->ctx_obj);
   const ixs_node *result;
-  ixs_simplify_result facts_result;
   Py_ssize_t i, n;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO", kwlist,
@@ -644,20 +589,13 @@ static PyObject *Expr_simplify(ExprObject *self, PyObject *args,
   }
 
   errors_before = ixs_session_nerrors(session);
-  if (facts_obj && facts_obj != Py_None) {
-    facts_result =
-        ixs_simplify_facts(((FactsObject *)facts_obj)->facts, self->node);
-    PyMem_Free(assumptions);
-    if (raise_fact_query_status(session, errors_before, facts_result.status,
-                                "simplify") < 0)
-      return NULL;
-    result = facts_result.value;
-  } else {
+  if (facts_obj && facts_obj != Py_None)
+    result = ixs_simplify_facts(((FactsObject *)facts_obj)->facts, self->node);
+  else
     result = ixs_simplify(session, self->node, assumptions, n_assumptions);
-    PyMem_Free(assumptions);
-    if (raise_new_simplify_error(session, errors_before) < 0)
-      return NULL;
-  }
+  PyMem_Free(assumptions);
+  if (raise_new_simplify_error(session, errors_before) < 0)
+    return NULL;
   return (PyObject *)Expr_wrap(self->ctx_obj, result);
 }
 
@@ -920,19 +858,13 @@ static PyObject *Expr_mul_factor_exp(ExprObject *self, PyObject *args) {
   return PyLong_FromLong(ixs_node_mul_factor_exp(self->node, (uint32_t)i));
 }
 
-static PyObject *Expr_to_bytes(ExprObject *self, PyObject *Py_UNUSED(args)) {
-  return serialize_node_to_bytes(self->ctx_obj, self->node);
-}
-
 static PyMethodDef Expr_methods[] = {
-    {"simplify", _PyCFunction_CAST(Expr_simplify), METH_VARARGS | METH_KEYWORDS,
+    {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
      "Simplify with either assumptions or a reusable fact set."},
     {"expand", (PyCFunction)Expr_expand, METH_NOARGS,
      "Distribute MUL over ADD (expand products of sums)."},
     {"to_c", (PyCFunction)Expr_to_c, METH_NOARGS,
      "Return C code representation."},
-    {"to_bytes", (PyCFunction)Expr_to_bytes, METH_NOARGS,
-     "Return the stable binary serialization."},
     {"subs", (PyCFunction)Expr_subs, METH_VARARGS,
      "expr.subs(target, repl) or expr.subs({t1: r1, ...}): simultaneous "
      "substitution. Keys can be str or Expr; values can be Expr or int."},
@@ -986,7 +918,7 @@ static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
 }
 
 static PyObject *Expr_get_node_ptr(ExprObject *self, void *Py_UNUSED(closure)) {
-  return PyLong_FromVoidPtr((void *)self->node);
+  return PyLong_FromVoidPtr(self->node);
 }
 
 static PyObject *Expr_get_nchildren(ExprObject *self,
@@ -1399,9 +1331,9 @@ static PyMethodDef Facts_methods[] = {
      "Atomically add a CMP/boolean or AND predicate fact."},
     {"assume_many", (PyCFunction)Facts_assume_many, METH_O,
      "Atomically add predicate facts."},
-    {"assume_range", _PyCFunction_CAST(Facts_assume_range),
+    {"assume_range", (PyCFunction)Facts_assume_range,
      METH_VARARGS | METH_KEYWORDS, "Add an explicit expression range fact."},
-    {"derive_affine", _PyCFunction_CAST(Facts_derive_affine),
+    {"derive_affine", (PyCFunction)Facts_derive_affine,
      METH_VARARGS | METH_KEYWORDS,
      "Derive range(derived) from range(base) via scale*base + offset."},
     {"subs", (PyCFunction)Facts_subs, METH_VARARGS,
@@ -1528,6 +1460,13 @@ static PyObject *Context_import_(ContextObject *self, PyObject *arg) {
 
 static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
   ExprObject *expr;
+  ixs_session *session;
+  size_t before_nerrors;
+  size_t after_nerrors;
+  PyObject *tmp;
+  PyObject *result;
+  BytesWriterState state;
+  const ixs_writer writer = {BytesWriter_write, &state};
 
   if (!PyObject_TypeCheck(arg, &_ExprType)) {
     PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
@@ -1535,13 +1474,30 @@ static PyObject *Context_serialize(ContextObject *self, PyObject *arg) {
   }
 
   expr = (ExprObject *)arg;
-  if (expr->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: cannot serialize an expression from a "
-                    "different context");
+  session = Context_session(self);
+  before_nerrors = ixs_session_nerrors(session);
+  tmp = PyByteArray_FromStringAndSize(NULL, 0);
+  if (!tmp)
     return NULL;
+
+  state.buf_obj = tmp;
+  if (!ixs_serialize_node(session, expr->node, &writer)) {
+    after_nerrors = ixs_session_nerrors(session);
+    Py_DECREF(tmp);
+    if (PyErr_Occurred())
+      return NULL;
+    if (after_nerrors > before_nerrors) {
+      PyErr_SetString(PyExc_RuntimeError,
+                      ixs_session_error(session, before_nerrors));
+      return NULL;
+    }
+    return PyErr_NoMemory();
   }
-  return serialize_node_to_bytes(self, expr->node);
+
+  result = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(tmp),
+                                     PyByteArray_GET_SIZE(tmp));
+  Py_DECREF(tmp);
+  return result;
 }
 
 static PyObject *Context_deserialize(ContextObject *self, PyObject *arg) {
@@ -1601,8 +1557,8 @@ typedef ixs_check_result (*Context_assumption_check_fn)(ixs_session *,
                                                         const ixs_node *,
                                                         const ixs_node *const *,
                                                         size_t);
-typedef ixs_fact_check_result (*Context_facts_check_fn)(ixs_facts *,
-                                                        const ixs_node *);
+typedef ixs_check_result (*Context_facts_check_fn)(ixs_facts *,
+                                                   const ixs_node *);
 
 static PyObject *Context_check_with(ContextObject *self, PyObject *args,
                                     PyObject *kwargs,
@@ -1632,7 +1588,6 @@ static PyObject *Context_check_with(ContextObject *self, PyObject *args,
   expr = ((ExprObject *)expr_obj)->node;
 
   if (facts_obj && facts_obj != Py_None) {
-    ixs_fact_check_result facts_result;
     if (assumptions_obj && assumptions_obj != Py_None) {
       PyErr_SetString(PyExc_ValueError,
                       "ixsimpl: pass either assumptions or facts, not both");
@@ -1647,12 +1602,7 @@ static PyObject *Context_check_with(ContextObject *self, PyObject *args,
                       "ixsimpl: facts from different context");
       return NULL;
     }
-    errors_before = ixs_session_nerrors(session);
-    facts_result = facts_fn(((FactsObject *)facts_obj)->facts, expr);
-    if (raise_fact_query_status(session, errors_before, facts_result.status,
-                                "fact check") < 0)
-      return NULL;
-    r = facts_result.check;
+    r = facts_fn(((FactsObject *)facts_obj)->facts, expr);
     if (r == IXS_CHECK_TRUE)
       Py_RETURN_TRUE;
     if (r == IXS_CHECK_FALSE)
@@ -1728,47 +1678,6 @@ static PyObject *check_result_to_py(ixs_check_result result) {
   Py_RETURN_NONE;
 }
 
-static PyObject *finite_domain_status_to_py(ixs_session *session,
-                                            size_t errors_before,
-                                            ixs_finite_domain_status status,
-                                            const char *error_prefix,
-                                            const char *invalid_fallback) {
-  const char *name;
-  switch (status) {
-  case IXS_FINITE_DOMAIN_COMPLETE:
-    name = "complete";
-    break;
-  case IXS_FINITE_DOMAIN_EXHAUSTED:
-    name = "exhausted";
-    break;
-  case IXS_FINITE_DOMAIN_LIMITED:
-    name = "limited";
-    break;
-  case IXS_FINITE_DOMAIN_INVALID: {
-    size_t error;
-    size_t error_count = ixs_session_nerrors(session);
-    for (error = errors_before; error < error_count; error++) {
-      const char *message = ixs_session_error(session, error);
-      if (message) {
-        PyErr_SetString(PyExc_ValueError, message);
-        return NULL;
-      }
-    }
-    PyErr_SetString(PyExc_ValueError, invalid_fallback);
-    return NULL;
-  }
-  case IXS_FINITE_DOMAIN_OOM:
-    return PyErr_NoMemory();
-  default:
-    PyErr_Format(PyExc_SystemError,
-                 "ixsimpl: unexpected finite-domain status %d", (int)status);
-    return NULL;
-  }
-  if (raise_new_prefixed_error(session, errors_before, error_prefix) < 0)
-    return NULL;
-  return PyUnicode_FromString(name);
-}
-
 static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
                                      PyObject *facts_obj, const ixs_node **expr,
                                      ixs_facts **facts);
@@ -1781,7 +1690,7 @@ static PyObject *Context_check_predicate(ContextObject *self, PyObject *args,
   ixs_session *session = Context_session(self);
   const ixs_node *predicate;
   ixs_facts *facts;
-  ixs_fact_check_result result;
+  ixs_check_result result;
   size_t errors_before;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &predicate_obj,
                                    &facts_obj))
@@ -1791,10 +1700,9 @@ static PyObject *Context_check_predicate(ContextObject *self, PyObject *args,
     return NULL;
   errors_before = ixs_session_nerrors(session);
   result = ixs_check_predicate_facts(facts, predicate);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "predicate") < 0)
+  if (raise_new_prefixed_error(session, errors_before, "predicate:") < 0)
     return NULL;
-  return check_result_to_py(result.check);
+  return check_result_to_py(result);
 }
 
 static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
@@ -1804,7 +1712,7 @@ static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
   PyObject *rhs_obj;
   PyObject *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_fact_check_result result;
+  ixs_check_result result;
   size_t errors_before;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &lhs_obj,
                                    &rhs_obj, &facts_obj))
@@ -1832,564 +1740,9 @@ static PyObject *Context_equivalent(ContextObject *self, PyObject *args,
   result = ixs_equivalent_facts(((FactsObject *)facts_obj)->facts,
                                 ((ExprObject *)lhs_obj)->node,
                                 ((ExprObject *)rhs_obj)->node);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "equivalence") < 0)
+  if (raise_new_prefixed_error(session, errors_before, "equivalence:") < 0)
     return NULL;
-  return check_result_to_py(result.check);
-}
-
-static PyObject *Context_equivalent_modulo_pow2(ContextObject *self,
-                                                PyObject *args,
-                                                PyObject *kwargs) {
-  static char *kwlist[] = {"lhs", "rhs", "bits", "facts", NULL};
-  PyObject *lhs_obj;
-  PyObject *rhs_obj;
-  PyObject *bits_obj;
-  PyObject *facts_obj;
-  ixs_session *session = Context_session(self);
-  ixs_fact_check_result result;
-  size_t errors_before;
-  long bits;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
-                                   &rhs_obj, &bits_obj, &facts_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
-      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
-    return NULL;
-  }
-  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
-      ((ExprObject *)rhs_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: expression from different context");
-    return NULL;
-  }
-  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-    return NULL;
-  }
-  if (((FactsObject *)facts_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
-    return NULL;
-  }
-  bits = PyLong_AsLong(bits_obj);
-  if ((bits == -1 && PyErr_Occurred()) || bits < 0 ||
-      (unsigned long)bits > (unsigned long)UINT_MAX) {
-    if (!PyErr_Occurred())
-      PyErr_SetString(PyExc_ValueError, "bits must be a nonnegative integer");
-    return NULL;
-  }
-  errors_before = ixs_session_nerrors(session);
-  result = ixs_equivalent_modulo_pow2_facts(
-      ((FactsObject *)facts_obj)->facts, ((ExprObject *)lhs_obj)->node,
-      ((ExprObject *)rhs_obj)->node, (unsigned)bits);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "modulo power-of-two equivalence") < 0)
-    return NULL;
-  return check_result_to_py(result.check);
-}
-
-static PyObject *Context_equivalent_finite_domain(ContextObject *self,
-                                                  PyObject *args,
-                                                  PyObject *kwargs) {
-  static char *kwlist[] = {"lhs", "rhs", "facts", "remaining_work", NULL};
-  PyObject *lhs_obj;
-  PyObject *rhs_obj;
-  PyObject *facts_obj;
-  PyObject *remaining_obj;
-  PyObject *status_answer;
-  PyObject *answer;
-  PyObject *remaining_answer;
-  PyObject *triple;
-  ixs_session *session = Context_session(self);
-  ixs_finite_domain_query query;
-  ixs_finite_domain_result result;
-  size_t remaining_work;
-  size_t errors_before;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &lhs_obj,
-                                   &rhs_obj, &facts_obj, &remaining_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(lhs_obj, &_ExprType) ||
-      !PyObject_TypeCheck(rhs_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "lhs and rhs must be Expr objects");
-    return NULL;
-  }
-  if (((ExprObject *)lhs_obj)->ctx_obj != self ||
-      ((ExprObject *)rhs_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: expression from different context");
-    return NULL;
-  }
-  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-    return NULL;
-  }
-  if (((FactsObject *)facts_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
-    return NULL;
-  }
-  remaining_work = PyLong_AsSize_t(remaining_obj);
-  if (remaining_work == (size_t)-1 && PyErr_Occurred())
-    return NULL;
-  errors_before = ixs_session_nerrors(session);
-  query.kind = IXS_FINITE_DOMAIN_EQUIVALENCE;
-  query.as.equivalence.lhs = ((ExprObject *)lhs_obj)->node;
-  query.as.equivalence.rhs = ((ExprObject *)rhs_obj)->node;
-  result = ixs_finite_domain_facts(((FactsObject *)facts_obj)->facts, &query,
-                                   &remaining_work);
-  status_answer = finite_domain_status_to_py(
-      session, errors_before, result.status,
-      "finite equivalence:", "finite equivalence: invalid query");
-  if (!status_answer)
-    return NULL;
-  answer = check_result_to_py(result.check);
-  remaining_answer = PyLong_FromSize_t(remaining_work);
-  if (!answer || !remaining_answer) {
-    Py_DECREF(status_answer);
-    Py_XDECREF(answer);
-    Py_XDECREF(remaining_answer);
-    return NULL;
-  }
-  triple = PyTuple_New(3);
-  if (!triple) {
-    Py_DECREF(status_answer);
-    Py_DECREF(answer);
-    Py_DECREF(remaining_answer);
-    return NULL;
-  }
-  PyTuple_SET_ITEM(triple, 0, status_answer);
-  PyTuple_SET_ITEM(triple, 1, answer);
-  PyTuple_SET_ITEM(triple, 2, remaining_answer);
-  return triple;
-}
-
-static PyObject *Context_check_finite_domain(ContextObject *self,
-                                             PyObject *args, PyObject *kwargs) {
-  static char *kwlist[] = {"domains", "queries", "facts", "remaining_work",
-                           NULL};
-  PyObject *domains_obj;
-  PyObject *queries_obj;
-  PyObject *facts_obj;
-  PyObject *remaining_obj;
-  PyObject *domain_sequence = NULL;
-  PyObject *query_sequence = NULL;
-  PyObject *answer_list = NULL;
-  PyObject *status_answer = NULL;
-  PyObject *remaining_answer = NULL;
-  PyObject *triple = NULL;
-  ixs_finite_integer_domain *domains = NULL;
-  ixs_finite_domain_batch_query *queries = NULL;
-  ixs_finite_domain_batch_result *results = NULL;
-  int64_t **point_storage = NULL;
-  Py_ssize_t ndomains;
-  Py_ssize_t nqueries;
-  Py_ssize_t index;
-  size_t remaining_work;
-  size_t errors_before;
-  ixs_finite_domain_status status;
-  ixs_session *session = Context_session(self);
-
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &domains_obj,
-                                   &queries_obj, &facts_obj, &remaining_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-    return NULL;
-  }
-  if (((FactsObject *)facts_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
-    return NULL;
-  }
-  remaining_work = PyLong_AsSize_t(remaining_obj);
-  if (remaining_work == (size_t)-1 && PyErr_Occurred())
-    return NULL;
-  domain_sequence =
-      PySequence_Fast(domains_obj, "domains must be an iterable of pairs");
-  query_sequence =
-      PySequence_Fast(queries_obj, "queries must be an iterable of pairs");
-  if (!domain_sequence || !query_sequence)
-    goto cleanup;
-  ndomains = PySequence_Fast_GET_SIZE(domain_sequence);
-  nqueries = PySequence_Fast_GET_SIZE(query_sequence);
-  if (ndomains > 0) {
-    domains = PyMem_Calloc((size_t)ndomains, sizeof(*domains));
-    point_storage = PyMem_Calloc((size_t)ndomains, sizeof(*point_storage));
-    if (!domains || !point_storage) {
-      PyErr_NoMemory();
-      goto cleanup;
-    }
-  }
-  if (nqueries > 0) {
-    queries = PyMem_Calloc((size_t)nqueries, sizeof(*queries));
-    results = PyMem_Calloc((size_t)nqueries, sizeof(*results));
-    if (!queries || !results) {
-      PyErr_NoMemory();
-      goto cleanup;
-    }
-  }
-
-  for (index = 0; index < ndomains; index++) {
-    PyObject *entry =
-        PySequence_Fast(PySequence_Fast_GET_ITEM(domain_sequence, index),
-                        "each domain must be (symbol, points)");
-    PyObject *points = NULL;
-    Py_ssize_t point;
-    Py_ssize_t npoints;
-    if (!entry)
-      goto cleanup;
-    if (PySequence_Fast_GET_SIZE(entry) != 2) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_ValueError,
-                      "each domain must contain exactly symbol and points");
-      goto cleanup;
-    }
-    PyObject *symbol_obj = PySequence_Fast_GET_ITEM(entry, 0);
-    if (!PyObject_TypeCheck(symbol_obj, &_ExprType)) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_TypeError, "domain symbol must be an Expr");
-      goto cleanup;
-    }
-    if (((ExprObject *)symbol_obj)->ctx_obj != self) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: domain symbol from different context");
-      goto cleanup;
-    }
-    points = PySequence_Fast(PySequence_Fast_GET_ITEM(entry, 1),
-                             "domain points must be an iterable of integers");
-    if (!points) {
-      Py_DECREF(entry);
-      goto cleanup;
-    }
-    npoints = PySequence_Fast_GET_SIZE(points);
-    if ((size_t)npoints > SIZE_MAX / sizeof(*point_storage[index])) {
-      Py_DECREF(points);
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_OverflowError,
-                      "finite-domain point table is too large");
-      goto cleanup;
-    }
-    if (npoints > 0) {
-      point_storage[index] =
-          PyMem_Malloc((size_t)npoints * sizeof(*point_storage[index]));
-      if (!point_storage[index]) {
-        Py_DECREF(points);
-        Py_DECREF(entry);
-        PyErr_NoMemory();
-        goto cleanup;
-      }
-    }
-    for (point = 0; point < npoints; point++)
-      if (!py_int64(PySequence_Fast_GET_ITEM(points, point),
-                    &point_storage[index][point], "domain point")) {
-        Py_DECREF(points);
-        Py_DECREF(entry);
-        goto cleanup;
-      }
-    domains[index].symbol = ((ExprObject *)symbol_obj)->node;
-    domains[index].points = point_storage[index];
-    domains[index].npoints = (size_t)npoints;
-    Py_DECREF(points);
-    Py_DECREF(entry);
-  }
-
-  for (index = 0; index < nqueries; index++) {
-    PyObject *entry =
-        PySequence_Fast(PySequence_Fast_GET_ITEM(query_sequence, index),
-                        "each query must be (kind, value)");
-    const char *kind;
-    PyObject *kind_obj;
-    PyObject *value_obj;
-    if (!entry)
-      goto cleanup;
-    if (PySequence_Fast_GET_SIZE(entry) != 2) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_ValueError,
-                      "each query must contain exactly kind and value");
-      goto cleanup;
-    }
-    kind_obj = PySequence_Fast_GET_ITEM(entry, 0);
-    value_obj = PySequence_Fast_GET_ITEM(entry, 1);
-    if (!PyUnicode_Check(kind_obj)) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_TypeError, "finite-domain query kind must be str");
-      goto cleanup;
-    }
-    if (!PyObject_TypeCheck(value_obj, &_ExprType)) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_TypeError,
-                      "finite-domain query value must be an Expr");
-      goto cleanup;
-    }
-    if (((ExprObject *)value_obj)->ctx_obj != self) {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: query value from different context");
-      goto cleanup;
-    }
-    kind = PyUnicode_AsUTF8(kind_obj);
-    if (!kind) {
-      Py_DECREF(entry);
-      goto cleanup;
-    }
-    if (strcmp(kind, "predicate") == 0)
-      queries[index].kind = IXS_FINITE_DOMAIN_PREDICATE_TRUE;
-    else if (strcmp(kind, "defined") == 0)
-      queries[index].kind = IXS_FINITE_DOMAIN_DEFINED;
-    else if (strcmp(kind, "integer") == 0)
-      queries[index].kind = IXS_FINITE_DOMAIN_INTEGER_VALUED;
-    else {
-      Py_DECREF(entry);
-      PyErr_SetString(PyExc_ValueError,
-                      "finite-domain query kind must be predicate, defined, "
-                      "or integer");
-      goto cleanup;
-    }
-    queries[index].value = ((ExprObject *)value_obj)->node;
-    Py_DECREF(entry);
-  }
-
-  errors_before = ixs_session_nerrors(session);
-  status = ixs_finite_domain_batch_facts(
-      ((FactsObject *)facts_obj)->facts, domains, (size_t)ndomains, queries,
-      (size_t)nqueries, results, &remaining_work);
-  status_answer = finite_domain_status_to_py(
-      session, errors_before, status,
-      "finite domain batch:", "finite domain batch: invalid query");
-  if (!status_answer)
-    goto cleanup;
-
-  answer_list = PyList_New(nqueries);
-  if (!answer_list)
-    goto cleanup;
-  for (index = 0; index < nqueries; index++) {
-    PyObject *check = check_result_to_py(results[index].check);
-    PyObject *witness = results[index].witness == SIZE_MAX
-                            ? Py_NewRef(Py_None)
-                            : PyLong_FromSize_t(results[index].witness);
-    PyObject *answer;
-    if (!check || !witness) {
-      Py_XDECREF(check);
-      Py_XDECREF(witness);
-      goto cleanup;
-    }
-    answer = PyTuple_Pack(2, check, witness);
-    Py_DECREF(check);
-    Py_DECREF(witness);
-    if (!answer)
-      goto cleanup;
-    PyList_SET_ITEM(answer_list, index, answer);
-  }
-  remaining_answer = PyLong_FromSize_t(remaining_work);
-  if (!remaining_answer)
-    goto cleanup;
-  triple = PyTuple_Pack(3, status_answer, answer_list, remaining_answer);
-
-cleanup:
-  if (point_storage)
-    for (index = 0; index < ndomains; index++)
-      PyMem_Free(point_storage[index]);
-  PyMem_Free(point_storage);
-  PyMem_Free(domains);
-  PyMem_Free(queries);
-  PyMem_Free(results);
-  Py_XDECREF(domain_sequence);
-  Py_XDECREF(query_sequence);
-  Py_XDECREF(answer_list);
-  Py_XDECREF(status_answer);
-  Py_XDECREF(remaining_answer);
-  return triple;
-}
-
-static bool mapped_difference_parse_expressions(ContextObject *self,
-                                                PyObject *sequence,
-                                                const ixs_node **expressions,
-                                                Py_ssize_t nexpressions) {
-  Py_ssize_t index;
-  for (index = 0; index < nexpressions; index++) {
-    PyObject *expression = PySequence_Fast_GET_ITEM(sequence, index);
-    if (!PyObject_TypeCheck(expression, &_ExprType)) {
-      PyErr_SetString(PyExc_TypeError,
-                      "each mapped expression must be an Expr");
-      return false;
-    }
-    if (((ExprObject *)expression)->ctx_obj != self) {
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: mapped expression from different context");
-      return false;
-    }
-    expressions[index] = ((ExprObject *)expression)->node;
-  }
-  return true;
-}
-
-static bool mapped_difference_parse_row(PyObject *object,
-                                        ixs_mapped_difference_row *row) {
-  PyObject *sequence = PySequence_Fast(
-      object, "each mapped difference row must be an iterable of four ints");
-  bool ok = false;
-  if (!sequence)
-    return false;
-  if (PySequence_Fast_GET_SIZE(sequence) != 4) {
-    PyErr_SetString(PyExc_ValueError,
-                    "each mapped difference row must contain four integers");
-    goto cleanup;
-  }
-  row->lhs_expression_index =
-      PyLong_AsSize_t(PySequence_Fast_GET_ITEM(sequence, 0));
-  if (row->lhs_expression_index == (size_t)-1 && PyErr_Occurred())
-    goto cleanup;
-  if (!py_int64(PySequence_Fast_GET_ITEM(sequence, 1), &row->lhs_point,
-                "mapped difference lhs point"))
-    goto cleanup;
-  row->rhs_expression_index =
-      PyLong_AsSize_t(PySequence_Fast_GET_ITEM(sequence, 2));
-  if (row->rhs_expression_index == (size_t)-1 && PyErr_Occurred())
-    goto cleanup;
-  if (!py_int64(PySequence_Fast_GET_ITEM(sequence, 3), &row->rhs_point,
-                "mapped difference rhs point"))
-    goto cleanup;
-  ok = true;
-
-cleanup:
-  Py_DECREF(sequence);
-  return ok;
-}
-
-static bool mapped_difference_parse_rows(PyObject *sequence,
-                                         ixs_mapped_difference_row *rows,
-                                         Py_ssize_t nrows) {
-  Py_ssize_t index;
-  for (index = 0; index < nrows; index++)
-    if (!mapped_difference_parse_row(PySequence_Fast_GET_ITEM(sequence, index),
-                                     &rows[index]))
-      return false;
-  return true;
-}
-
-static PyObject *mapped_difference_answer(ixs_check_result check,
-                                          const int64_t *differences,
-                                          Py_ssize_t nrows) {
-  PyObject *answer;
-  Py_ssize_t index;
-  if (check != IXS_CHECK_TRUE)
-    return Py_NewRef(Py_None);
-  answer = PyList_New(nrows);
-  if (!answer)
-    return NULL;
-  for (index = 0; index < nrows; index++) {
-    PyObject *value = PyLong_FromLongLong((long long)differences[index]);
-    if (!value) {
-      Py_DECREF(answer);
-      return NULL;
-    }
-    PyList_SET_ITEM(answer, index, value);
-  }
-  return answer;
-}
-
-static PyObject *Context_mapped_constant_differences(ContextObject *self,
-                                                     PyObject *args,
-                                                     PyObject *kwargs) {
-  static char *kwlist[] = {"symbol", "expressions",    "rows",
-                           "facts",  "remaining_work", NULL};
-  PyObject *symbol_obj;
-  PyObject *expressions_obj;
-  PyObject *rows_obj;
-  PyObject *facts_obj;
-  PyObject *remaining_obj;
-  PyObject *expression_sequence = NULL;
-  PyObject *row_sequence = NULL;
-  PyObject *status_answer = NULL;
-  PyObject *answer = NULL;
-  PyObject *remaining_answer = NULL;
-  PyObject *triple = NULL;
-  const ixs_node **expressions = NULL;
-  ixs_mapped_difference_row *rows = NULL;
-  int64_t *differences = NULL;
-  Py_ssize_t nexpressions = 0;
-  Py_ssize_t nrows = 0;
-  size_t remaining_work;
-  size_t errors_before;
-  ixs_finite_domain_result result;
-  ixs_session *session = Context_session(self);
-
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOOO", kwlist, &symbol_obj,
-                                   &expressions_obj, &rows_obj, &facts_obj,
-                                   &remaining_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(symbol_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "symbol must be an Expr");
-    return NULL;
-  }
-  if (((ExprObject *)symbol_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: symbol from different context");
-    return NULL;
-  }
-  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-    return NULL;
-  }
-  if (((FactsObject *)facts_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
-    return NULL;
-  }
-  remaining_work = PyLong_AsSize_t(remaining_obj);
-  if (remaining_work == (size_t)-1 && PyErr_Occurred())
-    return NULL;
-  expression_sequence = PySequence_Fast(
-      expressions_obj, "expressions must be an iterable of Expr objects");
-  row_sequence = PySequence_Fast(rows_obj, "rows must be an iterable");
-  if (!expression_sequence || !row_sequence)
-    goto cleanup;
-  nexpressions = PySequence_Fast_GET_SIZE(expression_sequence);
-  nrows = PySequence_Fast_GET_SIZE(row_sequence);
-  if (nexpressions > 0) {
-    expressions = PyMem_Calloc((size_t)nexpressions, sizeof(*expressions));
-    if (!expressions) {
-      PyErr_NoMemory();
-      goto cleanup;
-    }
-  }
-  if (nrows > 0) {
-    rows = PyMem_Calloc((size_t)nrows, sizeof(*rows));
-    differences = PyMem_Calloc((size_t)nrows, sizeof(*differences));
-    if (!rows || !differences) {
-      PyErr_NoMemory();
-      goto cleanup;
-    }
-  }
-  if (!mapped_difference_parse_expressions(self, expression_sequence,
-                                           expressions, nexpressions) ||
-      !mapped_difference_parse_rows(row_sequence, rows, nrows))
-    goto cleanup;
-
-  errors_before = ixs_session_nerrors(session);
-  result = ixs_mapped_constant_differences_facts(
-      ((FactsObject *)facts_obj)->facts, ((ExprObject *)symbol_obj)->node,
-      expressions, (size_t)nexpressions, rows, (size_t)nrows, differences,
-      &remaining_work);
-  status_answer = finite_domain_status_to_py(
-      session, errors_before, result.status, "mapped constant differences:",
-      "mapped constant differences: invalid query");
-  if (!status_answer)
-    goto cleanup;
-  answer = mapped_difference_answer(result.check, differences, nrows);
-  remaining_answer = PyLong_FromSize_t(remaining_work);
-  if (!answer || !remaining_answer)
-    goto cleanup;
-  triple = PyTuple_Pack(3, status_answer, answer, remaining_answer);
-
-cleanup:
-  PyMem_Free(expressions);
-  PyMem_Free(rows);
-  PyMem_Free(differences);
-  Py_XDECREF(expression_sequence);
-  Py_XDECREF(row_sequence);
-  Py_XDECREF(status_answer);
-  Py_XDECREF(answer);
-  Py_XDECREF(remaining_answer);
-  return triple;
+  return check_result_to_py(result);
 }
 
 static PyObject *Context_divisible(ContextObject *self, PyObject *args,
@@ -2397,7 +1750,7 @@ static PyObject *Context_divisible(ContextObject *self, PyObject *args,
   static char *kwlist[] = {"expr", "modulus", "facts", NULL};
   PyObject *expr_obj, *modulus_obj, *facts_obj;
   ixs_session *session = Context_session(self);
-  ixs_fact_check_result result;
+  ixs_check_result result;
   int64_t modulus;
   size_t errors_before;
 
@@ -2427,12 +1780,11 @@ static PyObject *Context_divisible(ContextObject *self, PyObject *args,
   errors_before = ixs_session_nerrors(session);
   result = ixs_check_divisible_facts(((FactsObject *)facts_obj)->facts,
                                      ((ExprObject *)expr_obj)->node, modulus);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "divisibility") < 0)
+  if (raise_new_divisibility_error(session, errors_before) < 0)
     return NULL;
-  if (result.check == IXS_CHECK_TRUE)
+  if (result == IXS_CHECK_TRUE)
     Py_RETURN_TRUE;
-  if (result.check == IXS_CHECK_FALSE)
+  if (result == IXS_CHECK_FALSE)
     Py_RETURN_FALSE;
   Py_RETURN_NONE;
 }
@@ -2572,8 +1924,9 @@ static PyObject *Context_constant_difference(ContextObject *self,
   PyObject *facts_obj;
   const ixs_node *exprs[2];
   ixs_facts *facts;
+  int64_t delta;
   size_t errors_before;
-  ixs_constant_difference_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_objs[0],
                                    &expr_objs[1], &facts_obj))
     return NULL;
@@ -2581,100 +1934,13 @@ static PyObject *Context_constant_difference(ContextObject *self,
                                  &facts))
     return NULL;
   errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_constant_difference_facts(facts, exprs[0], exprs[1]);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status, "constant difference") < 0)
+  ok = ixs_constant_difference_facts(facts, exprs[0], exprs[1], &delta);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "constant difference:") < 0)
     return NULL;
-  if (!result.available)
+  if (!ok)
     Py_RETURN_NONE;
-  return PyLong_FromLongLong((long long)result.difference);
-}
-
-static PyObject *Context_modulo_recurrence(ContextObject *self, PyObject *args,
-                                           PyObject *kwargs) {
-  static char *kwlist[] = {"value", "reference", "induction", "signedness",
-                           "width", "divisor",   "facts",     NULL};
-  static const char *names[] = {"value", "reference", "induction"};
-  PyObject *expr_objs[3];
-  PyObject *width_obj;
-  PyObject *divisor_obj;
-  PyObject *facts_obj;
-  const ixs_node *exprs[3];
-  ixs_facts *facts;
-  const char *signedness_text;
-  ixs_remainder_signedness signedness;
-  unsigned int width;
-  unsigned long long width_value;
-  unsigned long long divisor;
-  ixs_modulo_recurrence_result result;
-  size_t errors_before;
-  PyObject *pair;
-  PyObject *increment;
-  PyObject *remainder;
-
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOsOOO", kwlist,
-                                   &expr_objs[0], &expr_objs[1], &expr_objs[2],
-                                   &signedness_text, &width_obj, &divisor_obj,
-                                   &facts_obj))
-    return NULL;
-  width_value = PyLong_AsUnsignedLongLong(width_obj);
-  if (PyErr_Occurred())
-    return NULL;
-  if (width_value > UINT_MAX) {
-    PyErr_SetString(PyExc_OverflowError, "width does not fit unsigned int");
-    return NULL;
-  }
-  width = (unsigned int)width_value;
-  divisor = PyLong_AsUnsignedLongLong(divisor_obj);
-  if (PyErr_Occurred())
-    return NULL;
-  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
-                                 &facts))
-    return NULL;
-  if (strcmp(signedness_text, "signed") == 0)
-    signedness = IXS_REMAINDER_SIGNED;
-  else if (strcmp(signedness_text, "unsigned") == 0)
-    signedness = IXS_REMAINDER_UNSIGNED;
-  else {
-    PyErr_SetString(PyExc_ValueError,
-                    "signedness must be 'signed' or 'unsigned'");
-    return NULL;
-  }
-
-  errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_modulo_recurrence_facts(facts, exprs[0], exprs[1], exprs[2],
-                                       signedness, width, (uint64_t)divisor);
-  if (result.status == IXS_MODULO_RECURRENCE_OOM)
-    return PyErr_NoMemory();
-  if (result.status == IXS_MODULO_RECURRENCE_LIMITED) {
-    PyErr_SetString(PyExc_RuntimeError,
-                    "ixsimpl: modulo recurrence proof resource limit reached");
-    return NULL;
-  }
-  if (result.status == IXS_MODULO_RECURRENCE_INVALID) {
-    if (raise_new_prefixed_error(Context_session(self), errors_before,
-                                 "modulo recurrence:") < 0)
-      return NULL;
-    PyErr_SetString(PyExc_ValueError, "ixsimpl: invalid modulo recurrence");
-    return NULL;
-  }
-  if (result.status == IXS_MODULO_RECURRENCE_UNKNOWN)
-    Py_RETURN_NONE;
-
-  pair = PyTuple_New(2);
-  if (!pair)
-    return NULL;
-  increment = PyLong_FromUnsignedLongLong(result.increment);
-  remainder = (PyObject *)Expr_wrap(self, result.remainder);
-  if (!increment || !remainder) {
-    Py_XDECREF(increment);
-    Py_XDECREF(remainder);
-    Py_DECREF(pair);
-    return NULL;
-  }
-  PyTuple_SET_ITEM(pair, 0, increment);
-  PyTuple_SET_ITEM(pair, 1, remainder);
-  return pair;
+  return PyLong_FromLongLong((long long)delta);
 }
 
 static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
@@ -2684,9 +1950,11 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
   PyObject *expr_objs[2];
   PyObject *facts_obj;
   const ixs_node *exprs[2];
+  const ixs_node *coefficient;
+  const ixs_node *residual;
   ixs_facts *facts;
   size_t errors_before;
-  ixs_affine_decomposition_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_objs[0],
                                    &expr_objs[1], &facts_obj))
     return NULL;
@@ -2694,39 +1962,14 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
                                  &facts))
     return NULL;
   errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_affine_decompose_facts(facts, exprs[0], exprs[1]);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status, "affine decomposition") < 0)
+  ok = ixs_affine_decompose_facts(facts, exprs[0], exprs[1], &coefficient,
+                                  &residual);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "affine decomposition:") < 0)
     return NULL;
-  if (!result.available)
+  if (!ok)
     Py_RETURN_NONE;
-  return context_expr_pair(self, result.coefficient, result.residual);
-}
-
-static PyObject *Context_decompose_exact_quotient(ContextObject *self,
-                                                  PyObject *args,
-                                                  PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "facts", NULL};
-  PyObject *expr_obj;
-  PyObject *facts_obj;
-  const ixs_node *expr;
-  ixs_facts *facts;
-  size_t errors_before;
-  ixs_exact_quotient_result result;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
-                                   &facts_obj))
-    return NULL;
-  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_decompose_exact_quotient_facts(facts, expr);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status,
-                              "exact quotient decomposition") < 0)
-    return NULL;
-  if (!result.available)
-    Py_RETURN_NONE;
-  return context_expr_pair(self, result.numerator, result.denominator);
+  return context_expr_pair(self, coefficient, residual);
 }
 
 static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
@@ -2736,9 +1979,10 @@ static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
   PyObject *expr_objs[3];
   PyObject *facts_obj;
   const ixs_node *exprs[3];
+  const ixs_node *difference;
   ixs_facts *facts;
   size_t errors_before;
-  ixs_finite_difference_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_objs[0],
                                    &expr_objs[1], &expr_objs[2], &facts_obj))
     return NULL;
@@ -2746,39 +1990,14 @@ static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
                                  &facts))
     return NULL;
   errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_finite_difference_facts(facts, exprs[0], exprs[1], exprs[2]);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status, "finite difference") < 0)
+  ok = ixs_finite_difference_facts(facts, exprs[0], exprs[1], exprs[2],
+                                   &difference);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "finite difference:") < 0)
     return NULL;
-  if (!result.available)
+  if (!ok)
     Py_RETURN_NONE;
-  return (PyObject *)Expr_wrap(self, result.difference);
-}
-
-static PyObject *Context_invariant_under_step(ContextObject *self,
-                                              PyObject *args,
-                                              PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "symbol", "step", "facts", NULL};
-  static const char *names[] = {"expr", "symbol", "step"};
-  PyObject *expr_objs[3];
-  PyObject *facts_obj;
-  const ixs_node *exprs[3];
-  ixs_facts *facts;
-  size_t errors_before;
-  ixs_fact_check_result result;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_objs[0],
-                                   &expr_objs[1], &expr_objs[2], &facts_obj))
-    return NULL;
-  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
-                                 &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(Context_session(self));
-  result =
-      ixs_check_invariant_under_step_facts(facts, exprs[0], exprs[1], exprs[2]);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status, "step invariance") < 0)
-    return NULL;
-  return check_result_to_py(result.check);
+  return (PyObject *)Expr_wrap(self, difference);
 }
 
 static PyObject *Context_split_additive_constant(ContextObject *self,
@@ -2788,22 +2007,24 @@ static PyObject *Context_split_additive_constant(ContextObject *self,
   PyObject *expr_obj;
   PyObject *facts_obj;
   const ixs_node *expr;
+  const ixs_node *residual;
   ixs_facts *facts;
+  int64_t constant;
   size_t errors_before;
-  ixs_additive_constant_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
                                    &facts_obj))
     return NULL;
   if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
     return NULL;
   errors_before = ixs_session_nerrors(Context_session(self));
-  result = ixs_split_additive_constant_facts(facts, expr);
-  if (raise_fact_query_status(Context_session(self), errors_before,
-                              result.status, "additive constant") < 0)
+  ok = ixs_split_additive_constant_facts(facts, expr, &residual, &constant);
+  if (raise_new_prefixed_error(Context_session(self), errors_before,
+                               "additive constant:") < 0)
     return NULL;
-  if (!result.available)
+  if (!ok)
     Py_RETURN_NONE;
-  return context_expr_int_pair(self, result.residual, result.constant);
+  return context_expr_int_pair(self, residual, constant);
 }
 
 static PyObject *Context_known_bits(ContextObject *self, PyObject *args,
@@ -2813,19 +2034,21 @@ static PyObject *Context_known_bits(ContextObject *self, PyObject *args,
   ixs_session *session = Context_session(self);
   const ixs_node *expr;
   ixs_facts *facts;
+  ixs_known_bits bits;
   size_t errors_before;
-  ixs_known_bits_query_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &expr_obj,
                                    &facts_obj))
     return NULL;
   if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
     return NULL;
   errors_before = ixs_session_nerrors(session);
-  result = ixs_get_known_bits_facts(facts, expr);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "known bits") < 0)
+  ok = ixs_get_known_bits_facts(facts, expr, &bits);
+  if (raise_new_prefixed_error(session, errors_before, "known bits:") < 0)
     return NULL;
-  return known_bits_to_py(&result.bits);
+  if (!ok)
+    Py_RETURN_NONE;
+  return known_bits_to_py(&bits);
 }
 
 static PyObject *Context_symbol_congruence(ContextObject *self, PyObject *args,
@@ -2835,22 +2058,23 @@ static PyObject *Context_symbol_congruence(ContextObject *self, PyObject *args,
   ixs_session *session = Context_session(self);
   const ixs_node *symbol;
   ixs_facts *facts;
+  int64_t modulus;
+  int64_t residue;
   size_t errors_before;
-  ixs_symbol_congruence_result result;
+  bool ok;
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &symbol_obj,
                                    &facts_obj))
     return NULL;
   if (!context_query_expr_facts(self, symbol_obj, facts_obj, &symbol, &facts))
     return NULL;
   errors_before = ixs_session_nerrors(session);
-  result = ixs_get_symbol_congruence_facts(facts, symbol);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "symbol congruence") < 0)
+  ok = ixs_get_symbol_congruence_facts(facts, symbol, &modulus, &residue);
+  if (raise_new_prefixed_error(session, errors_before, "symbol congruence:") <
+      0)
     return NULL;
-  if (!result.available)
+  if (!ok)
     Py_RETURN_NONE;
-  return Py_BuildValue("(LL)", (long long)result.modulus,
-                       (long long)result.residue);
+  return Py_BuildValue("(LL)", (long long)modulus, (long long)residue);
 }
 
 static PyObject *Context_congruent(ContextObject *self, PyObject *args,
@@ -2860,7 +2084,7 @@ static PyObject *Context_congruent(ContextObject *self, PyObject *args,
   ixs_session *session = Context_session(self);
   const ixs_node *expr;
   ixs_facts *facts;
-  ixs_fact_check_result result;
+  ixs_check_result result;
   int64_t modulus;
   int64_t residue;
   size_t errors_before;
@@ -2874,47 +2098,13 @@ static PyObject *Context_congruent(ContextObject *self, PyObject *args,
     return NULL;
   errors_before = ixs_session_nerrors(session);
   result = ixs_check_congruent_facts(facts, expr, modulus, residue);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "congruence") < 0)
+  if (raise_new_prefixed_error(session, errors_before, "congruence:") < 0)
     return NULL;
-  if (result.check == IXS_CHECK_TRUE)
+  if (result == IXS_CHECK_TRUE)
     Py_RETURN_TRUE;
-  if (result.check == IXS_CHECK_FALSE)
+  if (result == IXS_CHECK_FALSE)
     Py_RETURN_FALSE;
   Py_RETURN_NONE;
-}
-
-static PyObject *Context_rational_intermediates_fit(ContextObject *self,
-                                                    PyObject *args,
-                                                    PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "word_bits", "facts", NULL};
-  PyObject *expr_obj, *word_bits_obj, *facts_obj;
-  ixs_session *session = Context_session(self);
-  const ixs_node *expr;
-  ixs_facts *facts;
-  ixs_fact_check_result result;
-  uint32_t word_bits;
-  unsigned long long word_bits_value;
-  size_t errors_before;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_obj,
-                                   &word_bits_obj, &facts_obj))
-    return NULL;
-  word_bits_value = PyLong_AsUnsignedLongLong(word_bits_obj);
-  if (PyErr_Occurred())
-    return NULL;
-  if (word_bits_value > UINT32_MAX) {
-    PyErr_SetString(PyExc_OverflowError, "word_bits does not fit uint32");
-    return NULL;
-  }
-  word_bits = (uint32_t)word_bits_value;
-  if (!context_query_expr_facts(self, expr_obj, facts_obj, &expr, &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(session);
-  result = ixs_check_rational_intermediates_facts(facts, expr, word_bits);
-  if (raise_fact_query_status(session, errors_before, result.status,
-                              "rational intermediates") < 0)
-    return NULL;
-  return check_result_to_py(result.check);
 }
 
 static PyObject *Context_try_exact_divide(ContextObject *self, PyObject *args,
@@ -2964,14 +2154,8 @@ static PyObject *Context_try_exact_divide(ContextObject *self, PyObject *args,
     return exact_divide_pair(self, "not_exact", NULL);
   case IXS_EXACT_DIVIDE_UNKNOWN:
     return exact_divide_pair(self, "unknown", NULL);
-  case IXS_EXACT_DIVIDE_LIMITED:
-    PyErr_SetString(PyExc_RuntimeError,
-                    "ixsimpl: exact division proof resource limit reached");
-    return NULL;
-  case IXS_EXACT_DIVIDE_INVALID:
+  case IXS_EXACT_DIVIDE_ERROR:
     return raise_exact_divide_error(session, errors_before);
-  case IXS_EXACT_DIVIDE_OOM:
-    return PyErr_NoMemory();
   }
   PyErr_SetString(PyExc_RuntimeError,
                   "ixsimpl: exact division returned an invalid status");
@@ -3004,7 +2188,6 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
   expr = ((ExprObject *)expr_obj)->node;
 
   if (facts_obj && facts_obj != Py_None) {
-    ixs_pow2_query_result facts_result;
     if (assumptions_obj && assumptions_obj != Py_None) {
       PyErr_SetString(PyExc_ValueError,
                       "ixsimpl: pass either assumptions or facts, not both");
@@ -3019,13 +2202,7 @@ static PyObject *Context_pow2_fact(ContextObject *self, PyObject *args,
                       "ixsimpl: facts from different context");
       return NULL;
     }
-    errors_before = ixs_session_nerrors(session);
-    facts_result =
-        ixs_get_pow2_fact_facts(((FactsObject *)facts_obj)->facts, expr);
-    if (raise_fact_query_status(session, errors_before, facts_result.status,
-                                "power-of-two fact") < 0)
-      return NULL;
-    r = facts_result.fact;
+    r = ixs_get_pow2_fact_facts(((FactsObject *)facts_obj)->facts, expr);
     if (r == IXS_POW2_OR_ZERO)
       return PyUnicode_FromString("or_zero");
     if (r == IXS_POW2_POSITIVE)
@@ -3135,7 +2312,6 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   expr = ((ExprObject *)expr_obj)->node;
 
   if (facts_obj && facts_obj != Py_None) {
-    ixs_range_query_result facts_result;
     if (assumptions_obj && assumptions_obj != Py_None) {
       PyErr_SetString(PyExc_ValueError,
                       "ixsimpl: pass either assumptions or facts, not both");
@@ -3150,14 +2326,8 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
                       "ixsimpl: facts from different context");
       return NULL;
     }
-    errors_before = ixs_session_nerrors(session);
-    facts_result = ixs_range_facts(((FactsObject *)facts_obj)->facts, expr);
-    if (raise_fact_query_status(session, errors_before, facts_result.status,
-                                "range") < 0)
-      return NULL;
-    if (!facts_result.available)
+    if (!ixs_range_facts(((FactsObject *)facts_obj)->facts, expr, &r))
       Py_RETURN_NONE;
-    r = facts_result.range;
     lo = range_endpoint_to_py(r.has_lower, r.lower_p, r.lower_q);
     if (!lo)
       return NULL;
@@ -3224,121 +2394,6 @@ static PyObject *Context_range(ContextObject *self, PyObject *args,
   return result;
 }
 
-static PyObject *Context_integer_range(ContextObject *self, PyObject *args,
-                                       PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "assumptions", "facts", NULL};
-  PyObject *expr_obj, *assumptions_obj = NULL, *facts_obj = NULL;
-  Py_ssize_t i, n_assumptions = 0;
-  const ixs_node *expr, **assumptions = NULL;
-  ixs_session *session = Context_session(self);
-  size_t errors_before;
-  ixs_integer_range_result r;
-  bool ok;
-  PyObject *lo, *hi, *result;
-
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &expr_obj,
-                                   &assumptions_obj, &facts_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(expr_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError, "expr must be an Expr");
-    return NULL;
-  }
-  if (((ExprObject *)expr_obj)->ctx_obj != self) {
-    PyErr_SetString(PyExc_ValueError,
-                    "ixsimpl: expression from different context");
-    return NULL;
-  }
-  expr = ((ExprObject *)expr_obj)->node;
-
-  if (facts_obj && facts_obj != Py_None) {
-    ixs_integer_range_query_result facts_result;
-    if (assumptions_obj && assumptions_obj != Py_None) {
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: pass either assumptions or facts, not both");
-      return NULL;
-    }
-    if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
-      PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
-      return NULL;
-    }
-    if (((FactsObject *)facts_obj)->ctx_obj != self) {
-      PyErr_SetString(PyExc_ValueError,
-                      "ixsimpl: facts from different context");
-      return NULL;
-    }
-    errors_before = ixs_session_nerrors(session);
-    facts_result =
-        ixs_integer_range_facts(((FactsObject *)facts_obj)->facts, expr);
-    if (raise_fact_query_status(session, errors_before, facts_result.status,
-                                "integer range") < 0)
-      return NULL;
-    if (!facts_result.available)
-      Py_RETURN_NONE;
-    r = facts_result.range;
-  } else {
-    if (assumptions_obj && assumptions_obj != Py_None) {
-      n_assumptions = PySequence_Size(assumptions_obj);
-      if (n_assumptions < 0)
-        return NULL;
-      if (n_assumptions > 0) {
-        assumptions =
-            PyMem_Malloc((size_t)n_assumptions * sizeof(const ixs_node *));
-        if (!assumptions)
-          return PyErr_NoMemory();
-        for (i = 0; i < n_assumptions; i++) {
-          PyObject *item = PySequence_GetItem(assumptions_obj, i);
-          if (!item || !PyObject_TypeCheck(item, &_ExprType)) {
-            Py_XDECREF(item);
-            PyMem_Free(assumptions);
-            PyErr_SetString(PyExc_TypeError, "each assumption must be an Expr");
-            return NULL;
-          }
-          if (((ExprObject *)item)->ctx_obj != self) {
-            Py_DECREF(item);
-            PyMem_Free(assumptions);
-            PyErr_SetString(PyExc_ValueError,
-                            "ixsimpl: assumption from different context");
-            return NULL;
-          }
-          assumptions[i] = ((ExprObject *)item)->node;
-          Py_DECREF(item);
-        }
-      }
-    }
-    errors_before = ixs_session_nerrors(session);
-    ok = ixs_integer_range(session, expr, assumptions, (size_t)n_assumptions,
-                           &r);
-    PyMem_Free(assumptions);
-    if (raise_new_assumption_error(session, errors_before) < 0)
-      return NULL;
-    if (!ok)
-      Py_RETURN_NONE;
-  }
-
-  if (r.has_lower)
-    lo = PyLong_FromLongLong((long long)r.lower);
-  else {
-    lo = Py_None;
-    Py_INCREF(lo);
-  }
-  if (!lo)
-    return NULL;
-  if (r.has_upper)
-    hi = PyLong_FromLongLong((long long)r.upper);
-  else {
-    hi = Py_None;
-    Py_INCREF(hi);
-  }
-  if (!hi) {
-    Py_DECREF(lo);
-    return NULL;
-  }
-  result = PyTuple_Pack(2, lo, hi);
-  Py_DECREF(lo);
-  Py_DECREF(hi);
-  return result;
-}
-
 static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
                                         PyObject *kwargs) {
   static char *kwlist[] = {"exprs", "assumptions", "facts", NULL};
@@ -3347,7 +2402,6 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
   const ixs_node **exprs = NULL, **assumptions = NULL;
   ixs_session *session = Context_session(self);
   size_t errors_before;
-  ixs_fact_query_status facts_status = IXS_FACT_QUERY_COMPLETE;
 
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OO", kwlist, &exprs_obj,
                                    &assumptions_obj, &facts_obj))
@@ -3432,17 +2486,13 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
   }
 
   errors_before = ixs_session_nerrors(session);
-  if (facts_obj && facts_obj != Py_None) {
-    facts_status = ixs_simplify_batch_facts(((FactsObject *)facts_obj)->facts,
-                                            exprs, (size_t)n_exprs);
-  } else {
+  if (facts_obj && facts_obj != Py_None)
+    ixs_simplify_batch_facts(((FactsObject *)facts_obj)->facts, exprs,
+                             (size_t)n_exprs);
+  else
     ixs_simplify_batch(session, exprs, (size_t)n_exprs, assumptions,
                        (size_t)n_assumptions);
-  }
-  if ((facts_obj && facts_obj != Py_None
-           ? raise_fact_query_status(session, errors_before, facts_status,
-                                     "batch simplify")
-           : raise_new_simplify_error(session, errors_before)) < 0) {
+  if (raise_new_simplify_error(session, errors_before) < 0) {
     PyMem_Free(exprs);
     PyMem_Free(assumptions);
     return NULL;
@@ -3535,98 +2585,55 @@ static PyMethodDef Context_methods[] = {
      "Build an inequality CMP node: ctx.ne(a, b)."},
     {"facts", (PyCFunction)Context_facts, METH_NOARGS,
      "Create a session-owned fact set."},
-    {"check", _PyCFunction_CAST(Context_check), METH_VARARGS | METH_KEYWORDS,
+    {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds. Assumptions accept CMP/boolean or AND predicates."},
-    {"integer_valued", _PyCFunction_CAST(Context_integer_valued),
+    {"integer_valued", (PyCFunction)Context_integer_valued,
      METH_VARARGS | METH_KEYWORDS,
      "Prove integrality from assumptions or facts; return bool or None."},
-    {"defined", _PyCFunction_CAST(Context_defined),
-     METH_VARARGS | METH_KEYWORDS,
+    {"defined", (PyCFunction)Context_defined, METH_VARARGS | METH_KEYWORDS,
      "Prove full-domain definedness from assumptions or facts; return bool "
      "or None."},
-    {"check_predicate", _PyCFunction_CAST(Context_check_predicate),
+    {"check_predicate", (PyCFunction)Context_check_predicate,
      METH_VARARGS | METH_KEYWORDS,
      "Check a compound predicate under a fact set; return bool or None."},
-    {"equivalent", _PyCFunction_CAST(Context_equivalent),
+    {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
-    {"equivalent_modulo_pow2",
-     _PyCFunction_CAST(Context_equivalent_modulo_pow2),
-     METH_VARARGS | METH_KEYWORDS,
-     "Prove total integer equivalence modulo 2**bits under a fact set."},
-    {"equivalent_finite_domain",
-     _PyCFunction_CAST(Context_equivalent_finite_domain),
-     METH_VARARGS | METH_KEYWORDS,
-     "Try ordinary equivalence, then finite-domain enumeration; return "
-     "(status, result, remaining_work)."},
-    {"check_finite_domain", _PyCFunction_CAST(Context_check_finite_domain),
-     METH_VARARGS | METH_KEYWORDS,
-     "Check typed properties over an ordered Cartesian integer domain; "
-     "return (status, [(result, witness)], remaining_work)."},
-    {"mapped_constant_differences",
-     _PyCFunction_CAST(Context_mapped_constant_differences),
-     METH_VARARGS | METH_KEYWORDS,
-     "Prove mapped scalar differences in caller order; return "
-     "(status, differences-or-None, remaining_work)."},
-    {"constant_difference", _PyCFunction_CAST(Context_constant_difference),
+    {"constant_difference", (PyCFunction)Context_constant_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return the proven integer lhs-rhs difference, or None."},
-    {"modulo_recurrence", _PyCFunction_CAST(Context_modulo_recurrence),
-     METH_VARARGS | METH_KEYWORDS,
-     "Prove a fixed-width modulo recurrence and return (increment, "
-     "remainder), or None."},
-    {"affine_decompose", _PyCFunction_CAST(Context_affine_decompose),
+    {"affine_decompose", (PyCFunction)Context_affine_decompose,
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
-    {"decompose_exact_quotient",
-     _PyCFunction_CAST(Context_decompose_exact_quotient),
-     METH_VARARGS | METH_KEYWORDS,
-     "Return an exact (numerator, denominator) pair, or None."},
-    {"finite_difference", _PyCFunction_CAST(Context_finite_difference),
+    {"finite_difference", (PyCFunction)Context_finite_difference,
      METH_VARARGS | METH_KEYWORDS,
      "Return expr(symbol+step)-expr(symbol), or None."},
-    {"invariant_under_step", _PyCFunction_CAST(Context_invariant_under_step),
-     METH_VARARGS | METH_KEYWORDS,
-     "Prove expr(symbol+step) == expr(symbol); return bool or None."},
-    {"split_additive_constant",
-     _PyCFunction_CAST(Context_split_additive_constant),
+    {"split_additive_constant", (PyCFunction)Context_split_additive_constant,
      METH_VARARGS | METH_KEYWORDS,
      "Return (residual, integer constant), or None."},
-    {"divisible", _PyCFunction_CAST(Context_divisible),
-     METH_VARARGS | METH_KEYWORDS,
+    {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
-    {"known_bits", _PyCFunction_CAST(Context_known_bits),
+    {"known_bits", (PyCFunction)Context_known_bits,
      METH_VARARGS | METH_KEYWORDS,
      "Return (known_zero, known_one, pow2) under a fact set, or None on an "
      "invalid query."},
-    {"symbol_congruence", _PyCFunction_CAST(Context_symbol_congruence),
+    {"symbol_congruence", (PyCFunction)Context_symbol_congruence,
      METH_VARARGS | METH_KEYWORDS,
      "Return a symbol's stored (modulus, residue), or None."},
-    {"congruent", _PyCFunction_CAST(Context_congruent),
-     METH_VARARGS | METH_KEYWORDS,
+    {"congruent", (PyCFunction)Context_congruent, METH_VARARGS | METH_KEYWORDS,
      "Prove a requested congruence under a fact set; return bool or None."},
-    {"rational_intermediates_fit",
-     _PyCFunction_CAST(Context_rational_intermediates_fit),
-     METH_VARARGS | METH_KEYWORDS,
-     "Prove that order-independent rational materialization intermediates "
-     "fit word_bits."},
-    {"try_exact_divide", _PyCFunction_CAST(Context_try_exact_divide),
+    {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
      METH_VARARGS | METH_KEYWORDS,
      "Prove exact division under facts; return (status, quotient)."},
-    {"pow2_fact", _PyCFunction_CAST(Context_pow2_fact),
-     METH_VARARGS | METH_KEYWORDS,
+    {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
      "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
      "or AND predicates."},
-    {"range", _PyCFunction_CAST(Context_range), METH_VARARGS | METH_KEYWORDS,
+    {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
      "Return an inclusive range or None, including supported powers, XOR, "
      "and first-match piecewise expressions. Assumptions accept CMP/boolean "
      "or AND predicates."},
-    {"integer_range", _PyCFunction_CAST(Context_integer_range),
-     METH_VARARGS | METH_KEYWORDS,
-     "Return a proved inclusive integer range or None. Rational bounds and "
-     "congruences are normalized internally."},
-    {"simplify_batch", _PyCFunction_CAST(Context_simplify_batch),
+    {"simplify_batch", (PyCFunction)Context_simplify_batch,
      METH_VARARGS | METH_KEYWORDS,
      "Simplify in-place with either assumptions or a reusable fact set."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,

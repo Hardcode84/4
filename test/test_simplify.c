@@ -301,6 +301,10 @@ static void test_mod_rules(void) {
   ixs_node *mx5 = ixs_mod(ctx, x, ixs_int(ctx, 5));
   CHECK(ixs_mod(ctx, mx5, ixs_int(ctx, 5)) == mx5);
 
+  /* Mod(c + Mod(x, m), m) -> Mod(c + x, m). */
+  CHECK(ixs_mod(ctx, ixs_add(ctx, ixs_int(ctx, 2), mx5), ixs_int(ctx, 5)) ==
+        ixs_mod(ctx, ixs_add(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 5)));
+
   /* Mod with non-integer argument must NOT fold to 0.
    * Mod(x*(x+1/3), 1) is NOT zero -- e.g. at x=2 it equals 2/3.
    * Regression: mod_bounds_elim called is_known_divisible without
@@ -489,6 +493,52 @@ static void test_mod_rules(void) {
     CHECK(ixs_node_tag(result) == IXS_MOD);
     CHECK(ixs_node_binary_lhs(result) == scaled);
   }
+}
+
+static void test_rational_carrier_factoring(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "rational_carrier_x");
+  ixs_node *a = ixs_sym(ctx, "rational_carrier_a");
+  ixs_node *b = ixs_sym(ctx, "rational_carrier_b");
+  ixs_node *c = ixs_sym(ctx, "rational_carrier_c");
+  ixs_node *d = ixs_sym(ctx, "rational_carrier_d");
+  ixs_node *condition = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *values[2] = {ixs_rat(ctx, 1, 2), ixs_int(ctx, 0)};
+  ixs_node *conditions[2] = {condition, ixs_true(ctx)};
+  ixs_node *selector = ixs_pw(ctx, 2, values, conditions);
+  ixs_node *quarter_sum =
+      ixs_add(ctx,
+              ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 4), a),
+                      ixs_mul(ctx, ixs_rat(ctx, 1, 4), b)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 4), c),
+                      ixs_mul(ctx, ixs_rat(ctx, 1, 4), d)));
+  ixs_node *noninteger = ixs_div(ctx, x, a);
+  ixs_node *unsupported =
+      ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), noninteger),
+              ixs_mul(ctx, ixs_rat(ctx, 1, 2), b));
+  ixs_node *result;
+  ixs_node *expected;
+
+  result = ixs_simplify(
+      ctx,
+      ixs_add(ctx, ixs_rat(ctx, 1, 2), ixs_mul(ctx, ixs_rat(ctx, 1, 4), x)),
+      NULL, 0);
+  expected = ixs_mul(ctx, ixs_rat(ctx, 1, 4), ixs_add(ctx, ixs_int(ctx, 2), x));
+  CHECK(result == expected);
+
+  CHECK(ixs_simplify(ctx, selector, NULL, 0) ==
+        ixs_mul(ctx, ixs_rat(ctx, 1, 2), condition));
+
+  result = ixs_simplify(
+      ctx, ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), x), selector), NULL,
+      0);
+  expected = ixs_mul(ctx, ixs_rat(ctx, 1, 2), ixs_add(ctx, x, condition));
+  CHECK(result == expected);
+
+  expected = ixs_mul(ctx, ixs_rat(ctx, 1, 4),
+                     ixs_add(ctx, ixs_add(ctx, a, b), ixs_add(ctx, c, d)));
+  CHECK(ixs_simplify(ctx, quarter_sum, NULL, 0) == expected);
+  CHECK(ixs_simplify(ctx, unsupported, NULL, 0) == unsupported);
 }
 
 static void test_mod_extract_constant_residue(void) {
@@ -1794,6 +1844,22 @@ static void test_floor_drop_small_bounded_term(void) {
   }
 }
 
+static void test_floor_shift_xor(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *item = ixs_sym(ctx, "redistribute_item");
+  ixs_node *source_wave =
+      ixs_floor(ctx, ixs_div(ctx, ixs_xor(ctx, item, ixs_int(ctx, 32)),
+                             ixs_int(ctx, 32)));
+  ixs_node *item_wave = ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 32)));
+  ixs_node *expected = ixs_xor(ctx, item_wave, ixs_int(ctx, 1));
+  ixs_node *assumptions[2] = {ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)),
+                              ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 63))};
+
+  /* Production redistribution toggles wave bit 5.  Canonical right-shift
+   * distribution exposes that the source and destination wave IDs differ. */
+  CHECK(ixs_simplify(ctx, source_wave, assumptions, 2) == expected);
+}
+
 static void test_nested_floor_ceil(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -2808,44 +2874,38 @@ static void test_fact_backed_simplification(void) {
   }
 
   {
-    ixs_simplify_result public_result = ixs_simplify_facts(facts, domain_error);
-    CHECK(public_result.status == IXS_FACT_QUERY_INVALID &&
-          public_result.value == NULL);
+    const ixs_node *public_result = ixs_simplify_facts(facts, domain_error);
+    CHECK(public_result == domain_error);
     public_result = ixs_simplify_facts(facts, parse_error);
-    CHECK(public_result.status == IXS_FACT_QUERY_INVALID &&
-          public_result.value == NULL);
+    CHECK(public_result == parse_error);
     public_result =
         ixs_simplify_facts(facts, ixs_sym(other, "facts_simplify_x"));
-    CHECK(public_result.status == IXS_FACT_QUERY_INVALID &&
-          public_result.value == NULL);
+    CHECK(ixs_is_domain_error(public_result));
   }
 
   {
     ixs_node *foreign = ixs_sym(other, "facts_simplify_y");
     fact_batch[0] = mod;
     fact_batch[1] = foreign;
-    CHECK(ixs_simplify_batch_facts(facts, fact_batch, 2) ==
-          IXS_FACT_QUERY_INVALID);
+    ixs_simplify_batch_facts(facts, fact_batch, 2);
     CHECK(fact_batch[0] == mod);
     CHECK(fact_batch[1] == foreign);
   }
 
   fact_batch[0] = domain_error;
   fact_batch[1] = floor;
-  CHECK(ixs_simplify_batch_facts(facts, fact_batch, 2) ==
-        IXS_FACT_QUERY_INVALID);
+  ixs_simplify_batch_facts(facts, fact_batch, 2);
   CHECK(fact_batch[0] == domain_error);
   CHECK(fact_batch[1] == floor);
 
   {
     ixs_facts *rejected = ixs_facts_create(ctx);
     ixs_node *unsupported = ixs_or(ctx, lo, hi);
-    ixs_simplify_result public_result;
+    const ixs_node *public_result;
     CHECK(ixs_facts_assume_pred(rejected, lo));
     CHECK(!ixs_facts_assume_pred(rejected, unsupported));
     public_result = ixs_simplify_facts(rejected, mod);
-    CHECK(public_result.status == IXS_FACT_QUERY_INVALID &&
-          public_result.value == NULL);
+    CHECK(ixs_is_domain_error(public_result));
     CHECK(test_ixs_check_facts(rejected, lo) == IXS_CHECK_UNKNOWN);
   }
 
@@ -3183,10 +3243,8 @@ static void test_fact_rewrite_constant_power(void) {
                               ixs_cmp(ctx, zero, IXS_CMP_EQ, ixs_int(ctx, 0))));
   errors = ixs_ctx_nerrors(ctx);
   {
-    ixs_simplify_result public_result =
-        ixs_simplify_facts(zero_facts, undefined);
-    CHECK(public_result.status == IXS_FACT_QUERY_INVALID &&
-          public_result.value == NULL);
+    const ixs_node *public_result = ixs_simplify_facts(zero_facts, undefined);
+    CHECK(public_result == NULL);
   }
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1);
   CHECK(strstr(ixs_ctx_error(ctx, errors), "division by zero") != NULL);
@@ -4618,6 +4676,7 @@ int main(void) {
   test_floor_rules();
   test_trunc_rules();
   test_mod_rules();
+  test_rational_carrier_factoring();
   test_mod_extract_constant_residue();
   test_mod_divisor_contract();
   test_boolean();
@@ -4633,6 +4692,7 @@ int main(void) {
   test_mod_extract_constant();
   test_floor_drop_small_rational();
   test_floor_drop_small_bounded_term();
+  test_floor_shift_xor();
   test_substitution();
   test_subs_multi();
   test_substitution_deep_iterative();

@@ -177,54 +177,13 @@ if TYPE_CHECKING:
         ) -> bool | None: ...
         def check_predicate(self, predicate: _Expr, facts: Facts) -> bool | None: ...
         def equivalent(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> bool | None: ...
-        def equivalent_modulo_pow2(
-            self, lhs: _Expr, rhs: _Expr, bits: int, facts: Facts
-        ) -> bool | None: ...
-        def equivalent_finite_domain(
-            self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_work: int
-        ) -> tuple[Literal["complete", "exhausted", "limited"], bool | None, int]: ...
-        def check_finite_domain(
-            self,
-            domains: Sequence[tuple[_Expr, Sequence[int]]],
-            queries: Sequence[tuple[Literal["predicate", "defined", "integer"], _Expr]],
-            facts: Facts,
-            remaining_work: int,
-        ) -> tuple[
-            Literal["complete", "exhausted", "limited"],
-            list[tuple[bool | None, int | None]],
-            int,
-        ]: ...
-        def mapped_constant_differences(
-            self,
-            symbol: _Expr,
-            expressions: Sequence[_Expr],
-            rows: Sequence[tuple[int, int, int, int]],
-            facts: Facts,
-            remaining_work: int,
-        ) -> tuple[Literal["complete", "exhausted", "limited"], list[int] | None, int]: ...
         def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
-        def modulo_recurrence(
-            self,
-            value: _Expr,
-            reference: _Expr,
-            induction: _Expr,
-            signedness: Literal["signed", "unsigned"],
-            width: int,
-            divisor: int,
-            facts: Facts,
-        ) -> tuple[int, Expr] | None: ...
         def affine_decompose(
             self, expr: _Expr, symbol: _Expr, facts: Facts
-        ) -> tuple[Expr, Expr] | None: ...
-        def decompose_exact_quotient(
-            self, expr: _Expr, facts: Facts
         ) -> tuple[Expr, Expr] | None: ...
         def finite_difference(
             self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
         ) -> Expr | None: ...
-        def invariant_under_step(
-            self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
-        ) -> bool | None: ...
         def split_additive_constant(self, expr: _Expr, facts: Facts) -> tuple[Expr, int] | None: ...
         def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
         def known_bits(
@@ -233,9 +192,6 @@ if TYPE_CHECKING:
         def symbol_congruence(self, symbol: _Expr, facts: Facts) -> tuple[int, int] | None: ...
         def congruent(
             self, expr: _Expr, modulus: int, residue: int, facts: Facts
-        ) -> bool | None: ...
-        def rational_intermediates_fit(
-            self, expr: _Expr, word_bits: int, facts: Facts
         ) -> bool | None: ...
         def try_exact_divide(
             self, expr: _Expr, divisor: int, facts: Facts

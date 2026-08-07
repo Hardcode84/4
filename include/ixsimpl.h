@@ -192,335 +192,11 @@ typedef enum {
   IXS_CHECK_UNKNOWN
 } ixs_check_result;
 
-/* Resource and input status for reusable-fact queries.  COMPLETE means the
- * query ran to a semantic conclusion; its payload may still be UNKNOWN or
- * unavailable when the facts do not prove the requested property.  LIMITED
- * and OOM are retryable without changing the fact set.  INVALID is a hard
- * caller or internal-contract failure and carries a session diagnostic when a
- * live session is available. */
-typedef enum {
-  IXS_FACT_QUERY_COMPLETE,
-  IXS_FACT_QUERY_LIMITED,
-  IXS_FACT_QUERY_INVALID,
-  IXS_FACT_QUERY_OOM
-} ixs_fact_query_status;
-
-typedef struct {
-  ixs_fact_query_status status;
-  ixs_check_result check;
-} ixs_fact_check_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  const ixs_node *value;
-} ixs_simplify_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  int64_t difference;
-} ixs_constant_difference_result;
-
-typedef enum {
-  IXS_GROUP_UNION_COMPLETE,
-  /* The caller-supplied work counter could not reserve the next unit. */
-  IXS_GROUP_UNION_EXHAUSTED,
-  /* A fixed internal proof traversal or saturation ceiling was reached. */
-  IXS_GROUP_UNION_LIMITED,
-  IXS_GROUP_UNION_INVALID,
-  IXS_GROUP_UNION_OOM
-} ixs_group_union_status;
-
-typedef enum {
-  IXS_GROUP_UNION_EQUIVALENT,
-  IXS_GROUP_UNION_CONSTANT_DIFFERENCE,
-  IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT,
-  IXS_GROUP_UNION_FINITE_DOMAIN_CONSTANT_DIFFERENCE
-} ixs_group_union_query_kind;
-
-typedef struct {
-  const ixs_node *const *predicates;
-  size_t n_predicates;
-} ixs_predicate_group;
-
-typedef struct {
-  size_t lhs_group;
-  size_t rhs_group;
-  ixs_group_union_query_kind kind;
-  const ixs_node *lhs;
-  const ixs_node *rhs;
-} ixs_group_union_query;
-
-typedef struct {
-  ixs_check_result status;
-  int64_t difference;
-} ixs_group_union_result;
-
-typedef enum {
-  IXS_FINITE_DOMAIN_EQUIVALENCE,
-  IXS_FINITE_DOMAIN_EXPR_RELATION,
-  IXS_FINITE_DOMAIN_PRED_RELATION,
-  IXS_FINITE_DOMAIN_EXPR_SYNTHESIS,
-  IXS_FINITE_DOMAIN_PRED_SYNTHESIS
-} ixs_finite_domain_query_kind;
-
-typedef enum {
-  IXS_FINITE_DOMAIN_COMPLETE,
-  IXS_FINITE_DOMAIN_EXHAUSTED,
-  IXS_FINITE_DOMAIN_LIMITED,
-  IXS_FINITE_DOMAIN_INVALID,
-  IXS_FINITE_DOMAIN_OOM
-} ixs_finite_domain_status;
-
-typedef struct {
-  const ixs_node *lhs;
-  const ixs_node *rhs;
-} ixs_finite_domain_equivalence_query;
-
-typedef struct {
-  const ixs_node *symbol;
-  const int64_t *points;
-  const ixs_node *const *values;
-  size_t npoints;
-} ixs_finite_domain_synthesis_query;
-
-typedef struct {
-  const ixs_node *symbol;
-  const int64_t *points;
-  const ixs_node *const *values;
-  size_t npoints;
-  const ixs_node *candidate;
-} ixs_finite_domain_relation_query;
-
-typedef struct {
-  ixs_finite_domain_query_kind kind;
-  union {
-    ixs_finite_domain_equivalence_query equivalence;
-    ixs_finite_domain_relation_query relation;
-    ixs_finite_domain_synthesis_query synthesis;
-  } as;
-} ixs_finite_domain_query;
-
-typedef struct {
-  ixs_finite_domain_status status;
-  ixs_check_result check;
-  const ixs_node *value;
-} ixs_finite_domain_result;
-
-/* One exact relation row for mapped scalar-expression synthesis and
- * verification.  Its equation is
- *
- *   expressions[expression_index](symbol := expression_point)
- *       == candidate(symbol := candidate_point) + additive_offset.
- */
-typedef struct {
-  size_t expression_index;
-  int64_t expression_point;
-  int64_t candidate_point;
-  int64_t additive_offset;
-} ixs_mapped_expression_row;
-
-typedef enum {
-  IXS_MAPPED_BUNDLE_SCALAR,
-  IXS_MAPPED_BUNDLE_PREDICATE
-} ixs_mapped_bundle_component_kind;
-
-/* One mapped relation row and the exact fact domain that must prove it. */
-typedef struct {
-  ixs_facts *facts;
-  ixs_mapped_expression_row relation;
-} ixs_mapped_bundle_row;
-
-/* One ordered output component in an atomic mapped-bundle query.
- * `synthesis_facts` is the first, normally common, candidate nomination
- * domain. Exact row domains may nominate alternatives when it is
- * inconclusive. */
-typedef struct {
-  ixs_mapped_bundle_component_kind kind;
-  ixs_facts *synthesis_facts;
-  const ixs_node *symbol;
-  const ixs_node *const *expressions;
-  size_t nexpressions;
-  const ixs_mapped_bundle_row *rows;
-  size_t nrows;
-  bool has_candidate_range;
-  int64_t candidate_lower;
-  int64_t candidate_upper;
-} ixs_mapped_bundle_component;
-
-typedef struct {
-  ixs_finite_domain_status status;
-  ixs_check_result check;
-} ixs_mapped_bundle_result;
-
-/* One exact scalar-difference row. Its output is
- *
- *   expressions[lhs_expression_index](symbol := lhs_point)
- *       - expressions[rhs_expression_index](symbol := rhs_point).
- */
-typedef struct {
-  size_t lhs_expression_index;
-  int64_t lhs_point;
-  size_t rhs_expression_index;
-  int64_t rhs_point;
-} ixs_mapped_difference_row;
-
-/* One explicitly ordered integer-symbol domain for a finite batch query. */
-typedef struct {
-  const ixs_node *symbol;
-  const int64_t *points;
-  size_t npoints;
-} ixs_finite_integer_domain;
-
-typedef enum {
-  IXS_FINITE_DOMAIN_PREDICATE_TRUE,
-  IXS_FINITE_DOMAIN_DEFINED,
-  IXS_FINITE_DOMAIN_INTEGER_VALUED
-} ixs_finite_domain_batch_query_kind;
-
-/* A typed logical property to check at every point in a Cartesian product.
- * PREDICATE_TRUE requires a predicate node. DEFINED and INTEGER_VALUED
- * accept every expression node, including predicate-valued expressions. */
-typedef struct {
-  ixs_finite_domain_batch_query_kind kind;
-  const ixs_node *value;
-} ixs_finite_domain_batch_query;
-
-/* Universal result for one batch query. `witness` is the row-major ordinal of
- * the first point whose result was not TRUE, with the last domain varying
- * fastest. It is SIZE_MAX when every point returned TRUE. */
-typedef struct {
-  ixs_check_result check;
-  size_t witness;
-} ixs_finite_domain_batch_result;
-
-typedef enum {
-  IXS_REDISTRIBUTION_RELATION_INCONCLUSIVE,
-  IXS_REDISTRIBUTION_RELATION_VALID,
-  IXS_REDISTRIBUTION_RELATION_NOT_TOTAL,
-  IXS_REDISTRIBUTION_RELATION_OUT_OF_BOUNDS
-} ixs_redistribution_relation_validation;
-
-typedef enum {
-  IXS_REDISTRIBUTION_EXHAUSTED_NONE,
-  IXS_REDISTRIBUTION_EXHAUSTED_VALIDATION,
-  IXS_REDISTRIBUTION_EXHAUSTED_MOVEMENT
-} ixs_redistribution_exhausted_phase;
-
-typedef enum {
-  IXS_REDISTRIBUTION_BLOCK,
-  IXS_REDISTRIBUTION_ITEM,
-  IXS_REDISTRIBUTION_SLOT,
-  IXS_REDISTRIBUTION_COORDINATE_NONE
-} ixs_redistribution_coordinate;
-
-/* Fixed block/item/slot relation. Destination coordinates range over
- * [0, blocks) x [0, items) x [0, result_slots). Source coordinates must lie
- * in the corresponding block, item, and source-slot ranges. */
-typedef struct {
-  const ixs_node *block;
-  const ixs_node *item;
-  const ixs_node *slot;
-  const ixs_node *source_block;
-  const ixs_node *source_item;
-  const ixs_node *source_slot;
-  int64_t blocks;
-  int64_t items;
-  int64_t source_slots;
-  int64_t result_slots;
-  int64_t wave_width;
-} ixs_redistribution_relation_query;
-
-typedef struct {
-  ixs_finite_domain_status status;
-  ixs_redistribution_relation_validation validation;
-  ixs_redistribution_exhausted_phase exhausted_phase;
-  ixs_check_result same_block;
-  ixs_check_result same_item;
-  ixs_check_result same_wave;
-  ixs_check_result same_slot;
-  size_t witness;
-  int64_t witness_value;
-  ixs_redistribution_coordinate witness_coordinate;
-} ixs_redistribution_relation_result;
-
-/* Signedness of a fixed-width integer remainder. */
-typedef enum {
-  IXS_REMAINDER_SIGNED,
-  IXS_REMAINDER_UNSIGNED
-} ixs_remainder_signedness;
-
-typedef enum {
-  IXS_MODULO_RECURRENCE_PROVEN,
-  IXS_MODULO_RECURRENCE_UNKNOWN,
-  IXS_MODULO_RECURRENCE_LIMITED,
-  IXS_MODULO_RECURRENCE_INVALID,
-  IXS_MODULO_RECURRENCE_OOM
-} ixs_modulo_recurrence_status;
-
-/* A proved fixed-width modulo recurrence. `increment` is normalized to
- * [0, divisor), and `remainder` is the exact fixed-width remainder of the
- * supplied induction expression. Both payload fields are meaningful only for
- * PROVEN. */
-typedef struct {
-  ixs_modulo_recurrence_status status;
-  uint64_t increment;
-  const ixs_node *remainder;
-} ixs_modulo_recurrence_result;
-
-/* One candidate relation from a modulo target to another target's remainder
- * result. A NULL expression denotes that exact result directly. Otherwise
- * expression is that result represented in this target's fact domain. */
-typedef struct {
-  size_t target_index;
-  const ixs_node *expression;
-} ixs_modulo_recurrence_reference;
-
-/* One fixed-width remainder rewrite target. value and the target-local form of
- * the loop induction are expressed in facts; references provide alternate,
- * explicitly related anchors when a direct value-to-induction proof is
- * inconclusive. The caller guarantees that induction denotes the common loop
- * induction supplied to the plan query. divisor is the raw width-bit divisor
- * encoding, including two's-complement negative signed divisors. */
-typedef struct {
-  ixs_facts *facts;
-  const ixs_node *value;
-  const ixs_node *induction;
-  const ixs_modulo_recurrence_reference *references;
-  size_t nreferences;
-  ixs_remainder_signedness signedness;
-  uint64_t divisor;
-} ixs_modulo_recurrence_target;
-
-/* One proved recurrence shared by every planned target in the group. divisor
- * is a positive normalized magnitude. successor_increment advances the exact
- * induction remainder by one loop successor. */
-typedef struct {
-  ixs_remainder_signedness signedness;
-  uint64_t divisor;
-  uint64_t successor_increment;
-  const ixs_node *remainder;
-} ixs_modulo_recurrence_plan_group;
-
-/* One target's relation to its plan group. group_index is SIZE_MAX when the
- * target has no proved plan. */
-typedef struct {
-  size_t group_index;
-  uint64_t increment;
-} ixs_modulo_recurrence_plan_entry;
-
-typedef struct {
-  ixs_finite_domain_status status;
-  size_t ngroups;
-} ixs_modulo_recurrence_plan_result;
-
 typedef enum {
   IXS_EXACT_DIVIDE_PROVEN,
   IXS_EXACT_DIVIDE_NOT_EXACT,
   IXS_EXACT_DIVIDE_UNKNOWN,
-  IXS_EXACT_DIVIDE_LIMITED,
-  IXS_EXACT_DIVIDE_INVALID,
-  IXS_EXACT_DIVIDE_OOM
+  IXS_EXACT_DIVIDE_ERROR
 } ixs_exact_divide_status;
 
 typedef struct {
@@ -543,16 +219,6 @@ typedef struct {
 } ixs_known_bits;
 
 typedef struct {
-  ixs_fact_query_status status;
-  ixs_pow2_fact fact;
-} ixs_pow2_query_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  ixs_known_bits bits;
-} ixs_known_bits_query_result;
-
-typedef struct {
   bool has_lower;
   bool has_upper;
   int64_t lower_p;
@@ -567,93 +233,6 @@ typedef struct {
   int64_t lower;
   int64_t upper;
 } ixs_integer_range_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  ixs_range_result range;
-} ixs_range_query_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  ixs_integer_range_result range;
-} ixs_integer_range_query_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  int64_t modulus;
-  int64_t residue;
-} ixs_symbol_congruence_result;
-
-/* Proven decomposition
- *   expr = residual + scale * Mod(symbol + phase, modulus).
- * scale and modulus are positive, modulus is greater than one, and ring is
- * their exactly representable product.  residual is invariant in symbol.
- * residual_bounded reports the additional proof 0 <= residual < scale. */
-typedef struct {
-  const ixs_node *residual;
-  int64_t scale;
-  int64_t modulus;
-  int64_t phase;
-  int64_t ring;
-  bool residual_bounded;
-} ixs_cyclic_decomposition;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  const ixs_node *coefficient;
-  const ixs_node *residual;
-} ixs_affine_decomposition_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  const ixs_node *numerator;
-  const ixs_node *denominator;
-} ixs_exact_quotient_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  const ixs_node *difference;
-} ixs_finite_difference_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  ixs_cyclic_decomposition decomposition;
-} ixs_cyclic_decomposition_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  const ixs_node *residual;
-  int64_t constant;
-} ixs_additive_constant_result;
-
-/* Exact rational materialization plan returned by the width query.  Numerator
- * and denominator are populated only when check is TRUE.  The denominator is
- * always positive, and the proof does not depend on canonical child order. A
- * TRUE plan for a root containing rational materialization proves that its
- * exported numerator and construction fit the word domain. With denominator
- * greater than one, either numerator_nonnegative is true or the numerator fits
- * the signed word domain. numerator_nonnegative records a proof that the exact
- * numerator is at least zero. ceil_bias_safe records a proof that numerator +
- * denominator - 1 fits the word domain (and the signed word domain unless
- * numerator_nonnegative is true). Both strategy flags are conservative and
- * false without such proof.
- */
-typedef struct {
-  ixs_fact_query_status status;
-  ixs_check_result check;
-  const ixs_node *numerator;
-  int64_t denominator;
-  bool numerator_nonnegative;
-  bool ceil_bias_safe;
-} ixs_rational_materialization_plan;
 
 /* Assumption contract shared by simplify, simplify_batch, check,
  * check_integer_valued, check_defined, get_pow2_fact, range, integer_range, and
@@ -785,473 +364,112 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
                                 const ixs_node *const *replacements);
 
 /* Simplify directly against an existing fact set without rebuilding bounds.
- * value is populated only for COMPLETE.  A fixed internal work ceiling is
- * LIMITED, malformed or foreign input is INVALID, and allocation failure is
- * OOM. Detected contradictory facts return COMPLETE with expr unchanged. */
-ixs_simplify_result ixs_simplify_facts(ixs_facts *facts, const ixs_node *expr);
+ * NULL reports OOM, a resource limit, or an expired/reset session.  Sentinel
+ * input propagates; invalid live input returns the fact set context's
+ * domain-error sentinel.  Detected contradictory facts return expr unchanged.
+ * Live failures append a session diagnostic. */
+const ixs_node *ixs_simplify_facts(ixs_facts *facts, const ixs_node *expr);
 
-/* Fact-backed batch simplification.  The operation is transactional: entries
- * are replaced only for COMPLETE and remain unchanged for LIMITED, INVALID,
- * or OOM.  NULL and sentinel entries are invalid input.  Detected
- * contradictory facts return COMPLETE with every entry unchanged. */
-ixs_fact_query_status
-ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs, size_t n);
+/* Fact-backed batch simplification.  On failure the operation is
+ * transactional and leaves every entry unchanged.  NULL and sentinel entries
+ * are invalid input.  Detected contradictory facts leave every entry
+ * unchanged.  Live failures append a session diagnostic. */
+void ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs,
+                              size_t n);
 
 /* Reusable-fact form of ixs_check with the same CMP or canonical
  * true/false input contract. */
-ixs_fact_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
 /* Check a predicate tree against an existing fact set.  AND, OR, and NOT use
  * conservative three-valued logic.  Numeric bitwise AND/OR expressions are
  * rejected because they are not predicate trees. */
-ixs_fact_check_result ixs_check_predicate_facts(ixs_facts *facts,
-                                                const ixs_node *predicate);
-/* Report whether the reusable fact domain is nonempty.  TRUE means no
- * contradiction detectable by the fact engine, FALSE means a detected empty
- * domain, and UNKNOWN means the fact set is invalid, expired, or exhausted. */
-ixs_fact_check_result ixs_check_consistent_facts(ixs_facts *facts);
+ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                           const ixs_node *predicate);
 /* Prove total equivalence over the full domain admitted by facts.  TRUE is
- * returned only after both operands are proved defined everywhere.  FALSE is
- * returned only for a universal proof of different values; insufficient
- * facts, contradictory facts, invalid input, and resource limits return
- * UNKNOWN. */
-ixs_fact_check_result ixs_equivalent_facts(ixs_facts *facts,
-                                           const ixs_node *lhs,
-                                           const ixs_node *rhs);
-/* Prove total equivalence modulo 2^bits.  Both operands must be defined and
- * integer-valued over the complete fact domain.  bits must be at most 63;
- * invalid widths emit a diagnostic and return UNKNOWN.  The proof propagates
- * only through operations that preserve the requested low bits. */
-ixs_fact_check_result ixs_equivalent_modulo_pow2_facts(ixs_facts *facts,
-                                                       const ixs_node *lhs,
-                                                       const ixs_node *rhs,
-                                                       unsigned bits);
-/* Run one bounded finite-domain query. Equivalence first uses the ordinary
- * proof engine, then enumerates the finite integer ranges still present in
- * lhs-rhs. Relation queries exhaustively verify one typed candidate against an
- * ordered table over an explicit contiguous point domain. Synthesis accepts
- * any strictly increasing point table, including sparse and non-power-of-two
- * domains, and returns one typed expression or predicate that is exhaustively
- * proved equal to every supplied sample. Expression synthesis composes additive
- * and XOR base deltas with additive or XOR bit contributions, grouping doubled
- * coefficients into integer fields and extending coefficients across sparse
- * missing basis points. Dense power-of-two tables also use the legacy additive
- * integer-difference and GF(2) output-bit recognizers. Predicate synthesis
- * iteratively preserves CMP, NOT, AND, and OR shape. Unsupported tables return
- * COMPLETE with UNKNOWN and a NULL value. Expression modes treat every
- * predicate-valued node, including predicate-valued Piecewise, as its numeric
- * scalar 0/1 value; predicate modes additionally require and preserve the
- * predicate contract. Relation and synthesis queries never return FALSE. Scalar
- * headers (kind, handles, non-NULL arrays, count, and allocation size) are
- * checked before the budget. An
- * insufficient budget then returns EXHAUSTED without reading either table;
- * with enough budget, point ordering is checked before value handles. All
- * finite work is charged atomically to *remaining_work and failed reserved
- * work is not refunded. Direct equivalence proofs, invalid table headers, and
- * over-budget queries leave the budget unchanged. Synthesis reserves its top
- * table before query-state allocation or sample specialization; nested
- * predicate children reserve when their table is entered. Internal proof
- * ceilings return LIMITED; malformed input returns INVALID; allocation
- * failure returns OOM. `check` and `value` are meaningful only on COMPLETE.
- * Every non-COMPLETE result resets them to UNKNOWN and NULL. */
-ixs_finite_domain_result
-ixs_finite_domain_facts(ixs_facts *facts, const ixs_finite_domain_query *query,
-                        size_t *remaining_work);
-/* Synthesize one scalar candidate over an explicit candidate-point image from
- * mapped rows. `symbol` must be a symbol; every expression may be any scalar
- * expression, including a predicate-valued 0/1 expression. Candidate points
- * must be nonempty, strictly increasing, and unique. Rows must be nonempty but
- * may use any caller order; they are never reordered, and repeated candidate
- * points or identical redundant rows are accepted. Every row candidate point
- * must occur in candidate_points, and every candidate point must have at least
- * one row. The first row in caller order for each candidate point supplies
- * both its representative value and the direct symbolic candidate
- *
- *   expressions[expression_index](
- *       symbol := symbol + expression_point - candidate_point)
- *           - additive_offset.
- *
- * When those per-point candidates are equivalent under the facts and the
- * common candidate verifies every representative value, synthesis returns that
- * globally reparameterized expression. A complete direct attempt that does not
- * prove one first tries structural predicate synthesis when every
- * representative is predicate-valued, then falls back to ordinary scalar
- * finite-table synthesis if that predicate attempt completes without a
- * candidate. OOM, LIMITED, and nested EXHAUSTED propagate without fallback. The
- * remaining rows are intentionally not reverified here; use
- * ixs_verify_mapped_expression_facts for the universal relation proof.
- *
- * The mapped table reserves ncandidate_points + nrows before reading any input
- * array: one unit for every candidate representative and every caller row. This
- * is 2 * ncandidate_points when there is exactly one row per point, while each
- * accepted duplicate row is charged once. Structural predicate fallback may
- * then reserve another
- * 2 * ncandidate_points for every child table it enters; for example, a
- * comparison costs nrows + 5 * ncandidate_points in total, or 6 *
- * ncandidate_points with one row per point. Predicate fallback that completes
- * without a candidate continues to scalar finite-table synthesis without
- * another reservation, preserving numeric 0/1 behavior. Scalar handles,
- * pointers, counts, and checked base work size are validated before the base
- * reservation. An insufficient base budget returns EXHAUSTED without reading
- * any input array. With sufficient base work, arrays are fully validated before
- * it is atomically deducted, so INVALID and validation OOM leave the budget
- * unchanged. OOM, LIMITED, or nested EXHAUSTED after a reservation keeps all
- * work already deducted. COMPLETE with TRUE is the only result carrying a
- * non-NULL value; COMPLETE with UNKNOWN means synthesis was unsupported. */
-ixs_finite_domain_result ixs_synthesize_mapped_expression_facts(
-    ixs_facts *facts, const ixs_node *symbol,
-    const ixs_node *const *expressions, size_t nexpressions,
-    const int64_t *candidate_points, size_t ncandidate_points,
-    const ixs_mapped_expression_row *rows, size_t nrows,
-    size_t *remaining_work);
-/* Universally verify every mapped row against one scalar candidate using the
- * equation documented on ixs_mapped_expression_row. Predicate-valued
- * expressions and candidates are numeric scalar 0/1 values. Rows are checked
- * in caller order without sorting. Work is exactly nrows with the same
- * precharge EXHAUSTED/INVALID and post-reservation OOM/LIMITED semantics. Every
- * row specializes both sides and proves them defined and equal. TRUE is
- * returned only when all rows are proved; a mismatch or insufficient facts is
- * COMPLETE with UNKNOWN. This query never returns FALSE or a value. */
-ixs_finite_domain_result ixs_verify_mapped_expression_facts(
-    ixs_facts *facts, const ixs_node *symbol,
-    const ixs_node *const *expressions, size_t nexpressions,
-    const ixs_mapped_expression_row *rows, size_t nrows,
-    const ixs_node *candidate, size_t *remaining_work);
-/* Synthesize an ordered bundle of mapped scalar or predicate candidates and
- * universally verify every candidate under each row's exact fact domain.
- * Every component and row fact set must be live and belong to one context;
- * separate sessions over that context are accepted. Candidate-point images
- * are the sorted unique image derived from the rows. The common synthesis
- * domain is tried first, followed by distinct exact row domains in first-row
- * order. Duplicate candidate handles are checked once. A scalar component may
- * request one inclusive signed candidate range. Every distinct nomination is
- * checked under `synthesis_facts` before universal row verification; an
- * unproved or out-of-range candidate is a semantic miss and nomination
- * continues. Predicate components cannot request a candidate range.
- *
- * Each nomination consumes the ordinary mapped-synthesis charge for its row
- * subset and derived image. Each distinct well-typed nomination additionally
- * consumes one unit when candidate-range admissibility is requested, then one
- * mapped-verification unit per component row when admissible, split across its
- * exact fact domains. One `remaining_work` counter owns all components and
- * nominations. Work consumed before an ensuing semantic miss, EXHAUSTED,
- * LIMITED, or hard failure is not refunded.
- *
- * `ncandidates` must equal `ncomponents`. A complete universal proof returns
- * COMPLETE with TRUE and writes every candidate in component order. COMPLETE
- * with UNKNOWN and every non-complete status leave every output NULL. Valid
- * output storage is reset before the remaining query validation. Invalid
- * input and validation OOM consume no work. Checked headers first establish
- * a lower-bound common-nomination charge of sum(nrows + 1); insufficient work
- * returns EXHAUSTED without reading any row array. Exact domains are grouped
- * once into stable row slices; a point image is sorted only if that domain is
- * reached for nomination. Planning is
- * O(R log R + sum(reached R_g log R_g)) rather than proportional to the total
- * nomination count. */
-ixs_mapped_bundle_result ixs_synthesize_mapped_bundle_facts(
-    const ixs_mapped_bundle_component *components, size_t ncomponents,
-    const ixs_node **candidates, size_t ncandidates, size_t *remaining_work);
-/* Prove one exactly representable signed integer constant difference for every
- * mapped row, preserving caller order. Every expression may be any scalar
- * expression, including a predicate-valued 0/1 expression. Work is exactly
- * nrows. Scalar handles, pointers, counts, and checked work size are validated
- * before the budget; an insufficient budget returns EXHAUSTED without reading
- * any input or output array. With enough work, all expression handles and row
- * indices are validated before work is deducted, so INVALID leaves the budget
- * and output untouched. OOM or LIMITED after reservation keeps the charge.
- *
- * COMPLETE with TRUE atomically copies all row differences to `differences`.
- * COMPLETE with UNKNOWN means at least one difference was not proved and
- * leaves the entire output array unchanged. Every non-COMPLETE result likewise
- * leaves output untouched, resets `check` to UNKNOWN, and carries no value. */
-ixs_finite_domain_result ixs_mapped_constant_differences_facts(
-    ixs_facts *facts, const ixs_node *symbol,
-    const ixs_node *const *expressions, size_t nexpressions,
-    const ixs_mapped_difference_row *rows, size_t nrows, int64_t *differences,
-    size_t *remaining_work);
-/* Check a typed batch of logical properties over one explicit Cartesian
- * product of ordered integer-symbol domains. Each domain point table must be
- * nonempty and strictly increasing, and domain symbols must be distinct. The
- * product is visited in row-major order with the last domain varying fastest.
- * Every query is evaluated under `facts` after simultaneous substitution of
- * the current point. A valid expression that becomes undefined at a point
- * makes every query kind FALSE at that point. Per-query truth is universal:
- * FALSE dominates UNKNOWN, and `witness` still records that query's first
- * non-TRUE point.
- *
- * Work is the checked product of the Cartesian point count and query count.
- * Invalid scalar sizes and multiplication overflow are rejected before the
- * budget or arrays are accessed. Insufficient work returns EXHAUSTED without
- * reading point or query arrays. After complete validation, work is reserved
- * atomically before evaluation and is not refunded on OOM or an internal
- * traversal ceiling. Invalid input leaves the budget unchanged. Once a
- * non-NULL result array has a representable nonzero count, every payload is
- * initialized to UNKNOWN and SIZE_MAX before any remaining validation, and is
- * meaningful only on COMPLETE. A detected contradictory fact domain returns
- * COMPLETE with every check UNKNOWN and every witness SIZE_MAX; no point is
- * evaluated and no work is reserved. */
-ixs_finite_domain_status ixs_finite_domain_batch_facts(
-    ixs_facts *facts, const ixs_finite_integer_domain *domains, size_t ndomains,
-    const ixs_finite_domain_batch_query *queries, size_t nqueries,
-    ixs_finite_domain_batch_result *results, size_t *remaining_work);
-/* Prove and classify one fixed block/item/slot redistribution relation. Direct
- * proof consumes no finite work. Otherwise the row-major Cartesian point count
- * is reserved once; slot varies fastest. EXHAUSTED reports whether validation
- * or movement still required enumeration. COMPLETE plus NOT_TOTAL or
- * OUT_OF_BOUNDS carries the first failing point ordinal. The latter also
- * carries its source coordinate and exact signed value. INCONCLUSIVE carries
- * no witness or movement result. Non-complete results carry no proof payload,
- * and failed reserved work is not refunded. */
-ixs_redistribution_relation_result ixs_analyze_redistribution_relation_facts(
-    ixs_facts *facts, const ixs_redistribution_relation_query *query,
-    size_t *remaining_work);
+ * returned only after both operands are proved defined everywhere. FALSE is
+ * returned only for a universal proof of different values;
+ * insufficient facts, contradictory facts, invalid input, and resource
+ * limits return UNKNOWN. */
+ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
+                                      const ixs_node *rhs);
+/* Try ordinary equivalence first, then enumerate the Cartesian product of
+ * finite integer symbol ranges still present in lhs-rhs.  Symbols without a
+ * finite range remain symbolic at every point.  The complete product is
+ * deducted from *remaining_points before evaluation; direct proofs and
+ * over-budget queries leave it unchanged.  A failed reserved proof remains
+ * charged.  remaining_points must be non-NULL. */
+ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
+                                                    const ixs_node *lhs,
+                                                    const ixs_node *rhs,
+                                                    size_t *remaining_points);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
-ixs_constant_difference_result
-ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
-                              const ixs_node *rhs);
-/* Prove and construct one fixed-width modulo recurrence. `value`, `reference`,
- * and `induction` are scalar signed-view fixed-width integer expressions.
- * Predicate-valued nodes participate as their canonical integer 0/1 values.
- * The closed fact domain must prove all three defined and integer-valued.
- * Signed recurrence operands must additionally be nonnegative so their
- * truncating remainders agree with the normalized Euclidean carry. Unsigned
- * recurrence differences are interpreted after projecting each operand modulo
- * 2^width and must have one invariant residue modulo divisor over the complete
- * fact domain. A raw algebraic difference alone is insufficient unless
- * whole-width wraps have zero residue or their quotient difference is also
- * proved.
- *
- * width must be in [1, 64]. divisor must be a nonzero width-bit unsigned
- * value; for SIGNED it must also be representable as a positive signed
- * width-bit value. PROVEN is the only status carrying payload. Insufficient
- * facts or an unsupported proof return UNKNOWN. A retryable internal proof
- * stop returns LIMITED. Malformed/cross-context input returns INVALID and
- * appends a diagnostic when a live session is available; allocation failure
- * returns OOM. */
-ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
-    ixs_facts *facts, const ixs_node *value, const ixs_node *reference,
-    const ixs_node *induction, ixs_remainder_signedness signedness,
-    unsigned width, uint64_t divisor);
-/* Atomically plan fixed-width modulo recurrences for one loop successor.
- * successor, current, and induction belong to loop_facts. Targets may use
- * distinct fact domains in the same context. Signed positive and negative
- * divisor encodings with one magnitude share a deterministic first-occurrence
- * group; the signed minimum divisor is valid but remains unplanned because its
- * positive magnitude is not representable in the signed width.
- *
- * Each target is first proved directly against its induction. Its references
- * are then attempted once, in input order, when their target becomes planned;
- * relation chains therefore require no caller retry machinery. Direct identity
- * references inherit the peer increment. Other references prove a constant
- * fixed-width remainder difference in the dependent target's exact facts.
- * A proved signed loop successor establishes the common induction as
- * nonnegative. Signed target queries trust that structural induction identity;
- * every distinct value and reference operand must still prove nonnegative in
- * its target fact domain.
- *
- * A scalar proof traversal limit is local to the attempted group, target, or
- * reference. That candidate remains unplanned and planning continues; it does
- * not produce a plan-level LIMITED status. INVALID and OOM remain global hard
- * failures.
- *
- * ngroup_capacity and nentries must both equal ntargets. Every entry is reset
- * to {SIZE_MAX, 0}, every group is cleared, and ngroups is zero before semantic
- * work. Payload is committed only on COMPLETE. COMPLETE may contain no groups
- * or unplanned entries when the supplied facts cannot prove a recurrence.
- *
- * Admission reserves 2 * ntargets + the total reference count from
- * *remaining_work after complete validation and before allocation or proof.
- * Insufficient work returns EXHAUSTED without changing the budget. Reserved
- * work is not refunded after a proof-local limit or a later INVALID or OOM
- * result. Planning visits each target and reference a bounded number of times
- * and uses scratch arena storage proportional to their counts. */
-ixs_modulo_recurrence_plan_result ixs_plan_modulo_recurrences_facts(
-    ixs_facts *loop_facts, const ixs_node *successor, const ixs_node *current,
-    const ixs_node *induction, unsigned width,
-    const ixs_modulo_recurrence_target *targets, size_t ntargets,
-    ixs_modulo_recurrence_plan_group *groups, size_t ngroup_capacity,
-    ixs_modulo_recurrence_plan_entry *entries, size_t nentries,
-    size_t *remaining_work);
-/* Answer many equivalence, finite-domain equivalence, and constant-difference
- * queries under exact unions of closed predicate groups. Query (i, j) has
- * precisely the batch-saturated set union of groups i and j: predicates from
- * every other group are absent. Operands must be scalar expressions;
- * predicate-valued nodes participate as their canonical integer 0/1 values.
- * Equivalence queries may return TRUE, FALSE, or UNKNOWN. Finite-domain
- * queries first use the corresponding exact proof and only spend the caller's
- * work budget enumerating selected-domain integer points when it is unknown.
- * Finite-domain constant difference requires the same signed int64 lhs-rhs
- * value at every point. Constant-difference queries return TRUE with
- * difference populated, or UNKNOWN; they never return FALSE. A contradictory
- * selected union returns UNKNOWN without contaminating any other union.
- *
- * The implementation shares the all-group intersection and each individual
- * group closure, then transiently saturates each distinct selected union.
- * There is no persistent fact domain per group pair. After complete input
- * validation, a nonempty query batch with zero budget returns EXHAUSTED before
- * planning or structural admission. Invalid input and validation OOM
- * therefore take precedence over zero-budget exhaustion.
- *
- * Before constructing closures, an uncharged structural scan estimates
- * nonlinear batch work. One iterative memo computes the expanded subtree cost
- * of every reachable node once, with extra weight for rounding and Piecewise;
- * each predicate root contributes once. Every query contributes both operand
- * uses plus four bounded structural passes over its selected lhs group and,
- * for a distinct rhs group, its selected rhs group: direct replay,
- * fact-conditioned rewrite, semantic ingestion/dependency wakeup, and closed
- * validation. Estimates at or below 65536 leave the ordinary work counter
- * authoritative.
- * Above that floor, an estimate exceeding *remaining_work, or one that cannot
- * be represented in size_t, returns EXHAUSTED, sets *remaining_work to zero,
- * and constructs no closure. Successful admission does not deduct the
- * estimate.
- *
- * Runtime work remains exact: one work unit is one predicate-root replay or
- * one internally bounded semantic query. Every runtime reservation is
- * deducted from *remaining_work before that work starts. Replay-support
- * scratch is allocated only after its reservation succeeds; a failed
- * allocation does not refund reserved work.
- * Insufficient work, an internal traversal limit, invalid input, and OOM are
- * reported as EXHAUSTED, LIMITED, INVALID, and OOM respectively. Results are
- * meaningful only on COMPLETE. After scalar array sizes are validated, every
- * non-COMPLETE return resets all results to UNKNOWN/zero. An unrepresentable
- * result count returns INVALID without touching the result pointer. A zero
- * count accepts a NULL array for its corresponding groups or queries/results.
- */
-ixs_group_union_status
-ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
-                       size_t n_groups, const ixs_group_union_query *queries,
-                       size_t n_queries, ixs_group_union_result *results,
-                       size_t *remaining_work);
+bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
+                                   const ixs_node *rhs, int64_t *delta);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an
  * exact rational constant and residual does not reference symbol. */
-ixs_affine_decomposition_result
-ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
-                           const ixs_node *symbol);
+bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
+                                const ixs_node *symbol,
+                                const ixs_node **coefficient,
+                                const ixs_node **residual);
 /* Decompose a rational product or common-denominator sum exactly after
  * simplifying under facts.  This does not prove integer-valued parts or a
  * nonzero denominator. */
-ixs_exact_quotient_result
-ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr);
+bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
+                                        const ixs_node **numerator,
+                                        const ixs_node **denominator);
 /* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
  * still reference symbol; callers decide whether it is loop invariant. */
-ixs_finite_difference_result ixs_finite_difference_facts(ixs_facts *facts,
-                                                         const ixs_node *expr,
-                                                         const ixs_node *symbol,
-                                                         const ixs_node *step);
-/* Prove expr[symbol -> symbol + step] == expr.  symbol must be a symbol.  A
- * step that references symbol is valid but unsupported and returns COMPLETE
- * with UNKNOWN.  The complete fact domain must prove expr, step, and the
- * shifted expression defined.  COMPLETE carries TRUE, FALSE, or UNKNOWN;
- * LIMITED and OOM are retryable and INVALID reports malformed or cross-context
- * input. */
-ixs_fact_check_result
-ixs_check_invariant_under_step_facts(ixs_facts *facts, const ixs_node *expr,
-                                     const ixs_node *symbol,
-                                     const ixs_node *step);
-/* Recognize a direct Mod, a positive integral scalar multiple of Mod, or one
- * such term in an ADD.  The Mod dividend must be symbol plus an exactly
- * representable integer phase.  The exact residual must be defined,
- * integer-valued, and invariant in symbol over the complete fact domain.
- * residual_bounded is true only when facts also prove
- * 0 <= residual < scale.  Loop step and target carry policy are not part of
- * this query. */
-ixs_cyclic_decomposition_result
-ixs_decompose_cyclic_facts(ixs_facts *facts, const ixs_node *expr,
-                           const ixs_node *symbol);
+bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
+                                 const ixs_node *symbol, const ixs_node *step,
+                                 const ixs_node **difference);
 /* Split expr into residual + constant with an exactly representable integer
  * constant. */
-ixs_additive_constant_result
-ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr);
-ixs_fact_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
-                                                     const ixs_node *expr);
-ixs_fact_check_result ixs_check_defined_facts(ixs_facts *facts,
-                                              const ixs_node *expr);
+bool ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr,
+                                       const ixs_node **residual,
+                                       int64_t *constant);
+ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                const ixs_node *expr);
+ixs_check_result ixs_check_defined_facts(ixs_facts *facts,
+                                         const ixs_node *expr);
 /* Check divisibility by a nonzero signed modulus.  Negative moduli are
  * normalized by magnitude without overflowing INT64_MIN.  Modulus zero emits
  * a session diagnostic and returns UNKNOWN. */
-ixs_fact_check_result ixs_check_divisible_facts(ixs_facts *facts,
-                                                const ixs_node *expr,
-                                                int64_t modulus);
+ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                           const ixs_node *expr,
+                                           int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
  * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
- * not prove the input defined.  LIMITED is a retryable proof-resource stop;
- * invalid input, divisor zero, or an invalid constructed result returns
- * INVALID; allocation failure returns OOM.  INVALID and OOM append a
- * diagnostic to the fact set's session when one is available. */
+ * not prove the input defined.  Invalid input, divisor zero, unrepresentable
+ * results, resource limits, and OOM return ERROR and append a diagnostic to
+ * the fact set's session when one is available. */
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    const ixs_node *expr,
                                                    int64_t divisor);
-ixs_pow2_query_result ixs_get_pow2_fact_facts(ixs_facts *facts,
-                                              const ixs_node *expr);
-/* Return sound low-64-bit facts.  COMPLETE with zero masks means that the
- * query was valid but proved no bits.  LIMITED is a retryable proof-resource
- * stop.  INVALID and OOM return the no-information payload. */
-ixs_known_bits_query_result ixs_get_known_bits_facts(ixs_facts *facts,
-                                                     const ixs_node *expr);
+ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, const ixs_node *expr);
+/* Return sound low-64-bit facts.  True with zero masks means that the query
+ * was valid but proved no bits.  Invalid input, contradictory facts, resource
+ * limits, and OOM return false and leave out initialized to the no-information
+ * value.  Live failures append a session diagnostic. */
+bool ixs_get_known_bits_facts(ixs_facts *facts, const ixs_node *expr,
+                              ixs_known_bits *out);
 /* Export the stored congruence record for a symbol.  Output pointers must be
  * non-NULL and distinct.  This deliberately does not synthesize a strongest
  * congruence for arbitrary expressions. */
-ixs_symbol_congruence_result
-ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol);
+bool ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol,
+                                     int64_t *modulus, int64_t *residue);
 /* Prove expr == residue (mod modulus).  Negative moduli are normalized by
  * magnitude without overflowing INT64_MIN.  Modulus zero emits a diagnostic
  * and returns UNKNOWN. */
-ixs_fact_check_result ixs_check_congruent_facts(ixs_facts *facts,
-                                                const ixs_node *expr,
-                                                int64_t modulus,
-                                                int64_t residue);
-ixs_range_query_result ixs_range_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                           const ixs_node *expr,
+                                           int64_t modulus, int64_t residue);
+bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
+                     ixs_range_result *out);
 /* Reusable-fact form of ixs_integer_range. */
-ixs_integer_range_query_result ixs_integer_range_facts(ixs_facts *facts,
-                                                       const ixs_node *expr);
-
-/* Prove that every arithmetic intermediate introduced while materializing the
- * rational islands of expr fits one machine word.  ADD and Piecewise choose
- * their full common denominator before scaling operands.  ADD and MUL then use
- * order-independent subset envelopes for partial sums and products, including
- * partial powers.  The query also checks Floor/Ceil/Trunc source numerators and
- * selected rounding biases, Piecewise conditions and value arms, and integral
- * Mod/bitwise operands. A static rounded denominator larger than the unsigned
- * word selects the compare/zero path and needs no bias. Static ceiling uses
- * quotient/remainder materialization; its optional denominator-minus-one bias
- * is reported separately as plan strategy metadata. Negative truncation still
- * validates its selected denominator-minus-one bias. word_bits must be in
- * [2, 64]. For N < 64 the ordinary word domain is
- * [-2^(N-1), 2^N-1], while signed rounded intermediates additionally use
- * [-2^(N-1), 2^(N-1)-1].  N == 64 uses the exact signed-int64 domain because
- * public range endpoints are int64 values.  TRUE is a complete full-domain
- * proof.  FALSE is returned only for a conclusive out-of-range intermediate.
- * A semantic proof failure without such a witness returns COMPLETE with
- * UNKNOWN, including an inconclusive envelope, unsupported or malformed
- * structure, an unrepresentable exact denominator, missing
- * totality/integrality facts, or contradictory facts.  A detected cycle or
- * invalid internal relation returns INVALID; allocation-size overflow or OOM
- * returns OOM; a retryable proof-resource stop returns LIMITED.  Every
- * non-COMPLETE status clears the check payload to UNKNOWN.  The planner uses
- * growable arena-backed iterative state and imposes no fixed traversal depth,
- * visit count, Piecewise case count, or exponent cap. */
-ixs_fact_check_result
-ixs_check_rational_intermediates_facts(ixs_facts *facts, const ixs_node *expr,
-                                       uint32_t word_bits);
-
-/* Return the exact numerator and denominator authorized by the
- * order-independent width proof above.  TRUE is the only status with a
- * non-NULL numerator and positive denominator.  FALSE is a conclusive width
- * failure.  COMPLETE with UNKNOWN covers unsupported or malformed structure,
- * an unrepresentable exact denominator, and insufficient or contradictory
- * facts.  Invalid input or a detected cycle returns INVALID,
- * allocation-size overflow or OOM returns OOM, and a retryable proof-resource
- * stop returns LIMITED.  Every non-COMPLETE status clears the plan.  A TRUE
- * plan also reports conservative numerator-sign and ceil-bias strategy facts;
- * a false sign fact on a nontrivial denominator authorizes signed-magnitude
- * materialization because the numerator is then proven to fit the signed word
- * domain. The returned node belongs to the fact set's context.
- */
-ixs_rational_materialization_plan
-ixs_plan_rational_materialization_facts(ixs_facts *facts, const ixs_node *expr,
-                                        uint32_t word_bits);
+bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
+                             ixs_integer_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 

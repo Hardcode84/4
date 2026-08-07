@@ -27,14 +27,13 @@ from __future__ import annotations
 import math
 import warnings
 from fractions import Fraction
-from typing import Any, Literal
+from typing import Any
 
 import ixsimpl
 import pytest
 import sympy
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
-from ixsimpl.sympy_conv import Trunc as SympyTrunc
 from ixsimpl.sympy_conv import from_sympy as conv_from_sympy
 from ixsimpl.sympy_conv import to_sympy as conv_to_sympy
 
@@ -46,8 +45,6 @@ ModSymbolCase = tuple[str, int, int, int, int, str]
 ModCompositeCase = tuple[str, str, int, int, int, int, int, int, int, str, str]
 BitMaskCase = tuple[str, str, int, int, int, int, str]
 Pow2Case = tuple[str, bool, str, int, str]
-FiniteDomainQuery = tuple[Literal["predicate", "defined", "integer"], ixsimpl.Expr]
-
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
 
@@ -223,7 +220,6 @@ _OPS_BASE = [
     "div",
     "floor",
     "ceiling",
-    "trunc",
     "mod",
     "max",
     "min",
@@ -265,7 +261,7 @@ def expressions(draw: st.DrawFn, max_depth: int = 6, include_piecewise: bool = T
             )
         return (op, *args)
     a = draw(expressions(max_depth=max_depth - 1, include_piecewise=include_piecewise))
-    if op in ("floor", "ceiling", "trunc"):
+    if op in ("floor", "ceiling"):
         choice = draw(st.sampled_from(["div", "rat_add", "mul", "sub", "add", "plain"]))
         if choice == "div":
             d = draw(pos_ints)
@@ -373,8 +369,6 @@ def to_sympy(tree: ExprTree) -> Any:
         return sympy.floor(to_sympy(tree[1]), evaluate=False)
     if op == "ceiling":
         return sympy.ceiling(to_sympy(tree[1]), evaluate=False)
-    if op == "trunc":
-        return SympyTrunc(to_sympy(tree[1]), evaluate=False)
     if op == "mod":
         # evaluate=False avoids SymPy Mod bugs (e.g. #28744) that silently
         # produce wrong results for certain inputs.
@@ -448,8 +442,6 @@ def to_ixsimpl(ctx: ixsimpl.Context, tree: ExprTree) -> ixsimpl.Expr:
         return ixsimpl.floor(to_ixsimpl(ctx, tree[1]))
     if op == "ceiling":
         return ixsimpl.ceil(to_ixsimpl(ctx, tree[1]))
-    if op == "trunc":
-        return ixsimpl.trunc(to_ixsimpl(ctx, tree[1]))
     if op == "mod":
         return ixsimpl.mod(to_ixsimpl(ctx, tree[1]), to_ixsimpl(ctx, tree[2]))
     if op == "max":
@@ -544,9 +536,6 @@ def eval_expr(tree: ExprTree, env: Env) -> Any:
     if op == "ceiling":
         v = eval_expr(tree[1], env)
         return math.ceil(v)
-    if op == "trunc":
-        v = eval_expr(tree[1], env)
-        return math.trunc(v)
     if op == "mod":
         return _floored_mod(eval_expr(tree[1], env), eval_expr(tree[2], env))
     if op == "max":
@@ -1179,22 +1168,18 @@ def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
     assert ixsimpl.same_node(roundtripped, original)
 
 
-def test_expr_bytes_are_stable_and_outlive_the_source_context() -> None:
+def test_serialized_bytes_are_stable_and_outlive_the_source_context() -> None:
     source = ixsimpl.Context()
     expr = 4 * source.sym("x") + source.sym("y")
-    data = expr.to_bytes()
-
-    assert data == source.serialize(expr)
+    data = source.serialize(expr)
 
     foreign = ixsimpl.Context()
-    with pytest.raises(ValueError, match="different context"):
-        source.serialize(foreign.sym("foreign"))
 
     del expr
     del source
     decoded = foreign.deserialize(data)
     assert str(decoded) == "4*x + y"
-    assert decoded.to_bytes() == data
+    assert foreign.serialize(decoded) == data
 
 
 def test_node_ptr_exposes_canonical_node_address() -> None:
@@ -1210,35 +1195,6 @@ def test_node_ptr_exposes_canonical_node_address() -> None:
     node_as_any: Any = x
     with pytest.raises(AttributeError):
         node_as_any.node_ptr = 0
-
-
-def test_trunc_binding_constructs_toward_zero_rounding() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("trunc_binding_x")
-    truncated = ixsimpl.trunc(x / 3)
-
-    assert truncated.tag == ixsimpl.TRUNC
-    assert ixsimpl.same_node(truncated, ctx.parse_expr("Trunc(trunc_binding_x/3)"))
-    assert int(truncated.subs(x, -5)) == -1
-    assert int(truncated.subs(x, 5)) == 1
-    with pytest.raises(TypeError, match="requires an Expr"):
-        ixsimpl.trunc(1)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("numerator", "denominator"),
-    [
-        ((1 << 63) - 1, 3),
-        (-(1 << 63) + 1, 3),
-        (-1, 2),
-        (1, 2),
-    ],
-)
-def test_trunc_binding_matches_exact_fraction_semantics(numerator: int, denominator: int) -> None:
-    ctx = ixsimpl.Context()
-    truncated = ixsimpl.trunc(ctx.rat(numerator, denominator))
-
-    assert int(truncated) == math.trunc(Fraction(numerator, denominator))
 
 
 @pytest.mark.forked
@@ -2323,36 +2279,6 @@ def test_known_bits_and_congruence_binding_failures() -> None:
         ctx.congruent(sentinel, 8, 0, facts)
 
 
-def test_rational_intermediates_fit_binding() -> None:
-    ctx = ixsimpl.Context()
-    other = ixsimpl.Context()
-    x = ctx.sym("rational_binding_x")
-    expr = ixsimpl.floor(x / 2)
-    fitting = ctx.facts()
-    fitting.assume_range(x, -128, 127)
-    overflow = ctx.facts()
-    overflow.assume_range(x, 256, 256)
-    signed_i64 = ctx.facts()
-    signed_i64.assume_range(x, -(1 << 63), (1 << 63) - 1)
-
-    assert ctx.rational_intermediates_fit(expr, 8, fitting) is True
-    assert ctx.rational_intermediates_fit(expr, 8, overflow) is False
-    assert ctx.rational_intermediates_fit(expr, 8, ctx.facts()) is None
-    assert ctx.rational_intermediates_fit(expr, 64, signed_i64) is True
-    with pytest.raises(ValueError, match="word_bits"):
-        ctx.rational_intermediates_fit(expr, 1, fitting)
-    with pytest.raises(ValueError, match="word_bits"):
-        ctx.rational_intermediates_fit(expr, 65, fitting)
-    with pytest.raises(OverflowError, match="word_bits"):
-        ctx.rational_intermediates_fit(expr, (1 << 32) + 8, fitting)
-    with pytest.raises(OverflowError):
-        ctx.rational_intermediates_fit(expr, -1, fitting)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.rational_intermediates_fit(other.sym("x"), 8, fitting)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.rational_intermediates_fit(expr, 8, other.facts())
-
-
 def test_predicate_tree_and_total_equivalence_bindings() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("binding_equiv_x")
@@ -2675,70 +2601,6 @@ def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
     assert ctx.equivalent(nonintegral_next, nonintegral_zero + 16, nonintegral) is None
 
 
-def test_finite_domain_equivalence_binding() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("x")
-    finite = ctx.parse_expr("Piecewise((1, x*(x - 1)*(x - 2)*(x - 3) == 0), (2, True))")
-    facts = ctx.facts()
-    facts.assume(x >= 0)
-    facts.assume(x <= 3)
-
-    assert ctx.equivalent(finite, ctx.int_(1), facts) is None
-    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 4) == (
-        "complete",
-        True,
-        0,
-    )
-    assert ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, 3) == (
-        "exhausted",
-        None,
-        3,
-    )
-    assert ctx.equivalent_finite_domain(x, x, facts, 0) == (
-        "complete",
-        True,
-        0,
-    )
-    with pytest.raises(OverflowError):
-        ctx.equivalent_finite_domain(finite, ctx.int_(1), facts, -1)
-
-
-def test_finite_domain_batch_binding() -> None:
-    ctx = ixsimpl.Context()
-    other = ixsimpl.Context()
-    block = ctx.sym("finite_batch_block")
-    slot = ctx.sym("finite_batch_slot")
-    facts = ctx.facts()
-    domains = [(block, [0, 1]), (slot, [5, 6])]
-    queries: list[FiniteDomainQuery] = [
-        ("predicate", ctx.eq(slot, 5)),
-        ("defined", 1 / (slot - 5)),
-        ("integer", block / 2),
-    ]
-
-    assert ctx.check_finite_domain(domains, queries, facts, 12) == (
-        "complete",
-        [(False, 1), (False, 0), (False, 2)],
-        0,
-    )
-    assert ctx.check_finite_domain(domains, queries, facts, 11) == (
-        "exhausted",
-        [(None, None), (None, None), (None, None)],
-        11,
-    )
-    with pytest.raises(ValueError, match="points are not ordered"):
-        ctx.check_finite_domain([(block, [1, 1])], queries[:1], facts, 2)
-    with pytest.raises(ValueError, match="must be predicate, defined, or integer"):
-        # This exercises the runtime parser with an untyped external payload;
-        # statically typed callers cannot construct an invalid query kind.
-        invalid_queries: Any = [("bad", block)]
-        ctx.check_finite_domain(domains, invalid_queries, facts, 4)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.check_finite_domain([(other.sym("foreign"), [0])], queries[:1], facts, 1)
-    with pytest.raises(OverflowError):
-        ctx.check_finite_domain(domains, queries, facts, -1)
-
-
 def test_equivalence_binding_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -2754,59 +2616,6 @@ def test_equivalence_binding_invalid_inputs() -> None:
         ctx.equivalent(sentinel, sentinel, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.check_predicate(sentinel, facts)
-
-
-def test_modulo_pow2_equivalence_binding() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("binding_modulo_pow2_x")
-    y = ctx.sym("binding_modulo_pow2_y")
-    facts = ctx.facts()
-    modulus = 2**32
-    wrapped_x = x % modulus
-    wrapped_y = y % modulus
-
-    add = 3 * x - 5 * y + 7
-    product = (x + 3) * (y + 5)
-    bitwise = ixsimpl.and_(ixsimpl.xor_(x, 85), ixsimpl.or_(y, 256))
-    mapping: dict[str | ixsimpl.Expr, ixsimpl.Expr | int] = {
-        x: wrapped_x,
-        y: wrapped_y,
-    }
-
-    assert ctx.equivalent_modulo_pow2(x, wrapped_x, 32, facts) is True
-    assert ctx.equivalent_modulo_pow2(add, add.subs(mapping), 32, facts) is True
-    assert ctx.equivalent_modulo_pow2(product, product.subs(mapping), 32, facts) is True
-    assert ctx.equivalent_modulo_pow2(bitwise, bitwise.subs(mapping), 32, facts) is True
-    assert ctx.equivalent_modulo_pow2(add % 16, add.subs(mapping) % 16, 4, facts) is True
-
-    assert ctx.equivalent_modulo_pow2(x, y, 0, facts) is True
-    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(modulus), 32, facts) is True
-    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(modulus + 1), 32, facts) is False
-    assert ctx.equivalent_modulo_pow2(ctx.int_(0), ctx.int_(-(2**63)), 63, facts) is True
-
-    floor_x = ixsimpl.floor(x / 3)
-    floor_wrapped = ixsimpl.floor(wrapped_x / 3)
-    assert ctx.equivalent_modulo_pow2(floor_x, floor_x, 4, facts) is True
-    assert ctx.equivalent_modulo_pow2(floor_x, floor_wrapped, 4, facts) is None
-
-    mod6 = x % 6
-    mod6_wrapped = (x % 4) % 6
-    assert ctx.equivalent_modulo_pow2(mod6, mod6_wrapped, 2, facts) is None
-    x_is_six = ctx.facts()
-    x_is_six.assume(ctx.eq(x, 6))
-    assert ctx.equivalent_modulo_pow2(mod6, mod6_wrapped, 2, x_is_six) is False
-
-    assert ctx.equivalent_modulo_pow2(ctx.rat(1, 2), ctx.rat(1, 2), 1, facts) is None
-    with pytest.raises(ValueError, match="bits"):
-        ctx.equivalent_modulo_pow2(x, wrapped_x, 64, facts)
-    with pytest.raises(ValueError, match="nonnegative"):
-        ctx.equivalent_modulo_pow2(x, wrapped_x, -1, facts)
-
-    other = ixsimpl.Context()
-    with pytest.raises(ValueError, match="different context"):
-        ctx.equivalent_modulo_pow2(x, other.sym("x"), 32, facts)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.equivalent_modulo_pow2(x, wrapped_x, 32, other.facts())
 
 
 def test_modular_projection_proves_wave_wrapping_xor_packet() -> None:
@@ -2954,14 +2763,6 @@ def test_fact_backed_algebra_helpers() -> None:
     with pytest.raises(ValueError, match="invalid internal relation state"):
         ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts)
 
-    assert ctx.invariant_under_step(base, i, ctx.int_(1), facts) is True
-    assert ctx.invariant_under_step(i % 4, i, ctx.int_(4), facts) is True
-    assert ctx.invariant_under_step(8 * i, i, ctx.int_(1), facts) is False
-    assert ctx.invariant_under_step(i, i, i, facts) is None
-    zero = ctx.facts()
-    zero.assume(ctx.eq(i, 0))
-    assert ctx.invariant_under_step(1 / (i - 1), i, ctx.int_(1), zero) is None
-
     split = ctx.split_additive_constant(base + 96, facts)
     assert split is not None
     residual, constant = split
@@ -2974,100 +2775,6 @@ def test_fact_backed_algebra_helpers() -> None:
         assert ixsimpl.same_node(residual, base)
         assert constant == limit
     assert ctx.split_additive_constant(base + ctx.rat(1, 2), facts) is None
-
-
-def test_exact_quotient_decomposition_binding() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("quotient_binding_x")
-    y = ctx.sym("quotient_binding_y")
-    z = ctx.sym("quotient_binding_z")
-    i = ctx.sym("quotient_binding_i")
-    facts = ctx.facts()
-
-    product = ctx.rat(3, 4) * x * x / (y * y)
-    parts = ctx.decompose_exact_quotient(product, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, 3 * x * x)
-    assert ixsimpl.same_node(denominator, 4 * y * y)
-    assert ixsimpl.same_node(numerator / denominator, product)
-
-    common_denominator = 2 * y
-    common_sum = x / common_denominator + 3 * z / common_denominator + 5
-    parts = ctx.decompose_exact_quotient(common_sum, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
-    assert ixsimpl.same_node(denominator, common_denominator)
-    assert ixsimpl.same_node((numerator / denominator).expand(), common_sum)
-
-    parts = ctx.decompose_exact_quotient(ctx.rat(-3, 4), facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, ctx.int_(-3))
-    assert ixsimpl.same_node(denominator, ctx.int_(4))
-    assert ctx.decompose_exact_quotient(ctx.int_(3), facts) is None
-    assert ctx.decompose_exact_quotient(2 * x, facts) is None
-    assert ctx.decompose_exact_quotient(x / y + z / x, facts) is None
-    assert ctx.decompose_exact_quotient(x / 2 + z / 4, facts) is None
-
-    large_denominator = ctx.int_(1)
-    for _ in range(65):
-        large_denominator *= y
-    parts = ctx.decompose_exact_quotient(x / large_denominator, facts)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x)
-    assert ixsimpl.same_node(denominator, large_denominator)
-
-    condition = i >= 0
-    piecewise = ixsimpl.pw((common_sum, condition), (x, ctx.true_()))
-    assert ctx.decompose_exact_quotient(piecewise, facts) is None
-    nonnegative = ctx.facts()
-    nonnegative.assume(condition)
-    parts = ctx.decompose_exact_quotient(piecewise, nonnegative)
-    assert parts is not None
-    numerator, denominator = parts
-    assert ixsimpl.same_node(numerator, x + 3 * z + 10 * y)
-    assert ixsimpl.same_node(denominator, common_denominator)
-
-
-def test_fixed_width_modulo_recurrence_query() -> None:
-    ctx = ixsimpl.Context()
-    i = ctx.sym("modulo_recurrence_binding_i")
-    positive = ctx.facts()
-    positive.assume_many([i >= 1, i <= 100])
-
-    signed = ctx.modulo_recurrence(i - 1, i, i, "signed", 32, 5, positive)
-    assert signed is not None
-    increment, remainder = signed
-    assert increment == 4
-    assert str(remainder) == "Mod(modulo_recurrence_binding_i, 5)"
-
-    empty = ctx.facts()
-    upper_half = ctx.modulo_recurrence(i, i, i, "unsigned", 32, 2**31 + 3, empty)
-    assert upper_half is not None
-    increment, remainder = upper_half
-    assert increment == 0
-    assert int(remainder.subs(i, -(2**31))) == -(2**31)
-    assert int(remainder.subs(i, -(2**31) + 3)) == 0
-    assert int(remainder.subs(i, -1)) == 2**31 - 4
-
-    assert ctx.modulo_recurrence(i + 1, i, i, "unsigned", 64, 5, empty) is None
-    with pytest.raises(ValueError, match="signedness"):
-        ctx.modulo_recurrence(i, i, i, "bogus", 32, 5, empty)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="width"):
-        ctx.modulo_recurrence(i, i, i, "unsigned", 0, 5, empty)
-    with pytest.raises(ValueError, match="divisor"):
-        ctx.modulo_recurrence(i, i, i, "signed", 8, 128, empty)
-    with pytest.raises(OverflowError):
-        ctx.modulo_recurrence(i, i, i, "unsigned", -1, 5, empty)
-    with pytest.raises(OverflowError):
-        ctx.modulo_recurrence(i, i, i, "unsigned", 2**32 + 32, 5, empty)
-    with pytest.raises(OverflowError):
-        ctx.modulo_recurrence(i, i, i, "unsigned", 64, -1, empty)
-    with pytest.raises(OverflowError):
-        ctx.modulo_recurrence(i, i, i, "unsigned", 64, 2**64, empty)
 
 
 def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
@@ -3098,7 +2805,6 @@ def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     contradictory.assume(i <= 5)
     assert ctx.constant_difference(i, i, contradictory) is None
     assert ctx.affine_decompose(i, i, contradictory) is None
-    assert ctx.invariant_under_step(i, i, ctx.int_(1), contradictory) is None
 
 
 def test_fact_backed_algebra_helper_binding_failures() -> None:
@@ -3113,29 +2819,17 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
     with pytest.raises(ValueError, match="different context"):
         ctx.affine_decompose(x, other.sym("x"), facts)
     with pytest.raises(ValueError, match="different context"):
-        ctx.decompose_exact_quotient(other.sym("x"), facts)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.decompose_exact_quotient(x, other.facts())
-    with pytest.raises(ValueError, match="different context"):
         ctx.finite_difference(x, x, other.sym("step"), facts)
-    with pytest.raises(ValueError, match="different context"):
-        ctx.invariant_under_step(x, x, other.sym("step"), facts)
     with pytest.raises(ValueError, match="different context"):
         ctx.split_additive_constant(other.sym("x"), facts)
     with pytest.raises(ValueError, match="must be a symbol"):
         ctx.affine_decompose(x, x + 1, facts)
-    with pytest.raises(ValueError, match="must be a symbol"):
-        ctx.invariant_under_step(x, x + 1, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.constant_difference(sentinel, x, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.affine_decompose(sentinel, x, facts)
     with pytest.raises(ValueError, match="sentinel"):
-        ctx.decompose_exact_quotient(sentinel, facts)
-    with pytest.raises(ValueError, match="sentinel"):
         ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
-    with pytest.raises(ValueError, match="sentinel"):
-        ctx.invariant_under_step(sentinel, x, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.split_additive_constant(sentinel, facts)
 
@@ -3699,57 +3393,18 @@ def test_range_basic() -> None:
         Fraction(1, 2),
         Fraction(3, 2),
     )
+    bounded_integer = ctx.facts()
+    bounded_integer.assume_range(x, Fraction(1, 2), Fraction(19, 2))
+    assert ctx.range(x, facts=bounded_integer) == (1, 9)
+    empty_integer = ctx.facts()
+    empty_integer.assume_range(x, Fraction(1, 4), Fraction(3, 4))
+    assert ctx.range(x, facts=empty_integer) is None
     assert ctx.range(x % 8) == (0, 7)
     assert ctx.range(x) is None
     assert ctx.range(x, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.range(-x, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.range(ctx.int_(int64_min)) == (int64_min, int64_min)
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
-
-
-def test_integer_range_normalizes_inside_ixsimpl() -> None:
-    ctx = ixsimpl.Context()
-    other = ixsimpl.Context()
-    x, y = ctx.sym("integer_range_x"), ctx.sym("integer_range_y")
-
-    assert ctx.integer_range(x, assumptions=[x >= ctx.rat(1, 2), x <= ctx.rat(19, 2)]) == (1, 9)
-    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 3]) is None
-    assert ctx.integer_range(x / 2, assumptions=[x >= 1, x <= 10, ctx.eq(x % 2, 0)]) == (1, 5)
-    assert ctx.integer_range(1 / y) is None
-
-    lower_only = ctx.facts()
-    lower_only.assume_range(x, Fraction(1, 2), None)
-    assert ctx.integer_range(x, facts=lower_only) == (1, None)
-
-    upper_only = ctx.facts()
-    upper_only.assume_range(x, None, Fraction(19, 2))
-    assert ctx.integer_range(x, facts=upper_only) == (None, 9)
-
-    composite = 2 * x * y + 1
-    aligned = ctx.facts()
-    aligned.assume_range(composite, 0, 10)
-    assert ctx.range(composite, facts=aligned) == (0, 10)
-    assert ctx.integer_range(composite, facts=aligned) == (1, 9)
-
-    empty = ctx.facts()
-    empty.assume_range(x, Fraction(1, 4), Fraction(3, 4))
-    assert ctx.integer_range(x, facts=empty) is None
-
-    contradictory = ctx.facts()
-    contradictory.assume(x >= 2)
-    contradictory.assume(x <= 1)
-    assert ctx.integer_range(x, facts=contradictory) is None
-
-    with pytest.raises(TypeError, match="expr must be an Expr"):
-        ctx.integer_range(1)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="expression from different context"):
-        ctx.integer_range(other.sym("integer_range_x"))
-    with pytest.raises(ValueError, match="assumption from different context"):
-        ctx.integer_range(x, assumptions=[other.sym("integer_range_bound") >= 0])
-    with pytest.raises(ValueError, match="facts from different context"):
-        ctx.integer_range(x, facts=other.facts())
-    with pytest.raises(ValueError, match="either assumptions or facts"):
-        ctx.integer_range(x, assumptions=[x >= 0], facts=lower_only)
 
 
 def test_range_composite_predicate_fact() -> None:
@@ -3858,8 +3513,7 @@ def test_facts_assume_many_is_atomic() -> None:
     rejected.assume(x >= 0)
     with pytest.raises(ValueError, match="OR predicates"):
         rejected.assume_many([y >= 5, ixsimpl.or_(x >= 0, x <= 10)])
-    with pytest.raises(ValueError, match="fact set is unusable"):
-        ctx.range(x, facts=rejected)
+    assert ctx.range(x, facts=rejected) is None
 
 
 def test_facts_assume_many_uses_prefix_closure() -> None:
@@ -3964,8 +3618,7 @@ def test_fact_backed_simplification() -> None:
     assert contradictory_floor.simplify(facts=contradictory) == contradictory_floor
 
     sentinel = ctx.parse_expr("(")
-    with pytest.raises(ValueError, match="sentinel"):
-        sentinel.simplify(facts=facts)
+    assert sentinel.simplify(facts=facts).is_parse_error
 
     other = ixsimpl.Context()
     with pytest.raises(ValueError, match="expression from different context"):
@@ -4003,10 +3656,8 @@ def test_compound_assumption_rejection_is_atomic() -> None:
     facts.assume(ge0)
     with pytest.raises(ValueError, match="OR predicates"):
         facts.assume(ixsimpl.and_(y >= 5, either))
-    with pytest.raises(ValueError, match="fact set is unusable"):
-        ctx.range(x, facts=facts)
-    with pytest.raises(ValueError, match="fact set is unusable"):
-        ctx.range(y, facts=facts)
+    assert ctx.range(x, facts=facts) is None
+    assert ctx.range(y, facts=facts) is None
     with pytest.raises(ValueError, match="fact set is unusable"):
         mod.simplify(facts=facts)
 
@@ -4085,7 +3736,12 @@ def test_facts_canonical_affine_spelling_fuzz(
 
     facts.assume_range(expanded, lo, hi)
 
-    assert ctx.range(factored, facts=facts) == (lo, hi)
+    modulus = abs(scale)
+    aligned_lo = lo + (offset - lo) % modulus
+    aligned_hi = hi - (hi - offset) % modulus
+    expected = None if aligned_lo > aligned_hi else (aligned_lo, aligned_hi)
+    assert ctx.range(expanded, facts=facts) == expected
+    assert ctx.range(factored, facts=facts) == expected
 
 
 def test_has_basic() -> None:

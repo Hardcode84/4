@@ -58,6 +58,11 @@ typedef struct {
 } ixs_expr_bound;
 
 typedef struct {
+  size_t expr_index; /* stable dense index, never an exprs-array pointer */
+  size_t next;       /* one-based watcher index, zero ends the list */
+} ixs_mod_inverse_watcher;
+
+typedef struct {
   uint64_t lo;
   uint64_t hi;
   bool negative;
@@ -90,6 +95,15 @@ typedef struct {
   size_t nexprs;
   size_t expr_cap;
   size_t expr_index_cap;
+  /* Reverse incident lists for Mod(raw_symbol, positive_literal) overrides.
+   * Heads are indexed by the stable variable index; watcher nodes reference
+   * stable dense expression indices so array growth cannot invalidate them. */
+  size_t *mod_inverse_heads;
+  size_t mod_inverse_head_cap;
+  ixs_mod_inverse_watcher *mod_inverse_watchers;
+  size_t nmod_inverse_watchers;
+  size_t mod_inverse_watcher_cap;
+  size_t mod_inverse_watch_visits; /* internal work-bound test counter */
   ixs_difference_constraint **difference_index;
   ixs_difference_var *difference_vars;
   size_t ndifferences;
@@ -137,6 +151,8 @@ typedef struct {
   /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
    * use the relation being justified to prove its own domain. */
   unsigned equality_disabled_depth;
+  /* Prevent predicate EQ/NE fallback from recursively re-entering itself. */
+  unsigned predicate_equivalence_depth;
   /* Exact proofs own their structural traversal.  Auxiliary interval and
    * predicate probes may re-enter once, but cannot form an unbounded C call
    * chain through another exact proof. */
@@ -158,8 +174,8 @@ struct ixs_facts {
   ixs_bounds bounds;
 };
 
-/* Internal hooks for bounded mutual-query regression tests. */
-#ifndef IXS_AMALGAMATED
+/* Internal hooks emitted only by the test-instrumented library. */
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
 typedef enum {
   IXS_BOUNDS_TEST_TRANSPORT_VALUE,
   IXS_BOUNDS_TEST_TRANSPORT_LIMITED,
@@ -173,9 +189,6 @@ IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *cache_hits, size_t *cycle_blocks,
                                        size_t *limit_blocks,
                                        size_t *active_count, size_t *nesting);
-IXS_STATIC void ixs_bounds_equality_query_stats(
-    const ixs_bounds *b, size_t *walks, size_t *endpoint_visits,
-    size_t *edge_visits, size_t *defined_checks, size_t *intrinsic_evaluations);
 /* Test hook: re-enter one active interval key and verify clean unwind. */
 IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
 /* Test hooks keep private query-cache and residue-walker types out of tests. */

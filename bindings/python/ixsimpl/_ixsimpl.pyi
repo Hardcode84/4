@@ -4,9 +4,6 @@ from collections.abc import Sequence
 from fractions import Fraction
 from typing import Literal, Self, TypeVar, overload
 
-# _Expr is the unified runtime node type. Predicate-valued nodes are numeric
-# zero/one expressions too; APIs with a dedicated predicate mode enforce that
-# semantic contract at runtime rather than through a separate Python class.
 # Assumption inputs accept CMP/boolean roots and AND trees with those leaves.
 # Unsupported predicate shapes raise ValueError.
 
@@ -59,7 +56,6 @@ class _Expr:
     @property
     def children(self) -> tuple[Self, ...]: ...
     def child(self, i: int) -> Self: ...
-    def to_bytes(self) -> bytes: ...
     @property
     def sym_name(self) -> str: ...
     @property
@@ -126,8 +122,6 @@ class _Expr:
     def _ctx(self) -> Context: ...
 
 _BatchExpr = TypeVar("_BatchExpr", bound=_Expr)
-_FiniteDomainStatus = Literal["complete", "exhausted", "limited"]
-_FiniteDomainQueryKind = Literal["predicate", "defined", "integer"]
 
 class Facts:
     def assume(self, pred: _Expr) -> None: ...
@@ -189,52 +183,13 @@ class Context:
     ) -> bool | None: ...
     def check_predicate(self, predicate: _Expr, facts: Facts) -> bool | None: ...
     def equivalent(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> bool | None: ...
-    def equivalent_modulo_pow2(
-        self, lhs: _Expr, rhs: _Expr, bits: int, facts: Facts
-    ) -> bool | None: ...
-    def equivalent_finite_domain(
-        self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_work: int
-    ) -> tuple[_FiniteDomainStatus, bool | None, int]: ...
-    def check_finite_domain(
-        self,
-        domains: Sequence[tuple[_Expr, Sequence[int]]],
-        queries: Sequence[tuple[_FiniteDomainQueryKind, _Expr]],
-        facts: Facts,
-        remaining_work: int,
-    ) -> tuple[
-        _FiniteDomainStatus,
-        list[tuple[bool | None, int | None]],
-        int,
-    ]: ...
-    def mapped_constant_differences(
-        self,
-        symbol: _Expr,
-        expressions: Sequence[_Expr],
-        rows: Sequence[tuple[int, int, int, int]],
-        facts: Facts,
-        remaining_work: int,
-    ) -> tuple[_FiniteDomainStatus, list[int] | None, int]: ...
     def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
-    def modulo_recurrence(
-        self,
-        value: _Expr,
-        reference: _Expr,
-        induction: _Expr,
-        signedness: Literal["signed", "unsigned"],
-        width: int,
-        divisor: int,
-        facts: Facts,
-    ) -> tuple[int, _Expr] | None: ...
     def affine_decompose(
         self, expr: _Expr, symbol: _Expr, facts: Facts
     ) -> tuple[_Expr, _Expr] | None: ...
-    def decompose_exact_quotient(self, expr: _Expr, facts: Facts) -> tuple[_Expr, _Expr] | None: ...
     def finite_difference(
         self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
     ) -> _Expr | None: ...
-    def invariant_under_step(
-        self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
-    ) -> bool | None: ...
     def split_additive_constant(self, expr: _Expr, facts: Facts) -> tuple[_Expr, int] | None: ...
     def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
     def known_bits(
@@ -242,9 +197,6 @@ class Context:
     ) -> tuple[int, int, Literal["or_zero", "positive"] | None] | None: ...
     def symbol_congruence(self, symbol: _Expr, facts: Facts) -> tuple[int, int] | None: ...
     def congruent(self, expr: _Expr, modulus: int, residue: int, facts: Facts) -> bool | None: ...
-    def rational_intermediates_fit(
-        self, expr: _Expr, word_bits: int, facts: Facts
-    ) -> bool | None: ...
     def try_exact_divide(
         self, expr: _Expr, divisor: int, facts: Facts
     ) -> tuple[Literal["proven", "not_exact", "unknown"], _Expr | None]: ...
@@ -263,15 +215,6 @@ class Context:
         facts: Facts | None = None,
     ) -> tuple[int | Fraction | None, int | Fraction | None] | None:
         """Infer bounds through supported powers, XOR, and first-match Piecewise."""
-
-    def integer_range(
-        self,
-        expr: _Expr,
-        *,
-        assumptions: Sequence[_Expr] | None = None,
-        facts: Facts | None = None,
-    ) -> tuple[int | None, int | None] | None:
-        """Infer bounds after proving the expression total and integer-valued."""
 
     def simplify_batch(
         self,

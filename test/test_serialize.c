@@ -39,17 +39,12 @@ static int failures;
 
 static bool test_ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
                                  ixs_range_result *out) {
-  ixs_range_query_result result = ixs_range_facts(facts, expr);
-  if (out)
-    *out = result.range;
-  return out && result.status == IXS_FACT_QUERY_COMPLETE && result.available;
+  return ixs_range_facts(facts, expr, out);
 }
 
 static ixs_check_result test_ixs_check_facts(ixs_facts *facts,
                                              const ixs_node *expr) {
-  ixs_fact_check_result result = ixs_check_facts(facts, expr);
-  return result.status == IXS_FACT_QUERY_COMPLETE ? result.check
-                                                  : IXS_CHECK_UNKNOWN;
+  return ixs_check_facts(facts, expr);
 }
 
 typedef struct {

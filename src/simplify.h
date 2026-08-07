@@ -16,9 +16,18 @@
 
 IXS_STATIC ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+/* Optional proof construction: arithmetic overflow is reported separately
+ * without appending a diagnostic; NULL with false still means allocation
+ * failure. These retain the canonical smart-constructor semantics. */
+IXS_STATIC ixs_node *simp_try_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
+                                  bool *unrepresentable);
+IXS_STATIC ixs_node *simp_try_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
+                                  bool *unrepresentable);
 IXS_STATIC ixs_node *simp_neg(ixs_ctx *ctx, ixs_node *a);
 IXS_STATIC ixs_node *simp_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_try_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
+                                  bool *unrepresentable);
 IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_trunc(ixs_ctx *ctx, ixs_node *x);
@@ -47,6 +56,9 @@ IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a);
 /* Top-down simplification pass with assumptions + bound analysis. */
 IXS_STATIC ixs_node *simp_simplify_bounds(ixs_ctx *ctx, ixs_node *expr,
                                           ixs_bounds *bounds);
+IXS_STATIC ixs_node *simp_normalize_rational_carrier(ixs_ctx *ctx,
+                                                     ixs_bounds *bounds,
+                                                     ixs_node *expr);
 
 /* As above, but reports a root-hold nesting limit separately from OOM. */
 IXS_STATIC ixs_node *simp_simplify_bounds_status(ixs_ctx *ctx, ixs_node *expr,

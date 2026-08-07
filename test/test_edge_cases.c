@@ -618,7 +618,6 @@ static void test_truncating_remainder_intersects_explicit_range(void) {
   ixs_range_result exact_zero = {true, true, 0, 1, 0, 1};
   ixs_range_result exact_four = {true, true, 4, 1, 4, 1};
   ixs_range_result range;
-  ixs_integer_range_result integer_range;
   ixs_facts *refined = ixs_facts_create(ctx);
   ixs_facts *disjoint = ixs_facts_create(ctx);
 
@@ -628,15 +627,11 @@ static void test_truncating_remainder_intersects_explicit_range(void) {
   CHECK(test_ixs_range_facts(refined, remainder, &range));
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
-  CHECK(test_ixs_integer_range_facts(refined, remainder, &integer_range));
-  CHECK(integer_range.has_lower && integer_range.lower == 0);
-  CHECK(integer_range.has_upper && integer_range.upper == 0);
 
   CHECK(ixs_facts_assume_pred(disjoint, d_is_four));
   CHECK(ixs_facts_assume_range(disjoint, remainder, &exact_four));
   CHECK(test_ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
   CHECK(!test_ixs_range_facts(disjoint, remainder, &range));
-  CHECK(!test_ixs_integer_range_facts(disjoint, remainder, &integer_range));
 
   ixs_ctx_destroy(ctx);
 }
