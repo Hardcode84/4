@@ -231,10 +231,6 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 
-/* Prove and return the representable inclusive integer domain of expr. */
-IXS_STATIC bool ixs_bounds_get_integer_range(ixs_bounds *b, ixs_node *expr,
-                                             ixs_integer_range_result *out);
-
 /* True if stored bounds contain a direct contradiction. */
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b);
 

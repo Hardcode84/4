@@ -153,6 +153,12 @@ const-qualified, so constructors, transforms, child accessors, walks, proof
 queries, and pointer arrays all use immutable handles without losing direct
 composition between APIs.
 
+There is one public range contract: `ixs_range_result` with exact rational
+endpoints. Consumers that require an integer enclosure first prove
+integer-valuedness with `ixs_check_integer_valued`, then round the returned
+finite endpoints inward. A separate `integer_range` API would duplicate those
+two contracts and is intentionally absent from C, C++, and Python.
+
 ## Rule-Hit Statistics
 
 Build with `-DENABLE_STATS=ON` to count how many times each

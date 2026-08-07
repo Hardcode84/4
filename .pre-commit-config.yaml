@@ -63,7 +63,7 @@ repos:
         name: check exported symbols
         language: python
         entry: python scripts/check_exports.py
-        files: ^(src/.*\.[ch]|include/ixsimpl\.h|ixsimpl_amalg\.c)$
+        files: ^(scripts/check_exports\.py|src/.*\.[ch]|include/ixsimpl\.h|ixsimpl_amalg\.c)$
         pass_filenames: false
       - id: check-hotpaths
         name: hot-path complexity check

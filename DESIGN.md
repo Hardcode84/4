@@ -1588,7 +1588,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   constraint solver: if propagation cannot derive an interval, the query
   reports unknown; if independent intervals lose correlations, the returned
   interval is conservative rather than the mathematical image of the full
-  assumption set.
+  assumption set. There is no parallel integer-range contract. Consumers
+  combine this canonical range with the definedness and integer-valued proof
+  queries; internal exact proofs refine the same interval representation
+  rather than materializing a second result type.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer

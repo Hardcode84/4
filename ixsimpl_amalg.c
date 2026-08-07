@@ -14996,99 +14996,78 @@ static uint64_t bounds_wide_integer_residue(bounds_wide_integer value,
   return residue;
 }
 
-static void integer_range_result_clear(ixs_integer_range_result *out) {
-  out->has_lower = false;
-  out->has_upper = false;
-  out->lower = 0;
-  out->upper = 0;
-}
-
-static bool
-bounds_tighten_integer_range_congruence(ixs_bounds *bounds, ixs_node *expr,
-                                        ixs_integer_range_result *out) {
+static bool bounds_refine_integral_interval(ixs_bounds *bounds, ixs_node *expr,
+                                            bool expression_defined,
+                                            ixs_interval *interval) {
+  ixs_interval truncating_remainder;
+  bounds_truncating_range_status truncating_status;
   uint64_t stride;
   uint64_t residue;
   int64_t aligned;
   bool lower_overflow = false;
   bool upper_overflow = false;
 
+  truncating_status = bounds_get_truncating_remainder_range(
+      bounds, expr, expression_defined, &truncating_remainder);
+  if (truncating_status == BOUNDS_TRUNCATING_RANGE_MATCH)
+    *interval = iv_intersect(*interval, truncating_remainder);
+  else
+    bounds_note_truncating_range_status(bounds, truncating_status);
+  if (bounds->oom || !interval->valid || ixs_interval_is_empty(*interval))
+    return false;
+  if (!interval->lo_inf) {
+    interval->lo_p = ixs_rat_ceil(interval->lo_p, interval->lo_q);
+    interval->lo_q = 1;
+  }
+  if (!interval->hi_inf) {
+    interval->hi_p = ixs_rat_floor(interval->hi_p, interval->hi_q);
+    interval->hi_q = 1;
+  }
+  if (ixs_interval_is_empty(*interval))
+    return false;
   if (!bounds_known_stride(bounds, expr, &stride) || stride <= 1u ||
       stride > (uint64_t)INT64_MAX)
     return !bounds->oom;
   if (!bounds_known_residue(bounds, expr, stride, &residue))
     return !bounds->oom;
-  if (out->has_lower) {
-    if (integer_align_congruence_up(out->lower, (int64_t)stride,
+  if (!interval->lo_inf) {
+    if (integer_align_congruence_up(interval->lo_p, (int64_t)stride,
                                     (int64_t)residue, &aligned))
-      out->lower = aligned;
+      interval->lo_p = aligned;
     else
       lower_overflow = true;
   }
-  if (out->has_upper) {
-    if (integer_align_congruence_down(out->upper, (int64_t)stride,
+  if (!interval->hi_inf) {
+    if (integer_align_congruence_down(interval->hi_p, (int64_t)stride,
                                       (int64_t)residue, &aligned))
-      out->upper = aligned;
+      interval->hi_p = aligned;
     else
       upper_overflow = true;
   }
 
   /* A one-sided interval can retain its untightened representable endpoint.
    * With an opposite finite side, overflow proves no value can remain. */
-  if ((lower_overflow && out->has_upper) || (upper_overflow && out->has_lower))
+  if ((lower_overflow && !interval->hi_inf) ||
+      (upper_overflow && !interval->lo_inf))
     return false;
-  return !out->has_lower || !out->has_upper || out->lower <= out->upper;
-}
-
-IXS_STATIC bool ixs_bounds_get_integer_range(ixs_bounds *bounds, ixs_node *expr,
-                                             ixs_integer_range_result *out) {
-  ixs_interval interval;
-  ixs_interval truncating_remainder;
-  bounds_truncating_range_status truncating_status;
-
-  if (!out)
-    return false;
-  integer_range_result_clear(out);
-  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
-      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
-    return false;
-
-  interval = ixs_bounds_get(bounds, expr);
-  truncating_status = bounds_get_truncating_remainder_range(
-      bounds, expr, /*expression_defined=*/true, &truncating_remainder);
-  if (truncating_status == BOUNDS_TRUNCATING_RANGE_MATCH)
-    interval = iv_intersect(interval, truncating_remainder);
-  else
-    bounds_note_truncating_range_status(bounds, truncating_status);
-  if (bounds->oom || !interval.valid || ixs_interval_is_empty(interval))
-    return false;
-  if (!interval.lo_inf) {
-    out->has_lower = true;
-    out->lower = ixs_rat_ceil(interval.lo_p, interval.lo_q);
-  }
-  if (!interval.hi_inf) {
-    out->has_upper = true;
-    out->upper = ixs_rat_floor(interval.hi_p, interval.hi_q);
-  }
-  if (out->has_lower && out->has_upper && out->lower > out->upper)
-    goto failure;
-  if (!bounds_tighten_integer_range_congruence(bounds, expr, out))
-    goto failure;
-  return true;
-
-failure:
-  integer_range_result_clear(out);
-  return false;
+  return !ixs_interval_is_empty(*interval);
 }
 
 static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
                                      int64_t *lower, int64_t *upper) {
-  ixs_integer_range_result range;
-  if (!ixs_bounds_get_integer_range(bounds, expr, &range) || !range.has_lower ||
-      !range.has_upper)
+  ixs_interval interval;
+
+  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
+      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
     return false;
-  *lower = range.lower;
-  *upper = range.upper;
+  interval = ixs_bounds_get(bounds, expr);
+  if (!bounds_refine_integral_interval(
+          bounds, expr, /*expression_defined=*/true, &interval) ||
+      interval.lo_inf || interval.hi_inf)
+    return false;
+  *lower = interval.lo_p;
+  *upper = interval.hi_p;
   return true;
 }
 
@@ -19553,7 +19532,6 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   bool defined_limited = false;
   bool query_held = false;
   ixs_check_result integer_valued;
-  ixs_integer_range_result integer_range;
   bounds_truncating_range_status truncating_status;
   ixs_range_query_result result;
   memset(&result, 0, sizeof(result));
@@ -19588,19 +19566,15 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   }
   result.status = IXS_FACT_QUERY_COMPLETE;
   integer_valued = ixs_bounds_check_integer_valued(&facts->bounds, expr);
+  iv = ixs_bounds_get(&facts->bounds, expr);
   if (integer_valued == IXS_CHECK_TRUE) {
-    if (!ixs_bounds_get_integer_range(&facts->bounds, expr, &integer_range))
+    if (!bounds_refine_integral_interval(&facts->bounds, expr,
+                                         /*expression_defined=*/true, &iv))
       goto cleanup;
-    result.range.has_lower = integer_range.has_lower;
-    result.range.has_upper = integer_range.has_upper;
-    result.range.lower_p = integer_range.has_lower ? integer_range.lower : 0;
-    result.range.lower_q = 1;
-    result.range.upper_p = integer_range.has_upper ? integer_range.upper : 0;
-    result.range.upper_q = 1;
+    interval_to_range_result(iv, &result.range);
     result.available = true;
     goto cleanup;
   }
-  iv = ixs_bounds_get(&facts->bounds, expr);
   truncating_status = bounds_get_truncating_remainder_range(
       &facts->bounds, expr, /*expression_defined=*/false,
       &truncating_remainder);
@@ -19931,32 +19905,6 @@ bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
   if (result.status != IXS_FACT_QUERY_COMPLETE || !result.available)
     return false;
   *out = result.range;
-  return true;
-}
-
-bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
-                             ixs_integer_range_result *out) {
-  ixs_fact_check_result integer_valued;
-  ixs_range_query_result range;
-
-  if (out)
-    memset(out, 0, sizeof(*out));
-  if (!out) {
-    facts_public_output_error(facts, "integer range", "NULL output");
-    return false;
-  }
-  integer_valued = facts_query_check_integer_valued(facts, (ixs_node *)expr);
-  if (integer_valued.status != IXS_FACT_QUERY_COMPLETE ||
-      integer_valued.check != IXS_CHECK_TRUE)
-    return false;
-  range = facts_query_range(facts, (ixs_node *)expr);
-  if (range.status != IXS_FACT_QUERY_COMPLETE || !range.available ||
-      range.range.lower_q != 1 || range.range.upper_q != 1)
-    return false;
-  out->has_lower = range.range.has_lower;
-  out->has_upper = range.range.has_upper;
-  out->lower = range.range.lower_p;
-  out->upper = range.range.upper_p;
   return true;
 }
 
@@ -20634,16 +20582,6 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   bool result = simp_range(ctx, expr, assumptions, n_assumptions, out);
-  ixs_session_unbind(&binding);
-  return result;
-}
-
-bool ixs_integer_range(ixs_session *s, ixs_node *expr,
-                       ixs_node *const *assumptions, size_t n_assumptions,
-                       ixs_integer_range_result *out) {
-  ixs_session_binding binding;
-  ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  bool result = simp_integer_range(ctx, expr, assumptions, n_assumptions, out);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -35103,33 +35041,6 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
   ok = true;
 
 cleanup:
-  simp_bounds_scope_end_query(&scope);
-  simp_bounds_scope_destroy(&scope);
-  return ok;
-}
-
-IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
-                                   ixs_node *const *assumptions,
-                                   size_t n_assumptions,
-                                   ixs_integer_range_result *out) {
-  simp_bounds_scope scope;
-  bool ok;
-
-  if (!out)
-    return false;
-  out->has_lower = false;
-  out->has_upper = false;
-  out->lower = 0;
-  out->upper = 0;
-  if (!ctx || !expr || ixs_node_is_sentinel(expr) ||
-      !ixs_ctx_owns_node(ctx, expr) ||
-      !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
-    return false;
-  if (!simp_bounds_scope_hold(&scope, expr)) {
-    simp_bounds_scope_destroy(&scope);
-    return false;
-  }
-  ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
   simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
