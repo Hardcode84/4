@@ -1710,6 +1710,29 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   expression DAG and exact residuals use the weighted equality forest rather
   than inequality adjacency or context-wide scans.
 
+  After those exact strategies miss, a private final rule handles two original
+  outer `Mod` nodes with the same positive, representable power-of-two literal
+  modulus. It proves the outer operations and both dividends defined and
+  integer-valued over the complete fact domain, then normalizes the dividends
+  in the corresponding power-of-two quotient ring. The walk propagates through
+  integer-coefficient `ADD`, integer-coefficient `MUL` with only positive
+  powers, numeric `XOR`/`AND`/`OR`, and a nested literal `Mod` whose modulus is
+  divisible by the outer modulus. Other nodes, including rounding,
+  `Piecewise`, extrema, predicates, rational coefficients, reciprocal powers,
+  and dynamic or incompatible `Mod`, remain opaque. Pointer-identical opaque
+  subtrees can still participate in a successful exact proof. The rule sees
+  the original pair because fact-backed simplification can remove only one of
+  the matching outer operations.
+
+  Low-bit normalization is iterative and uses growable query-local scratch for
+  its stack and expected-O(1) pointer memo. It visits each supported DAG node
+  once, with expected O(nodes + edges) walk work and no context-wide scan or
+  semantic node/depth cutoff. Rebuilding canonical `ADD` and `MUL` nodes by
+  immediate-child substitution is O(children^2) in the worst case. Allocation,
+  checked-size, transport, or bounded exact-subproof failure returns
+  `UNKNOWN`. The rule can establish only `TRUE`; it never derives `FALSE` from
+  low-bit normalization.
+
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
   exact difference or predicates with opposite proven truth values return

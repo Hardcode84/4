@@ -2650,6 +2650,34 @@ def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
     assert ctx.equivalent(nonintegral_next, nonintegral_zero + 16, nonintegral) is None
 
 
+def test_private_low_bit_equivalence_fallback() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("binding_low_bits_x")
+    y = ctx.sym("binding_low_bits_y")
+    modulus = 2**32
+    facts = ctx.facts()
+
+    product = (x + 3) * (y + 5)
+    wrapped_product = (x % modulus + 3) * (y % modulus + 5)
+    lhs = product % modulus
+    rhs = wrapped_product % modulus
+    assert ctx.equivalent(lhs, rhs, facts) is True
+    assert ctx.equivalent(rhs, lhs, facts) is True
+    assert ctx.check(ctx.eq(lhs, rhs), facts=facts) is True
+
+    xor_lhs = ixsimpl.xor_(x, ctx.int_(85)) % modulus
+    xor_rhs = ixsimpl.xor_(x % modulus, ctx.int_(85)) % modulus
+    assert ctx.equivalent(xor_lhs, xor_rhs, facts) is True
+
+    nonpow_lhs = product % 12
+    nonpow_rhs = ((x % 12 + 3) * (y % 12 + 5)) % 12
+    assert ctx.equivalent(nonpow_lhs, nonpow_rhs, facts) is None
+
+    floor_lhs = ixsimpl.floor(x / 3) % 16
+    floor_rhs = ixsimpl.floor((x % 16) / 3) % 16
+    assert ctx.equivalent(floor_lhs, floor_rhs, facts) is None
+
+
 def test_equivalence_binding_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()

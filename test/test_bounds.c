@@ -7936,6 +7936,348 @@ static void test_total_equivalence_new_proof_oom(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *test_low_bit_wrap(ixs_ctx *ctx, ixs_node *value,
+                                   int64_t modulus) {
+  return ixs_mod(ctx, value, ixs_int(ctx, modulus));
+}
+
+static void test_public_equivalence_low_bit_normalization(void) {
+  const int64_t modulus = INT64_C(4294967296);
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "equiv_low_bits_x");
+  ixs_node *y = ixs_sym(ctx, "equiv_low_bits_y");
+  ixs_node *z = ixs_sym(ctx, "equiv_low_bits_z");
+  ixs_node *wrapped_x = test_low_bit_wrap(ctx, x, modulus);
+  ixs_node *wrapped_y = test_low_bit_wrap(ctx, y, modulus);
+  ixs_node *wrapped_z = test_low_bit_wrap(ctx, z, modulus);
+  ixs_node *targets[3] = {x, y, z};
+  ixs_node *replacements[3] = {wrapped_x, wrapped_y, wrapped_z};
+  ixs_node *add = ixs_add(
+      ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 3), x), ixs_int(ctx, 7)),
+      ixs_mul(ctx, ixs_int(ctx, -5), y));
+  ixs_node *product = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 3)),
+                              ixs_add(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *nested_product =
+      ixs_mul(ctx, ixs_add(ctx, product, ixs_int(ctx, 7)),
+              ixs_add(ctx, z, ixs_int(ctx, 9)));
+  ixs_node *xor_expr = ixs_xor(ctx, x, ixs_int(ctx, 85));
+  ixs_node *and_expr = ixs_and(ctx, x, ixs_int(ctx, 255));
+  ixs_node *or_expr = ixs_or(ctx, y, ixs_int(ctx, 256));
+  ixs_node *add_wrapped = ixs_subs_multi(ctx, add, 3, targets, replacements);
+  ixs_node *product_wrapped =
+      ixs_subs_multi(ctx, product, 3, targets, replacements);
+  ixs_node *nested_product_wrapped =
+      ixs_subs_multi(ctx, nested_product, 3, targets, replacements);
+  ixs_node *xor_wrapped =
+      ixs_subs_multi(ctx, xor_expr, 3, targets, replacements);
+  ixs_node *and_wrapped =
+      ixs_subs_multi(ctx, and_expr, 3, targets, replacements);
+  ixs_node *or_wrapped = ixs_subs_multi(ctx, or_expr, 3, targets, replacements);
+  ixs_node *add_lhs = test_low_bit_wrap(ctx, add, modulus);
+  ixs_node *add_rhs = test_low_bit_wrap(ctx, add_wrapped, modulus);
+  ixs_node *product_lhs = test_low_bit_wrap(ctx, product, modulus);
+  ixs_node *product_rhs = test_low_bit_wrap(ctx, product_wrapped, modulus);
+  ixs_node *nested_product_lhs =
+      test_low_bit_wrap(ctx, nested_product, modulus);
+  ixs_node *nested_product_rhs =
+      test_low_bit_wrap(ctx, nested_product_wrapped, modulus);
+  ixs_node *xor_lhs = test_low_bit_wrap(ctx, xor_expr, modulus);
+  ixs_node *xor_rhs = test_low_bit_wrap(ctx, xor_wrapped, modulus);
+  ixs_node *and_lhs = test_low_bit_wrap(ctx, and_expr, modulus);
+  ixs_node *and_rhs = test_low_bit_wrap(ctx, and_wrapped, modulus);
+  ixs_node *or_lhs = test_low_bit_wrap(ctx, or_expr, modulus);
+  ixs_node *or_rhs = test_low_bit_wrap(ctx, or_wrapped, modulus);
+  ixs_node *compatible_lhs = test_low_bit_wrap(ctx, product, 4);
+  ixs_node *compatible_product =
+      ixs_mul(ctx, ixs_add(ctx, test_low_bit_wrap(ctx, x, 16), ixs_int(ctx, 3)),
+              ixs_add(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *compatible_rhs = test_low_bit_wrap(ctx, compatible_product, 4);
+  ixs_node *equality = ixs_cmp(ctx, product_lhs, IXS_CMP_EQ, product_rhs);
+  ixs_node *inequality = ixs_cmp(ctx, product_lhs, IXS_CMP_NE, product_rhs);
+  ixs_node *assumption = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && y && z && wrapped_x && wrapped_y && wrapped_z && add &&
+        product && nested_product && xor_expr && and_expr && or_expr &&
+        add_wrapped && product_wrapped && nested_product_wrapped &&
+        xor_wrapped && and_wrapped && or_wrapped && add_lhs && add_rhs &&
+        product_lhs && product_rhs && nested_product_lhs &&
+        nested_product_rhs && xor_lhs && xor_rhs && and_lhs && and_rhs &&
+        or_lhs && or_rhs && compatible_lhs && compatible_product &&
+        compatible_rhs && equality && inequality && assumption && facts);
+
+  CHECK(test_ixs_equivalent_facts(facts, add_lhs, add_rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, product_lhs, product_rhs) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, product_rhs, product_lhs) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, nested_product_lhs,
+                                  nested_product_rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, xor_lhs, xor_rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, and_lhs, and_rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, or_lhs, or_rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, compatible_lhs, compatible_rhs) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, inequality) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx, equality, &assumption, 1) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_equivalence_low_bit_rejections(void) {
+  const int64_t modulus = INT64_C(4294967296);
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "equiv_low_bits_reject_x");
+  ixs_node *y = ixs_sym(ctx, "equiv_low_bits_reject_y");
+  ixs_node *d = ixs_sym(ctx, "equiv_low_bits_reject_d");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *wrapped_x = test_low_bit_wrap(ctx, x, modulus);
+  ixs_node *wrapped_y = test_low_bit_wrap(ctx, y, modulus);
+  ixs_node *product = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 3)),
+                              ixs_add(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *wrapped_product =
+      ixs_mul(ctx, ixs_add(ctx, wrapped_x, ixs_int(ctx, 3)),
+              ixs_add(ctx, wrapped_y, ixs_int(ctx, 5)));
+  ixs_node *different_lhs = test_low_bit_wrap(ctx, product, modulus);
+  ixs_node *different_rhs = test_low_bit_wrap(
+      ctx, ixs_add(ctx, wrapped_product, ixs_int(ctx, 1)), modulus);
+  ixs_node *nonpow_lhs = test_low_bit_wrap(ctx, product, 12);
+  ixs_node *nonpow_product =
+      ixs_mul(ctx, ixs_add(ctx, test_low_bit_wrap(ctx, x, 12), ixs_int(ctx, 3)),
+              ixs_add(ctx, test_low_bit_wrap(ctx, y, 12), ixs_int(ctx, 5)));
+  ixs_node *nonpow_rhs = test_low_bit_wrap(ctx, nonpow_product, 12);
+  ixs_node *unequal_lhs = test_low_bit_wrap(ctx, product, 16);
+  ixs_node *unequal_product =
+      ixs_mul(ctx, ixs_add(ctx, test_low_bit_wrap(ctx, x, 32), ixs_int(ctx, 3)),
+              ixs_add(ctx, test_low_bit_wrap(ctx, y, 32), ixs_int(ctx, 5)));
+  ixs_node *unequal_rhs = test_low_bit_wrap(ctx, unequal_product, 32);
+  ixs_node *dynamic_lhs = ixs_mod(ctx, product, d);
+  ixs_node *dynamic_product =
+      ixs_mul(ctx, ixs_add(ctx, ixs_mod(ctx, x, d), ixs_int(ctx, 3)),
+              ixs_add(ctx, ixs_mod(ctx, y, d), ixs_int(ctx, 5)));
+  ixs_node *dynamic_rhs = ixs_mod(ctx, dynamic_product, d);
+  ixs_node *rational_lhs = test_low_bit_wrap(
+      ctx,
+      ixs_mul(ctx,
+              ixs_add(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), ixs_int(ctx, 3)),
+              ixs_add(ctx, y, ixs_int(ctx, 5))),
+      16);
+  ixs_node *rational_rhs = test_low_bit_wrap(
+      ctx,
+      ixs_mul(
+          ctx,
+          ixs_add(ctx,
+                  ixs_div(ctx, test_low_bit_wrap(ctx, x, 16), ixs_int(ctx, 2)),
+                  ixs_int(ctx, 3)),
+          ixs_add(ctx, y, ixs_int(ctx, 5))),
+      16);
+  ixs_node *round_lhs = test_low_bit_wrap(
+      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3))), 16);
+  ixs_node *round_rhs = test_low_bit_wrap(
+      ctx,
+      ixs_floor(ctx,
+                ixs_div(ctx, test_low_bit_wrap(ctx, x, 16), ixs_int(ctx, 3))),
+      16);
+  ixs_node *piecewise_values[2] = {x, zero};
+  ixs_node *piecewise_conditions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, zero),
+                                       ixs_true(ctx)};
+  ixs_node *wrapped_piecewise_values[2] = {test_low_bit_wrap(ctx, x, 16), zero};
+  ixs_node *wrapped_piecewise_conditions[2] = {
+      ixs_cmp(ctx, test_low_bit_wrap(ctx, x, 16), IXS_CMP_GE, zero),
+      ixs_true(ctx)};
+  ixs_node *piecewise_lhs = test_low_bit_wrap(
+      ctx, ixs_pw(ctx, 2, piecewise_values, piecewise_conditions), 16);
+  ixs_node *piecewise_rhs = test_low_bit_wrap(
+      ctx,
+      ixs_pw(ctx, 2, wrapped_piecewise_values, wrapped_piecewise_conditions),
+      16);
+  ixs_node *shared_opaque_lhs = test_low_bit_wrap(
+      ctx,
+      ixs_add(ctx, wrapped_x,
+              ixs_floor(ctx, ixs_div(ctx, wrapped_x, ixs_int(ctx, 3)))),
+      modulus);
+  ixs_node *shared_opaque_rhs = test_low_bit_wrap(
+      ctx, ixs_add(ctx, x, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)))),
+      modulus);
+  ixs_node *incompatible_lhs = test_low_bit_wrap(ctx, product, 4);
+  ixs_node *incompatible_product =
+      ixs_mul(ctx, ixs_add(ctx, test_low_bit_wrap(ctx, x, 6), ixs_int(ctx, 3)),
+              ixs_add(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *incompatible_rhs = test_low_bit_wrap(ctx, incompatible_product, 4);
+  ixs_node *reciprocal_lhs =
+      test_low_bit_wrap(ctx,
+                        ixs_mul(ctx, ixs_div(ctx, ixs_int(ctx, 1), x),
+                                ixs_add(ctx, y, ixs_int(ctx, 1))),
+                        16);
+  ixs_node *reciprocal_rhs = test_low_bit_wrap(
+      ctx,
+      ixs_mul(ctx, ixs_div(ctx, ixs_int(ctx, 1), test_low_bit_wrap(ctx, x, 16)),
+              ixs_add(ctx, y, ixs_int(ctx, 1))),
+      16);
+  ixs_node *undefined = test_low_bit_wrap(ctx, ixs_div(ctx, x, d), 16);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *dynamic_facts = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_node *other_x = ixs_sym(other, "equiv_low_bits_reject_x");
+  ixs_node *other_y = ixs_sym(other, "equiv_low_bits_reject_y");
+  ixs_node *other_product =
+      ixs_mul(other,
+              ixs_add(other, test_low_bit_wrap(other, other_x, modulus),
+                      ixs_int(other, 3)),
+              ixs_add(other, test_low_bit_wrap(other, other_y, modulus),
+                      ixs_int(other, 5)));
+  ixs_node *other_rhs = test_low_bit_wrap(other, other_product, modulus);
+
+  CHECK(ctx && other && x && y && d && zero && wrapped_x && wrapped_y &&
+        product && wrapped_product && different_lhs && different_rhs &&
+        nonpow_lhs && nonpow_product && nonpow_rhs && unequal_lhs &&
+        unequal_product && unequal_rhs && dynamic_lhs && dynamic_product &&
+        dynamic_rhs && rational_lhs && rational_rhs && round_lhs && round_rhs &&
+        piecewise_lhs && piecewise_rhs && shared_opaque_lhs &&
+        shared_opaque_rhs && incompatible_lhs && incompatible_product &&
+        incompatible_rhs && reciprocal_lhs && reciprocal_rhs && undefined &&
+        facts && dynamic_facts && contradictory && other_x && other_y &&
+        other_product && other_rhs);
+
+  CHECK(test_ixs_equivalent_facts(facts, different_lhs, different_rhs) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, nonpow_lhs, nonpow_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, unequal_lhs, unequal_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(dynamic_facts,
+                              ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(test_ixs_equivalent_facts(dynamic_facts, dynamic_lhs, dynamic_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, rational_lhs, rational_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, round_lhs, round_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, piecewise_lhs, piecewise_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, shared_opaque_lhs,
+                                  shared_opaque_rhs) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, incompatible_lhs, incompatible_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, reciprocal_lhs, reciprocal_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, undefined, undefined) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(test_ixs_equivalent_facts(contradictory, different_lhs,
+                                  different_lhs) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_equivalent_facts(facts, different_lhs, other_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "different context") != NULL);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_equivalence_low_bit_growable_walk(void) {
+  enum { DEEP_NODES = 96, WIDE_ARGS = 2200 };
+  const int64_t modulus = INT64_C(4294967296);
+  const size_t allowance = 4096u;
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "equiv_low_bits_deep_x");
+  ixs_node *y = ixs_sym(ctx, "equiv_low_bits_deep_y");
+  ixs_node *deep = x;
+  ixs_node *deep_product;
+  ixs_node *plain_product;
+  ixs_node *deep_lhs;
+  ixs_node *deep_rhs;
+  ixs_node **wide_lhs_args = calloc(WIDE_ARGS, sizeof(*wide_lhs_args));
+  ixs_node **wide_rhs_args = calloc(WIDE_ARGS, sizeof(*wide_rhs_args));
+  ixs_node *wide_lhs;
+  ixs_node *wide_rhs;
+  ixs_node *product;
+  ixs_node *wrapped_product;
+  ixs_node *product_lhs;
+  ixs_node *product_rhs;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *probe = ixs_facts_create(ctx);
+  size_t allocations;
+  size_t failure_budget;
+  unsigned i;
+  char name[48];
+
+  CHECK(ctx && x && y && wide_lhs_args && wide_rhs_args && facts && probe);
+  if (!ctx || !x || !y || !wide_lhs_args || !wide_rhs_args || !facts ||
+      !probe) {
+    free(wide_lhs_args);
+    free(wide_rhs_args);
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+
+  for (i = 0; i < DEEP_NODES; i++)
+    deep = test_low_bit_wrap(ctx, deep, 4096 - (int64_t)(2u * i));
+  deep_product = ixs_mul(ctx, ixs_add(ctx, deep, ixs_int(ctx, 3)),
+                         ixs_add(ctx, y, ixs_int(ctx, 5)));
+  plain_product = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 3)),
+                          ixs_add(ctx, y, ixs_int(ctx, 5)));
+  deep_lhs = test_low_bit_wrap(ctx, deep_product, 2);
+  deep_rhs = test_low_bit_wrap(ctx, plain_product, 2);
+  CHECK(deep && deep_product && plain_product && deep_lhs && deep_rhs);
+  CHECK(test_ixs_equivalent_facts(facts, deep_lhs, deep_rhs) == IXS_CHECK_TRUE);
+
+  for (i = 0; i < WIDE_ARGS; i++) {
+    (void)snprintf(name, sizeof(name), "equiv_low_bits_wide_%u", i);
+    wide_lhs_args[i] = ixs_sym(ctx, name);
+    wide_rhs_args[i] = test_low_bit_wrap(ctx, wide_lhs_args[i], modulus);
+  }
+  wide_lhs = ixs_xor_many(ctx, WIDE_ARGS, wide_lhs_args);
+  wide_rhs = ixs_xor_many(ctx, WIDE_ARGS, wide_rhs_args);
+  free(wide_lhs_args);
+  free(wide_rhs_args);
+  CHECK(wide_lhs && wide_rhs);
+  CHECK(test_ixs_equivalent_facts(
+            facts, test_low_bit_wrap(ctx, wide_lhs, modulus),
+            test_low_bit_wrap(ctx, wide_rhs, modulus)) == IXS_CHECK_TRUE);
+
+  product = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 3)),
+                    ixs_add(ctx, y, ixs_int(ctx, 5)));
+  wrapped_product = ixs_mul(
+      ctx, ixs_add(ctx, test_low_bit_wrap(ctx, x, modulus), ixs_int(ctx, 3)),
+      ixs_add(ctx, test_low_bit_wrap(ctx, y, modulus), ixs_int(ctx, 5)));
+  product_lhs = test_low_bit_wrap(ctx, product, modulus);
+  product_rhs = test_low_bit_wrap(ctx, wrapped_product, modulus);
+  CHECK(product && wrapped_product && product_lhs && product_rhs);
+
+  CHECK(test_ixs_equivalent_facts(probe, product_lhs, product_rhs) ==
+        IXS_CHECK_TRUE);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), allowance);
+  CHECK(test_ixs_equivalent_facts(probe, product_lhs, product_rhs) ==
+        IXS_CHECK_TRUE);
+  allocations = allowance - ixs_test_scratch(ctx)->fail_after;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(allocations > 0u && allocations < allowance);
+  failure_budget = allocations == 0u ? 0u : allocations - 1u;
+
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), failure_budget);
+  CHECK(test_ixs_equivalent_facts(probe, product_lhs, product_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  if (ixs_ctx_nerrors(ctx) != 0)
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_equivalent_facts(probe, product_lhs, product_rhs) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_equivalence_invalid_inputs(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -9970,6 +10312,9 @@ int main(void) {
   test_public_remainder_projection_large_candidate_set();
   test_public_remainder_projection_shared_diamond();
   test_total_equivalence_new_proof_oom();
+  test_public_equivalence_low_bit_normalization();
+  test_public_equivalence_low_bit_rejections();
+  test_public_equivalence_low_bit_growable_walk();
   test_public_equivalence_invalid_inputs();
   test_public_affine_and_constant_difference();
   test_public_finite_difference_and_additive_split();
