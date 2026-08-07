@@ -292,6 +292,118 @@ static void test_mapped_bundle_atomic_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_modulo_recurrence_plan_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "modulo_plan_i");
+  ixs_node *k = ixs_sym(ctx, "modulo_plan_k");
+  ixs_node *x = ixs_sym(ctx, "modulo_plan_x");
+  ixs_node *y = ixs_sym(ctx, "modulo_plan_y");
+  ixs_node *z = ixs_sym(ctx, "modulo_plan_z");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *hundred = ixs_int(ctx, 100);
+  ixs_node *successor = ixs_add(ctx, i, one);
+  ixs_node *minus_one = ixs_sub(ctx, i, one);
+  ixs_facts *loop_facts = ixs_facts_create(ctx);
+  ixs_facts *derived_facts = ixs_facts_create(ctx);
+  ixs_facts *identity_facts = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_reference derived_reference[1] = {{0u, y}};
+  ixs_modulo_recurrence_reference identity_reference[1] = {{2u, NULL}};
+  ixs_modulo_recurrence_target targets[4];
+  ixs_modulo_recurrence_plan_group groups[4];
+  ixs_modulo_recurrence_plan_entry entries[4];
+  ixs_modulo_recurrence_plan_result result;
+  size_t budget;
+
+  CHECK(ctx && i && k && x && y && z && zero && one && hundred && successor &&
+        minus_one && loop_facts && derived_facts && identity_facts);
+  CHECK(ixs_facts_assume_pred(loop_facts,
+                              ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(
+      ixs_facts_assume_pred(loop_facts, ixs_cmp(ctx, i, IXS_CMP_LE, hundred)));
+  CHECK(
+      ixs_facts_assume_pred(derived_facts, ixs_cmp(ctx, k, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(derived_facts,
+                              ixs_cmp(ctx, k, IXS_CMP_LE, hundred)));
+  CHECK(
+      ixs_facts_assume_pred(derived_facts, ixs_cmp(ctx, x, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(derived_facts,
+                              ixs_cmp(ctx, x, IXS_CMP_LE, hundred)));
+  CHECK(
+      ixs_facts_assume_pred(derived_facts, ixs_cmp(ctx, y, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(derived_facts,
+                              ixs_cmp(ctx, y, IXS_CMP_LE, hundred)));
+  CHECK(ixs_facts_assume_pred(
+      derived_facts,
+      ixs_cmp(ctx, ixs_sub(ctx, x, y), IXS_CMP_EQ, ixs_int(ctx, 2))));
+  CHECK(
+      ixs_facts_assume_pred(identity_facts, ixs_cmp(ctx, k, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(identity_facts,
+                              ixs_cmp(ctx, k, IXS_CMP_LE, hundred)));
+  CHECK(
+      ixs_facts_assume_pred(identity_facts, ixs_cmp(ctx, z, IXS_CMP_GE, zero)));
+
+  targets[0] = (ixs_modulo_recurrence_target){
+      loop_facts, i, i, NULL, 0u, IXS_REMAINDER_SIGNED, 5u};
+  targets[1] = (ixs_modulo_recurrence_target){
+      loop_facts,           minus_one,           i, NULL, 0u,
+      IXS_REMAINDER_SIGNED, UINT64_C(4294967291)};
+  targets[2] = (ixs_modulo_recurrence_target){
+      derived_facts, x, k, derived_reference, 1u, IXS_REMAINDER_SIGNED, 5u};
+  targets[3] = (ixs_modulo_recurrence_target){
+      identity_facts, z, k, identity_reference, 1u, IXS_REMAINDER_SIGNED, 5u};
+
+  budget = 10u;
+  result = ixs_plan_modulo_recurrences_facts(loop_facts, successor, i, i, 32u,
+                                             targets, 4u, groups, 4u, entries,
+                                             4u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE && result.ngroups == 1u &&
+        budget == 0u);
+  CHECK(groups[0].signedness == IXS_REMAINDER_SIGNED &&
+        groups[0].divisor == 5u && groups[0].successor_increment == 1u &&
+        groups[0].remainder != NULL);
+  CHECK(entries[0].group_index == 0u && entries[0].increment == 0u);
+  CHECK(entries[1].group_index == 0u && entries[1].increment == 4u);
+  CHECK(entries[2].group_index == 0u && entries[2].increment == 2u);
+  CHECK(entries[3].group_index == 0u && entries[3].increment == 2u);
+
+  groups[0].divisor = 99u;
+  entries[0].group_index = 0u;
+  budget = 9u;
+  result = ixs_plan_modulo_recurrences_facts(loop_facts, successor, i, i, 32u,
+                                             targets, 4u, groups, 4u, entries,
+                                             4u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED && result.ngroups == 0u &&
+        budget == 9u && groups[0].divisor == 0u &&
+        entries[0].group_index == SIZE_MAX && entries[0].increment == 0u);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_modulo_recurrence_plan_fixed_width_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *current = ixs_int(ctx, INT32_MAX);
+  ixs_node *successor = ixs_int(ctx, INT32_MIN);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_target target = {
+      facts, current, current, NULL, 0u, IXS_REMAINDER_UNSIGNED, 5u};
+  ixs_modulo_recurrence_plan_group group;
+  ixs_modulo_recurrence_plan_entry entry;
+  ixs_modulo_recurrence_plan_result result;
+  size_t budget = 2u;
+
+  CHECK(ctx && current && successor && facts);
+  result = ixs_plan_modulo_recurrences_facts(facts, successor, current, current,
+                                             32u, &target, 1u, &group, 1u,
+                                             &entry, 1u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE && result.ngroups == 1u &&
+        budget == 0u && group.successor_increment == 1u &&
+        group.divisor == 5u && entry.group_index == 0u &&
+        entry.increment == 0u);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_relational_negative_cycle_contract();
   test_relational_chain_insertion_order_contract();
@@ -299,6 +411,8 @@ int main(void) {
   test_relational_loop_bound_production_witness();
   test_mapped_predicate_fallback_budget_contract();
   test_mapped_bundle_atomic_contract();
+  test_modulo_recurrence_plan_contract();
+  test_modulo_recurrence_plan_fixed_width_contract();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

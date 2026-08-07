@@ -21937,6 +21937,604 @@ cleanup:
   return result;
 }
 
+typedef enum {
+  MODULO_PLAN_DIVISOR_VALID,
+  MODULO_PLAN_DIVISOR_UNSUPPORTED,
+  MODULO_PLAN_DIVISOR_INVALID
+} modulo_plan_divisor_status;
+
+typedef struct {
+  ixs_remainder_signedness signedness;
+  uint64_t divisor;
+  size_t group_plus_one;
+} modulo_plan_group_slot;
+
+typedef struct {
+  ixs_remainder_signedness signedness;
+  uint64_t divisor;
+  uint64_t successor_increment;
+  const ixs_node *remainder;
+  size_t output_index;
+  bool successor_proven;
+  bool used;
+} modulo_plan_group_work;
+
+typedef struct {
+  size_t group_index;
+  uint64_t increment;
+  bool planned;
+} modulo_plan_target_work;
+
+typedef struct {
+  size_t dependent;
+  const ixs_node *expression;
+  size_t next;
+} modulo_plan_reference_work;
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_facts *loop_facts;
+  const ixs_node *successor;
+  const ixs_node *current;
+  const ixs_node *induction;
+  const ixs_modulo_recurrence_target *targets;
+  size_t ntargets;
+  unsigned width;
+  modulo_plan_group_slot *group_slots;
+  size_t group_hash_capacity;
+  modulo_plan_group_work *groups;
+  size_t ngroups;
+  modulo_plan_target_work *target_state;
+  modulo_plan_reference_work *references;
+  size_t nreferences;
+  size_t *reference_heads;
+  size_t *reference_tails;
+  size_t *queue;
+  size_t queue_begin;
+  size_t queue_end;
+} modulo_plan_work;
+
+static ixs_modulo_recurrence_plan_result
+modulo_plan_result(ixs_finite_domain_status status) {
+  ixs_modulo_recurrence_plan_result result;
+  result.status = status;
+  result.ngroups = 0u;
+  return result;
+}
+
+static void modulo_plan_reset_outputs(ixs_modulo_recurrence_plan_group *groups,
+                                      size_t ngroups,
+                                      ixs_modulo_recurrence_plan_entry *entries,
+                                      size_t nentries) {
+  size_t i;
+  if (groups && ngroups <= SIZE_MAX / sizeof(*groups))
+    memset(groups, 0, ngroups * sizeof(*groups));
+  if (!entries || nentries > SIZE_MAX / sizeof(*entries))
+    return;
+  for (i = 0; i < nentries; i++) {
+    entries[i].group_index = SIZE_MAX;
+    entries[i].increment = 0u;
+  }
+}
+
+static modulo_plan_divisor_status
+modulo_plan_normalize_divisor(ixs_remainder_signedness signedness,
+                              unsigned width, uint64_t raw,
+                              uint64_t *magnitude) {
+  uint64_t sign_bit;
+  uint64_t mask;
+  if ((signedness != IXS_REMAINDER_SIGNED &&
+       signedness != IXS_REMAINDER_UNSIGNED) ||
+      width == 0u || width > 64u || raw == 0u ||
+      !modulo_recurrence_width_contains(width, raw))
+    return MODULO_PLAN_DIVISOR_INVALID;
+  if (signedness == IXS_REMAINDER_UNSIGNED) {
+    *magnitude = raw;
+    return MODULO_PLAN_DIVISOR_VALID;
+  }
+  sign_bit = UINT64_C(1) << (width - 1u);
+  if (raw < sign_bit) {
+    *magnitude = raw;
+    return MODULO_PLAN_DIVISOR_VALID;
+  }
+  mask = width == 64u ? UINT64_MAX : (UINT64_C(1) << width) - 1u;
+  *magnitude = ((~raw) & mask) + 1u;
+  return *magnitude == sign_bit ? MODULO_PLAN_DIVISOR_UNSUPPORTED
+                                : MODULO_PLAN_DIVISOR_VALID;
+}
+
+static size_t modulo_plan_hash(ixs_remainder_signedness signedness,
+                               uint64_t divisor) {
+  uint64_t value = divisor ^ ((uint64_t)(unsigned)signedness << 61u);
+  value ^= value >> 33u;
+  value *= UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33u;
+  return (size_t)value;
+}
+
+static modulo_plan_group_slot *
+modulo_plan_find_group_slot(modulo_plan_group_slot *slots, size_t capacity,
+                            ixs_remainder_signedness signedness,
+                            uint64_t divisor) {
+  size_t index = modulo_plan_hash(signedness, divisor) & (capacity - 1u);
+  while (slots[index].group_plus_one != 0u &&
+         (slots[index].signedness != signedness ||
+          slots[index].divisor != divisor))
+    index = (index + 1u) & (capacity - 1u);
+  return &slots[index];
+}
+
+static bool modulo_plan_header_valid(
+    ixs_ctx *ctx, unsigned width, const ixs_modulo_recurrence_target *targets,
+    size_t ntargets, ixs_modulo_recurrence_plan_group *groups,
+    size_t ngroup_capacity, ixs_modulo_recurrence_plan_entry *entries,
+    size_t nentries, size_t *remaining_work, size_t *reference_count,
+    size_t *reserved_work, size_t *group_hash_capacity) {
+  size_t target;
+  *reference_count = 0u;
+  *reserved_work = 0u;
+  *group_hash_capacity = 0u;
+  if (width == 0u || width > 64u) {
+    ixs_ctx_push_error(ctx, "modulo recurrence plan: invalid bit width");
+    return false;
+  }
+  if (!targets || ntargets == 0u || ntargets > SIZE_MAX / sizeof(*targets) ||
+      !groups || ngroup_capacity != ntargets ||
+      ngroup_capacity > SIZE_MAX / sizeof(*groups) || !entries ||
+      nentries != ntargets || nentries > SIZE_MAX / sizeof(*entries) ||
+      !remaining_work) {
+    ixs_ctx_push_error(
+        ctx, "modulo recurrence plan: invalid target or output arrays");
+    return false;
+  }
+  if (ntargets > SIZE_MAX / 2u ||
+      !mapped_bundle_hash_capacity(ntargets, sizeof(modulo_plan_group_slot),
+                                   group_hash_capacity)) {
+    ixs_ctx_push_error(ctx, "modulo recurrence plan: target count overflows");
+    return false;
+  }
+  for (target = 0u; target < ntargets; target++) {
+    const ixs_modulo_recurrence_target *current_target = &targets[target];
+    if (!current_target->facts || !current_target->value ||
+        !current_target->induction ||
+        (current_target->nreferences != 0u && !current_target->references) ||
+        current_target->nreferences >
+            SIZE_MAX / sizeof(*current_target->references) ||
+        *reference_count > SIZE_MAX - current_target->nreferences) {
+      ixs_ctx_push_error(ctx,
+                         "modulo recurrence plan: invalid target descriptor");
+      return false;
+    }
+    *reference_count += current_target->nreferences;
+  }
+  if (*reference_count > SIZE_MAX / sizeof(modulo_plan_reference_work) ||
+      ntargets > (SIZE_MAX - *reference_count) / 2u) {
+    ixs_ctx_push_error(ctx, "modulo recurrence plan: work count overflows");
+    return false;
+  }
+  *reserved_work = 2u * ntargets + *reference_count;
+  return true;
+}
+
+static ixs_finite_domain_status
+modulo_plan_validate_facts(ixs_facts *facts, const ixs_node *const *nodes,
+                           size_t nnodes, const char *query,
+                           ixs_ctx **shared_ctx) {
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  size_t node;
+  ixs_finite_domain_status status = IXS_FINITE_DOMAIN_COMPLETE;
+  if (!facts_bind(facts, &binding, &ctx))
+    return IXS_FINITE_DOMAIN_INVALID;
+  if (!facts_ready(facts)) {
+    status =
+        facts->bounds.oom ? IXS_FINITE_DOMAIN_OOM : IXS_FINITE_DOMAIN_INVALID;
+    ixs_ctx_push_error(ctx, "%s: fact set is unusable", query);
+    goto cleanup;
+  }
+  if (*shared_ctx && *shared_ctx != ctx) {
+    ixs_ctx_push_error(ctx, "%s: fact sets belong to different contexts",
+                       query);
+    status = IXS_FINITE_DOMAIN_INVALID;
+    goto cleanup;
+  }
+  *shared_ctx = ctx;
+  for (node = 0u; node < nnodes; node++) {
+    if (!facts_query_node_ok(ctx, (ixs_node *)nodes[node], query)) {
+      status = IXS_FINITE_DOMAIN_INVALID;
+      break;
+    }
+    if (!finite_domain_expression_kind(nodes[node])) {
+      ixs_ctx_push_error(ctx, "%s: scalar expression expected", query);
+      status = IXS_FINITE_DOMAIN_INVALID;
+      break;
+    }
+  }
+
+cleanup:
+  ixs_session_unbind(&binding);
+  return status;
+}
+
+static ixs_finite_domain_status
+modulo_plan_validate_targets(const ixs_modulo_recurrence_target *targets,
+                             size_t ntargets, unsigned width,
+                             ixs_ctx **shared_ctx) {
+  size_t target;
+  for (target = 0u; target < ntargets; target++) {
+    const ixs_modulo_recurrence_target *current = &targets[target];
+    const ixs_node *nodes[2] = {current->value, current->induction};
+    modulo_plan_divisor_status divisor_status;
+    uint64_t magnitude;
+    size_t reference;
+    ixs_finite_domain_status status = modulo_plan_validate_facts(
+        current->facts, nodes, 2u, "modulo recurrence plan target", shared_ctx);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    divisor_status = modulo_plan_normalize_divisor(
+        current->signedness, width, current->divisor, &magnitude);
+    if (divisor_status == MODULO_PLAN_DIVISOR_INVALID) {
+      ixs_session_binding binding;
+      ixs_ctx *ctx;
+      if (facts_bind(current->facts, &binding, &ctx)) {
+        ixs_ctx_push_error(ctx,
+                           "modulo recurrence plan: invalid target divisor");
+        ixs_session_unbind(&binding);
+      }
+      return IXS_FINITE_DOMAIN_INVALID;
+    }
+    for (reference = 0u; reference < current->nreferences; reference++) {
+      const ixs_modulo_recurrence_reference *relation =
+          &current->references[reference];
+      if (relation->target_index >= ntargets) {
+        ixs_session_binding binding;
+        ixs_ctx *ctx;
+        if (facts_bind(current->facts, &binding, &ctx)) {
+          ixs_ctx_push_error(
+              ctx, "modulo recurrence plan: reference target is out of range");
+          ixs_session_unbind(&binding);
+        }
+        return IXS_FINITE_DOMAIN_INVALID;
+      }
+      if (relation->expression) {
+        const ixs_node *relation_node[1] = {relation->expression};
+        status = modulo_plan_validate_facts(current->facts, relation_node, 1u,
+                                            "modulo recurrence plan reference",
+                                            shared_ctx);
+        if (status != IXS_FINITE_DOMAIN_COMPLETE)
+          return status;
+      }
+    }
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+modulo_plan_query_status(ixs_modulo_recurrence_status status) {
+  switch (status) {
+  case IXS_MODULO_RECURRENCE_PROVEN:
+  case IXS_MODULO_RECURRENCE_UNKNOWN:
+    return IXS_FINITE_DOMAIN_COMPLETE;
+  case IXS_MODULO_RECURRENCE_LIMITED:
+    return IXS_FINITE_DOMAIN_LIMITED;
+  case IXS_MODULO_RECURRENCE_INVALID:
+    return IXS_FINITE_DOMAIN_INVALID;
+  case IXS_MODULO_RECURRENCE_OOM:
+    return IXS_FINITE_DOMAIN_OOM;
+  }
+  return IXS_FINITE_DOMAIN_INVALID;
+}
+
+static bool modulo_plan_allocate_work(modulo_plan_work *work) {
+  ixs_arena *scratch = &work->ctx->scratch;
+  work->group_slots = ixs_arena_alloc(
+      scratch, work->group_hash_capacity * sizeof(*work->group_slots),
+      sizeof(void *));
+  work->groups = ixs_arena_alloc(
+      scratch, work->ntargets * sizeof(*work->groups), sizeof(void *));
+  work->target_state = ixs_arena_alloc(
+      scratch, work->ntargets * sizeof(*work->target_state), sizeof(void *));
+  work->reference_heads = ixs_arena_alloc(
+      scratch, work->ntargets * sizeof(*work->reference_heads), sizeof(size_t));
+  work->reference_tails = ixs_arena_alloc(
+      scratch, work->ntargets * sizeof(*work->reference_tails), sizeof(size_t));
+  work->queue = ixs_arena_alloc(scratch, work->ntargets * sizeof(*work->queue),
+                                sizeof(size_t));
+  work->references =
+      work->nreferences == 0u
+          ? NULL
+          : ixs_arena_alloc(scratch,
+                            work->nreferences * sizeof(*work->references),
+                            sizeof(void *));
+  if (!work->group_slots || !work->groups || !work->target_state ||
+      !work->reference_heads || !work->reference_tails || !work->queue ||
+      (work->nreferences != 0u && !work->references))
+    return false;
+  memset(work->group_slots, 0,
+         work->group_hash_capacity * sizeof(*work->group_slots));
+  memset(work->groups, 0, work->ntargets * sizeof(*work->groups));
+  memset(work->target_state, 0, work->ntargets * sizeof(*work->target_state));
+  return true;
+}
+
+static void modulo_plan_build_graph(modulo_plan_work *work) {
+  size_t edge_count = 0u;
+  size_t target;
+  for (target = 0u; target < work->ntargets; target++) {
+    work->reference_heads[target] = SIZE_MAX;
+    work->reference_tails[target] = SIZE_MAX;
+    work->target_state[target].group_index = SIZE_MAX;
+  }
+  for (target = 0u; target < work->ntargets; target++) {
+    const ixs_modulo_recurrence_target *input = &work->targets[target];
+    modulo_plan_divisor_status divisor_status;
+    modulo_plan_group_slot *slot;
+    uint64_t divisor;
+    size_t reference;
+    divisor_status = modulo_plan_normalize_divisor(
+        input->signedness, work->width, input->divisor, &divisor);
+    assert(divisor_status != MODULO_PLAN_DIVISOR_INVALID);
+    if (divisor_status == MODULO_PLAN_DIVISOR_VALID) {
+      slot = modulo_plan_find_group_slot(work->group_slots,
+                                         work->group_hash_capacity,
+                                         input->signedness, divisor);
+      if (slot->group_plus_one == 0u) {
+        modulo_plan_group_work *group = &work->groups[work->ngroups];
+        slot->signedness = input->signedness;
+        slot->divisor = divisor;
+        slot->group_plus_one = ++work->ngroups;
+        group->signedness = input->signedness;
+        group->divisor = divisor;
+        group->output_index = SIZE_MAX;
+      }
+      work->target_state[target].group_index = slot->group_plus_one - 1u;
+    }
+    for (reference = 0u; reference < input->nreferences; reference++) {
+      const ixs_modulo_recurrence_reference *relation =
+          &input->references[reference];
+      size_t peer = relation->target_index;
+      modulo_plan_reference_work *edge = &work->references[edge_count];
+      edge->dependent = target;
+      edge->expression = relation->expression;
+      edge->next = SIZE_MAX;
+      if (work->reference_heads[peer] == SIZE_MAX)
+        work->reference_heads[peer] = edge_count;
+      else
+        work->references[work->reference_tails[peer]].next = edge_count;
+      work->reference_tails[peer] = edge_count++;
+    }
+  }
+  assert(edge_count == work->nreferences);
+}
+
+static ixs_finite_domain_status
+modulo_plan_prove_successors(modulo_plan_work *work) {
+  size_t group_index;
+  for (group_index = 0u; group_index < work->ngroups; group_index++) {
+    modulo_plan_group_work *group = &work->groups[group_index];
+    ixs_modulo_recurrence_result proof = ixs_modulo_recurrence_facts(
+        work->loop_facts, work->successor, work->current, work->induction,
+        group->signedness, work->width, group->divisor);
+    ixs_finite_domain_status status = modulo_plan_query_status(proof.status);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (proof.status != IXS_MODULO_RECURRENCE_PROVEN)
+      continue;
+    if (!proof.remainder) {
+      ixs_ctx_push_error(
+          work->ctx,
+          "modulo recurrence plan: successor proof omitted remainder");
+      return IXS_FINITE_DOMAIN_INVALID;
+    }
+    group->successor_proven = true;
+    group->successor_increment = proof.increment;
+    group->remainder = proof.remainder;
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+modulo_plan_seed_targets(modulo_plan_work *work) {
+  size_t target;
+  for (target = 0u; target < work->ntargets; target++) {
+    modulo_plan_target_work *planned = &work->target_state[target];
+    const ixs_modulo_recurrence_target *input = &work->targets[target];
+    modulo_plan_group_work *group;
+    ixs_modulo_recurrence_result proof;
+    ixs_finite_domain_status status;
+    if (planned->group_index == SIZE_MAX)
+      continue;
+    group = &work->groups[planned->group_index];
+    if (!group->successor_proven)
+      continue;
+    proof = ixs_modulo_recurrence_facts(
+        input->facts, input->value, input->induction, input->induction,
+        group->signedness, work->width, group->divisor);
+    status = modulo_plan_query_status(proof.status);
+    if (status != IXS_FINITE_DOMAIN_COMPLETE)
+      return status;
+    if (proof.status != IXS_MODULO_RECURRENCE_PROVEN)
+      continue;
+    planned->planned = true;
+    planned->increment = proof.increment;
+    work->queue[work->queue_end++] = target;
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static ixs_finite_domain_status
+modulo_plan_propagate_references(modulo_plan_work *work) {
+  while (work->queue_begin < work->queue_end) {
+    size_t peer = work->queue[work->queue_begin++];
+    size_t edge_index;
+    for (edge_index = work->reference_heads[peer]; edge_index != SIZE_MAX;
+         edge_index = work->references[edge_index].next) {
+      modulo_plan_reference_work *edge = &work->references[edge_index];
+      modulo_plan_target_work *dependent = &work->target_state[edge->dependent];
+      const ixs_modulo_recurrence_target *input =
+          &work->targets[edge->dependent];
+      modulo_plan_group_work *group;
+      uint64_t relation_increment = 0u;
+      if (dependent->planned || dependent->group_index == SIZE_MAX ||
+          dependent->group_index != work->target_state[peer].group_index)
+        continue;
+      group = &work->groups[dependent->group_index];
+      if (!group->successor_proven)
+        continue;
+      if (edge->expression) {
+        ixs_modulo_recurrence_result proof = ixs_modulo_recurrence_facts(
+            input->facts, input->value, edge->expression, input->induction,
+            group->signedness, work->width, group->divisor);
+        ixs_finite_domain_status status =
+            modulo_plan_query_status(proof.status);
+        if (status != IXS_FINITE_DOMAIN_COMPLETE)
+          return status;
+        if (proof.status != IXS_MODULO_RECURRENCE_PROVEN)
+          continue;
+        relation_increment = proof.increment;
+      }
+      dependent->increment =
+          modulo_recurrence_add(work->target_state[peer].increment,
+                                relation_increment, group->divisor);
+      dependent->planned = true;
+      work->queue[work->queue_end++] = edge->dependent;
+    }
+  }
+  return IXS_FINITE_DOMAIN_COMPLETE;
+}
+
+static size_t modulo_plan_commit(modulo_plan_work *work,
+                                 ixs_modulo_recurrence_plan_group *groups,
+                                 ixs_modulo_recurrence_plan_entry *entries) {
+  size_t ngroups = 0u;
+  size_t target;
+  for (target = 0u; target < work->ntargets; target++)
+    if (work->target_state[target].planned)
+      work->groups[work->target_state[target].group_index].used = true;
+  for (target = 0u; target < work->ngroups; target++) {
+    modulo_plan_group_work *group = &work->groups[target];
+    if (!group->used)
+      continue;
+    group->output_index = ngroups;
+    groups[ngroups].signedness = group->signedness;
+    groups[ngroups].divisor = group->divisor;
+    groups[ngroups].successor_increment = group->successor_increment;
+    groups[ngroups].remainder = group->remainder;
+    ngroups++;
+  }
+  for (target = 0u; target < work->ntargets; target++) {
+    modulo_plan_target_work *planned = &work->target_state[target];
+    if (!planned->planned)
+      continue;
+    entries[target].group_index =
+        work->groups[planned->group_index].output_index;
+    entries[target].increment = planned->increment;
+  }
+  return ngroups;
+}
+
+ixs_modulo_recurrence_plan_result ixs_plan_modulo_recurrences_facts(
+    ixs_facts *loop_facts, const ixs_node *successor, const ixs_node *current,
+    const ixs_node *induction, unsigned width,
+    const ixs_modulo_recurrence_target *targets, size_t ntargets,
+    ixs_modulo_recurrence_plan_group *groups, size_t ngroup_capacity,
+    ixs_modulo_recurrence_plan_entry *entries, size_t nentries,
+    size_t *remaining_work) {
+  ixs_modulo_recurrence_plan_result result =
+      modulo_plan_result(IXS_FINITE_DOMAIN_INVALID);
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  ixs_ctx *shared_ctx = NULL;
+  ixs_arena_mark mark;
+  const ixs_node *loop_nodes[3] = {successor, current, induction};
+  modulo_plan_work work;
+  size_t reference_count;
+  size_t reserved_work;
+  size_t group_hash_capacity;
+  ixs_finite_domain_status validation;
+  bool bound = false;
+
+  memset(&work, 0, sizeof(work));
+  modulo_plan_reset_outputs(groups, ngroup_capacity, entries, nentries);
+  if (!facts_bind(loop_facts, &binding, &ctx))
+    return result;
+  bound = true;
+  if (!facts_ready(loop_facts)) {
+    result.status = loop_facts->bounds.oom ? IXS_FINITE_DOMAIN_OOM
+                                           : IXS_FINITE_DOMAIN_INVALID;
+    ixs_ctx_push_error(ctx, "modulo recurrence plan: fact set is unusable");
+    goto cleanup_binding;
+  }
+  if (!modulo_plan_header_valid(ctx, width, targets, ntargets, groups,
+                                ngroup_capacity, entries, nentries,
+                                remaining_work, &reference_count,
+                                &reserved_work, &group_hash_capacity))
+    goto cleanup_binding;
+  ixs_session_unbind(&binding);
+  bound = false;
+
+  validation = modulo_plan_validate_facts(
+      loop_facts, loop_nodes, 3u, "modulo recurrence plan loop", &shared_ctx);
+  if (validation != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = validation;
+    return result;
+  }
+  validation =
+      modulo_plan_validate_targets(targets, ntargets, width, &shared_ctx);
+  if (validation != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.status = validation;
+    return result;
+  }
+  if (reserved_work > *remaining_work) {
+    result.status = IXS_FINITE_DOMAIN_EXHAUSTED;
+    return result;
+  }
+  *remaining_work -= reserved_work;
+
+  if (!facts_bind(loop_facts, &binding, &ctx))
+    return result;
+  bound = true;
+  mark = ixs_arena_save(&ctx->scratch);
+  work.ctx = ctx;
+  work.loop_facts = loop_facts;
+  work.successor = successor;
+  work.current = current;
+  work.induction = induction;
+  work.targets = targets;
+  work.ntargets = ntargets;
+  work.width = width;
+  work.group_hash_capacity = group_hash_capacity;
+  work.nreferences = reference_count;
+  if (!modulo_plan_allocate_work(&work)) {
+    ixs_ctx_push_error(ctx, "modulo recurrence plan: out of memory");
+    result.status = IXS_FINITE_DOMAIN_OOM;
+    goto cleanup_work;
+  }
+  modulo_plan_build_graph(&work);
+  result.status = modulo_plan_prove_successors(&work);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE)
+    goto cleanup_work;
+  result.status = modulo_plan_seed_targets(&work);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE)
+    goto cleanup_work;
+  result.status = modulo_plan_propagate_references(&work);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE)
+    goto cleanup_work;
+  result.ngroups = modulo_plan_commit(&work, groups, entries);
+  result.status = IXS_FINITE_DOMAIN_COMPLETE;
+
+cleanup_work:
+  ixs_arena_restore(&ctx->scratch, mark);
+cleanup_binding:
+  if (bound)
+    ixs_session_unbind(&binding);
+  if (result.status != IXS_FINITE_DOMAIN_COMPLETE) {
+    result.ngroups = 0u;
+    modulo_plan_reset_outputs(groups, ngroup_capacity, entries, nentries);
+  }
+  return result;
+}
+
 typedef struct {
   size_t *root_ids;
   size_t n_roots;

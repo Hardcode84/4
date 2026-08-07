@@ -2195,6 +2195,40 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   increment and remainder; insufficient facts return `UNKNOWN`, malformed or
   cross-context operands return `INVALID`, and allocation failure returns
   `OOM`.
+- **Atomic modulo recurrence planning**
+  (`ixs_plan_modulo_recurrences_facts`): owns the multi-target discovery that
+  consumers previously implemented as local grouping and proof retries. The
+  caller supplies one exact loop `successor`, `current`, and `induction` fact
+  domain plus ordered remainder targets. Each target carries its exact value
+  domain, local induction expression, raw width-bit divisor, and zero or more
+  structural references to another target's remainder result. A direct
+  reference is represented without an expression; an explicit expression is
+  proved in the dependent target's fact domain.
+
+  The planner normalizes signed two's-complement divisors to a positive
+  magnitude before grouping. Positive and negative encodings of one magnitude
+  are therefore adjacent in one deterministic first-occurrence group. The
+  signed minimum divisor is valid but remains unplanned because its magnitude
+  is not positive-representable in the signed width. Every other group first
+  proves `successor - current` with the scalar fixed-width recurrence query.
+  A group with no successor proof is a semantic no-plan. Targets in a proved
+  group are then proved directly against their local induction. Proved targets
+  seed a FIFO traversal of reverse structural references. Every reference is
+  visited at most once; an explicit relation increment is added modulo the
+  group divisor to the referenced target's already proved increment. Cycles
+  without a direct anchor remain unplanned.
+
+  The work admission cost is exactly twice the target count plus the total
+  reference count: at most one successor proof per target-sized group, one
+  direct proof per target, and one peer proof per reference. Overflow and all
+  fact/node/context validation precede admission. An insufficient budget
+  returns `EXHAUSTED` unchanged. After reservation, later `LIMITED`, `INVALID`,
+  or `OOM` results retain the charge. Group hashing, reverse adjacency, target
+  state, and the FIFO live in session scratch and use space linear in the
+  supplied descriptor counts. Outputs are cleared before validation and copied
+  only after complete planning, so bounded stops and allocation failure never
+  expose a partial plan. `COMPLETE` may legitimately return zero groups or
+  individual `SIZE_MAX` entries when facts are inconclusive.
 - **Cyclic decomposition** (`ixs_decompose_cyclic_facts`, C++
   `Facts::decompose_cyclic`): proves the fact-domain identity
 

@@ -13505,6 +13505,70 @@ static void test_public_modulo_recurrence_failures(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_modulo_recurrence_plan_failures(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *other = ixs_ctx_create();
+  ixs_node *i = ixs_sym(ctx, "modulo_plan_failure_i");
+  ixs_node *foreign = ixs_sym(other, "modulo_plan_failure_foreign");
+  ixs_node *successor = ixs_add(ctx, i, ixs_int(ctx, 1));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_modulo_recurrence_target target = {
+      facts, i, i, NULL, 0u, IXS_REMAINDER_SIGNED, 5u};
+  ixs_modulo_recurrence_plan_group group;
+  ixs_modulo_recurrence_plan_entry entry;
+  ixs_modulo_recurrence_plan_result result;
+  size_t budget;
+
+  CHECK(ctx && other && i && foreign && successor && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, i, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, i, IXS_CMP_LE, ixs_int(ctx, 9))));
+
+  target.value = foreign;
+  group.divisor = 99u;
+  entry.group_index = 0u;
+  entry.increment = 99u;
+  budget = 2u;
+  result = ixs_plan_modulo_recurrences_facts(
+      facts, successor, i, i, 8u, &target, 1u, &group, 1u, &entry, 1u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID && result.ngroups == 0u &&
+        budget == 2u && group.divisor == 0u && entry.group_index == SIZE_MAX &&
+        entry.increment == 0u);
+
+  target.value = i;
+  target.divisor = 128u;
+  budget = 2u;
+  result = ixs_plan_modulo_recurrences_facts(
+      facts, successor, i, i, 8u, &target, 1u, &group, 1u, &entry, 1u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE && result.ngroups == 0u &&
+        budget == 0u && entry.group_index == SIZE_MAX);
+
+  target.divisor = 5u;
+  group.divisor = 99u;
+  entry.group_index = 0u;
+  entry.increment = 99u;
+  budget = 2u;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  result = ixs_plan_modulo_recurrences_facts(
+      facts, successor, i, i, 8u, &target, 1u, &group, 1u, &entry, 1u, &budget);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_FINITE_DOMAIN_OOM && result.ngroups == 0u &&
+        budget == 0u && group.divisor == 0u && entry.group_index == SIZE_MAX &&
+        entry.increment == 0u);
+
+  budget = 2u;
+  result = ixs_plan_modulo_recurrences_facts(
+      facts, successor, i, i, 8u, &target, 1u, &group, 1u, &entry, 1u, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE && result.ngroups == 1u &&
+        budget == 0u && group.divisor == 5u &&
+        group.successor_increment == 1u && entry.group_index == 0u &&
+        entry.increment == 0u);
+
+  ixs_ctx_destroy(other);
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   /* Interval arithmetic */
   test_iv_add_basic();
@@ -13684,6 +13748,7 @@ int main(void) {
   test_public_group_union_failures();
   test_public_modulo_recurrence();
   test_public_modulo_recurrence_failures();
+  test_public_modulo_recurrence_plan_failures();
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();

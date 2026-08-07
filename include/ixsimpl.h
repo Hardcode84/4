@@ -415,6 +415,50 @@ typedef struct {
   const ixs_node *remainder;
 } ixs_modulo_recurrence_result;
 
+/* One candidate relation from a modulo target to another target's remainder
+ * result. A NULL expression denotes that exact result directly. Otherwise
+ * expression is that result represented in this target's fact domain. */
+typedef struct {
+  size_t target_index;
+  const ixs_node *expression;
+} ixs_modulo_recurrence_reference;
+
+/* One fixed-width remainder rewrite target. value and induction are expressed
+ * in facts; references provide alternate, explicitly related anchors when a
+ * direct value-to-induction proof is inconclusive. divisor is the raw width-bit
+ * divisor encoding, including two's-complement negative signed divisors. */
+typedef struct {
+  ixs_facts *facts;
+  const ixs_node *value;
+  const ixs_node *induction;
+  const ixs_modulo_recurrence_reference *references;
+  size_t nreferences;
+  ixs_remainder_signedness signedness;
+  uint64_t divisor;
+} ixs_modulo_recurrence_target;
+
+/* One proved recurrence shared by every planned target in the group. divisor
+ * is a positive normalized magnitude. successor_increment advances the exact
+ * induction remainder by one loop successor. */
+typedef struct {
+  ixs_remainder_signedness signedness;
+  uint64_t divisor;
+  uint64_t successor_increment;
+  const ixs_node *remainder;
+} ixs_modulo_recurrence_plan_group;
+
+/* One target's relation to its plan group. group_index is SIZE_MAX when the
+ * target has no proved plan. */
+typedef struct {
+  size_t group_index;
+  uint64_t increment;
+} ixs_modulo_recurrence_plan_entry;
+
+typedef struct {
+  ixs_finite_domain_status status;
+  size_t ngroups;
+} ixs_modulo_recurrence_plan_result;
+
 typedef enum {
   IXS_EXACT_DIVIDE_PROVEN,
   IXS_EXACT_DIVIDE_NOT_EXACT,
@@ -913,6 +957,37 @@ ixs_modulo_recurrence_result ixs_modulo_recurrence_facts(
     ixs_facts *facts, const ixs_node *value, const ixs_node *reference,
     const ixs_node *induction, ixs_remainder_signedness signedness,
     unsigned width, uint64_t divisor);
+/* Atomically plan fixed-width modulo recurrences for one loop successor.
+ * successor, current, and induction belong to loop_facts. Targets may use
+ * distinct fact domains in the same context. Signed positive and negative
+ * divisor encodings with one magnitude share a deterministic first-occurrence
+ * group; the signed minimum divisor is valid but remains unplanned because its
+ * positive magnitude is not representable in the signed width.
+ *
+ * Each target is first proved directly against its induction. Its references
+ * are then attempted once, in input order, when their target becomes planned;
+ * relation chains therefore require no caller retry machinery. Direct identity
+ * references inherit the peer increment. Other references prove a constant
+ * fixed-width remainder difference in the dependent target's exact facts.
+ *
+ * ngroup_capacity and nentries must both equal ntargets. Every entry is reset
+ * to {SIZE_MAX, 0}, every group is cleared, and ngroups is zero before semantic
+ * work. Payload is committed only on COMPLETE. COMPLETE may contain no groups
+ * or unplanned entries when the supplied facts cannot prove a recurrence.
+ *
+ * Admission reserves 2 * ntargets + the total reference count from
+ * *remaining_work after complete validation and before allocation or proof.
+ * Insufficient work returns EXHAUSTED without changing the budget. Reserved
+ * work is not refunded after a later LIMITED, INVALID, or OOM result. Planning
+ * visits each target and reference a bounded number of times and uses scratch
+ * arena storage proportional to their counts. */
+ixs_modulo_recurrence_plan_result ixs_plan_modulo_recurrences_facts(
+    ixs_facts *loop_facts, const ixs_node *successor, const ixs_node *current,
+    const ixs_node *induction, unsigned width,
+    const ixs_modulo_recurrence_target *targets, size_t ntargets,
+    ixs_modulo_recurrence_plan_group *groups, size_t ngroup_capacity,
+    ixs_modulo_recurrence_plan_entry *entries, size_t nentries,
+    size_t *remaining_work);
 /* Answer many equivalence, finite-domain equivalence, and constant-difference
  * queries under exact unions of closed predicate groups. Query (i, j) has
  * precisely the batch-saturated set union of groups i and j: predicates from
