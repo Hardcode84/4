@@ -291,17 +291,22 @@ static void test_relational_cyclic_xor_recurrence(void) {
   ixs_node *equality = ixs_cmp(ctx, next, IXS_CMP_EQ, wrapped);
   ixs_facts *facts = ixs_facts_create(ctx);
   ixs_node *symbols[4] = {i, a, b, c};
+  ixs_node *assumptions[8];
   int64_t uppers[4] = {7, 1, 1, 1};
   size_t index;
 
   CHECK(ctx && i && a && b && c && x && e && next && wrapped && equality &&
         facts);
   for (index = 0; index < 4; index++) {
-    CHECK(ixs_facts_assume_pred(
-        facts, ixs_cmp(ctx, symbols[index], IXS_CMP_GE, ixs_int(ctx, 0))));
-    CHECK(ixs_facts_assume_pred(facts, ixs_cmp(ctx, symbols[index], IXS_CMP_LE,
-                                               ixs_int(ctx, uppers[index]))));
+    assumptions[2 * index] =
+        ixs_cmp(ctx, symbols[index], IXS_CMP_GE, ixs_int(ctx, 0));
+    assumptions[2 * index + 1] =
+        ixs_cmp(ctx, symbols[index], IXS_CMP_LE, ixs_int(ctx, uppers[index]));
+    CHECK(assumptions[2 * index] && assumptions[2 * index + 1]);
   }
+  CHECK(ixs_check(ctx, equality, assumptions, 8) == IXS_CHECK_TRUE);
+  for (index = 0; index < 8; index++)
+    CHECK(ixs_facts_assume_pred(facts, assumptions[index]));
   CHECK(test_ixs_check_integer_valued_facts(facts, x) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(
             facts, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))) ==
@@ -317,6 +322,7 @@ static void test_relational_cyclic_xor_recurrence(void) {
                 ixs_add(ctx, ixs_mod(ctx, i, ixs_int(ctx, 4)), ixs_int(ctx, 1)),
                 ixs_int(ctx, 4))) == IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(facts, next, wrapped) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(facts, equality) == IXS_CHECK_TRUE);
 
   {
@@ -341,6 +347,9 @@ static void test_relational_cyclic_xor_recurrence(void) {
             IXS_CHECK_TRUE);
     }
   }
+
+  CHECK(ixs_check(ctx, equality, assumptions, 8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -1043,11 +1052,14 @@ static void test_relational_scaled_mod_depth_guard(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *lhs = ixs_sym(ctx, "relation_scaled_depth_lhs");
   ixs_node *rhs = ixs_sym(ctx, "relation_scaled_depth_rhs");
+  ixs_node *probe = ixs_cmp(ctx, ixs_mod(ctx, lhs, ixs_int(ctx, 3)), IXS_CMP_GE,
+                            ixs_int(ctx, 0));
   ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *equality;
   size_t errors = ixs_ctx_nerrors(ctx);
   int level;
 
-  CHECK(ctx && lhs && rhs && facts);
+  CHECK(ctx && lhs && rhs && probe && facts);
   for (level = 0; level < DEPTH; level++) {
     int64_t modulus = 3 + 2 * level;
     lhs =
@@ -1056,7 +1068,15 @@ static void test_relational_scaled_mod_depth_guard(void) {
                   ixs_int(ctx, 2 * modulus));
     CHECK(lhs && rhs);
   }
+  equality = ixs_cmp(ctx, lhs, IXS_CMP_EQ, rhs);
+  CHECK(equality);
+  CHECK(ixs_check(ctx, equality, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check(ctx, equality, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check(ctx, probe, NULL, 0) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, probe) == IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
   ixs_ctx_destroy(ctx);

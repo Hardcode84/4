@@ -13628,9 +13628,6 @@ static ixs_check_result check_result_not(ixs_check_result result) {
   return IXS_CHECK_UNKNOWN;
 }
 
-static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
-                                                      ixs_node *cmp);
-
 static ixs_check_result predicate_query_cmp_atom(ixs_bounds *bounds,
                                                  ixs_node *node) {
   ixs_check_result result;
@@ -13641,10 +13638,7 @@ static ixs_check_result predicate_query_cmp_atom(ixs_bounds *bounds,
   if (node->u.binary.cmp_op == IXS_CMP_EQ &&
       node->u.binary.lhs == node->u.binary.rhs)
     return ixs_bounds_check_defined(bounds, node->u.binary.lhs);
-  result = ixs_bounds_check(bounds, node);
-  if (result == IXS_CHECK_UNKNOWN && (node->u.binary.cmp_op == IXS_CMP_EQ ||
-                                      node->u.binary.cmp_op == IXS_CMP_NE))
-    result = bounds_check_equivalence_atom(bounds, node);
+  result = ixs_bounds_check_query(bounds, node);
   if (result != IXS_CHECK_UNKNOWN || !ixs_node_is_zero(node->u.binary.rhs) ||
       !bounds_is_known_nonzero(bounds, node->u.binary.lhs))
     return result;
@@ -17797,6 +17791,24 @@ static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
                                             : check_result_not(equivalent);
 }
 
+IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
+                                                   ixs_node *cmp) {
+  ixs_check_result result;
+  bool query_held = false;
+
+  if (!ixs_bounds_query_hold_begin(bounds, cmp, &query_held))
+    return IXS_CHECK_UNKNOWN;
+  result = ixs_bounds_check(bounds, cmp);
+  if (result == IXS_CHECK_UNKNOWN && cmp && cmp->tag == IXS_CMP &&
+      ixs_node_is_zero(cmp->u.binary.rhs) &&
+      (cmp->u.binary.cmp_op == IXS_CMP_EQ ||
+       cmp->u.binary.cmp_op == IXS_CMP_NE))
+    result = bounds_check_equivalence_atom(bounds, cmp);
+  if (query_held)
+    ixs_bounds_query_hold_end(bounds);
+  return result;
+}
+
 static ixs_fact_query_status
 constant_difference_query_status(bool oom, bool invalid, bool limited, bool ok,
                                  int64_t result, int64_t *delta,
@@ -18625,7 +18637,6 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
-  bool query_held = false;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
   if (!facts_bind(facts, &binding, &ctx))
     return result;
@@ -18648,20 +18659,10 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  result.check = ixs_bounds_check(&facts->bounds, expr);
-  if (result.check == IXS_CHECK_UNKNOWN && expr->tag == IXS_CMP &&
-      (expr->u.binary.cmp_op == IXS_CMP_EQ ||
-       expr->u.binary.cmp_op == IXS_CMP_NE))
-    result.check = bounds_check_equivalence_atom(&facts->bounds, expr);
+  result.check = ixs_bounds_check_query(&facts->bounds, expr);
   result.status = IXS_FACT_QUERY_COMPLETE;
 
 cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
   result.status = facts_read_query_finish(&read_scope, result.status);
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.check = IXS_CHECK_UNKNOWN;

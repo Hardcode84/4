@@ -7033,7 +7033,7 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
     ixs_arena_restore(&ctx->scratch, m);
     return IXS_CHECK_UNKNOWN;
   }
-  r = ixs_bounds_check(&bnds, expr);
+  r = ixs_bounds_check_query(&bnds, expr);
   ixs_bounds_destroy(&bnds);
   ixs_arena_restore(&ctx->scratch, m);
   return r;

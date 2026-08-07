@@ -1248,7 +1248,11 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   normalized comparison or the canonical integer `1`/`0` produced when a
   smart constructor resolves a comparison. Other non-comparison expressions
   remain unknown. Contradictory fact domains never prove even a constant
-  predicate.
+  predicate. Both entry points run the same scalar proof contract: one query
+  generation spans the fast interval, congruence, and bit checks plus the
+  exact fallback for an unresolved `EQ` or `NE`. Exact proofs require total
+  operands. Cycles, bounded subproof exhaustion, and allocation failure return
+  unknown without poisoning the reusable session or fact set.
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 

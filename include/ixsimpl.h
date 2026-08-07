@@ -248,13 +248,13 @@ typedef struct {
  * and leaves an existing fact set unchanged. */
 
 /* Check whether a comparison is provably true or false given the
- * assumptions, using interval propagation, modular congruence facts, and
- * bitwise facts.  expr must be a CMP node in normalized form (lhs op 0), or
- * the canonical true/false node produced when a smart constructor resolves a
- * comparison.  CMP normalization is automatic through ixs_cmp().  Returns
- * UNKNOWN when bounds are insufficient, when expr has another form, or on
- * OOM.  Lighter than ixs_simplify: no rewriting, just bounds setup and
- * entailment checks. */
+ * assumptions, using interval propagation, modular congruence facts, bitwise
+ * facts, and an exact equivalence fallback for unresolved EQ/NE predicates.
+ * expr must be a CMP node in normalized form (lhs op 0), or the canonical
+ * true/false node produced when a smart constructor resolves a comparison.
+ * CMP normalization is automatic through ixs_cmp().  Returns UNKNOWN when
+ * proof information is insufficient, when expr has another form, when a
+ * bounded proof limit is reached, or on OOM. */
 ixs_check_result ixs_check(ixs_session *s, const ixs_node *expr,
                            const ixs_node *const *assumptions,
                            size_t n_assumptions);

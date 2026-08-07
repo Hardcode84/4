@@ -5252,11 +5252,88 @@ static void test_fact_check_xor_cancellation_parity(void) {
   CHECK(test_ixs_equivalent_facts(facts, nested, x) == IXS_CHECK_TRUE);
 
   CHECK(different != x);
-  CHECK(ixs_check(ctx, not_equal, &range, 1) == IXS_CHECK_UNKNOWN);
-  /* Closed facts exhaust this 32-point domain; the legacy query does not. */
+  CHECK(ixs_check(ctx, not_equal, &range, 1) == IXS_CHECK_FALSE);
   CHECK(test_ixs_check_facts(facts, not_equal) == IXS_CHECK_FALSE);
 
   ixs_ctx_destroy(ctx);
+}
+
+static void test_exact_check_assumption_fact_parity(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "exact_check_x");
+  ixs_node *y = ixs_sym(ctx, "exact_check_y");
+  ixs_node *three = ixs_int(ctx, 3);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *low_zero = ixs_cmp(ctx, ixs_and(ctx, x, three), IXS_CMP_EQ, zero);
+  ixs_node *toggled = ixs_xor(ctx, three, x);
+  ixs_node *equal = ixs_cmp(ctx, toggled, IXS_CMP_EQ, x);
+  ixs_node *different = ixs_cmp(ctx, toggled, IXS_CMP_NE, x);
+  ixs_node *unknown = ixs_cmp(ctx, ixs_xor(ctx, x, y), IXS_CMP_EQ, x);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && y && three && zero && low_zero && toggled && equal &&
+        different && unknown && facts);
+  CHECK(ixs_check(ctx, equal, &low_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(ixs_check(ctx, different, &low_zero, 1) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, unknown, &low_zero, 1) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(facts, low_zero));
+  CHECK(test_ixs_check_facts(facts, equal) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_facts(facts, different) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, unknown) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(facts, equal) == IXS_CHECK_FALSE);
+
+  /* Both query owners unwind after an inconclusive exact proof. */
+  CHECK(ixs_check(ctx, equal, &low_zero, 1) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_facts(facts, different) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_exact_check_allocation_failure_is_reusable(void) {
+  ixs_ctx *legacy_ctx = ixs_ctx_create();
+  ixs_node *legacy_x = ixs_sym(legacy_ctx, "exact_check_oom_x");
+  ixs_node *legacy_three = ixs_int(legacy_ctx, 3);
+  ixs_node *legacy_zero = ixs_int(legacy_ctx, 0);
+  ixs_node *legacy_assumption =
+      ixs_cmp(legacy_ctx, ixs_and(legacy_ctx, legacy_x, legacy_three),
+              IXS_CMP_EQ, legacy_zero);
+  ixs_node *legacy_query =
+      ixs_cmp(legacy_ctx, ixs_xor(legacy_ctx, legacy_three, legacy_x),
+              IXS_CMP_EQ, legacy_x);
+  ixs_ctx *facts_ctx = ixs_ctx_create();
+  ixs_node *facts_x = ixs_sym(facts_ctx, "exact_fact_check_oom_x");
+  ixs_node *facts_three = ixs_int(facts_ctx, 3);
+  ixs_node *facts_zero = ixs_int(facts_ctx, 0);
+  ixs_node *facts_assumption =
+      ixs_cmp(facts_ctx, ixs_and(facts_ctx, facts_x, facts_three), IXS_CMP_EQ,
+              facts_zero);
+  ixs_node *facts_query = ixs_cmp(
+      facts_ctx, ixs_xor(facts_ctx, facts_three, facts_x), IXS_CMP_EQ, facts_x);
+  ixs_facts *facts = ixs_facts_create(facts_ctx);
+
+  CHECK(legacy_ctx && legacy_x && legacy_three && legacy_zero &&
+        legacy_assumption && legacy_query);
+  CHECK(legacy_ctx->bounds_query_state == NULL);
+  ixs_arena_set_fail_after(&legacy_ctx->arena, 0);
+  CHECK(ixs_check(legacy_ctx, legacy_query, &legacy_assumption, 1) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(&legacy_ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_check(legacy_ctx, legacy_query, &legacy_assumption, 1) ==
+        IXS_CHECK_FALSE);
+
+  CHECK(facts_ctx && facts_x && facts_three && facts_zero && facts_assumption &&
+        facts_query && facts);
+  CHECK(ixs_facts_assume_pred(facts, facts_assumption));
+  ixs_arena_set_fail_after(ixs_test_scratch(facts_ctx), 0);
+  CHECK(test_ixs_check_facts(facts, facts_query) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(facts_ctx),
+                           IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(facts_ctx);
+  CHECK(test_ixs_check_facts(facts, facts_query) == IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(facts_ctx);
+  ixs_ctx_destroy(legacy_ctx);
 }
 
 static void test_compound_assumption_rejection_is_atomic(void) {
@@ -9532,6 +9609,8 @@ int main(void) {
   test_ctx_node_ownership_uses_intern_table();
   test_compound_assumption_legacy_fact_parity();
   test_fact_check_xor_cancellation_parity();
+  test_exact_check_assumption_fact_parity();
+  test_exact_check_allocation_failure_is_reusable();
   test_compound_assumption_rejection_is_atomic();
   test_compound_assumption_boolean_constants();
   test_public_facts_assume_deep_conjunction();

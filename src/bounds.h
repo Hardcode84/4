@@ -286,4 +286,10 @@ ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
  * non-zero rhs returns UNKNOWN. */
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp);
 
+/* Complete public scalar check.  One query generation spans the fast bounds
+ * check and the exact EQ/NE fallback, so all callers observe one proof
+ * contract and one resource outcome. */
+IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *b,
+                                                   ixs_node *cmp);
+
 #endif /* IXS_BOUNDS_H */

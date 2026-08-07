@@ -1198,7 +1198,7 @@ def test_trunc_binding_constructs_toward_zero_rounding() -> None:
     assert int(truncated.subs(x, -5)) == -1
     assert int(truncated.subs(x, 5)) == 1
     with pytest.raises(TypeError, match="requires an Expr"):
-        ixsimpl.trunc(1)  # type: ignore[arg-type]
+        ixsimpl.trunc(1)
 
 
 @pytest.mark.parametrize(
@@ -3617,9 +3617,33 @@ def test_fact_check_nested_xor_cancellation_parity() -> None:
     assert ctx.equivalent(nested, x, facts) is True
 
     assert different != x
-    assert ctx.check(nonmatching, assumptions=[pred]) is None
-    # Closed facts exhaust this 32-point domain; the legacy query does not.
+    assert ctx.check(nonmatching, assumptions=[pred]) is False
     assert ctx.check(nonmatching, facts=facts) is False
+
+
+def test_check_exact_fallback_assumption_fact_parity() -> None:
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("exact_check_x"), ctx.sym("exact_check_y")
+    three = ctx.int_(3)
+    low_zero = ctx.eq(x & three, 0)
+    toggled = ixsimpl.xor_(three, x)
+    equal = ctx.eq(toggled, x)
+    different = ctx.ne(toggled, x)
+    unknown = ctx.eq(ixsimpl.xor_(x, y), x)
+
+    assert ctx.check(equal, assumptions=[low_zero]) is False
+    assert ctx.check(different, assumptions=[low_zero]) is True
+    assert ctx.check(unknown, assumptions=[low_zero]) is None
+
+    facts = ctx.facts()
+    facts.assume(low_zero)
+    assert ctx.check(equal, facts=facts) is False
+    assert ctx.check(different, facts=facts) is True
+    assert ctx.check(unknown, facts=facts) is None
+    assert ctx.check_predicate(equal, facts) is False
+
+    assert ctx.check(equal, assumptions=[low_zero]) is False
+    assert ctx.check(different, facts=facts) is True
 
 
 def test_fact_backed_simplification() -> None:
