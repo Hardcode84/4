@@ -11515,6 +11515,12 @@ static void test_public_rational_intermediate_boundaries(void) {
   ixs_node *floor_half = ixs_floor(ctx, half);
   ixs_node *ceil_half = ixs_ceil(ctx, half);
   ixs_node *trunc_half = ixs_trunc(ctx, half);
+  ixs_node *ceil_third = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *ceil_fifth = ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, 5)));
+  ixs_node *ceil_u32_max =
+      ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, INT64_C(4294967295))));
+  ixs_node *ceil_above_u32 =
+      ixs_ceil(ctx, ixs_div(ctx, x, ixs_int(ctx, INT64_C(4294967296))));
   ixs_node *large_quotient = ixs_div(ctx, x, ixs_int(ctx, large_denominator));
   ixs_node *large_ceil = ixs_ceil(ctx, large_quotient);
   ixs_node *large_trunc = ixs_trunc(ctx, large_quotient);
@@ -11522,12 +11528,16 @@ static void test_public_rational_intermediate_boundaries(void) {
   ixs_facts *word_boundary = ixs_facts_create(ctx);
   ixs_facts *word_overflow = ixs_facts_create(ctx);
   ixs_facts *partial_crossing = ixs_facts_create(ctx);
-  ixs_facts *ceil_overflow = ixs_facts_create(ctx);
+  ixs_facts *ceil_word_boundary = ixs_facts_create(ctx);
+  ixs_facts *signed_i32_word = ixs_facts_create(ctx);
+  ixs_facts *unsigned_i32_word = ixs_facts_create(ctx);
+  ixs_facts *mixed_i32_word = ixs_facts_create(ctx);
+  ixs_facts *overflow_i32_word = ixs_facts_create(ctx);
   ixs_facts *wide_word = ixs_facts_create(ctx);
   ixs_facts *widest_word = ixs_facts_create(ctx);
   ixs_facts *signed_i64_word = ixs_facts_create(ctx);
   ixs_facts *large_ceil_fit = ixs_facts_create(ctx);
-  ixs_facts *large_ceil_overflow = ixs_facts_create(ctx);
+  ixs_facts *large_ceil_bias_overflow = ixs_facts_create(ctx);
   ixs_facts *large_trunc_negative = ixs_facts_create(ctx);
   ixs_facts *dynamic_word = ixs_facts_create(ctx);
   ixs_facts *dynamic_overflow = ixs_facts_create(ctx);
@@ -11547,13 +11557,19 @@ static void test_public_rational_intermediate_boundaries(void) {
   rational_assume_integer_range(word_boundary, x, 0, 255);
   rational_assume_integer_range(word_overflow, x, 256, 256);
   rational_assume_integer_range(partial_crossing, x, 0, 256);
-  rational_assume_integer_range(ceil_overflow, x, 255, 255);
+  rational_assume_integer_range(ceil_word_boundary, x, 255, 255);
+  rational_assume_integer_range(signed_i32_word, x, -INT64_C(2147483647) - 1,
+                                INT64_C(2147483647));
+  rational_assume_integer_range(unsigned_i32_word, x, 0, INT64_C(4294967295));
+  rational_assume_integer_range(mixed_i32_word, x, -1, INT64_C(4294967295));
+  rational_assume_integer_range(overflow_i32_word, x, INT64_C(4294967296),
+                                INT64_C(4294967296));
   rational_assume_integer_range(wide_word, x, 0, INT64_C(4611686018427387903));
   rational_assume_integer_range(widest_word, x, 0, INT64_MAX);
   rational_assume_integer_range(signed_i64_word, x, INT64_MIN, INT64_MAX);
   rational_assume_integer_range(large_ceil_fit, x, INT64_MAX - large_bias,
                                 INT64_MAX - large_bias);
-  rational_assume_integer_range(large_ceil_overflow, x,
+  rational_assume_integer_range(large_ceil_bias_overflow, x,
                                 INT64_MAX - large_bias + 1,
                                 INT64_MAX - large_bias + 1);
   rational_assume_integer_range(large_trunc_negative, x, INT64_MIN, -1);
@@ -11572,26 +11588,72 @@ static void test_public_rational_intermediate_boundaries(void) {
                                                     8) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(signed_boundary, trunc_half,
                                                     8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_boundary, ceil_half,
+                                                    8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_boundary, ceil_third,
+                                                    8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_boundary, ceil_fifth,
+                                                    8) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(word_boundary, floor_half,
+                                                    8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(word_boundary, ceil_half,
+                                                    8) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(word_boundary, ceil_third,
                                                     8) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(word_overflow, floor_half,
                                                     8) == IXS_CHECK_FALSE);
   CHECK(test_ixs_check_rational_intermediates_facts(
             partial_crossing, floor_half, 8) == IXS_CHECK_UNKNOWN);
-  CHECK(test_ixs_check_rational_intermediates_facts(ceil_overflow, ceil_half,
-                                                    8) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_rational_intermediates_facts(
+            ceil_word_boundary, ceil_half, 8) == IXS_CHECK_TRUE);
+  plan = ixs_plan_rational_materialization_facts(signed_boundary, half, 8);
+  CHECK(plan.status == IXS_FACT_QUERY_COMPLETE && plan.check == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == 2 && !plan.numerator_nonnegative &&
+        !plan.ceil_bias_safe);
+  plan = ixs_plan_rational_materialization_facts(word_boundary, half, 8);
+  CHECK(plan.status == IXS_FACT_QUERY_COMPLETE && plan.check == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == 2 && plan.numerator_nonnegative &&
+        !plan.ceil_bias_safe);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_i32_word, ceil_half,
+                                                    32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_i32_word, ceil_third,
+                                                    32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_i32_word, ceil_fifth,
+                                                    32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(
+            unsigned_i32_word, ceil_half, 32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(
+            unsigned_i32_word, ceil_u32_max, 32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(
+            unsigned_i32_word, ceil_above_u32, 32) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(mixed_i32_word, ceil_half,
+                                                    32) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_rational_intermediates_facts(
+            overflow_i32_word, ceil_half, 32) == IXS_CHECK_FALSE);
   CHECK(test_ixs_check_rational_intermediates_facts(wide_word, floor_half,
                                                     62) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(widest_word, floor_half,
                                                     63) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(signed_i64_word, floor_half,
                                                     64) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_rational_intermediates_facts(signed_i64_word, ceil_half,
+                                                    64) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(signed_i64_word, trunc_half,
                                                     64) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(large_ceil_fit, large_ceil,
                                                     64) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_rational_intermediates_facts(
-            large_ceil_overflow, large_ceil, 64) != IXS_CHECK_TRUE);
+            large_ceil_bias_overflow, large_ceil, 64) == IXS_CHECK_TRUE);
+  plan = ixs_plan_rational_materialization_facts(large_ceil_fit, large_quotient,
+                                                 64);
+  CHECK(plan.status == IXS_FACT_QUERY_COMPLETE && plan.check == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == large_denominator && plan.numerator_nonnegative &&
+        plan.ceil_bias_safe);
+  plan = ixs_plan_rational_materialization_facts(large_ceil_bias_overflow,
+                                                 large_quotient, 64);
+  CHECK(plan.status == IXS_FACT_QUERY_COMPLETE && plan.check == IXS_CHECK_TRUE);
+  CHECK(plan.denominator == large_denominator && plan.numerator_nonnegative &&
+        !plan.ceil_bias_safe);
   CHECK(test_ixs_check_rational_intermediates_facts(
             large_trunc_negative, large_trunc, 64) == IXS_CHECK_TRUE);
   plan =
@@ -11713,6 +11775,7 @@ static void test_public_rational_intermediate_compounds(void) {
         plan.check == IXS_CHECK_FALSE);
   CHECK(plan.numerator == NULL);
   CHECK(plan.denominator == 1);
+  CHECK(!plan.numerator_nonnegative && !plan.ceil_bias_safe);
   ixs_ctx_destroy(ctx);
 }
 
@@ -12079,7 +12142,8 @@ static void test_public_rational_intermediate_oom_and_invalid(void) {
   plan = ixs_plan_rational_materialization_facts(facts, piecewise, 8);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   CHECK(plan.status == IXS_FACT_QUERY_OOM && plan.check == IXS_CHECK_UNKNOWN &&
-        plan.numerator == NULL && plan.denominator == 1);
+        plan.numerator == NULL && plan.denominator == 1 &&
+        !plan.numerator_nonnegative && !plan.ceil_bias_safe);
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
   plan = ixs_plan_rational_materialization_facts(facts, piecewise, 8);
   CHECK(plan.status == IXS_FACT_QUERY_COMPLETE &&
@@ -12252,8 +12316,8 @@ static void test_public_group_union_dag_work_admission(void) {
     symbol = ixs_sym(ctx, name);
     predicate_storage[group][0] =
         ixs_cmp(ctx, symbol, IXS_CMP_EQ, ixs_int(ctx, (int64_t)group));
-    predicate_storage[group][1] = ixs_cmp(
-        ctx, complex, IXS_CMP_NE, ixs_int(ctx, (int64_t)group + 1024));
+    predicate_storage[group][1] =
+        ixs_cmp(ctx, complex, IXS_CMP_NE, ixs_int(ctx, (int64_t)group + 1024));
     groups[group].predicates = predicate_storage[group];
     groups[group].n_predicates = 2;
   }

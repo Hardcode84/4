@@ -21396,11 +21396,9 @@ group_union_get_dag_cost(ixs_ctx *ctx, group_union_dag_cost_memo *memo,
 }
 
 static ixs_group_union_status
-group_union_admit_dag_work(ixs_ctx *ctx,
-                           const group_union_group_state *states,
+group_union_admit_dag_work(ixs_ctx *ctx, const group_union_group_state *states,
                            size_t n_groups, ixs_node *const *roots,
-                           size_t n_roots,
-                           const ixs_group_union_query *queries,
+                           size_t n_roots, const ixs_group_union_query *queries,
                            size_t n_queries, size_t remaining_work) {
   group_union_dag_cost_memo memo;
   size_t *group_costs;
@@ -21422,8 +21420,7 @@ group_union_admit_dag_work(ixs_ctx *ctx,
   }
   if (n_groups > SIZE_MAX / sizeof(*group_costs))
     return IXS_GROUP_UNION_INVALID;
-  group_costs = ixs_arena_alloc(&ctx->scratch,
-                                n_groups * sizeof(*group_costs),
+  group_costs = ixs_arena_alloc(&ctx->scratch, n_groups * sizeof(*group_costs),
                                 sizeof(void *));
   if (!group_costs)
     return IXS_GROUP_UNION_OOM;
@@ -21435,14 +21432,13 @@ group_union_admit_dag_work(ixs_ctx *ctx,
       size_t root_id = state->root_ids[root_index];
       group_union_dag_cost_entry *entry;
       if (root_id >= n_roots) {
-        ixs_ctx_push_error(ctx,
-                           "group unions: group root registry invariant failed");
+        ixs_ctx_push_error(
+            ctx, "group unions: group root registry invariant failed");
         return IXS_GROUP_UNION_INVALID;
       }
       entry = group_union_dag_cost_memo_find(&memo, roots[root_id]);
       if (!entry || entry->state != GROUP_UNION_DAG_COST_COMPLETE) {
-        ixs_ctx_push_error(ctx,
-                           "group unions: DAG cost memo invariant failed");
+        ixs_ctx_push_error(ctx, "group unions: DAG cost memo invariant failed");
         return IXS_GROUP_UNION_INVALID;
       }
       group_costs[index] =
@@ -21473,11 +21469,11 @@ group_union_admit_dag_work(ixs_ctx *ctx,
     cost = group_union_dag_cost_add(cost, GROUP_UNION_DAG_QUERY_WEIGHT);
     cost = group_union_dag_cost_add(cost, lhs_cost);
     cost = group_union_dag_cost_add(cost, rhs_cost);
-    cost = group_union_dag_cost_add(
-        cost, group_costs[queries[index].lhs_group]);
+    cost =
+        group_union_dag_cost_add(cost, group_costs[queries[index].lhs_group]);
     if (queries[index].rhs_group != queries[index].lhs_group)
-      cost = group_union_dag_cost_add(
-          cost, group_costs[queries[index].rhs_group]);
+      cost =
+          group_union_dag_cost_add(cost, group_costs[queries[index].rhs_group]);
     if (cost == SIZE_MAX || cost > admission_limit)
       return IXS_GROUP_UNION_EXHAUSTED;
   }
@@ -22462,6 +22458,28 @@ static void group_union_destroy_lanes(group_union_group_state *states,
   }
 }
 
+static ixs_group_union_status group_union_allocate_query_storage(
+    ixs_ctx *ctx, size_t n_queries, size_t n_roots,
+    group_union_query_order **order, size_t **pair_ids, size_t **direct_ids,
+    size_t **pair_marks) {
+  *order = ixs_arena_alloc(&ctx->scratch, n_queries * sizeof(**order),
+                           sizeof(void *));
+  if (!*order)
+    return IXS_GROUP_UNION_OOM;
+  if (n_roots == 0)
+    return IXS_GROUP_UNION_COMPLETE;
+  *pair_ids = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(**pair_ids),
+                              sizeof(void *));
+  *direct_ids = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(**direct_ids),
+                                sizeof(void *));
+  *pair_marks = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(**pair_marks),
+                                sizeof(void *));
+  if (!*pair_ids || !*direct_ids || !*pair_marks)
+    return IXS_GROUP_UNION_OOM;
+  memset(*pair_marks, 0, n_roots * sizeof(**pair_marks));
+  return IXS_GROUP_UNION_COMPLETE;
+}
+
 ixs_group_union_status
 ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
                        size_t n_groups, const ixs_group_union_query *queries,
@@ -22528,25 +22546,10 @@ ixs_query_group_unions(ixs_session *s, const ixs_predicate_group *groups,
       *remaining_work = 0;
     goto cleanup;
   }
-  order = ixs_arena_alloc(&ctx->scratch, n_queries * sizeof(*order),
-                          sizeof(void *));
-  if (!order) {
-    status = IXS_GROUP_UNION_OOM;
+  status = group_union_allocate_query_storage(
+      ctx, n_queries, n_roots, &order, &pair_ids, &direct_ids, &pair_marks);
+  if (status != IXS_GROUP_UNION_COMPLETE)
     goto cleanup;
-  }
-  if (n_roots != 0) {
-    pair_ids = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(*pair_ids),
-                               sizeof(void *));
-    direct_ids = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(*direct_ids),
-                                 sizeof(void *));
-    pair_marks = ixs_arena_alloc(&ctx->scratch, n_roots * sizeof(*pair_marks),
-                                 sizeof(void *));
-    if (!pair_ids || !direct_ids || !pair_marks) {
-      status = IXS_GROUP_UNION_OOM;
-      goto cleanup;
-    }
-    memset(pair_marks, 0, n_roots * sizeof(*pair_marks));
-  }
 
   if (!ixs_bounds_init_ctx(&common, ctx, &ctx->scratch)) {
     ixs_bounds_destroy(&common);
@@ -23952,8 +23955,8 @@ ixs_plan_rational_materialization_facts(ixs_facts *facts, ixs_node *expr,
                                         uint32_t word_bits) {
   algebra_query_scope scope;
   ixs_node *nodes[1] = {expr};
-  ixs_rational_materialization_plan result = {IXS_FACT_QUERY_INVALID,
-                                              IXS_CHECK_UNKNOWN, NULL, 1};
+  ixs_rational_materialization_plan result = {
+      IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN, NULL, 1, false, false};
   bool width_ok = word_bits >= 2u && word_bits <= 64u;
   if (!algebra_query_begin(facts, nodes, 1, "rational intermediates", width_ok,
                            "word_bits must be in [2, 64]", &scope)) {
@@ -23970,6 +23973,8 @@ ixs_plan_rational_materialization_facts(ixs_facts *facts, ixs_node *expr,
     result.check = IXS_CHECK_UNKNOWN;
     result.numerator = NULL;
     result.denominator = 1;
+    result.numerator_nonnegative = false;
+    result.ceil_bias_safe = false;
   }
   return result;
 }

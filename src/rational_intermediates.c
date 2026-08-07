@@ -1124,28 +1124,15 @@ rational_validate_static_round(rational_state *state, ixs_node *expr,
   if (!nonnegative)
     result = rational_check_and(result,
                                 rational_signed_fits(state, proof.numerator));
-  /* A denominator wider than the requested unsigned word selects the
-   * compare/zero lowering: every fitting numerator has magnitude below it.
-   * Otherwise Ceil and negative Trunc materialize denominator - 1. */
+  /* Static Ceil divides the exact magnitude into quotient and remainder, then
+   * increments a nonzero remainder.  Those values cannot exceed a fitting
+   * numerator.  Negative Trunc still materializes denominator - 1. */
   if (proof.denominator > 1 &&
-      (uint64_t)proof.denominator <= (uint64_t)state->word_upper) {
-    if (expr->tag == IXS_CEIL) {
-      ixs_node *bias = rational_make_integer(state, proof.denominator - 1);
-      ixs_node *biased =
-          rational_make_binary(state, proof.numerator, IXS_ADD, bias);
-      if (!biased)
-        return rational_check_and(result, IXS_CHECK_UNKNOWN);
-      result =
-          rational_check_and(result, rational_validate_integer(state, biased));
-      if (!nonnegative)
-        result =
-            rational_check_and(result, rational_signed_fits(state, biased));
-    } else if (expr->tag == IXS_TRUNC && !nonnegative) {
-      result = rational_check_and(
-          result, rational_selected_trunc_bias_fit(state, proof.numerator,
-                                                   proof.denominator));
-    }
-  }
+      (uint64_t)proof.denominator <= (uint64_t)state->word_upper &&
+      expr->tag == IXS_TRUNC && !nonnegative)
+    result = rational_check_and(
+        result, rational_selected_trunc_bias_fit(state, proof.numerator,
+                                                 proof.denominator));
   /* Division by a positive denominator cannot enlarge a fitting integer
    * numerator beyond the signed/word domain checked above.  Avoid a redundant
    * recursive range query on the rounded tree; doing so would reintroduce a
@@ -1669,6 +1656,26 @@ static rational_analysis rational_analyze(rational_state *state,
                                                    : rational_empty_analysis();
 }
 
+static ixs_check_result rational_ceil_bias_fits(rational_state *state,
+                                                rational_proof proof,
+                                                bool numerator_nonnegative) {
+  ixs_node *bias_node;
+  ixs_node *biased;
+  ixs_check_result result;
+  int64_t bias;
+  if (!proof.valid || !proof.numerator || proof.denominator <= 0 ||
+      !ixs_safe_sub(proof.denominator, 1, &bias))
+    return IXS_CHECK_UNKNOWN;
+  bias_node = rational_make_integer(state, bias);
+  biased = rational_make_binary(state, proof.numerator, IXS_ADD, bias_node);
+  if (!biased)
+    return IXS_CHECK_UNKNOWN;
+  result = rational_validate_integer(state, biased);
+  if (!numerator_nonnegative)
+    result = rational_check_and(result, rational_signed_fits(state, biased));
+  return result;
+}
+
 IXS_STATIC ixs_rational_materialization_plan
 ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
                                          ixs_node *expr, uint32_t word_bits) {
@@ -1680,6 +1687,8 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
   result.check = IXS_CHECK_UNKNOWN;
   result.numerator = NULL;
   result.denominator = 1;
+  result.numerator_nonnegative = false;
+  result.ceil_bias_safe = false;
   if (!ctx || !bounds || !expr || word_bits < 2u || word_bits > 64u)
     return result;
   result.status = IXS_FACT_QUERY_COMPLETE;
@@ -1721,5 +1730,19 @@ ixs_bounds_plan_rational_materialization(ixs_ctx *ctx, ixs_bounds *bounds,
   }
   result.numerator = analysis.proof.numerator;
   result.denominator = analysis.proof.denominator;
+  result.numerator_nonnegative =
+      analysis.nonnegative ||
+      rational_is_nonnegative(&state, analysis.proof.numerator);
+  result.ceil_bias_safe =
+      rational_ceil_bias_fits(&state, analysis.proof,
+                              result.numerator_nonnegative) == IXS_CHECK_TRUE;
+  if (state.oom || bounds->oom) {
+    result.status = IXS_FACT_QUERY_OOM;
+    result.check = IXS_CHECK_UNKNOWN;
+    result.numerator = NULL;
+    result.denominator = 1;
+    result.numerator_nonnegative = false;
+    result.ceil_bias_safe = false;
+  }
   return result;
 }

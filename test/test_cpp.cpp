@@ -77,7 +77,15 @@ int main() {
   ixs::RationalMaterializationPlan plan =
       facts.plan_rational_materialization(rational_eighth, 8);
   if (plan.status != IXS_FACT_QUERY_COMPLETE || plan.check != IXS_CHECK_TRUE ||
-      plan.denominator != 8 || plan.numerator.str() != "x")
+      plan.denominator != 8 || plan.numerator.str() != "x" ||
+      !plan.numerator_nonnegative || !plan.ceil_bias_safe)
+    return 4;
+  ixs::RationalMaterializationPlan invalid_plan =
+      facts.plan_rational_materialization(rational_eighth, 1);
+  if (invalid_plan.status != IXS_FACT_QUERY_INVALID ||
+      invalid_plan.check != IXS_CHECK_UNKNOWN ||
+      !invalid_plan.numerator.is_null() || invalid_plan.denominator != 1 ||
+      invalid_plan.numerator_nonnegative || invalid_plan.ceil_bias_safe)
     return 4;
 
   ixs::Expr finite_item = ixs::Expr::sym(ctx, "finite_item");

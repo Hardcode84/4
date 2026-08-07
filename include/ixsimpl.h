@@ -506,14 +506,20 @@ typedef struct {
 } ixs_additive_constant_result;
 
 /* Exact rational materialization plan returned by the width query.  Numerator
- * and denominator are populated only when status is TRUE.  The denominator
- * is always positive, and the proof does not depend on canonical child order.
+ * and denominator are populated only when check is TRUE.  The denominator is
+ * always positive, and the proof does not depend on canonical child order.
+ * numerator_nonnegative records a proof that the exact numerator is at least
+ * zero.  ceil_bias_safe records a proof that numerator + denominator - 1 fits
+ * the word domain (and the signed word domain unless numerator_nonnegative is
+ * true).  Both strategy flags are conservative and false without such proof.
  */
 typedef struct {
   ixs_fact_query_status status;
   ixs_check_result check;
   const ixs_node *numerator;
   int64_t denominator;
+  bool numerator_nonnegative;
+  bool ceil_bias_safe;
 } ixs_rational_materialization_plan;
 
 /* Assumption contract shared by simplify, simplify_batch, check,
@@ -988,8 +994,10 @@ ixs_integer_range_query_result ixs_integer_range_facts(ixs_facts *facts,
  * partial powers.  The query also checks Floor/Ceil/Trunc source numerators and
  * selected rounding biases, Piecewise conditions and value arms, and integral
  * Mod/bitwise operands. A static rounded denominator larger than the unsigned
- * word selects the compare/zero path and needs no bias; every other nonunit
- * denominator validates its denominator-minus-one bias. word_bits must be in
+ * word selects the compare/zero path and needs no bias. Static ceiling uses
+ * quotient/remainder materialization; its optional denominator-minus-one bias
+ * is reported separately as plan strategy metadata. Negative truncation still
+ * validates its selected denominator-minus-one bias. word_bits must be in
  * [2, 64]. For N < 64 the ordinary word domain is
  * [-2^(N-1), 2^N-1], while signed rounded intermediates additionally use
  * [-2^(N-1), 2^(N-1)-1].  N == 64 uses the exact signed-int64 domain because
@@ -1015,8 +1023,11 @@ ixs_check_rational_intermediates_facts(ixs_facts *facts, const ixs_node *expr,
  * an unrepresentable exact denominator, and insufficient or contradictory
  * facts.  Invalid input or a detected cycle returns INVALID,
  * allocation-size overflow or OOM returns OOM, and a retryable proof-resource
- * stop returns LIMITED.  Every non-COMPLETE status clears the plan.  The
- * returned node belongs to the fact set's context. */
+ * stop returns LIMITED.  Every non-COMPLETE status clears the plan.  A TRUE
+ * plan also reports conservative numerator-sign and ceil-bias strategy facts;
+ * a false strategy fact selects a general materialization and does not weaken
+ * the TRUE width proof.  The returned node belongs to the fact set's context.
+ */
 ixs_rational_materialization_plan
 ixs_plan_rational_materialization_facts(ixs_facts *facts, const ixs_node *expr,
                                         uint32_t word_bits);

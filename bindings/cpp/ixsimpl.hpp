@@ -258,6 +258,8 @@ struct RationalMaterializationPlan {
   ixs_check_result check;
   Expr numerator;
   int64_t denominator;
+  bool numerator_nonnegative;
+  bool ceil_bias_safe;
 };
 
 struct FiniteDomainResult {
@@ -749,8 +751,12 @@ public:
   plan_rational_materialization(const Expr &expr, uint32_t word_bits) const {
     ixs_rational_materialization_plan result =
         ixs_plan_rational_materialization_facts(facts_, expr.raw(), word_bits);
-    return {result.status, result.check, Expr(ctx_, session_, result.numerator),
-            result.denominator};
+    return {result.status,
+            result.check,
+            Expr(ctx_, session_, result.numerator),
+            result.denominator,
+            result.numerator_nonnegative,
+            result.ceil_bias_safe};
   }
   bool substitute(const Facts &source, const Expr &target,
                   const Expr &replacement) {

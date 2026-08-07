@@ -1719,8 +1719,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   materialization island below one root, synthesizes its exact numerator and
   positive denominator, and proves the materialization safe for a requested
   machine-word width. A TRUE result carries the exact plan authorized by that
-  proof; FALSE and UNKNOWN carry no plan. The boolean C, C++, and Python
-  `rational_intermediates_fit` queries return the plan status.
+  proof plus two conservative strategy facts: `numerator_nonnegative` proves
+  that the exact numerator is at least zero, and `ceil_bias_safe` proves that
+  `numerator + denominator - 1` fits the word domain (and the signed domain
+  when numerator nonnegativity is not proven). A false strategy fact selects a
+  general quotient/remainder materialization; it does not change a TRUE plan
+  into UNKNOWN. FALSE and UNKNOWN carry no plan and clear both facts. The
+  boolean C, C++, and Python `rational_intermediates_fit` queries return the
+  plan status.
 
   Plan synthesis and intermediate validation are deliberately separate.
   Before scaling any ADD operand or Piecewise value, synthesis determines the
@@ -1738,11 +1744,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   Floor, ceiling, and truncation validate the source numerator and the signed
   range when nonnegativity is not proven. A static denominator larger than the
   requested unsigned word selects the compare/zero path because every fitting
-  numerator has smaller magnitude. Every other nonunit denominator uses a
-  `denominator - 1` bias: ceiling validates the biased numerator, while
-  truncation validates that bias only on the negative-numerator path and the
-  original numerator on the nonnegative path. A rounded dynamic quotient is a
-  plan boundary when its exact numerator, denominator, and result fit the
+  numerator has smaller magnitude. Static ceiling uses an unsigned-magnitude
+  quotient and remainder, increments the quotient when the remainder is
+  nonzero, and restores the sign; the quotient, scaled quotient, remainder,
+  and rounded result cannot exceed the fitting source magnitude. Truncation
+  validates a `denominator - 1` bias only on the negative-numerator path and
+  the original numerator on the nonnegative path. A rounded dynamic quotient
+  is a plan boundary when its exact numerator, denominator, and result fit the
   signed word and facts prove the quotient defined and integral. Piecewise
   forms one common denominator for its values, validates every scaled arm
   independently, and analyzes each condition as an independently materialized
@@ -2746,6 +2754,8 @@ typedef struct {
     ixs_check_result check;
     const ixs_node *numerator;
     int64_t denominator;
+    bool numerator_nonnegative;
+    bool ceil_bias_safe;
 } ixs_rational_materialization_plan;
 bool ixs_integer_range(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions,
@@ -3931,6 +3941,8 @@ typedef struct {
   ixs_check_result check;
   const ixs_node *numerator;
   int64_t denominator;
+  bool numerator_nonnegative;
+  bool ceil_bias_safe;
 } ixs_rational_materialization_plan;
 
 typedef enum {
