@@ -343,6 +343,9 @@ typedef struct {
   size_t nexpressions;
   const ixs_mapped_bundle_row *rows;
   size_t nrows;
+  bool has_candidate_range;
+  int64_t candidate_lower;
+  int64_t candidate_upper;
 } ixs_mapped_bundle_component;
 
 typedef struct {
@@ -863,14 +866,19 @@ ixs_finite_domain_result ixs_verify_mapped_expression_facts(
  * separate sessions over that context are accepted. Candidate-point images
  * are the sorted unique image derived from the rows. The common synthesis
  * domain is tried first, followed by distinct exact row domains in first-row
- * order. Duplicate candidate handles are verified once.
+ * order. Duplicate candidate handles are checked once. A scalar component may
+ * request one inclusive signed candidate range. Every distinct nomination is
+ * checked under `synthesis_facts` before universal row verification; an
+ * unproved or out-of-range candidate is a semantic miss and nomination
+ * continues. Predicate components cannot request a candidate range.
  *
  * Each nomination consumes the ordinary mapped-synthesis charge for its row
  * subset and derived image. Each distinct well-typed nomination additionally
- * consumes exactly one mapped-verification unit per component row, split
- * across its exact fact domains. One `remaining_work` counter owns all
- * components and nominations. Work consumed before an ensuing semantic miss,
- * EXHAUSTED, LIMITED, or hard failure is not refunded.
+ * consumes one unit when candidate-range admissibility is requested, then one
+ * mapped-verification unit per component row when admissible, split across its
+ * exact fact domains. One `remaining_work` counter owns all components and
+ * nominations. Work consumed before an ensuing semantic miss, EXHAUSTED,
+ * LIMITED, or hard failure is not refunded.
  *
  * `ncandidates` must equal `ncomponents`. A complete universal proof returns
  * COMPLETE with TRUE and writes every candidate in component order. COMPLETE

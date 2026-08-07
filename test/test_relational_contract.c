@@ -268,6 +268,8 @@ static void test_mapped_bundle_atomic_contract(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "mapped_bundle_contract_item");
   ixs_node *base = ixs_sym(ctx, "mapped_bundle_contract_base");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
   const ixs_node *address[1] = {ixs_add(ctx, base, item)};
   const ixs_node *predicate[1] = {
       ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 1))};
@@ -275,13 +277,18 @@ static void test_mapped_bundle_atomic_contract(void) {
   ixs_mapped_bundle_row rows[2] = {{facts, {0, 1, 1, 0}},
                                    {facts, {0, 0, 0, 0}}};
   ixs_mapped_bundle_component components[2] = {
-      {IXS_MAPPED_BUNDLE_SCALAR, facts, item, address, 1, rows, 2},
-      {IXS_MAPPED_BUNDLE_PREDICATE, facts, item, predicate, 1, rows, 2}};
+      {IXS_MAPPED_BUNDLE_SCALAR, facts, item, address, 1, rows, 2, true, 0, 1},
+      {IXS_MAPPED_BUNDLE_PREDICATE, facts, item, predicate, 1, rows, 2, false,
+       0, 0}};
   const ixs_node *candidates[2] = {base, base};
   ixs_mapped_bundle_result result;
-  size_t budget = 12;
+  size_t budget = 13;
 
-  CHECK(ctx && item && base && address[0] && predicate[0] && facts);
+  CHECK(ctx && item && base && zero && one && address[0] && predicate[0] &&
+        facts &&
+        ixs_facts_assume_pred(facts, ixs_cmp(ctx, base, IXS_CMP_EQ, zero)) &&
+        ixs_facts_assume_pred(facts, ixs_cmp(ctx, item, IXS_CMP_GE, zero)) &&
+        ixs_facts_assume_pred(facts, ixs_cmp(ctx, item, IXS_CMP_LE, one)));
   result =
       ixs_synthesize_mapped_bundle_facts(components, 2, candidates, 2, &budget);
   CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&

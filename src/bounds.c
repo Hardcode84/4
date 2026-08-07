@@ -19786,6 +19786,17 @@ mapped_bundle_validate_component(const ixs_mapped_bundle_component *component) {
     valid = false;
     goto cleanup;
   }
+  if (component->has_candidate_range &&
+      component->kind != IXS_MAPPED_BUNDLE_SCALAR) {
+    ixs_ctx_push_error(ctx, "%s: candidate range requires a scalar component",
+                       query);
+    valid = false;
+  }
+  if (component->has_candidate_range &&
+      component->candidate_lower > component->candidate_upper) {
+    ixs_ctx_push_error(ctx, "%s: candidate range is empty", query);
+    valid = false;
+  }
   if (!mapped_expression_symbol_valid(ctx, component->symbol, query) ||
       !mapped_expression_values_valid(ctx, query, component->expressions,
                                       component->nexpressions))
@@ -20036,6 +20047,36 @@ mapped_bundle_verify_candidate(const ixs_mapped_bundle_component *component,
   return result;
 }
 
+static ixs_finite_domain_status
+mapped_bundle_candidate_admissible(const ixs_mapped_bundle_component *component,
+                                   const ixs_node *candidate,
+                                   size_t *remaining_work, bool *admissible) {
+  ixs_integer_range_query_result range;
+
+  *admissible = !component->has_candidate_range;
+  if (!component->has_candidate_range)
+    return IXS_FINITE_DOMAIN_COMPLETE;
+  if (!finite_domain_reserve(1u, 1u, remaining_work))
+    return IXS_FINITE_DOMAIN_EXHAUSTED;
+  range = ixs_integer_range_facts(component->synthesis_facts,
+                                  (ixs_node *)candidate);
+  switch (range.status) {
+  case IXS_FACT_QUERY_COMPLETE:
+    *admissible = range.available && range.range.has_lower &&
+                  range.range.has_upper &&
+                  range.range.lower >= component->candidate_lower &&
+                  range.range.upper <= component->candidate_upper;
+    return IXS_FINITE_DOMAIN_COMPLETE;
+  case IXS_FACT_QUERY_LIMITED:
+    return IXS_FINITE_DOMAIN_LIMITED;
+  case IXS_FACT_QUERY_INVALID:
+    return IXS_FINITE_DOMAIN_INVALID;
+  case IXS_FACT_QUERY_OOM:
+    return IXS_FINITE_DOMAIN_OOM;
+  }
+  return IXS_FINITE_DOMAIN_INVALID;
+}
+
 static ixs_finite_domain_result
 mapped_bundle_try_nomination(const ixs_mapped_bundle_component *component,
                              mapped_bundle_component_work *work,
@@ -20066,6 +20107,14 @@ mapped_bundle_try_nomination(const ixs_mapped_bundle_component *component,
   }
   {
     const ixs_node *candidate = result.value;
+    bool admissible;
+    result.status = mapped_bundle_candidate_admissible(
+        component, candidate, remaining_work, &admissible);
+    if (result.status != IXS_FINITE_DOMAIN_COMPLETE || !admissible) {
+      result.check = IXS_CHECK_UNKNOWN;
+      result.value = NULL;
+      return result;
+    }
     result = mapped_bundle_verify_candidate(component, work, candidate,
                                             remaining_work);
     if (result.status == IXS_FINITE_DOMAIN_COMPLETE &&

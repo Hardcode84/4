@@ -8590,7 +8590,10 @@ static void test_public_mapped_bundle_facts(void) {
                                             partial_expressions,
                                             1,
                                             exact_rows,
-                                            2};
+                                            2,
+                                            false,
+                                            0,
+                                            0};
   candidates[0] = base;
   budget = 9;
   result =
@@ -8617,9 +8620,16 @@ static void test_public_mapped_bundle_facts(void) {
         ixs_pw(ctx, 1, right_values, right_conditions)};
     ixs_mapped_bundle_row incompatible_rows[2] = {{strong, {0, 0, 0, 0}},
                                                   {opposite, {1, 0, 0, 0}}};
-    ixs_mapped_bundle_component incompatible = {
-        IXS_MAPPED_BUNDLE_SCALAR, common, item, incompatible_expressions, 2,
-        incompatible_rows,        2};
+    ixs_mapped_bundle_component incompatible = {IXS_MAPPED_BUNDLE_SCALAR,
+                                                common,
+                                                item,
+                                                incompatible_expressions,
+                                                2,
+                                                incompatible_rows,
+                                                2,
+                                                false,
+                                                0,
+                                                0};
     CHECK(incompatible_expressions[0] && incompatible_expressions[1]);
     candidates[0] = base;
     budget = 11;
@@ -8635,9 +8645,9 @@ static void test_public_mapped_bundle_facts(void) {
                                             {common, {0, 0, 0, 0}}};
     ixs_mapped_bundle_component components[2] = {
         {IXS_MAPPED_BUNDLE_SCALAR, common, item, address_expressions, 1,
-         scalar_rows, 2},
+         scalar_rows, 2, false, 0, 0},
         {IXS_MAPPED_BUNDLE_PREDICATE, common, item, predicate_expressions, 1,
-         scalar_rows, 2}};
+         scalar_rows, 2, false, 0, 0}};
 
     candidates[0] = base;
     candidates[1] = base;
@@ -8666,6 +8676,62 @@ static void test_public_mapped_bundle_facts(void) {
           candidates[1] == NULL && budget == 0);
   }
 
+  {
+    ixs_node *item_lower = ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0));
+    ixs_node *item_upper = ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 1));
+    ixs_node *guard_zero =
+        ixs_cmp(ctx, guard_value, IXS_CMP_EQ, ixs_int(ctx, 0));
+    ixs_node *guard_positive =
+        ixs_cmp(ctx, guard_value, IXS_CMP_GT, ixs_int(ctx, 0));
+    const ixs_node *ranged_values[2] = {item, ixs_int(ctx, -1)};
+    const ixs_node *ranged_conditions[2] = {guard, ixs_true(ctx)};
+    const ixs_node *ranged_expressions[1] = {
+        ixs_pw(ctx, 2, ranged_values, ranged_conditions)};
+    ixs_facts *range_common = ixs_facts_create(ctx);
+    ixs_facts *zero_domain = ixs_facts_create(ctx);
+    ixs_facts *positive_domain = ixs_facts_create(ctx);
+    ixs_mapped_bundle_row ranged_rows[2] = {{zero_domain, {0, 0, 0, 0}},
+                                            {positive_domain, {0, 1, 1, 0}}};
+    ixs_mapped_bundle_component ranged = {IXS_MAPPED_BUNDLE_SCALAR,
+                                          range_common,
+                                          item,
+                                          ranged_expressions,
+                                          1,
+                                          ranged_rows,
+                                          2,
+                                          true,
+                                          0,
+                                          1};
+
+    CHECK(item_lower && item_upper && guard_zero && guard_positive &&
+          ranged_values[1] && ranged_expressions[0] && range_common &&
+          zero_domain && positive_domain &&
+          ixs_facts_assume_pred(range_common, item_lower) &&
+          ixs_facts_assume_pred(range_common, item_upper) &&
+          ixs_facts_assume_pred(zero_domain, item_lower) &&
+          ixs_facts_assume_pred(zero_domain, item_upper) &&
+          ixs_facts_assume_pred(zero_domain, guard_zero) &&
+          ixs_facts_assume_pred(positive_domain, item_lower) &&
+          ixs_facts_assume_pred(positive_domain, item_upper) &&
+          ixs_facts_assume_pred(positive_domain, guard_positive));
+
+    candidates[0] = base;
+    budget = 9;
+    result =
+        ixs_synthesize_mapped_bundle_facts(&ranged, 1, candidates, 1, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+          result.check == IXS_CHECK_UNKNOWN && candidates[0] == NULL &&
+          budget == 0);
+    budget = 10;
+    result =
+        ixs_synthesize_mapped_bundle_facts(&ranged, 1, candidates, 1, &budget);
+    CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+          result.check == IXS_CHECK_TRUE && candidates[0] != NULL &&
+          test_ixs_equivalent_facts(range_common, (ixs_node *)candidates[0],
+                                    item) == IXS_CHECK_TRUE &&
+          budget == 0);
+  }
+
   ixs_session_destroy(&exact_session);
   ixs_ctx_destroy(ctx);
 }
@@ -8683,8 +8749,16 @@ static void test_public_mapped_bundle_failures(void) {
   ixs_session stale_session;
   ixs_facts *stale;
   ixs_mapped_bundle_row rows[1] = {{facts, {0, 0, 0, 0}}};
-  ixs_mapped_bundle_component component = {
-      IXS_MAPPED_BUNDLE_SCALAR, facts, item, expressions, 1, rows, 1};
+  ixs_mapped_bundle_component component = {IXS_MAPPED_BUNDLE_SCALAR,
+                                           facts,
+                                           item,
+                                           expressions,
+                                           1,
+                                           rows,
+                                           1,
+                                           false,
+                                           0,
+                                           0};
   ixs_mapped_bundle_result result;
   const ixs_node *candidate = base;
   size_t budget;
@@ -8727,6 +8801,25 @@ static void test_public_mapped_bundle_failures(void) {
   CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
         result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
   component.kind = IXS_MAPPED_BUNDLE_SCALAR;
+
+  component.has_candidate_range = true;
+  component.candidate_lower = 1;
+  component.candidate_upper = 0;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  component.candidate_lower = 0;
+  component.candidate_upper = 1;
+  component.kind = IXS_MAPPED_BUNDLE_PREDICATE;
+  candidate = base;
+  result =
+      ixs_synthesize_mapped_bundle_facts(&component, 1, &candidate, 1, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_INVALID &&
+        result.check == IXS_CHECK_UNKNOWN && candidate == NULL && budget == 3);
+  component.kind = IXS_MAPPED_BUNDLE_SCALAR;
+  component.has_candidate_range = false;
 
   component.expressions = foreign_expressions;
   candidate = base;
