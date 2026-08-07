@@ -1185,7 +1185,6 @@ def test_expr_bytes_are_stable_and_outlive_the_source_context() -> None:
     data = expr.to_bytes()
 
     assert data == source.serialize(expr)
-    assert not hasattr(expr, "node_ptr")
 
     foreign = ixsimpl.Context()
     with pytest.raises(ValueError, match="different context"):
@@ -1196,6 +1195,21 @@ def test_expr_bytes_are_stable_and_outlive_the_source_context() -> None:
     decoded = foreign.deserialize(data)
     assert str(decoded) == "4*x + y"
     assert decoded.to_bytes() == data
+
+
+def test_node_ptr_exposes_canonical_node_address() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    x_again = ctx.sym("x")
+    y = ctx.sym("y")
+
+    assert isinstance(x.node_ptr, int)
+    assert x.node_ptr != 0
+    assert x_again.node_ptr == x.node_ptr
+    assert y.node_ptr != x.node_ptr
+    node_as_any: Any = x
+    with pytest.raises(AttributeError):
+        node_as_any.node_ptr = 0
 
 
 def test_trunc_binding_constructs_toward_zero_rounding() -> None:
@@ -2237,7 +2251,8 @@ def test_integrality_and_divisibility_invalid_inputs() -> None:
     assert ctx.divisible(ctx.int_(64), 32, contradictory) is None
     assert not sentinel.is_integer_valued
     assert ctx.integer_valued(sentinel) is None
-    assert ctx.divisible(sentinel, 8, facts) is None
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.divisible(sentinel, 8, facts)
 
     with pytest.raises(ValueError, match="different context"):
         ctx.integer_valued(other.sym("x"))
@@ -2290,7 +2305,7 @@ def test_known_bits_and_congruence_binding_failures() -> None:
     contradictory.assume(x <= 5)
     sentinel = ctx.parse_expr("(")
 
-    assert ctx.known_bits(x, contradictory) is None
+    assert ctx.known_bits(x, contradictory) == (0, 0, None)
     assert ctx.symbol_congruence(x, contradictory) is None
     assert ctx.congruent(ctx.int_(1), 2, 1, contradictory) is None
 
@@ -2932,7 +2947,16 @@ def test_fact_backed_algebra_helpers() -> None:
     assert quadratic_difference is not None
     assert ixsimpl.same_node(quadratic_difference, 2 * i + 1)
     assert ctx.finite_difference(i, i, i, facts) is None
-    assert ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts) is None
+    with pytest.raises(ValueError, match="invalid internal relation state"):
+        ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts)
+
+    assert ctx.invariant_under_step(base, i, ctx.int_(1), facts) is True
+    assert ctx.invariant_under_step(i % 4, i, ctx.int_(4), facts) is True
+    assert ctx.invariant_under_step(8 * i, i, ctx.int_(1), facts) is False
+    assert ctx.invariant_under_step(i, i, i, facts) is None
+    zero = ctx.facts()
+    zero.assume(ctx.eq(i, 0))
+    assert ctx.invariant_under_step(1 / (i - 1), i, ctx.int_(1), zero) is None
 
     split = ctx.split_additive_constant(base + 96, facts)
     assert split is not None
@@ -3070,6 +3094,7 @@ def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     contradictory.assume(i <= 5)
     assert ctx.constant_difference(i, i, contradictory) is None
     assert ctx.affine_decompose(i, i, contradictory) is None
+    assert ctx.invariant_under_step(i, i, ctx.int_(1), contradictory) is None
 
 
 def test_fact_backed_algebra_helper_binding_failures() -> None:
@@ -3090,9 +3115,13 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
     with pytest.raises(ValueError, match="different context"):
         ctx.finite_difference(x, x, other.sym("step"), facts)
     with pytest.raises(ValueError, match="different context"):
+        ctx.invariant_under_step(x, x, other.sym("step"), facts)
+    with pytest.raises(ValueError, match="different context"):
         ctx.split_additive_constant(other.sym("x"), facts)
     with pytest.raises(ValueError, match="must be a symbol"):
         ctx.affine_decompose(x, x + 1, facts)
+    with pytest.raises(ValueError, match="must be a symbol"):
+        ctx.invariant_under_step(x, x + 1, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.constant_difference(sentinel, x, facts)
     with pytest.raises(ValueError, match="sentinel"):
@@ -3101,6 +3130,8 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
         ctx.decompose_exact_quotient(sentinel, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
+    with pytest.raises(ValueError, match="sentinel"):
+        ctx.invariant_under_step(sentinel, x, ctx.int_(1), facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.split_additive_constant(sentinel, facts)
 
@@ -3823,7 +3854,8 @@ def test_facts_assume_many_is_atomic() -> None:
     rejected.assume(x >= 0)
     with pytest.raises(ValueError, match="OR predicates"):
         rejected.assume_many([y >= 5, ixsimpl.or_(x >= 0, x <= 10)])
-    assert ctx.range(x, facts=rejected) is None
+    with pytest.raises(ValueError, match="fact set is unusable"):
+        ctx.range(x, facts=rejected)
 
 
 def test_facts_assume_many_uses_prefix_closure() -> None:
@@ -3928,7 +3960,8 @@ def test_fact_backed_simplification() -> None:
     assert contradictory_floor.simplify(facts=contradictory) == contradictory_floor
 
     sentinel = ctx.parse_expr("(")
-    assert sentinel.simplify(facts=facts).is_parse_error
+    with pytest.raises(ValueError, match="sentinel"):
+        sentinel.simplify(facts=facts)
 
     other = ixsimpl.Context()
     with pytest.raises(ValueError, match="expression from different context"):
@@ -3966,8 +3999,10 @@ def test_compound_assumption_rejection_is_atomic() -> None:
     facts.assume(ge0)
     with pytest.raises(ValueError, match="OR predicates"):
         facts.assume(ixsimpl.and_(y >= 5, either))
-    assert ctx.range(x, facts=facts) is None
-    assert ctx.range(y, facts=facts) is None
+    with pytest.raises(ValueError, match="fact set is unusable"):
+        ctx.range(x, facts=facts)
+    with pytest.raises(ValueError, match="fact set is unusable"):
+        ctx.range(y, facts=facts)
     with pytest.raises(ValueError, match="fact set is unusable"):
         mod.simplify(facts=facts)
 

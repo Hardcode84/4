@@ -519,7 +519,8 @@ static void test_product_nonzero_factors(void) {
   CHECK(test_ixs_check_defined_facts(addition, inverse) == IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_facts_assume_pred(negative_power, inverse_nonzero));
-  CHECK(test_ixs_check_defined_facts(negative_power, inverse) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_defined_facts(negative_power, inverse) ==
+        IXS_CHECK_UNKNOWN);
   CHECK(!ixs_facts_assume_preds(negative_power_batch, &inverse_nonzero, 1));
 
   ixs_ctx_destroy(ctx);

@@ -142,9 +142,12 @@ API. Key functions:
 | `ixs_facts_*` | First-class predicate and expression-range fact sets |
 | `ixs_equivalent_modulo_pow2_facts` | Total low-bit equivalence under facts |
 | `ixs_finite_domain_facts` | Typed, budgeted finite-domain equivalence, relation verification, and synthesis with separate call status and proof result |
+| `ixs_synthesize_mapped_expression_facts` / `ixs_verify_mapped_expression_facts` | Budgeted synthesis and universal verification for caller-ordered source/candidate point mappings and additive offsets |
+| `ixs_mapped_constant_differences_facts` | Atomically prove an exact signed scalar difference for every caller-ordered mapped row |
 | `ixs_finite_domain_batch_facts` | Mixed logical property checks over one ordered Cartesian integer domain, with universal results and first row-major witnesses |
 | `ixs_decompose_cyclic_facts` | Prove a cyclic residual-plus-scaled-Mod decomposition |
-| `ixs_query_group_unions` | Bulk ordinary/finite-domain equivalence and constant-difference queries over exact pairwise predicate-group unions |
+| `ixs_check_invariant_under_step_facts` | Prove `expr[symbol := symbol + step] == expr` under one closed fact domain |
+| `ixs_query_group_unions` | Bulk ordinary/finite-domain equivalence and exact/finite-domain constant-difference queries over exact pairwise predicate-group unions |
 | `ixs_expand` | Distribute MUL over ADD (sum-of-products) |
 | `ixs_subs` | Variable substitution |
 | `ixs_import_node` / `ixs_import_many` | Structural import across contexts |
@@ -174,17 +177,21 @@ its value to null.
 Each query names two predicate groups and sees exactly their set union. Facts
 from any third group are excluded, including when the implementation shares
 work across the batch. All operands are scalar expressions: semantic predicate
-values are rejected, but integer literals `0` and `1` remain valid. Ordinary
+values participate as their canonical integer `0`/`1` values. Ordinary
 and finite-domain equivalence queries return `TRUE`, `FALSE`, or `UNKNOWN`;
 finite-domain mode may enumerate integer points proved bounded by the selected
 union. Constant-difference queries return `TRUE` with the exact signed
-difference or `UNKNOWN`.
+difference or `UNKNOWN`. Finite-domain constant difference first uses that
+exact proof, then enumerates the complete selected Cartesian domain and
+requires one common signed `int64_t` `lhs - rhs` value; it never returns
+`FALSE`.
 
 The caller supplies one work budget for the entire call. Predicate-root
 replays, bounded semantic queries, and finite-domain points consume that budget
 before they run. Replay-support scratch is allocated only after the matching
 reservation succeeds; insufficient work returns `EXHAUSTED` without attempting
-that allocation.
+that allocation. A finite-domain point product is reserved atomically, while
+the exact fast path consumes no point work.
 `COMPLETE`, caller-budget `EXHAUSTED`, internal-proof-ceiling `LIMITED`,
 `INVALID`, and `OOM` are distinct call statuses. Results are valid only after
 `COMPLETE`; every other status resets every result to `UNKNOWN` with a zero

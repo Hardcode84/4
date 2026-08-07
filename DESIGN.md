@@ -164,16 +164,19 @@ recursively. `ixs_subs` uses a 256-slot direct-mapped memo cache (4 KB on the
 stack) keyed by node pointer to avoid exponential re-traversal of shared
 subexpressions; collisions only cause redundant work, never incorrect results.
 Successful deterministic node transforms use a context-local open-addressed
-cache keyed by source-node identity. Current slots memoize top-level expansion,
+cache keyed by source-node identity. Current slots memoize expansion,
 removal of an ADD constant for shifted bounds, proportional ADD primitives,
 and bounds-canonical aliases.
 Arena-backed storage stays at or below 75% load, so hits and inserts are
 expected O(1). A bounds-canonical miss costs expansion plus bounded-iteration,
 fact-free simplification of the expanded DAG; later queries hit the cache.
-Expansion memoizes successful recursive children in the same growable cache.
-Each entry records the deepest successful call depth and is reused only at an
-equal or shallower depth, preserving the expansion depth limit; sentinel and
-depth-limit failures are not memoized.
+Expansion walks the input DAG with a growable explicit postorder stack and a
+growable pointer-keyed active/completed memo, then memoizes every successful
+compound child in the same persistent transform cache. Active re-entry rejects
+a cyclic graph. Positive powers use exponentiation by squaring; negative powers
+preserve their signed `int32_t` exponent directly. Expansion has no fixed DAG
+depth, visit-count, or exponent-magnitude ceiling. Sentinel and allocation
+failures are not memoized.
 Successful results survive session reset; failures and sentinels are not
 cached. Cache-allocation failure leaves the result uncached without failing
 the query. Statistics reset clears the cache so rule-hit counters remain
@@ -1295,8 +1298,9 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
   Initial storage is symbol-level in `ixs_var_bound`. Expression-level
   bitfacts are computed on demand for constants, symbols, comparisons,
-  logical NOT, and bounded-depth `AND`/`OR`/`XOR` nodes. A pointer-keyed side
-  table can be added later if expression-level assumptions need to persist.
+  logical NOT, and arbitrarily deep `AND`/`OR`/`XOR` DAGs using growable
+  explicit work stacks. A pointer-keyed side table can be added later if
+  expression-level assumptions need to persist.
   Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
   assumptions remain isolated.
 
@@ -1307,23 +1311,21 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   tables live in a dedicated bounds-owned arena until `ixs_bounds_destroy`.
   An incomplete current-generation memo entry is exactly an active query, so
   cycle rejection is expected O(1); the active stack is used only for LIFO
-  assertions and statistics. One outer query admits at most 256 nested
-  holds/work entries and 8192 cache misses. Only published, interned nodes are
+  assertions and statistics. Active entries and the memo grow geometrically;
+  there is no semantic hold, cache-miss, depth, or Piecewise-case cutoff.
+  Checked-size overflow and allocation failure propagate as OOM rather than
+  degrading to a cached no-fact answer. Only published, interned nodes are
   pointer-keyed; unpublished stack probes take the direct path. `Piecewise`
-  forks share those limits and a separate budget of 256 attempted nonempty
-  range-case visits, while receiving distinct fact-domain identities. An
-  active fork borrows its source query state but owns an empty local arena;
-  the source hold and shared scratch lifetime must outlive the fork. The case
-  budget is armed monotonically only for a nested `Piecewise` outer root or a
-  nested `Piecewise` reached while tracking is already active. Flat roots keep
-  the existing 1024-case limit and direct path.
+  forks share the query state while receiving distinct fact-domain identities.
+  An active fork borrows its source query state but owns an empty local arena;
+  the source hold and shared scratch lifetime must outlive the fork.
   This makes mutual interval/bitfact/congruence dependencies return
   conservative unknown results instead of restarting independent depth
   budgets or expanding a shared DAG repeatedly. Stride memoization also
   prevents shared `Piecewise`
   arms from multiplying the same DAG walk. Same-domain stride and residue
-  recursion also enter the tracked helpers; ordinary interval queries retain
-  their direct legacy path. Fact-backed simplification and public proof APIs
+  explicit-stack traversals also enter the tracked helpers; ordinary interval
+  queries retain their direct legacy path. Fact-backed simplification and public proof APIs
   hold one query scope across the complete root operation, including
   predicate ingestion and each truncating-remainder postpass. Tracking is
   activated for nested-`Piecewise` roots and arbitrary exact-relation endpoint
@@ -1674,8 +1676,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   reachable conditions and values must be proven defined, every feasible
   input must be covered, and every reachable value must have a range. The
   result is the hull of those branch ranges. Otherwise the query reports
-  unknown. Nested range partitioning is capped at 32 Piecewise levels and
-  1024 cases per node.
+  unknown. Nested range partitioning has no fixed Piecewise-depth or case-count
+  cap; query workspace grows with the visited DAG and allocation failure is
+  reported conservatively.
 - **Overflow widening** (`iv_endpoint_widen`): when `ixs_rat_mul` overflows
   during interval arithmetic, the endpoint is widened to `INT64_MIN` or
   `INT64_MAX` (representing −∞ or +∞) based on the sign of the factors.
@@ -1708,7 +1711,8 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   and OOM return no result with cleared output. Unbounded sides remain absent;
   congruence alignment that would overflow an `int64_t` endpoint retains the
   untightened endpoint only when the opposite side is unbounded. The
-  congruence walk is depth-limited to 64 and visits only the queried DAG.
+  congruence walk uses the shared growable query memo and explicit stack and
+  visits only the queried DAG, without a fixed depth cutoff.
 - **Rational materialization plan**
   (`ixs_plan_rational_materialization_facts`, C++
   `Facts::plan_rational_materialization`): discovers every rational
@@ -1892,20 +1896,20 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   substitution pass in the truncation strategy. Malformed, overlapping, or
   uncovered `Piecewise` encodings, unknown divisor signs, zero divisors,
   noninteger parts, and shifts crossing a remainder boundary remain unknown.
-  Candidate discovery is iterative, visits each rounding-bearing node in both
-  query DAGs once, and shares the equivalence query's 4096-node proof-work
-  budget. Its scratch-backed stack, visited set, and candidate vector grow with
-  the query instead of imposing separate depth or candidate-count cutoffs.
+  Candidate discovery is iterative and visits each rounding-bearing node in
+  both query DAGs once. Its scratch-backed stack, visited set, and candidate
+  vector grow with the query instead of imposing depth, visit, or
+  candidate-count cutoffs.
   Selected targets form an outermost antichain: one multi-source unique-DAG
   descendant traversal marks every match contained by another match, including
   through shared diamonds and across the two operands. Selection is O(N + C)
   expected for N candidate-descendant nodes and C candidates; it performs no
   pairwise containment walks. Allocation or checked-size failure returns
   unknown with both input roots untouched. Reusable-fact simplification returns
-  a projected candidate only when a bounded 4096-node unique-DAG measurement
-  proves that both the rounding-node count and total node count decrease. Its
-  open-addressed 8192-slot memo visits shared nodes once; limit or allocation
-  failure keeps the original expression. A single bounded pass returns
+  a projected candidate only when a growable unique-DAG measurement proves
+  that both the rounding-node count and total node count decrease. Its
+  open-addressed memo visits shared nodes once; allocation failure is reported
+  through the typed query status. A single pass returns
   immediately when neither operand has a usable form, so ordinary
   no-truncation failures are not rebuilt or simplified by this strategy.
   Interned nodes cache private subtree-rounding and subtree-Piecewise property
@@ -1920,10 +1924,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   obtained from the symbol forest or arbitrary-expression relation graph,
   returns `TRUE`; other failed
   sufficient proofs return `UNKNOWN`. Contradictory facts never prove
-  equivalence. Recursive predicate-shape comparison has
-  depth 32, 4096 proof visits, and at most 1024 flattened terms; stride
-  inference uses the congruence depth limit and makes one structural pass over
-  the visited expression. This API is not an unbounded theorem prover.
+  equivalence. Predicate-shape matching flattens associative logic with
+  growable stacks and sets, and the pair memo grows with the proof DAG. Nested
+  semantic matching is deliberately started only at the outer comparison, a
+  static recursion boundary rather than an expression-size cutoff. Stride and
+  residue inference use growable structural traversals. This API remains a
+  conservative algebraic proof engine, not a general theorem prover.
 - **Total fact-backed low-bit equivalence**
   (`ixs_equivalent_modulo_pow2_facts`, Python
   `Context.equivalent_modulo_pow2`, C++ `Facts::equivalent_modulo_pow2`):
@@ -1945,13 +1951,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 
   Normalization is path-sensitive, so a shared DAG node reached through an
   opaque operation is never rewritten merely because another occurrence is
-  reachable through arithmetic. A 256-slot direct memo bounds repeated DAG
-  work. Rebuilding one supported associative node uses bounded quadratic
-  immediate-child substitution; it never descends into an opaque child.
-  Recursion depth is 64, total visits are 4096, and one associative node may
-  expose at most 1024 children. Reaching a limit, OOM, invalid input, or a
-  contradictory fact domain returns `UNKNOWN`. The proof walks only the two
-  queried DAGs and is independent of unrelated context state.
+  reachable through arithmetic. A query-local growable hash table memoizes
+  every visited node, and a growable explicit postorder stack removes any
+  expression-depth or child-count cutoff. Rebuilding a supported associative
+  node substitutes only its immediate children and never descends into an
+  opaque child. Allocation failure is `OOM`, a malformed structural cycle is
+  `INVALID`, and a retryable limit reached by a nested proof is `LIMITED`;
+  semantic insufficiency remains `COMPLETE` plus `UNKNOWN`. The proof walks
+  only the two queried DAGs and is independent of unrelated context state.
 - **Typed finite-domain queries** (`ixs_finite_domain_facts` and the C++
   `Facts` finite-domain methods): one tagged structural API
   owns finite-domain equivalence, explicit-table relation verification, and
@@ -1959,10 +1966,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   fact set's context; no text is parsed or printed at this boundary. Every
   mode returns `ixs_finite_domain_result`, whose call `status` is distinct from
   its semantic `check`. `COMPLETE` makes the check and optional value
-  meaningful. `EXHAUSTED` names a caller-budget or bounded query limit,
-  `INVALID` names malformed input, and `OOM` names allocation failure. Every
-  non-complete result resets `check` to `UNKNOWN` and `value` to null. Only
-  synthesis returns a non-null value, and only with `TRUE`; relation and
+  meaningful. `EXHAUSTED` names only caller-budget exhaustion, `LIMITED` names
+  a retryable internal proof-resource stop, `INVALID` names malformed input,
+  and `OOM` names allocation failure. Every non-complete result resets `check`
+  to `UNKNOWN` and `value` to null. Only synthesis returns a non-null value,
+  and only with `TRUE`; relation and
   synthesis semantic failure is `UNKNOWN`, never `FALSE`.
 
   `ixs_finite_domain_batch_facts` is the companion Cartesian property query.
@@ -1991,6 +1999,53 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   consumes work. Once a complete table reservation succeeds, failed proof work
   is not refunded, including an ensuing OOM.
 
+  `ixs_synthesize_mapped_expression_facts` and
+  `ixs_verify_mapped_expression_facts` are the structural facade for callers
+  whose source expressions and candidate coordinates use different point
+  mappings. A row states that one source expression specialized at its source
+  point equals the candidate specialized at its candidate point plus an exact
+  additive offset. Rows retain caller order and may repeat candidate points or
+  duplicate complete rows. Synthesis consumes the first row for each point in
+  a sorted unique candidate image. It first shifts that row's source expression
+  by `expression_point - candidate_point`, subtracts the additive offset, and
+  simplifies the resulting symbolic candidate under the facts. If every image
+  point produces an equivalent candidate and that common candidate verifies the
+  complete representative table, the globally reparameterized expression is
+  returned directly. A complete but inconclusive direct attempt first delegates
+  an all-predicate representative table to structural predicate synthesis. A
+  completed predicate attempt with no candidate then falls through to scalar
+  finite-table synthesis, so literal zero/one tables retain numeric GF(2)
+  synthesis. `OOM`, `LIMITED`, and nested `EXHAUSTED` propagate without trying
+  another strategy. Verification checks every row in order. Coverage
+  validation uses one candidate-image-sized seen table, one binary search per
+  caller row, and one final image scan. It therefore preserves arbitrary row
+  order and duplicates without an image-by-row scan: its time is
+  `O(N + R log N)` and its scratch space is `O(N)` for `N` candidate points and
+  `R` rows.
+
+  Synthesis first charges `N + R`, one unit for every representative and every
+  caller row. This is `2N` with exactly one row per point, while every accepted
+  duplicate row costs one additional unit. Structural predicate synthesis
+  additionally charges `2N` for every child table it enters; a comparison
+  enters its left and right scalar tables and therefore costs `R + 5N` in
+  total, or `6N` with one row per point. Scalar fallback makes no additional
+  reservation. Verification charges exactly the row count. Insufficient base
+  work does not inspect caller arrays; malformed tables and validation OOM do
+  not consume work. OOM, a proof limit, or nested exhaustion after a
+  reservation keeps every charge already made. Undefined specialized values
+  are semantic no-proofs, not malformed input.
+
+  `ixs_mapped_constant_differences_facts` is the companion bounded scalar
+  query. Each row independently names lhs and rhs expression indices and
+  specialization points. It proves an exactly representable signed `lhs-rhs`
+  constant in caller order and charges exactly one unit per row. Predicate
+  expressions participate as numeric zero or one. Results are transactional:
+  only `COMPLETE` plus `TRUE` copies the complete difference vector to the
+  caller; `COMPLETE` plus `UNKNOWN`, `EXHAUSTED`, `LIMITED`, `INVALID`, and OOM
+  leave the entire output array unchanged. The C++ wrappers preserve these
+  status, budget, ordering, and atomic-output contracts without duplicating
+  symbolic reasoning.
+
   Equivalence first runs total fact-backed equivalence. A direct `TRUE` or
   `FALSE` leaves `remaining_work` unchanged. If direct proof is unknown, both
   inputs must still be defined over the complete fact domain. The query
@@ -2013,9 +2068,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   need not be defined outside the explicit table. One work unit per point is
   reserved before evaluation. This mode is the exhaustive verifier for tables
   assembled by an external compiler without exporting compiler concepts into
-  ixsimpl. Typed validation is semantic: structured predicate-valued nodes,
-  including predicate-valued `Piecewise`, are rejected by expression modes;
-  literal integer zero and one remain valid scalar expression samples.
+  ixsimpl. Expression modes use the unified scalar model: structured
+  predicate-valued nodes, including predicate-valued `Piecewise`, participate
+  as their canonical numeric 0/1 values. Predicate modes additionally require
+  that every candidate and sample be semantically predicate-valued.
 
   Synthesis uses `symbol - points[0]` as its zero-based coordinate. Expression
   synthesis tries base delta/combine Add or Xor crossed with bit contribution
@@ -2026,22 +2082,23 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   power-of-two tables retain additive integer-difference and output-bit GF(2)
   recognition as a fallback. Predicate synthesis requires one common
   structural shape: constants agree, comparisons use one comparison opcode
-  and synthesize both operand tables, and NOT/AND/OR recursively synthesize
-  corresponding children. Predicate recursion is limited to 32. Unsupported
-  shapes return `COMPLETE` plus `UNKNOWN`; reaching the recursion limit returns
-  `EXHAUSTED`.
+  and synthesize both operand tables, and NOT/AND/OR synthesize corresponding
+  children. A growable explicit frame stack supports arbitrary predicate depth;
+  unsupported shapes return `COMPLETE` plus `UNKNOWN`, allocation failure is
+  `OOM`, and retryable nested proof limits are `LIMITED`.
 
   Each expression table and predicate node atomically reserves two work units
   per point: one for table analysis/construction and one for exhaustive
-  verification of the returned candidate. Recursive predicate children share
+  verification of the returned candidate. Nested predicate children share
   the same caller-owned counter. An over-budget reservation changes nothing;
   any failure after reservation remains charged. The top reservation precedes
-  query-state allocation and sample specialization; a recursive predicate
+  query-state allocation and sample specialization; a nested predicate
   child reserves when that child's table is entered. All temporary arrays and
   traversal state live in session scratch, while a successful candidate is a
   permanent hash-consed context node and remains valid after scratch restore.
 - **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
-  `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
+  `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`,
+  `ixs_check_invariant_under_step_facts`, and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
   incoming fact domain, then simplify, expand, and simplify again in that same
   environment. Constant-difference queries also accept an exact integer point
@@ -2052,16 +2109,19 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   decomposition accepts only one symbol and rejects any nonlinear occurrence
   or residual reference to it. Finite difference substitutes
   `symbol + step` once and may return a symbolic result such as `2*i + 1`;
-  callers decide whether that result is loop invariant. A step referencing the
-  target symbol is rejected. Unsupported shapes, undefined partitions,
-  contradictory facts, representation overflow, and bounded-walk or expansion
-  limits fail conservatively. These helpers do not add relational, polyhedral,
-  or SMT reasoning.
+  the step-invariance query reuses that exact construction and proves the
+  result equal to zero in the same held fact query. A step referencing the
+  target symbol is valid but unsupported and returns `COMPLETE` plus `UNKNOWN`.
+  Unsupported shapes, undefined partitions, contradictory facts,
+  representation overflow, and bounded-walk or expansion limits fail
+  conservatively. These helpers do not add relational, polyhedral, or SMT
+  reasoning.
 - **Fixed-width modulo recurrence proof** (`ixs_modulo_recurrence_facts`,
   Python `Context.modulo_recurrence`, C++ `Facts::modulo_recurrence`): proves
   one invariant remainder increment and constructs the exact remainder of the
   induction expression. All three operands are scalar, defined,
-  integer-valued signed-view expressions. Signed recurrence proofs also
+  integer-valued signed-view expressions; predicate-valued operands participate
+  as their canonical integer 0/1 values. Signed recurrence proofs also
   require nonnegative operands so Euclidean `Mod` agrees with truncating
   signed remainder.
 
@@ -2131,9 +2191,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   repeatedly multiplies powers, so every representable positive exponent is
   supported; `INT32_MIN` cannot be negated into a representable denominator
   exponent and does not match. Unequal denominators, denominator-free shapes,
-  invalid or contradictory facts, sentinels, representation overflow, and OOM
-  return false with both outputs null. Scratch and fact-cache state are
-  restored transactionally on every exit.
+  and other structural nonmatches return `COMPLETE` with an unavailable
+  payload. Invalid input returns `INVALID`, retryable proof-resource stops
+  return `LIMITED`, allocation failure returns `OOM`, and every
+  non-`COMPLETE` result clears both output nodes.
+  Contradictory facts also return a `COMPLETE` unavailable result. Scratch and
+  fact-cache state are restored transactionally on every exit, and the same
+  fact set can retry immediately after OOM.
 - **Public integrality queries**: `ixs_node_is_integer_valued` is a
   conservative structural test. It rejects negative powers and rational
   coefficients without consulting facts. `ixs_check_integer_valued` and
@@ -2146,6 +2210,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   domain: positivity of `D` is still a separate definedness obligation. `TRUE`
   and `FALSE` are universal proofs; a failed sufficient proof is `UNKNOWN`,
   while an exact noninteger rational point may return `FALSE`.
+
+  Fact-backed integrality and divisibility form one iterative dependency
+  graph. Its arena-grown work stack and open-addressed memo are keyed by node
+  pointer, proof kind, and modulus, so a shared DAG obligation is evaluated
+  once and expression depth never consumes C stack. An active memo key is an
+  invalid producer cycle; allocation or checked-size failure is OOM. Residue
+  probes made from this graph use an independent iterative mode that never
+  calls back into integrality. Piecewise condition probes may enter one nested
+  exact evaluator for interval or predicate precision; a second cross-domain
+  re-entry is a conservative miss, statically bounding that auxiliary C call
+  chain at two. These transport failures cannot be cached as semantic
+  no-proof results.
 - **Public definedness queries** (`ixs_check_defined`,
   `ixs_check_defined_facts`, Python `Context.defined`, C++
   `Expr::check_defined` and `Facts::check_defined`): prove domain safety for
@@ -2173,13 +2249,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   and a partially uncovered expression cannot be reported as `FALSE` unless
   the whole feasible domain is uncovered.
 
-  Ordinary nodes use per-environment memoized iterative walks with a query-wide
-  budget of 8192 node visits, a 1024-frame explicit stack, and a 16384-slot
-  memo table. Piecewise fact environments nest at most 32 levels and share the
-  same visit budget. Interval guard queries are attempted only for subgraphs
-  within 64 levels and 4096 local walk steps. Their temporary interval cache is
-  the smallest power-of-two table from 32 through 8192 with at least two slots
-  per local walk step. Reaching any limit returns `UNKNOWN`.
+  Ordinary nodes use per-environment memoized iterative walks with growable
+  stacks and memo tables. Branch-sensitive reasoning is entered for the outer
+  `Piecewise`; nested Piecewise nodes whose first reachable arm is statically
+  selected stay on the same work stack, while an unknown nested selection is a
+  conservative semantic `UNKNOWN`. Guard interval probes first measure their
+  unique sub-DAG and provision a temporary cache accordingly (capped at 8192
+  slots for cache policy, not traversal). Checked-size overflow, malformed
+  cycles, and allocation failure propagate through the typed query outcome.
 - **Public divisibility query** (`ixs_check_divisible_facts`, Python
   `Context.divisible`, C++ `Facts::check_divisible`): first proves that the
   expression is integer-valued, then uses exact values, congruences, and known
@@ -2188,17 +2265,17 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   magnitude, including the `2^63` magnitude of `INT64_MIN`, so normalization
   cannot overflow.
 - **Exact quotient construction** (`ixs_try_exact_divide_facts`, Python
-  `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): first simplifies
-  the expression in the supplied fact domain, then reuses the same divisibility
-  proof and returns a canonical expanded quotient only after that proof
-  succeeds. A conclusive result also requires the original input to be defined
-  over the complete fact domain, so simplification cannot erase uncovered or
-  undefined partitions. Its result separates
-  `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, and
-  domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
+  `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): first proves that
+  the original input is defined over the complete fact domain, then simplifies
+  it in that domain and reuses the same divisibility proof. This ordering keeps
+  simplification from erasing uncovered or undefined partitions. A canonical
+  expanded quotient is returned only after both proofs succeed. Its result separates
+  `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, a
+  retryable resource `LIMITED`, caller/constructed-state `INVALID`, and
+  allocation `OOM`. Only `PROVEN` carries a quotient. Negative divisors
   preserve quotient sign; `INT64_MIN` is handled without taking its signed
-  magnitude. Every `ERROR` reached through a valid fact set appends a session
-  diagnostic.
+  magnitude. Every `INVALID` or `OOM` reached through a valid fact set appends
+  a session diagnostic.
 - **Public fact sets** (`ixs_facts`, Python `Facts`): reusable, session-owned
   proof contexts for callers that carry facts through IR rewrites instead of
   re-encoding everything as predicates.  A fact set accepts predicate facts,
@@ -2536,14 +2613,35 @@ void ixs_simplify_batch(ixs_session *s, ixs_node **exprs, size_t n,
 // IXS_CHECK_UNKNOWN.  Lighter than ixs_simplify for pure truth queries.
 typedef enum { IXS_CHECK_TRUE, IXS_CHECK_FALSE, IXS_CHECK_UNKNOWN } ixs_check_result;
 typedef enum {
+    IXS_FACT_QUERY_COMPLETE,
+    IXS_FACT_QUERY_LIMITED,
+    IXS_FACT_QUERY_INVALID,
+    IXS_FACT_QUERY_OOM
+} ixs_fact_query_status;
+typedef struct {
+    ixs_fact_query_status status;
+    ixs_check_result check;
+} ixs_fact_check_result;
+typedef struct {
+    ixs_fact_query_status status;
+    const ixs_node *value;
+} ixs_simplify_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    int64_t difference;
+} ixs_constant_difference_result;
+typedef enum {
     IXS_EXACT_DIVIDE_PROVEN,
     IXS_EXACT_DIVIDE_NOT_EXACT,
     IXS_EXACT_DIVIDE_UNKNOWN,
-    IXS_EXACT_DIVIDE_ERROR
+    IXS_EXACT_DIVIDE_LIMITED,
+    IXS_EXACT_DIVIDE_INVALID,
+    IXS_EXACT_DIVIDE_OOM
 } ixs_exact_divide_status;
 typedef struct {
     ixs_exact_divide_status status;
-    ixs_node *quotient;
+    const ixs_node *quotient;
 } ixs_exact_divide_result;
 ixs_check_result ixs_check(ixs_session *s, ixs_node *expr,
                            ixs_node *const *assumptions, size_t n_assumptions);
@@ -2567,6 +2665,14 @@ typedef struct {
     uint64_t known_one;
     ixs_pow2_fact pow2;
 } ixs_known_bits;
+typedef struct {
+    ixs_fact_query_status status;
+    ixs_pow2_fact fact;
+} ixs_pow2_query_result;
+typedef struct {
+    ixs_fact_query_status status;
+    ixs_known_bits bits;
+} ixs_known_bits_query_result;
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
                                 ixs_node *const *assumptions,
                                 size_t n_assumptions);
@@ -2587,10 +2693,60 @@ typedef struct {
     int64_t lower, upper;
 } ixs_integer_range_result;
 typedef struct {
-    ixs_node *residual;
+    const ixs_node *residual;
     int64_t scale, modulus, phase, ring;
     bool residual_bounded;
 } ixs_cyclic_decomposition;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    ixs_range_result range;
+} ixs_range_query_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    ixs_integer_range_result range;
+} ixs_integer_range_query_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    int64_t modulus;
+    int64_t residue;
+} ixs_symbol_congruence_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    const ixs_node *coefficient;
+    const ixs_node *residual;
+} ixs_affine_decomposition_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    const ixs_node *numerator;
+    const ixs_node *denominator;
+} ixs_exact_quotient_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    const ixs_node *difference;
+} ixs_finite_difference_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    ixs_cyclic_decomposition decomposition;
+} ixs_cyclic_decomposition_result;
+typedef struct {
+    ixs_fact_query_status status;
+    bool available;
+    const ixs_node *residual;
+    int64_t constant;
+} ixs_additive_constant_result;
+typedef struct {
+    ixs_fact_query_status status;
+    ixs_check_result check;
+    const ixs_node *numerator;
+    int64_t denominator;
+} ixs_rational_materialization_plan;
 bool ixs_integer_range(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions,
                        ixs_integer_range_result *out);
@@ -2601,74 +2757,86 @@ bool ixs_integer_range(ixs_session *s, ixs_node *expr,
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
 ixs_facts *ixs_facts_create_preds(ixs_session *s,
-                                  ixs_node *const *preds, size_t n_preds);
-bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
-bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+                                  const ixs_node *const *preds, size_t n_preds);
+bool ixs_facts_assume_preds(ixs_facts *facts,
+                            const ixs_node *const *preds, size_t n_preds);
+bool ixs_facts_assume_pred(ixs_facts *facts, const ixs_node *pred);
+bool ixs_facts_assume_range(ixs_facts *facts, const ixs_node *expr,
                             const ixs_range_result *range);
-bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
-                             int64_t offset, ixs_node *derived);
+bool ixs_facts_derive_affine(ixs_facts *facts, const ixs_node *base,
+                             int64_t scale, int64_t offset,
+                             const ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
-                          ixs_node *target, ixs_node *replacement);
+                          const ixs_node *target,
+                          const ixs_node *replacement);
 bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
                                 uint32_t nsubs,
-                                ixs_node *const *targets,
-                                ixs_node *const *replacements);
-ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
-void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
-ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
-ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
-                                           ixs_node *predicate);
-ixs_check_result ixs_check_consistent_facts(ixs_facts *facts);
-ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
-                                      ixs_node *lhs, ixs_node *rhs);
-ixs_check_result ixs_equivalent_modulo_pow2_facts(
-    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs, unsigned bits);
+                                const ixs_node *const *targets,
+                                const ixs_node *const *replacements);
+ixs_simplify_result ixs_simplify_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
+ixs_fact_query_status
+ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs, size_t n);
+ixs_fact_check_result ixs_check_facts(ixs_facts *facts,
+                                      const ixs_node *expr);
+ixs_fact_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                                const ixs_node *predicate);
+ixs_fact_check_result ixs_check_consistent_facts(ixs_facts *facts);
+ixs_fact_check_result ixs_equivalent_facts(ixs_facts *facts,
+                                           const ixs_node *lhs,
+                                           const ixs_node *rhs);
+ixs_fact_check_result ixs_equivalent_modulo_pow2_facts(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs, unsigned bits);
 ixs_finite_domain_result ixs_finite_domain_facts(
     ixs_facts *facts, const ixs_finite_domain_query *query,
     size_t *remaining_work);
-bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
-                                   ixs_node *rhs, int64_t *delta);
-bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
-                                ixs_node *symbol, ixs_node **coefficient,
-                                ixs_node **residual);
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
-                                        ixs_node **numerator,
-                                        ixs_node **denominator);
-bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
-                                 ixs_node *symbol, ixs_node *step,
-                                 ixs_node **difference);
-bool ixs_decompose_cyclic_facts(ixs_facts *facts, ixs_node *expr,
-                                ixs_node *symbol,
-                                ixs_cyclic_decomposition *out);
-bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
-                                       ixs_node **residual,
-                                       int64_t *constant);
-ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
-                                                ixs_node *expr);
-ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
-ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
-                                           ixs_node *expr,
-                                           int64_t modulus);
+ixs_constant_difference_result
+ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
+                              const ixs_node *rhs);
+ixs_affine_decomposition_result
+ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
+ixs_exact_quotient_result
+ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_finite_difference_result ixs_finite_difference_facts(
+    ixs_facts *facts, const ixs_node *expr, const ixs_node *symbol,
+    const ixs_node *step);
+ixs_fact_check_result ixs_check_invariant_under_step_facts(
+    ixs_facts *facts, const ixs_node *expr, const ixs_node *symbol,
+    const ixs_node *step);
+ixs_cyclic_decomposition_result
+ixs_decompose_cyclic_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
+ixs_additive_constant_result
+ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
+ixs_fact_check_result ixs_check_defined_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
+ixs_fact_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus);
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
-                                                   ixs_node *expr,
+                                                   const ixs_node *expr,
                                                    int64_t divisor);
-ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
-bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
-                              ixs_known_bits *out);
-bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
-                                     int64_t *modulus, int64_t *residue);
-ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
-                                           ixs_node *expr,
-                                           int64_t modulus,
-                                           int64_t residue);
-bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
-                     ixs_range_result *out);
-bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
-                             ixs_integer_range_result *out);
-ixs_check_result ixs_check_rational_intermediates_facts(
-    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
+ixs_pow2_query_result ixs_get_pow2_fact_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
+ixs_known_bits_query_result ixs_get_known_bits_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
+ixs_symbol_congruence_result
+ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol);
+ixs_fact_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus,
+                                                int64_t residue);
+ixs_range_query_result ixs_range_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
+ixs_integer_range_query_result ixs_integer_range_facts(
+    ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_rational_intermediates_facts(
+    ixs_facts *facts, const ixs_node *expr, uint32_t word_bits);
 ixs_rational_materialization_plan ixs_plan_rational_materialization_facts(
-    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
+    ixs_facts *facts, const ixs_node *expr, uint32_t word_bits);
 
 // Expand: distribute MUL over ADD recursively (sum-of-products form).
 // Recurses into subexpressions (floor args, piecewise branches, etc.).
@@ -3298,18 +3466,23 @@ Key properties:
   traversal.
   `Expr::simplify(const Facts&)` is the expression-oriented spelling.
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
-  four-way status and a nullable `Expr` quotient; errors remain available
+  six-way status and a nullable `Expr` quotient; errors remain available
   through the owning `Context` diagnostics.
   `Facts::constant_difference()`, `affine_decompose()`,
-  `decompose_exact_quotient()`, `finite_difference()`, and
+  `decompose_exact_quotient()`, `finite_difference()`,
+  `check_invariant_under_step()`, and
   `split_additive_constant()` mirror the narrow
   fact-backed C helpers and fill their output references only on success.
   `Facts::equivalent_finite_domain()`, `verify_finite_expression()`,
   `verify_finite_predicate()`, `synthesize_finite_expression()`, and
-  `synthesize_finite_predicate()` take the caller's remaining work by
-  reference and delegate to the single typed core query. Each returns a
+  `synthesize_finite_predicate()` take the caller's remaining work by reference
+  and delegate to the single typed core query. The mapped-expression synthesis,
+  verification, and constant-difference wrappers similarly marshal only
+  structural arrays and preserve caller order. Each returns a
   `FiniteDomainResult` carrying call `status`, semantic `check`, and a nullable
-  `value`, so C++ callers cannot collapse resource failure into no-proof.
+  `value`, so C++ callers cannot collapse resource failure into no-proof;
+  mapped differences replace the caller's vector only on `COMPLETE` plus
+  `TRUE`.
 - `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
   compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
@@ -3402,8 +3575,11 @@ Implementation:
 - `Expr.is_integer_valued` — conservative structural integrality, without
   assumptions or facts.
 - `Expr.to_bytes()` returns the stable binary serialization used for durable
-  storage and cross-context interchange. Raw node addresses are never exposed
-  through the Python API.
+  storage and cross-context interchange.
+- `Expr.node_ptr` exposes the raw `ixs_node*` address as a Python `int` for
+  identity, debugging, and FFI plumbing. It is not a stable semantic ID and is
+  meaningful only while the owning `Context` remains alive; each `Expr` keeps
+  that context alive.
 - `Context.errors` property — returns list of error strings; `Context.clear_errors()` resets.
 - `Context.parse()` remains the backward-compatible expression parser.
   `Context.parse_expr()` and `Context.parse_pred()` expose the kind-aware parse
@@ -3429,17 +3605,28 @@ Implementation:
   raises `ValueError`.
 - `Context.try_exact_divide(expr, divisor, facts)` returns
   `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
-  Core `ERROR` results raise `ValueError` for domain/representation failures
-  and `MemoryError` for OOM while preserving the session diagnostic.
+  A retryable core `LIMITED` result raises `RuntimeError`, `INVALID` raises
+  `ValueError`, and `OOM` raises `MemoryError`; available core diagnostics are
+  preserved.
 - `Context.rational_intermediates_fit(expr, word_bits, facts)` returns
   `True`, `False`, or `None` for the complete order-independent
   rational-intermediate proof and rejects widths outside 2 through 64.
 - `Context.constant_difference(lhs, rhs, facts)` returns an `int` or `None`;
+  `Context.mapped_constant_differences(symbol, expressions, rows, facts,
+  remaining_work)` returns `(status, differences_or_none, remaining_work)` and
+  takes each row as `(lhs_expression_index, lhs_point, rhs_expression_index,
+  rhs_point)`. It
+  preserves the C row-order, budget, predicate-scalar, and all-or-nothing
+  output semantics. `EXHAUSTED` and `LIMITED` remain explicit tuple statuses;
+  malformed input raises `ValueError`, allocation failure raises
+  `MemoryError`, and `COMPLETE` plus an unproved row returns `None` without a
+  partial difference list;
   `Context.affine_decompose(expr, symbol, facts)` returns
   `(coefficient, residual)` or `None`;
   `Context.decompose_exact_quotient(expr, facts)` returns
   `(numerator, denominator)` or `None`; `Context.finite_difference(...)`
-  returns an `Expr` or `None`; and `Context.split_additive_constant(...)`
+  returns an `Expr` or `None`; `Context.invariant_under_step(...)` returns
+  tri-state `True`, `False`, or `None`; and `Context.split_additive_constant(...)`
   returns `(residual, constant)` or `None`. Invalid contexts, sentinels, and
   non-symbol affine targets raise `ValueError`; valid but unmatched queries do
   not add diagnostics.
@@ -3450,7 +3637,9 @@ Implementation:
   totality contract for equality of the requested low bits.
   `Context.equivalent_finite_domain(lhs, rhs, facts, remaining_work)` delegates
   its equivalence mode to the typed query and returns
-  `(Literal["complete", "exhausted"], check, remaining_work)`. `INVALID`
+  `(Literal["complete", "exhausted", "limited"], check, remaining_work)`.
+  `exhausted` reports only caller-budget exhaustion; `limited` preserves a
+  retryable internal proof-resource stop. `INVALID`
   raises a Python exception and `OOM` raises `MemoryError`; semantic unknown is
   distinct from exhaustion. Explicit relation and synthesis modes are
   currently C/C++ surfaces.
@@ -3654,6 +3843,29 @@ flags or output unions whose active member is implicit:
 
 ```c
 typedef enum {
+  IXS_FACT_QUERY_COMPLETE,
+  IXS_FACT_QUERY_LIMITED,
+  IXS_FACT_QUERY_INVALID,
+  IXS_FACT_QUERY_OOM
+} ixs_fact_query_status;
+
+typedef struct {
+  ixs_fact_query_status status;
+  ixs_check_result check;
+} ixs_fact_check_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  const ixs_node *value;
+} ixs_simplify_result;
+
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  int64_t difference;
+} ixs_constant_difference_result;
+
+typedef enum {
   IXS_FINITE_DOMAIN_EQUIVALENCE,
   IXS_FINITE_DOMAIN_EXPR_RELATION,
   IXS_FINITE_DOMAIN_PRED_RELATION,
@@ -3664,6 +3876,7 @@ typedef enum {
 typedef enum {
   IXS_FINITE_DOMAIN_COMPLETE,
   IXS_FINITE_DOMAIN_EXHAUSTED,
+  IXS_FINITE_DOMAIN_LIMITED,
   IXS_FINITE_DOMAIN_INVALID,
   IXS_FINITE_DOMAIN_OOM
 } ixs_finite_domain_status;
@@ -3703,7 +3916,8 @@ typedef struct {
 } ixs_finite_domain_result;
 
 typedef struct {
-  ixs_check_result status;
+  ixs_fact_query_status status;
+  ixs_check_result check;
   const ixs_node *numerator;
   int64_t denominator;
 } ixs_rational_materialization_plan;
@@ -3719,7 +3933,8 @@ typedef enum {
 typedef enum {
   IXS_GROUP_UNION_EQUIVALENT,
   IXS_GROUP_UNION_CONSTANT_DIFFERENCE,
-  IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT
+  IXS_GROUP_UNION_FINITE_DOMAIN_EQUIVALENT,
+  IXS_GROUP_UNION_FINITE_DOMAIN_CONSTANT_DIFFERENCE
 } ixs_group_union_query_kind;
 
 typedef struct {
@@ -3808,11 +4023,13 @@ typedef enum {
   IXS_EXACT_DIVIDE_PROVEN,
   IXS_EXACT_DIVIDE_NOT_EXACT,
   IXS_EXACT_DIVIDE_UNKNOWN,
-  IXS_EXACT_DIVIDE_ERROR
+  IXS_EXACT_DIVIDE_LIMITED,
+  IXS_EXACT_DIVIDE_INVALID,
+  IXS_EXACT_DIVIDE_OOM
 } ixs_exact_divide_status;
 typedef struct {
   ixs_exact_divide_status status;
-  ixs_node *quotient;
+  const ixs_node *quotient;
 } ixs_exact_divide_result;
 
 ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, ixs_node *expr,
@@ -3824,6 +4041,14 @@ typedef struct {
   uint64_t known_one;
   ixs_pow2_fact pow2;
 } ixs_known_bits;
+typedef struct {
+  ixs_fact_query_status status;
+  ixs_pow2_fact fact;
+} ixs_pow2_query_result;
+typedef struct {
+  ixs_fact_query_status status;
+  ixs_known_bits bits;
+} ixs_known_bits_query_result;
 
 typedef struct {
   bool has_lower;
@@ -3840,10 +4065,54 @@ typedef struct {
   int64_t lower, upper;
 } ixs_integer_range_result;
 typedef struct {
-  ixs_node *residual;
+  const ixs_node *residual;
   int64_t scale, modulus, phase, ring;
   bool residual_bounded;
 } ixs_cyclic_decomposition;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_range_result range;
+} ixs_range_query_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_integer_range_result range;
+} ixs_integer_range_query_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  int64_t modulus;
+  int64_t residue;
+} ixs_symbol_congruence_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *coefficient;
+  const ixs_node *residual;
+} ixs_affine_decomposition_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *numerator;
+  const ixs_node *denominator;
+} ixs_exact_quotient_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *difference;
+} ixs_finite_difference_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  ixs_cyclic_decomposition decomposition;
+} ixs_cyclic_decomposition_result;
+typedef struct {
+  ixs_fact_query_status status;
+  bool available;
+  const ixs_node *residual;
+  int64_t constant;
+} ixs_additive_constant_result;
 bool ixs_integer_range(ixs_session *s, ixs_node *expr,
                        ixs_node *const *assumptions, size_t n_assumptions,
                        ixs_integer_range_result *out);
@@ -3851,73 +4120,86 @@ bool ixs_integer_range(ixs_session *s, ixs_node *expr,
 typedef struct ixs_facts ixs_facts;
 ixs_facts *ixs_facts_create(ixs_session *s);
 ixs_facts *ixs_facts_create_preds(ixs_session *s,
-                                  ixs_node *const *preds, size_t n_preds);
-bool ixs_facts_assume_pred(ixs_facts *facts, ixs_node *pred);
-bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
+                                  const ixs_node *const *preds, size_t n_preds);
+bool ixs_facts_assume_preds(ixs_facts *facts,
+                            const ixs_node *const *preds, size_t n_preds);
+bool ixs_facts_assume_pred(ixs_facts *facts, const ixs_node *pred);
+bool ixs_facts_assume_range(ixs_facts *facts, const ixs_node *expr,
                             const ixs_range_result *range);
-bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
-                             int64_t offset, ixs_node *derived);
+bool ixs_facts_derive_affine(ixs_facts *facts, const ixs_node *base,
+                             int64_t scale, int64_t offset,
+                             const ixs_node *derived);
 bool ixs_facts_substitute(ixs_facts *dst, const ixs_facts *src,
-                          ixs_node *target, ixs_node *replacement);
+                          const ixs_node *target,
+                          const ixs_node *replacement);
 bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
                                 uint32_t nsubs,
-                                ixs_node *const *targets,
-                                ixs_node *const *replacements);
-ixs_node *ixs_simplify_facts(ixs_facts *facts, ixs_node *expr);
-void ixs_simplify_batch_facts(ixs_facts *facts, ixs_node **exprs, size_t n);
-ixs_check_result ixs_check_facts(ixs_facts *facts, ixs_node *expr);
-ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
-                                           ixs_node *predicate);
-ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
-                                      ixs_node *lhs, ixs_node *rhs);
-ixs_check_result ixs_equivalent_modulo_pow2_facts(
-    ixs_facts *facts, ixs_node *lhs, ixs_node *rhs, unsigned bits);
+                                const ixs_node *const *targets,
+                                const ixs_node *const *replacements);
+ixs_simplify_result ixs_simplify_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
+ixs_fact_query_status
+ixs_simplify_batch_facts(ixs_facts *facts, const ixs_node **exprs, size_t n);
+ixs_fact_check_result ixs_check_facts(ixs_facts *facts,
+                                      const ixs_node *expr);
+ixs_fact_check_result ixs_check_predicate_facts(ixs_facts *facts,
+                                                const ixs_node *predicate);
+ixs_fact_check_result ixs_check_consistent_facts(ixs_facts *facts);
+ixs_fact_check_result ixs_equivalent_facts(ixs_facts *facts,
+                                           const ixs_node *lhs,
+                                           const ixs_node *rhs);
+ixs_fact_check_result ixs_equivalent_modulo_pow2_facts(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs, unsigned bits);
 ixs_finite_domain_result ixs_finite_domain_facts(
     ixs_facts *facts, const ixs_finite_domain_query *query,
     size_t *remaining_work);
-bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
-                                   ixs_node *rhs, int64_t *delta);
-bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
-                                ixs_node *symbol, ixs_node **coefficient,
-                                ixs_node **residual);
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, ixs_node *expr,
-                                        ixs_node **numerator,
-                                        ixs_node **denominator);
-bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
-                                 ixs_node *symbol, ixs_node *step,
-                                 ixs_node **difference);
-bool ixs_decompose_cyclic_facts(ixs_facts *facts, ixs_node *expr,
-                                ixs_node *symbol,
-                                ixs_cyclic_decomposition *out);
-bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
-                                       ixs_node **residual,
-                                       int64_t *constant);
-ixs_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
-                                                ixs_node *expr);
-ixs_check_result ixs_check_defined_facts(ixs_facts *facts, ixs_node *expr);
-ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
-                                           ixs_node *expr,
-                                           int64_t modulus);
+ixs_constant_difference_result
+ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
+                              const ixs_node *rhs);
+ixs_affine_decomposition_result
+ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
+ixs_exact_quotient_result
+ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_finite_difference_result ixs_finite_difference_facts(
+    ixs_facts *facts, const ixs_node *expr, const ixs_node *symbol,
+    const ixs_node *step);
+ixs_fact_check_result ixs_check_invariant_under_step_facts(
+    ixs_facts *facts, const ixs_node *expr, const ixs_node *symbol,
+    const ixs_node *step);
+ixs_cyclic_decomposition_result
+ixs_decompose_cyclic_facts(ixs_facts *facts, const ixs_node *expr,
+                           const ixs_node *symbol);
+ixs_additive_constant_result
+ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_integer_valued_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
+ixs_fact_check_result ixs_check_defined_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
+ixs_fact_check_result ixs_check_divisible_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus);
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
-                                                   ixs_node *expr,
+                                                   const ixs_node *expr,
                                                    int64_t divisor);
-ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, ixs_node *expr);
-bool ixs_get_known_bits_facts(ixs_facts *facts, ixs_node *expr,
-                              ixs_known_bits *out);
-bool ixs_get_symbol_congruence_facts(ixs_facts *facts, ixs_node *symbol,
-                                     int64_t *modulus, int64_t *residue);
-ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
-                                           ixs_node *expr,
-                                           int64_t modulus,
-                                           int64_t residue);
-bool ixs_range_facts(ixs_facts *facts, ixs_node *expr,
-                     ixs_range_result *out);
-bool ixs_integer_range_facts(ixs_facts *facts, ixs_node *expr,
-                             ixs_integer_range_result *out);
-ixs_check_result ixs_check_rational_intermediates_facts(
-    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
+ixs_pow2_query_result ixs_get_pow2_fact_facts(ixs_facts *facts,
+                                              const ixs_node *expr);
+ixs_known_bits_query_result ixs_get_known_bits_facts(ixs_facts *facts,
+                                                     const ixs_node *expr);
+ixs_symbol_congruence_result
+ixs_get_symbol_congruence_facts(ixs_facts *facts, const ixs_node *symbol);
+ixs_fact_check_result ixs_check_congruent_facts(ixs_facts *facts,
+                                                const ixs_node *expr,
+                                                int64_t modulus,
+                                                int64_t residue);
+ixs_range_query_result ixs_range_facts(ixs_facts *facts,
+                                       const ixs_node *expr);
+ixs_integer_range_query_result ixs_integer_range_facts(
+    ixs_facts *facts, const ixs_node *expr);
+ixs_fact_check_result ixs_check_rational_intermediates_facts(
+    ixs_facts *facts, const ixs_node *expr, uint32_t word_bits);
 ixs_rational_materialization_plan ixs_plan_rational_materialization_facts(
-    ixs_facts *facts, ixs_node *expr, uint32_t word_bits);
+    ixs_facts *facts, const ixs_node *expr, uint32_t word_bits);
 
 ixs_node *ixs_expand(ixs_session *s, ixs_node *expr);
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,
@@ -3972,9 +4254,9 @@ contradictory selected union produces `UNKNOWN` for its queries and does not
 contaminate another pair. Queries naming the same group use that group's
 domain once, not a doubled copy.
 
-All relation operands must be scalar expressions. Semantic predicate values,
-including predicate-valued `Piecewise`, are invalid; integer literals `0` and
-`1` remain valid scalar operands. The three query kinds have fact-backed
+All relation operands use the unified scalar expression model. Semantic
+predicate values, including predicate-valued `Piecewise`, participate as their
+canonical numeric 0/1 values. The four query kinds have fact-backed
 scalar-query semantics:
 
 - equivalence returns `TRUE`, `FALSE`, or `UNKNOWN` after proving both operands
@@ -3984,6 +4266,10 @@ scalar-query semantics:
   work is charged to the caller's shared budget and may return `EXHAUSTED`
 - constant difference returns `TRUE` and the signed `lhs - rhs` difference, or
   `UNKNOWN`; it never uses `FALSE`
+- finite-domain constant difference first applies exact constant difference,
+  then may enumerate every integer point bounded by the selected domain; it
+  returns `TRUE` only when every point has the same representable signed
+  `int64_t` `lhs - rhs` value, otherwise `UNKNOWN`, and never uses `FALSE`
 
 All input nodes are immutable handles owned by the context bound to `s`.
 Groups and query/result arrays are borrowed for the call. The API retains no
@@ -3994,7 +4280,11 @@ One `remaining_work` counter governs the whole batch. One work unit reserves
 one predicate-root replay or one internally bounded semantic query, and the
 reservation is deducted before work begins. Replay-support scratch is
 allocated only after that reservation succeeds; allocation failure does not
-refund attempted work. `IXS_GROUP_UNION_COMPLETE` is the only status for which
+refund attempted work. Finite Cartesian point products are reserved atomically
+after the exact proof is unknown; an insufficient point budget charges no
+points, while a later proof stop keeps the reservation. The exact fast path
+therefore consumes only its dispatcher/query work. `IXS_GROUP_UNION_COMPLETE`
+is the only status for which
 any result is meaningful. Caller-budget exhaustion, a bounded semantic
 traversal ceiling, invalid input or an internal
 invariant failure, and scratch OOM return `IXS_GROUP_UNION_EXHAUSTED`,

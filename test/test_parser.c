@@ -212,6 +212,9 @@ static void test_max_min_xor(void) {
 static void test_piecewise(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
+  const char *scalar_carrier = "Piecewise((0, slot == 0), (2, True))";
+  const char *predicate_values =
+      "Piecewise((typed_x >= 0, typed_y >= 0), (0, True))";
 
   /* Single True branch → value */
   n = ixs_parse_expr(ctx, "Piecewise((42, True))", 21);
@@ -220,6 +223,17 @@ static void test_piecewise(void) {
   /* False branch dropped */
   n = ixs_parse_expr(ctx, "Piecewise((1, False), (2, True))", 32);
   CHECK(n && ixs_node_int_val(n) == 2);
+
+  /* A non-boolean Piecewise remains a scalar expression root. */
+  n = ixs_parse_expr(ctx, scalar_carrier, strlen(scalar_carrier));
+  CHECK(n && !ixs_is_error(n));
+  CHECK(ixs_node_tag(n) == IXS_PIECEWISE);
+
+  n = ixs_parse_pred(ctx, predicate_values, strlen(predicate_values));
+  CHECK(n && !ixs_is_error(n));
+  CHECK(ixs_node_tag(n) == IXS_PIECEWISE);
+  CHECK(ixs_node_is_pred(n));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
 
   ixs_ctx_destroy(ctx);
 }

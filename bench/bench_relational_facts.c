@@ -96,11 +96,13 @@ static int run_chain_benchmark(ixs_session *session, size_t iterations,
     goto failed;
   for (iteration = 0; iteration < iterations; iteration++) {
     ixs_facts *facts = ixs_facts_create(session);
-    ixs_range_result range;
+    ixs_range_query_result range;
     if (!facts || !ixs_facts_assume_preds(facts, predicates, predicate_count))
       goto failed;
-    if (ixs_range_facts(facts, nodes[0], &range) && range.has_upper &&
-        range.upper_p == 0 && range.upper_q == 1)
+    range = ixs_range_facts(facts, nodes[0]);
+    if (range.status == IXS_FACT_QUERY_COMPLETE && range.available &&
+        range.range.has_upper && range.range.upper_p == 0 &&
+        range.range.upper_q == 1)
       proven++;
   }
   finish = clock();
@@ -212,10 +214,12 @@ int main(int argc, char **argv) {
     goto failed;
   for (i = 0; i < iterations; i++) {
     ixs_facts *facts = ixs_facts_create(&session);
-    ixs_range_result range;
+    ixs_range_query_result range;
     if (!facts || !assume_all(facts, predicates))
       goto failed;
-    if (ixs_range_facts(facts, iv, &range) && is_expected_loop_range(&range))
+    range = ixs_range_facts(facts, iv);
+    if (range.status == IXS_FACT_QUERY_COMPLETE && range.available &&
+        is_expected_loop_range(&range.range))
       proven++;
   }
   finish = clock();

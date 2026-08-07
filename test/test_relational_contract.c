@@ -117,10 +117,10 @@ static void test_relational_chain_insertion_order_contract(void) {
     CHECK(assume_unit_difference_upper(ctx, early_anchor, nodes[i - 1u],
                                        nodes[i], 0));
 
-  late_check =
-      test_ixs_check_facts(late_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
-  early_check =
-      test_ixs_check_facts(early_anchor, ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
+  late_check = test_ixs_check_facts(late_anchor,
+                                    ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
+  early_check = test_ixs_check_facts(early_anchor,
+                                     ixs_cmp(ctx, nodes[0], IXS_CMP_LE, zero));
   CHECK(late_check == IXS_CHECK_TRUE);
   CHECK(early_check == IXS_CHECK_TRUE);
 
@@ -177,7 +177,8 @@ static void test_relational_exact_equality_noise_contract(void) {
   CHECK(loaded_equivalent == IXS_CHECK_TRUE);
 
   base_delta_ok = test_ixs_constant_difference_facts(base, x, z, &base_delta);
-  loaded_delta_ok = test_ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
+  loaded_delta_ok =
+      test_ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
   CHECK(base_delta_ok && base_delta == 0);
   CHECK(loaded_delta_ok && loaded_delta == 0);
 
@@ -225,11 +226,50 @@ static void test_relational_loop_bound_production_witness(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_mapped_predicate_fallback_budget_contract(void) {
+  const int64_t points[4] = {0, 1, 2, 3};
+  const ixs_mapped_expression_row rows[4] = {
+      {0, 0, 0, 0}, {0, 2, 1, 0}, {0, 4, 2, 0}, {0, 6, 3, 0}};
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "mapped_contract_item");
+  ixs_node *limit = ixs_sym(ctx, "mapped_contract_limit");
+  const ixs_node *expressions[1] = {ixs_cmp(ctx, item, IXS_CMP_LT, limit)};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_finite_domain_result result;
+  const ixs_node *candidate;
+  size_t budget;
+
+  CHECK(ctx && item && limit && expressions[0] && facts);
+  budget = 23;
+  result = ixs_synthesize_mapped_expression_facts(facts, item, expressions, 1,
+                                                  points, 4, rows, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_EXHAUSTED &&
+        result.check == IXS_CHECK_UNKNOWN && result.value == NULL &&
+        budget == 7);
+
+  budget = 24;
+  result = ixs_synthesize_mapped_expression_facts(facts, item, expressions, 1,
+                                                  points, 4, rows, 4, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value != NULL &&
+        ixs_node_is_pred(result.value) && budget == 0);
+  candidate = result.value;
+
+  budget = 4;
+  result = ixs_verify_mapped_expression_facts(facts, item, expressions, 1, rows,
+                                              4, candidate, &budget);
+  CHECK(result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE && result.value == NULL && budget == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_relational_negative_cycle_contract();
   test_relational_chain_insertion_order_contract();
   test_relational_exact_equality_noise_contract();
   test_relational_loop_bound_production_witness();
+  test_mapped_predicate_fallback_budget_contract();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

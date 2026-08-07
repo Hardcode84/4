@@ -115,7 +115,7 @@ typedef struct {
   size_t nonzero_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
-  unsigned range_pw_depth;
+  size_t range_pw_depth;
   bool has_modrem;
   bool contradiction;
   bool empty_cache_valid;
@@ -133,10 +133,15 @@ typedef struct {
   void *equality_projection_cache;
   size_t equality_projection_cache_count;
   size_t equality_projection_cache_capacity;
-  unsigned query_tracking_depth;
+  size_t query_tracking_depth;
   /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
    * use the relation being justified to prove its own domain. */
   unsigned equality_disabled_depth;
+  /* Exact proofs own their structural traversal.  Auxiliary interval and
+   * predicate probes may re-enter once, but cannot form an unbounded C call
+   * chain through another exact proof. */
+  unsigned exact_proof_call_depth;
+  bool interval_evaluating;
   bool query_state_owner;
   bool query_state_borrowed;
   bool equality_projection_cache_transient;
@@ -154,6 +159,12 @@ struct ixs_facts {
 
 /* Internal hooks for bounded mutual-query regression tests. */
 #ifndef IXS_AMALGAMATED
+typedef enum {
+  IXS_BOUNDS_TEST_TRANSPORT_VALUE,
+  IXS_BOUNDS_TEST_TRANSPORT_LIMITED,
+  IXS_BOUNDS_TEST_TRANSPORT_INVALID
+} ixs_bounds_test_transport;
+
 IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *stride_visits,
                                        size_t *range_pw_case_visits,
@@ -163,10 +174,17 @@ IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *active_count, size_t *nesting);
 IXS_STATIC void ixs_bounds_equality_query_stats(
     const ixs_bounds *b, size_t *walks, size_t *endpoint_visits,
-    size_t *edge_visits, size_t *defined_checks,
-    size_t *intrinsic_evaluations);
+    size_t *edge_visits, size_t *defined_checks, size_t *intrinsic_evaluations);
 /* Test hook: re-enter one active interval key and verify clean unwind. */
 IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
+/* Test hooks keep private query-cache and residue-walker types out of tests. */
+IXS_STATIC bool
+ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
+                                 ixs_bounds_test_transport injected,
+                                 ixs_bounds_test_transport *observed);
+IXS_STATIC bool ixs_bounds_known_residue_probe(ixs_bounds *b, ixs_node *expr,
+                                               uint64_t modulus,
+                                               uint64_t *residue);
 #endif
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);

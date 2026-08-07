@@ -76,9 +76,8 @@ int main() {
     return 4;
   ixs::RationalMaterializationPlan plan =
       facts.plan_rational_materialization(rational_eighth, 8);
-  if (plan.status != IXS_FACT_QUERY_COMPLETE ||
-      plan.check != IXS_CHECK_TRUE || plan.denominator != 8 ||
-      plan.numerator.str() != "x")
+  if (plan.status != IXS_FACT_QUERY_COMPLETE || plan.check != IXS_CHECK_TRUE ||
+      plan.denominator != 8 || plan.numerator.str() != "x")
     return 4;
 
   ixs::Expr finite_item = ixs::Expr::sym(ctx, "finite_item");
@@ -100,6 +99,53 @@ int main() {
       verified_expression.check != IXS_CHECK_TRUE ||
       !verified_expression.value.is_null() || synthesis_budget != 0)
     return 19;
+  std::vector<ixs::Expr> mapped_expressions = {
+      y + finite_item * ixs::Expr::integer(ctx, 4) + ixs::Expr::integer(ctx, 7),
+      y + finite_item * ixs::Expr::integer(ctx, 4) -
+          ixs::Expr::integer(ctx, 3)};
+  std::vector<ixs::MappedExpressionRow> mapped_rows = {
+      {1, 2, 2, -3}, {0, 0, 0, 7}, {1, 3, 3, -3}, {0, 1, 1, 7}};
+  synthesis_budget = 8;
+  ixs::FiniteDomainResult mapped_expression =
+      facts.synthesize_mapped_expression(finite_item, mapped_expressions,
+                                         finite_points, mapped_rows,
+                                         synthesis_budget);
+  if (mapped_expression.status != IXS_FINITE_DOMAIN_COMPLETE ||
+      mapped_expression.check != IXS_CHECK_TRUE ||
+      mapped_expression.value.is_null() || synthesis_budget != 0)
+    return 25;
+  synthesis_budget = mapped_rows.size();
+  ixs::FiniteDomainResult mapped_verified = facts.verify_mapped_expression(
+      finite_item, mapped_expressions, mapped_rows, mapped_expression.value,
+      synthesis_budget);
+  if (mapped_verified.status != IXS_FINITE_DOMAIN_COMPLETE ||
+      mapped_verified.check != IXS_CHECK_TRUE ||
+      !mapped_verified.value.is_null() || synthesis_budget != 0)
+    return 26;
+  std::vector<ixs::Expr> difference_expressions = {
+      mapped_expressions[0], mapped_expressions[1], finite_item >= one, x, y};
+  std::vector<ixs::MappedDifferenceRow> difference_rows = {
+      {0, 2, 1, 0}, {2, 0, 2, 1}, {0, 2, 1, 0}};
+  std::vector<int64_t> differences = {99};
+  synthesis_budget = difference_rows.size();
+  ixs::FiniteDomainResult difference_result = facts.mapped_constant_differences(
+      finite_item, difference_expressions, difference_rows, differences,
+      synthesis_budget);
+  if (difference_result.status != IXS_FINITE_DOMAIN_COMPLETE ||
+      difference_result.check != IXS_CHECK_TRUE ||
+      !difference_result.value.is_null() || synthesis_budget != 0 ||
+      differences != std::vector<int64_t>({18, -1, 18}))
+    return 27;
+  difference_rows[1] = {3, 0, 4, 0};
+  synthesis_budget = difference_rows.size();
+  difference_result = facts.mapped_constant_differences(
+      finite_item, difference_expressions, difference_rows, differences,
+      synthesis_budget);
+  if (difference_result.status != IXS_FINITE_DOMAIN_COMPLETE ||
+      difference_result.check != IXS_CHECK_UNKNOWN ||
+      !difference_result.value.is_null() || synthesis_budget != 0 ||
+      differences != std::vector<int64_t>({18, -1, 18}))
+    return 28;
   std::vector<ixs::Expr> finite_predicates;
   finite_predicates.reserve(finite_values.size());
   for (const ixs::Expr &value : finite_values)
@@ -190,6 +236,10 @@ int main() {
       !(numerator == ixs::Expr::integer(ctx, 3) * x) ||
       !(denominator == ixs::Expr::integer(ctx, 4)) ||
       !facts.finite_difference(twice_x, x, one, difference) ||
+      facts.check_invariant_under_step(y, x, one) != IXS_CHECK_TRUE ||
+      facts.check_invariant_under_step(ixs::mod(x, eight), x, eight) !=
+          IXS_CHECK_TRUE ||
+      facts.check_invariant_under_step(twice_x, x, one) != IXS_CHECK_FALSE ||
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||
       !facts.get_symbol_congruence(x, modulus, residue) || modulus != 8 ||
@@ -243,16 +293,20 @@ int main() {
   ixs::Expr group_z = ixs::Expr::sym(ctx, "group_z");
   std::vector<ixs::GroupUnionQuery> relation_queries = {
       {0, 1, IXS_GROUP_UNION_EQUIVALENT, group_y, group_x + one},
-      {0, 2, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, group_z, group_x}};
+      {0, 2, IXS_GROUP_UNION_CONSTANT_DIFFERENCE, group_z, group_x},
+      {0, 2, IXS_GROUP_UNION_FINITE_DOMAIN_CONSTANT_DIFFERENCE, group_z,
+       group_x}};
   std::vector<ixs::GroupUnionResult> relation_results;
   size_t relation_work = 10000;
   if (ixs::query_group_unions(ctx, relation_groups, relation_queries,
                               relation_results,
                               relation_work) != IXS_GROUP_UNION_COMPLETE ||
-      relation_results.size() != 2 ||
+      relation_results.size() != 3 ||
       relation_results[0].status != IXS_CHECK_TRUE ||
       relation_results[1].status != IXS_CHECK_TRUE ||
-      relation_results[1].difference != 2)
+      relation_results[1].difference != 2 ||
+      relation_results[2].status != IXS_CHECK_TRUE ||
+      relation_results[2].difference != 2)
     return 18;
 
   ixs::Facts transferred = ctx.facts();

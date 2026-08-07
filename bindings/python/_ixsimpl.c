@@ -128,10 +128,6 @@ static int raise_new_prefixed_error(ixs_session *session, size_t before,
   return 0;
 }
 
-static int raise_new_divisibility_error(ixs_session *session, size_t before) {
-  return raise_new_prefixed_error(session, before, "divisibility:");
-}
-
 static int raise_fact_query_status(ixs_session *session, size_t before,
                                    ixs_fact_query_status status,
                                    const char *operation) {
@@ -151,8 +147,8 @@ static int raise_fact_query_status(ixs_session *session, size_t before,
   if (status == IXS_FACT_QUERY_INVALID)
     PyErr_SetString(PyExc_ValueError, message);
   else
-    PyErr_Format(PyExc_RuntimeError,
-                 "ixsimpl: %s proof resource limit reached", operation);
+    PyErr_Format(PyExc_RuntimeError, "ixsimpl: %s proof resource limit reached",
+                 operation);
   return -1;
 }
 
@@ -929,7 +925,7 @@ static PyObject *Expr_to_bytes(ExprObject *self, PyObject *Py_UNUSED(args)) {
 }
 
 static PyMethodDef Expr_methods[] = {
-    {"simplify", (PyCFunction)Expr_simplify, METH_VARARGS | METH_KEYWORDS,
+    {"simplify", _PyCFunction_CAST(Expr_simplify), METH_VARARGS | METH_KEYWORDS,
      "Simplify with either assumptions or a reusable fact set."},
     {"expand", (PyCFunction)Expr_expand, METH_NOARGS,
      "Distribute MUL over ADD (expand products of sums)."},
@@ -987,6 +983,10 @@ static PyObject *Expr_get_is_integer_valued(ExprObject *self,
 
 static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
   return PyLong_FromLong((long)ixs_node_tag(self->node));
+}
+
+static PyObject *Expr_get_node_ptr(ExprObject *self, void *Py_UNUSED(closure)) {
+  return PyLong_FromVoidPtr((void *)self->node);
 }
 
 static PyObject *Expr_get_nchildren(ExprObject *self,
@@ -1071,6 +1071,8 @@ static PyGetSetDef Expr_getset[] = {
     {"is_integer_valued", (getter)Expr_get_is_integer_valued, NULL,
      "True if the expression is structurally integer-valued.", NULL},
     {"tag", (getter)Expr_get_tag, NULL, "Node type tag (ixs_tag enum).", NULL},
+    {"node_ptr", (getter)Expr_get_node_ptr, NULL,
+     "Raw ixs_node* address as an int. For identity/debug/FFI use only.", NULL},
     {"nchildren", (getter)Expr_get_nchildren, NULL,
      "Number of child node pointers (0 for leaves).", NULL},
     {"children", (getter)Expr_get_children, NULL, "Tuple of child Expr nodes.",
@@ -1397,9 +1399,9 @@ static PyMethodDef Facts_methods[] = {
      "Atomically add a CMP/boolean or AND predicate fact."},
     {"assume_many", (PyCFunction)Facts_assume_many, METH_O,
      "Atomically add predicate facts."},
-    {"assume_range", (PyCFunction)Facts_assume_range,
+    {"assume_range", _PyCFunction_CAST(Facts_assume_range),
      METH_VARARGS | METH_KEYWORDS, "Add an explicit expression range fact."},
-    {"derive_affine", (PyCFunction)Facts_derive_affine,
+    {"derive_affine", _PyCFunction_CAST(Facts_derive_affine),
      METH_VARARGS | METH_KEYWORDS,
      "Derive range(derived) from range(base) via scale*base + offset."},
     {"subs", (PyCFunction)Facts_subs, METH_VARARGS,
@@ -1726,6 +1728,47 @@ static PyObject *check_result_to_py(ixs_check_result result) {
   Py_RETURN_NONE;
 }
 
+static PyObject *finite_domain_status_to_py(ixs_session *session,
+                                            size_t errors_before,
+                                            ixs_finite_domain_status status,
+                                            const char *error_prefix,
+                                            const char *invalid_fallback) {
+  const char *name;
+  switch (status) {
+  case IXS_FINITE_DOMAIN_COMPLETE:
+    name = "complete";
+    break;
+  case IXS_FINITE_DOMAIN_EXHAUSTED:
+    name = "exhausted";
+    break;
+  case IXS_FINITE_DOMAIN_LIMITED:
+    name = "limited";
+    break;
+  case IXS_FINITE_DOMAIN_INVALID: {
+    size_t error;
+    size_t error_count = ixs_session_nerrors(session);
+    for (error = errors_before; error < error_count; error++) {
+      const char *message = ixs_session_error(session, error);
+      if (message) {
+        PyErr_SetString(PyExc_ValueError, message);
+        return NULL;
+      }
+    }
+    PyErr_SetString(PyExc_ValueError, invalid_fallback);
+    return NULL;
+  }
+  case IXS_FINITE_DOMAIN_OOM:
+    return PyErr_NoMemory();
+  default:
+    PyErr_Format(PyExc_SystemError,
+                 "ixsimpl: unexpected finite-domain status %d", (int)status);
+    return NULL;
+  }
+  if (raise_new_prefixed_error(session, errors_before, error_prefix) < 0)
+    return NULL;
+  return PyUnicode_FromString(name);
+}
+
 static bool context_query_expr_facts(ContextObject *self, PyObject *expr_obj,
                                      PyObject *facts_obj, const ixs_node **expr,
                                      ixs_facts **facts);
@@ -1894,26 +1937,15 @@ static PyObject *Context_equivalent_finite_domain(ContextObject *self,
   query.as.equivalence.rhs = ((ExprObject *)rhs_obj)->node;
   result = ixs_finite_domain_facts(((FactsObject *)facts_obj)->facts, &query,
                                    &remaining_work);
-  if (result.status == IXS_FINITE_DOMAIN_OOM) {
-    PyErr_NoMemory();
+  status_answer = finite_domain_status_to_py(
+      session, errors_before, result.status,
+      "finite equivalence:", "finite equivalence: invalid query");
+  if (!status_answer)
     return NULL;
-  }
-  if (result.status == IXS_FINITE_DOMAIN_INVALID) {
-    if (raise_new_prefixed_error(session, errors_before,
-                                 "finite equivalence:") < 0)
-      return NULL;
-    PyErr_SetString(PyExc_ValueError, "finite equivalence: invalid query");
-    return NULL;
-  }
-  if (raise_new_prefixed_error(session, errors_before, "finite equivalence:") <
-      0)
-    return NULL;
-  status_answer = PyUnicode_FromString(
-      result.status == IXS_FINITE_DOMAIN_COMPLETE ? "complete" : "exhausted");
   answer = check_result_to_py(result.check);
   remaining_answer = PyLong_FromSize_t(remaining_work);
-  if (!status_answer || !answer || !remaining_answer) {
-    Py_XDECREF(status_answer);
+  if (!answer || !remaining_answer) {
+    Py_DECREF(status_answer);
     Py_XDECREF(answer);
     Py_XDECREF(remaining_answer);
     return NULL;
@@ -2121,19 +2153,10 @@ static PyObject *Context_check_finite_domain(ContextObject *self,
   status = ixs_finite_domain_batch_facts(
       ((FactsObject *)facts_obj)->facts, domains, (size_t)ndomains, queries,
       (size_t)nqueries, results, &remaining_work);
-  if (status == IXS_FINITE_DOMAIN_OOM) {
-    PyErr_NoMemory();
-    goto cleanup;
-  }
-  if (status == IXS_FINITE_DOMAIN_INVALID) {
-    if (raise_new_prefixed_error(session, errors_before,
-                                 "finite domain batch:") < 0)
-      goto cleanup;
-    PyErr_SetString(PyExc_ValueError, "finite domain batch: invalid query");
-    goto cleanup;
-  }
-  if (raise_new_prefixed_error(session, errors_before, "finite domain batch:") <
-      0)
+  status_answer = finite_domain_status_to_py(
+      session, errors_before, status,
+      "finite domain batch:", "finite domain batch: invalid query");
+  if (!status_answer)
     goto cleanup;
 
   answer_list = PyList_New(nqueries);
@@ -2157,10 +2180,8 @@ static PyObject *Context_check_finite_domain(ContextObject *self,
       goto cleanup;
     PyList_SET_ITEM(answer_list, index, answer);
   }
-  status_answer = PyUnicode_FromString(
-      status == IXS_FINITE_DOMAIN_COMPLETE ? "complete" : "exhausted");
   remaining_answer = PyLong_FromSize_t(remaining_work);
-  if (!status_answer || !remaining_answer)
+  if (!remaining_answer)
     goto cleanup;
   triple = PyTuple_Pack(3, status_answer, answer_list, remaining_answer);
 
@@ -2176,6 +2197,197 @@ cleanup:
   Py_XDECREF(query_sequence);
   Py_XDECREF(answer_list);
   Py_XDECREF(status_answer);
+  Py_XDECREF(remaining_answer);
+  return triple;
+}
+
+static bool mapped_difference_parse_expressions(ContextObject *self,
+                                                PyObject *sequence,
+                                                const ixs_node **expressions,
+                                                Py_ssize_t nexpressions) {
+  Py_ssize_t index;
+  for (index = 0; index < nexpressions; index++) {
+    PyObject *expression = PySequence_Fast_GET_ITEM(sequence, index);
+    if (!PyObject_TypeCheck(expression, &_ExprType)) {
+      PyErr_SetString(PyExc_TypeError,
+                      "each mapped expression must be an Expr");
+      return false;
+    }
+    if (((ExprObject *)expression)->ctx_obj != self) {
+      PyErr_SetString(PyExc_ValueError,
+                      "ixsimpl: mapped expression from different context");
+      return false;
+    }
+    expressions[index] = ((ExprObject *)expression)->node;
+  }
+  return true;
+}
+
+static bool mapped_difference_parse_row(PyObject *object,
+                                        ixs_mapped_difference_row *row) {
+  PyObject *sequence = PySequence_Fast(
+      object, "each mapped difference row must be an iterable of four ints");
+  bool ok = false;
+  if (!sequence)
+    return false;
+  if (PySequence_Fast_GET_SIZE(sequence) != 4) {
+    PyErr_SetString(PyExc_ValueError,
+                    "each mapped difference row must contain four integers");
+    goto cleanup;
+  }
+  row->lhs_expression_index =
+      PyLong_AsSize_t(PySequence_Fast_GET_ITEM(sequence, 0));
+  if (row->lhs_expression_index == (size_t)-1 && PyErr_Occurred())
+    goto cleanup;
+  if (!py_int64(PySequence_Fast_GET_ITEM(sequence, 1), &row->lhs_point,
+                "mapped difference lhs point"))
+    goto cleanup;
+  row->rhs_expression_index =
+      PyLong_AsSize_t(PySequence_Fast_GET_ITEM(sequence, 2));
+  if (row->rhs_expression_index == (size_t)-1 && PyErr_Occurred())
+    goto cleanup;
+  if (!py_int64(PySequence_Fast_GET_ITEM(sequence, 3), &row->rhs_point,
+                "mapped difference rhs point"))
+    goto cleanup;
+  ok = true;
+
+cleanup:
+  Py_DECREF(sequence);
+  return ok;
+}
+
+static bool mapped_difference_parse_rows(PyObject *sequence,
+                                         ixs_mapped_difference_row *rows,
+                                         Py_ssize_t nrows) {
+  Py_ssize_t index;
+  for (index = 0; index < nrows; index++)
+    if (!mapped_difference_parse_row(PySequence_Fast_GET_ITEM(sequence, index),
+                                     &rows[index]))
+      return false;
+  return true;
+}
+
+static PyObject *mapped_difference_answer(ixs_check_result check,
+                                          const int64_t *differences,
+                                          Py_ssize_t nrows) {
+  PyObject *answer;
+  Py_ssize_t index;
+  if (check != IXS_CHECK_TRUE)
+    return Py_NewRef(Py_None);
+  answer = PyList_New(nrows);
+  if (!answer)
+    return NULL;
+  for (index = 0; index < nrows; index++) {
+    PyObject *value = PyLong_FromLongLong((long long)differences[index]);
+    if (!value) {
+      Py_DECREF(answer);
+      return NULL;
+    }
+    PyList_SET_ITEM(answer, index, value);
+  }
+  return answer;
+}
+
+static PyObject *Context_mapped_constant_differences(ContextObject *self,
+                                                     PyObject *args,
+                                                     PyObject *kwargs) {
+  static char *kwlist[] = {"symbol", "expressions",    "rows",
+                           "facts",  "remaining_work", NULL};
+  PyObject *symbol_obj;
+  PyObject *expressions_obj;
+  PyObject *rows_obj;
+  PyObject *facts_obj;
+  PyObject *remaining_obj;
+  PyObject *expression_sequence = NULL;
+  PyObject *row_sequence = NULL;
+  PyObject *status_answer = NULL;
+  PyObject *answer = NULL;
+  PyObject *remaining_answer = NULL;
+  PyObject *triple = NULL;
+  const ixs_node **expressions = NULL;
+  ixs_mapped_difference_row *rows = NULL;
+  int64_t *differences = NULL;
+  Py_ssize_t nexpressions = 0;
+  Py_ssize_t nrows = 0;
+  size_t remaining_work;
+  size_t errors_before;
+  ixs_finite_domain_result result;
+  ixs_session *session = Context_session(self);
+
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOOO", kwlist, &symbol_obj,
+                                   &expressions_obj, &rows_obj, &facts_obj,
+                                   &remaining_obj))
+    return NULL;
+  if (!PyObject_TypeCheck(symbol_obj, &_ExprType)) {
+    PyErr_SetString(PyExc_TypeError, "symbol must be an Expr");
+    return NULL;
+  }
+  if (((ExprObject *)symbol_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: symbol from different context");
+    return NULL;
+  }
+  if (!PyObject_TypeCheck(facts_obj, &FactsType)) {
+    PyErr_SetString(PyExc_TypeError, "facts must be a Facts object");
+    return NULL;
+  }
+  if (((FactsObject *)facts_obj)->ctx_obj != self) {
+    PyErr_SetString(PyExc_ValueError, "ixsimpl: facts from different context");
+    return NULL;
+  }
+  remaining_work = PyLong_AsSize_t(remaining_obj);
+  if (remaining_work == (size_t)-1 && PyErr_Occurred())
+    return NULL;
+  expression_sequence = PySequence_Fast(
+      expressions_obj, "expressions must be an iterable of Expr objects");
+  row_sequence = PySequence_Fast(rows_obj, "rows must be an iterable");
+  if (!expression_sequence || !row_sequence)
+    goto cleanup;
+  nexpressions = PySequence_Fast_GET_SIZE(expression_sequence);
+  nrows = PySequence_Fast_GET_SIZE(row_sequence);
+  if (nexpressions > 0) {
+    expressions = PyMem_Calloc((size_t)nexpressions, sizeof(*expressions));
+    if (!expressions) {
+      PyErr_NoMemory();
+      goto cleanup;
+    }
+  }
+  if (nrows > 0) {
+    rows = PyMem_Calloc((size_t)nrows, sizeof(*rows));
+    differences = PyMem_Calloc((size_t)nrows, sizeof(*differences));
+    if (!rows || !differences) {
+      PyErr_NoMemory();
+      goto cleanup;
+    }
+  }
+  if (!mapped_difference_parse_expressions(self, expression_sequence,
+                                           expressions, nexpressions) ||
+      !mapped_difference_parse_rows(row_sequence, rows, nrows))
+    goto cleanup;
+
+  errors_before = ixs_session_nerrors(session);
+  result = ixs_mapped_constant_differences_facts(
+      ((FactsObject *)facts_obj)->facts, ((ExprObject *)symbol_obj)->node,
+      expressions, (size_t)nexpressions, rows, (size_t)nrows, differences,
+      &remaining_work);
+  status_answer = finite_domain_status_to_py(
+      session, errors_before, result.status, "mapped constant differences:",
+      "mapped constant differences: invalid query");
+  if (!status_answer)
+    goto cleanup;
+  answer = mapped_difference_answer(result.check, differences, nrows);
+  remaining_answer = PyLong_FromSize_t(remaining_work);
+  if (!answer || !remaining_answer)
+    goto cleanup;
+  triple = PyTuple_Pack(3, status_answer, answer, remaining_answer);
+
+cleanup:
+  PyMem_Free(expressions);
+  PyMem_Free(rows);
+  PyMem_Free(differences);
+  Py_XDECREF(expression_sequence);
+  Py_XDECREF(row_sequence);
+  Py_XDECREF(status_answer);
+  Py_XDECREF(answer);
   Py_XDECREF(remaining_answer);
   return triple;
 }
@@ -2541,6 +2753,32 @@ static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
   if (!result.available)
     Py_RETURN_NONE;
   return (PyObject *)Expr_wrap(self, result.difference);
+}
+
+static PyObject *Context_invariant_under_step(ContextObject *self,
+                                              PyObject *args,
+                                              PyObject *kwargs) {
+  static char *kwlist[] = {"expr", "symbol", "step", "facts", NULL};
+  static const char *names[] = {"expr", "symbol", "step"};
+  PyObject *expr_objs[3];
+  PyObject *facts_obj;
+  const ixs_node *exprs[3];
+  ixs_facts *facts;
+  size_t errors_before;
+  ixs_fact_check_result result;
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_objs[0],
+                                   &expr_objs[1], &expr_objs[2], &facts_obj))
+    return NULL;
+  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
+                                 &facts))
+    return NULL;
+  errors_before = ixs_session_nerrors(Context_session(self));
+  result =
+      ixs_check_invariant_under_step_facts(facts, exprs[0], exprs[1], exprs[2]);
+  if (raise_fact_query_status(Context_session(self), errors_before,
+                              result.status, "step invariance") < 0)
+    return NULL;
+  return check_result_to_py(result.check);
 }
 
 static PyObject *Context_split_additive_constant(ContextObject *self,
@@ -3186,8 +3424,8 @@ static PyObject *Context_simplify_batch(ContextObject *self, PyObject *args,
 
   errors_before = ixs_session_nerrors(session);
   if (facts_obj && facts_obj != Py_None) {
-    facts_status = ixs_simplify_batch_facts(
-        ((FactsObject *)facts_obj)->facts, exprs, (size_t)n_exprs);
+    facts_status = ixs_simplify_batch_facts(((FactsObject *)facts_obj)->facts,
+                                            exprs, (size_t)n_exprs);
   } else {
     ixs_simplify_batch(session, exprs, (size_t)n_exprs, assumptions,
                        (size_t)n_assumptions);
@@ -3288,82 +3526,98 @@ static PyMethodDef Context_methods[] = {
      "Build an inequality CMP node: ctx.ne(a, b)."},
     {"facts", (PyCFunction)Context_facts, METH_NOARGS,
      "Create a session-owned fact set."},
-    {"check", (PyCFunction)Context_check, METH_VARARGS | METH_KEYWORDS,
+    {"check", _PyCFunction_CAST(Context_check), METH_VARARGS | METH_KEYWORDS,
      "True if provable, False if contradicted, None if undecidable from "
      "bounds. Assumptions accept CMP/boolean or AND predicates."},
-    {"integer_valued", (PyCFunction)Context_integer_valued,
+    {"integer_valued", _PyCFunction_CAST(Context_integer_valued),
      METH_VARARGS | METH_KEYWORDS,
      "Prove integrality from assumptions or facts; return bool or None."},
-    {"defined", (PyCFunction)Context_defined, METH_VARARGS | METH_KEYWORDS,
+    {"defined", _PyCFunction_CAST(Context_defined),
+     METH_VARARGS | METH_KEYWORDS,
      "Prove full-domain definedness from assumptions or facts; return bool "
      "or None."},
-    {"check_predicate", (PyCFunction)Context_check_predicate,
+    {"check_predicate", _PyCFunction_CAST(Context_check_predicate),
      METH_VARARGS | METH_KEYWORDS,
      "Check a compound predicate under a fact set; return bool or None."},
-    {"equivalent", (PyCFunction)Context_equivalent,
+    {"equivalent", _PyCFunction_CAST(Context_equivalent),
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
-    {"equivalent_modulo_pow2", (PyCFunction)Context_equivalent_modulo_pow2,
+    {"equivalent_modulo_pow2",
+     _PyCFunction_CAST(Context_equivalent_modulo_pow2),
      METH_VARARGS | METH_KEYWORDS,
      "Prove total integer equivalence modulo 2**bits under a fact set."},
-    {"equivalent_finite_domain", (PyCFunction)Context_equivalent_finite_domain,
+    {"equivalent_finite_domain",
+     _PyCFunction_CAST(Context_equivalent_finite_domain),
      METH_VARARGS | METH_KEYWORDS,
      "Try ordinary equivalence, then finite-domain enumeration; return "
      "(status, result, remaining_work)."},
-    {"check_finite_domain", (PyCFunction)Context_check_finite_domain,
+    {"check_finite_domain", _PyCFunction_CAST(Context_check_finite_domain),
      METH_VARARGS | METH_KEYWORDS,
      "Check typed properties over an ordered Cartesian integer domain; "
      "return (status, [(result, witness)], remaining_work)."},
-    {"constant_difference", (PyCFunction)Context_constant_difference,
+    {"mapped_constant_differences",
+     _PyCFunction_CAST(Context_mapped_constant_differences),
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove mapped scalar differences in caller order; return "
+     "(status, differences-or-None, remaining_work)."},
+    {"constant_difference", _PyCFunction_CAST(Context_constant_difference),
      METH_VARARGS | METH_KEYWORDS,
      "Return the proven integer lhs-rhs difference, or None."},
-    {"modulo_recurrence", (PyCFunction)Context_modulo_recurrence,
+    {"modulo_recurrence", _PyCFunction_CAST(Context_modulo_recurrence),
      METH_VARARGS | METH_KEYWORDS,
      "Prove a fixed-width modulo recurrence and return (increment, "
      "remainder), or None."},
-    {"affine_decompose", (PyCFunction)Context_affine_decompose,
+    {"affine_decompose", _PyCFunction_CAST(Context_affine_decompose),
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
-    {"decompose_exact_quotient", (PyCFunction)Context_decompose_exact_quotient,
+    {"decompose_exact_quotient",
+     _PyCFunction_CAST(Context_decompose_exact_quotient),
      METH_VARARGS | METH_KEYWORDS,
      "Return an exact (numerator, denominator) pair, or None."},
-    {"finite_difference", (PyCFunction)Context_finite_difference,
+    {"finite_difference", _PyCFunction_CAST(Context_finite_difference),
      METH_VARARGS | METH_KEYWORDS,
      "Return expr(symbol+step)-expr(symbol), or None."},
-    {"split_additive_constant", (PyCFunction)Context_split_additive_constant,
+    {"invariant_under_step", _PyCFunction_CAST(Context_invariant_under_step),
+     METH_VARARGS | METH_KEYWORDS,
+     "Prove expr(symbol+step) == expr(symbol); return bool or None."},
+    {"split_additive_constant",
+     _PyCFunction_CAST(Context_split_additive_constant),
      METH_VARARGS | METH_KEYWORDS,
      "Return (residual, integer constant), or None."},
-    {"divisible", (PyCFunction)Context_divisible, METH_VARARGS | METH_KEYWORDS,
+    {"divisible", _PyCFunction_CAST(Context_divisible),
+     METH_VARARGS | METH_KEYWORDS,
      "Prove divisibility under a fact set; return bool or None."},
-    {"known_bits", (PyCFunction)Context_known_bits,
+    {"known_bits", _PyCFunction_CAST(Context_known_bits),
      METH_VARARGS | METH_KEYWORDS,
      "Return (known_zero, known_one, pow2) under a fact set, or None on an "
      "invalid query."},
-    {"symbol_congruence", (PyCFunction)Context_symbol_congruence,
+    {"symbol_congruence", _PyCFunction_CAST(Context_symbol_congruence),
      METH_VARARGS | METH_KEYWORDS,
      "Return a symbol's stored (modulus, residue), or None."},
-    {"congruent", (PyCFunction)Context_congruent, METH_VARARGS | METH_KEYWORDS,
+    {"congruent", _PyCFunction_CAST(Context_congruent),
+     METH_VARARGS | METH_KEYWORDS,
      "Prove a requested congruence under a fact set; return bool or None."},
     {"rational_intermediates_fit",
-     (PyCFunction)Context_rational_intermediates_fit,
+     _PyCFunction_CAST(Context_rational_intermediates_fit),
      METH_VARARGS | METH_KEYWORDS,
      "Prove that order-independent rational materialization intermediates "
      "fit word_bits."},
-    {"try_exact_divide", (PyCFunction)Context_try_exact_divide,
+    {"try_exact_divide", _PyCFunction_CAST(Context_try_exact_divide),
      METH_VARARGS | METH_KEYWORDS,
      "Prove exact division under facts; return (status, quotient)."},
-    {"pow2_fact", (PyCFunction)Context_pow2_fact, METH_VARARGS | METH_KEYWORDS,
+    {"pow2_fact", _PyCFunction_CAST(Context_pow2_fact),
+     METH_VARARGS | METH_KEYWORDS,
      "Return 'or_zero', 'positive', or None. Assumptions accept CMP/boolean "
      "or AND predicates."},
-    {"range", (PyCFunction)Context_range, METH_VARARGS | METH_KEYWORDS,
+    {"range", _PyCFunction_CAST(Context_range), METH_VARARGS | METH_KEYWORDS,
      "Return an inclusive range or None, including supported powers, XOR, "
      "and first-match piecewise expressions. Assumptions accept CMP/boolean "
      "or AND predicates."},
-    {"integer_range", (PyCFunction)Context_integer_range,
+    {"integer_range", _PyCFunction_CAST(Context_integer_range),
      METH_VARARGS | METH_KEYWORDS,
      "Return a proved inclusive integer range or None. Rational bounds and "
      "congruences are normalized internally."},
-    {"simplify_batch", (PyCFunction)Context_simplify_batch,
+    {"simplify_batch", _PyCFunction_CAST(Context_simplify_batch),
      METH_VARARGS | METH_KEYWORDS,
      "Simplify in-place with either assumptions or a reusable fact set."},
     {"clear_errors", (PyCFunction)Context_clear_errors, METH_NOARGS,

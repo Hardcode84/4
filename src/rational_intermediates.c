@@ -1594,10 +1594,16 @@ rational_analysis_prepare_frame(rational_state *state,
         frame->expr->tag == IXS_TRUNC) {
       rational_analysis child =
           rational_analysis_done(state, frame->expr->u.unary.arg);
-      if (!child.proof.valid &&
-          simp_decompose_exact_quotient(state->ctx, frame->expr->u.unary.arg,
-                                        &frame->exact_numerator,
-                                        &frame->exact_denominator)) {
+      ixs_quotient_parts_status quotient_status = IXS_QUOTIENT_PARTS_NO_MATCH;
+      if (!child.proof.valid)
+        quotient_status = simp_decompose_exact_quotient(
+            state->ctx, frame->expr->u.unary.arg, &frame->exact_numerator,
+            &frame->exact_denominator);
+      if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
+        state->oom = true;
+        return RATIONAL_FRAME_FAILED;
+      }
+      if (quotient_status == IXS_QUOTIENT_PARTS_MATCH) {
         if (!rational_analysis_schedule(state, frame->exact_numerator))
           return RATIONAL_FRAME_FAILED;
         return RATIONAL_FRAME_WAITING;

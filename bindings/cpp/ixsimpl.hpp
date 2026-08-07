@@ -266,6 +266,20 @@ struct FiniteDomainResult {
   Expr value;
 };
 
+struct MappedExpressionRow {
+  size_t expression_index;
+  int64_t expression_point;
+  int64_t candidate_point;
+  int64_t additive_offset;
+};
+
+struct MappedDifferenceRow {
+  size_t lhs_expression_index;
+  int64_t lhs_point;
+  size_t rhs_expression_index;
+  int64_t rhs_point;
+};
+
 struct FiniteIntegerDomain {
   Expr symbol;
   std::vector<int64_t> points;
@@ -487,6 +501,67 @@ public:
         ixs_finite_domain_facts(facts_, &query, &remaining_work);
     return {result.status, result.check, Expr(ctx_, session_, result.value)};
   }
+  FiniteDomainResult
+  synthesize_mapped_expression(const Expr &symbol,
+                               const std::vector<Expr> &expressions,
+                               const std::vector<int64_t> &candidate_points,
+                               const std::vector<MappedExpressionRow> &rows,
+                               size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw_expressions;
+    std::vector<ixs_mapped_expression_row> raw_rows;
+    raw_expressions.reserve(expressions.size());
+    for (const Expr &expression : expressions)
+      raw_expressions.push_back(expression.raw());
+    raw_rows.reserve(rows.size());
+    for (const MappedExpressionRow &row : rows)
+      raw_rows.push_back({row.expression_index, row.expression_point,
+                          row.candidate_point, row.additive_offset});
+    ixs_finite_domain_result result = ixs_synthesize_mapped_expression_facts(
+        facts_, symbol.raw(), raw_expressions.data(), raw_expressions.size(),
+        candidate_points.data(), candidate_points.size(), raw_rows.data(),
+        raw_rows.size(), &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
+  FiniteDomainResult verify_mapped_expression(
+      const Expr &symbol, const std::vector<Expr> &expressions,
+      const std::vector<MappedExpressionRow> &rows, const Expr &candidate,
+      size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw_expressions;
+    std::vector<ixs_mapped_expression_row> raw_rows;
+    raw_expressions.reserve(expressions.size());
+    for (const Expr &expression : expressions)
+      raw_expressions.push_back(expression.raw());
+    raw_rows.reserve(rows.size());
+    for (const MappedExpressionRow &row : rows)
+      raw_rows.push_back({row.expression_index, row.expression_point,
+                          row.candidate_point, row.additive_offset});
+    ixs_finite_domain_result result = ixs_verify_mapped_expression_facts(
+        facts_, symbol.raw(), raw_expressions.data(), raw_expressions.size(),
+        raw_rows.data(), raw_rows.size(), candidate.raw(), &remaining_work);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
+  FiniteDomainResult mapped_constant_differences(
+      const Expr &symbol, const std::vector<Expr> &expressions,
+      const std::vector<MappedDifferenceRow> &rows,
+      std::vector<int64_t> &differences, size_t &remaining_work) const {
+    std::vector<const ixs_node *> raw_expressions;
+    std::vector<ixs_mapped_difference_row> raw_rows;
+    std::vector<int64_t> temporary(rows.size());
+    raw_expressions.reserve(expressions.size());
+    for (const Expr &expression : expressions)
+      raw_expressions.push_back(expression.raw());
+    raw_rows.reserve(rows.size());
+    for (const MappedDifferenceRow &row : rows)
+      raw_rows.push_back({row.lhs_expression_index, row.lhs_point,
+                          row.rhs_expression_index, row.rhs_point});
+    ixs_finite_domain_result result = ixs_mapped_constant_differences_facts(
+        facts_, symbol.raw(), raw_expressions.data(), raw_expressions.size(),
+        raw_rows.data(), raw_rows.size(), temporary.data(), &remaining_work);
+    if (result.status == IXS_FINITE_DOMAIN_COMPLETE &&
+        result.check == IXS_CHECK_TRUE)
+      differences = std::move(temporary);
+    return {result.status, result.check, Expr(ctx_, session_, result.value)};
+  }
   FiniteDomainResult verify_finite_expression(
       const Expr &symbol, const std::vector<int64_t> &points,
       const std::vector<Expr> &values, const Expr &candidate,
@@ -569,13 +644,21 @@ public:
   }
   bool finite_difference(const Expr &expr, const Expr &symbol, const Expr &step,
                          Expr &difference) const {
-    ixs_finite_difference_result result =
-        ixs_finite_difference_facts(facts_, expr.raw(), symbol.raw(), step.raw());
+    ixs_finite_difference_result result = ixs_finite_difference_facts(
+        facts_, expr.raw(), symbol.raw(), step.raw());
     require_complete(result.status, "finite difference");
     if (!result.available)
       return false;
     difference = Expr(ctx_, session_, result.difference);
     return true;
+  }
+  ixs_check_result check_invariant_under_step(const Expr &expr,
+                                              const Expr &symbol,
+                                              const Expr &step) const {
+    ixs_fact_check_result result = ixs_check_invariant_under_step_facts(
+        facts_, expr.raw(), symbol.raw(), step.raw());
+    require_complete(result.status, "step invariance");
+    return result.check;
   }
   bool decompose_cyclic(const Expr &expr, const Expr &symbol,
                         CyclicDecomposition &out) const {
@@ -585,8 +668,11 @@ public:
     if (!result.available)
       return false;
     const ixs_cyclic_decomposition &raw = result.decomposition;
-    out = CyclicDecomposition{Expr(ctx_, session_, raw.residual), raw.scale,
-                              raw.modulus, raw.phase, raw.ring,
+    out = CyclicDecomposition{Expr(ctx_, session_, raw.residual),
+                              raw.scale,
+                              raw.modulus,
+                              raw.phase,
+                              raw.ring,
                               raw.residual_bounded};
     return true;
   }

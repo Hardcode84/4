@@ -182,7 +182,7 @@ if TYPE_CHECKING:
         ) -> bool | None: ...
         def equivalent_finite_domain(
             self, lhs: _Expr, rhs: _Expr, facts: Facts, remaining_work: int
-        ) -> tuple[Literal["complete", "exhausted"], bool | None, int]: ...
+        ) -> tuple[Literal["complete", "exhausted", "limited"], bool | None, int]: ...
         def check_finite_domain(
             self,
             domains: Sequence[tuple[_Expr, Sequence[int]]],
@@ -190,10 +190,18 @@ if TYPE_CHECKING:
             facts: Facts,
             remaining_work: int,
         ) -> tuple[
-            Literal["complete", "exhausted"],
+            Literal["complete", "exhausted", "limited"],
             list[tuple[bool | None, int | None]],
             int,
         ]: ...
+        def mapped_constant_differences(
+            self,
+            symbol: _Expr,
+            expressions: Sequence[_Expr],
+            rows: Sequence[tuple[int, int, int, int]],
+            facts: Facts,
+            remaining_work: int,
+        ) -> tuple[Literal["complete", "exhausted", "limited"], list[int] | None, int]: ...
         def constant_difference(self, lhs: _Expr, rhs: _Expr, facts: Facts) -> int | None: ...
         def modulo_recurrence(
             self,
@@ -214,6 +222,9 @@ if TYPE_CHECKING:
         def finite_difference(
             self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
         ) -> Expr | None: ...
+        def invariant_under_step(
+            self, expr: _Expr, symbol: _Expr, step: _Expr, facts: Facts
+        ) -> bool | None: ...
         def split_additive_constant(self, expr: _Expr, facts: Facts) -> tuple[Expr, int] | None: ...
         def divisible(self, expr: _Expr, modulus: int, facts: Facts) -> bool | None: ...
         def known_bits(

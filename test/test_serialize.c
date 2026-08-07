@@ -37,6 +37,21 @@ static int failures;
     }                                                                          \
   } while (0)
 
+static bool test_ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
+                                 ixs_range_result *out) {
+  ixs_range_query_result result = ixs_range_facts(facts, expr);
+  if (out)
+    *out = result.range;
+  return out && result.status == IXS_FACT_QUERY_COMPLETE && result.available;
+}
+
+static ixs_check_result test_ixs_check_facts(ixs_facts *facts,
+                                             const ixs_node *expr) {
+  ixs_fact_check_result result = ixs_check_facts(facts, expr);
+  return result.status == IXS_FACT_QUERY_COMPLETE ? result.check
+                                                  : IXS_CHECK_UNKNOWN;
+}
+
 typedef struct {
   unsigned char *data;
   size_t len;
@@ -753,7 +768,8 @@ static void test_facts_create_preds_public(void) {
       ixs_cmp(&other_s, other_divisor, IXS_CMP_EQ, ixs_int(&other_s, 8));
   other_query = ixs_cmp(&other_s, ixs_sym(&other_s, "create_preds_base"),
                         IXS_CMP_GE, ixs_int(&other_s, 0));
-  CHECK(test_ixs_check_facts(serialized, other_divisor_eight) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(serialized, other_divisor_eight) ==
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(serialized, other_query) == IXS_CHECK_UNKNOWN);
 
   invalid[0] = divisor_eight;

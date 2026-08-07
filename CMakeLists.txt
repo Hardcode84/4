@@ -94,6 +94,10 @@ target_compile_definitions(ixsimpl_stats PRIVATE IXS_STATS)
 
 add_executable(test_simplify test/test_simplify.c)
 target_link_libraries(test_simplify ixsimpl_stats)
+if(NOT USE_AMALGAMATION)
+    target_include_directories(test_simplify PRIVATE src)
+    target_compile_definitions(test_simplify PRIVATE IXS_TEST_INTERNAL)
+endif()
 add_test(NAME test_simplify COMMAND test_simplify)
 
 add_executable(test_corpus test/test_corpus.c)

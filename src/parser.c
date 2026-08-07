@@ -304,7 +304,11 @@ static ixs_node *parse_piecewise_impl(parser *p) {
     if (!match_char(p, '('))
       return parse_error(p, "expected '(' for Piecewise case");
 
-    ixs_node *val = parse_expr(p);
+    /* A Piecewise value is a numeric expression, including the canonical
+     * 0/1 value of a structured predicate.  The condition parser's
+     * allow_top_level_expr mode preserves ordinary arithmetic while also
+     * accepting comparison/boolean-valued branches. */
+    ixs_node *val = parse_cond(p, true);
     if (!val)
       return NULL;
 

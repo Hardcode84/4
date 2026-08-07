@@ -102,9 +102,14 @@ IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,
                                      ixs_node *const *replacements);
 
+typedef enum {
+  IXS_QUOTIENT_PARTS_NO_MATCH,
+  IXS_QUOTIENT_PARTS_MATCH,
+  IXS_QUOTIENT_PARTS_OOM
+} ixs_quotient_parts_status;
+
 /* Exact top-level rational product or common-denominator sum. */
-IXS_STATIC bool simp_decompose_exact_quotient(ixs_ctx *ctx, ixs_node *expr,
-                                              ixs_node **numerator,
-                                              ixs_node **denominator);
+IXS_STATIC ixs_quotient_parts_status simp_decompose_exact_quotient(
+    ixs_ctx *ctx, ixs_node *expr, ixs_node **numerator, ixs_node **denominator);
 
 #endif /* IXS_SIMPLIFY_H */
