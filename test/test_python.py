@@ -22,6 +22,8 @@ Properties tested:
    crash the forked test subprocess.
 10. Radix certificate soundness: every proven nonnegative floor sum is checked
     exhaustively over its finite input domain.
+11. Radix reconstruction soundness: every proven high/low reconstruction is
+    checked exhaustively over its complete residue domain.
 """
 
 from __future__ import annotations
@@ -3756,6 +3758,112 @@ def test_compositional_mod_wave_identity() -> None:
     assert ctx.equivalent(wrap, unwrapped, facts) is not True
     assert ctx.equivalent(half % 64, ixsimpl.floor(half), facts) is not True
     assert ctx.equivalent(partial, zero, facts) is not True
+
+
+def test_congruent_radix_reconstruction_composes_equivalence() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("radix_reconstruction_x")
+    y = ctx.sym("radix_reconstruction_y")
+    alias = ctx.sym("radix_reconstruction_alias")
+    dynamic = ctx.sym("radix_reconstruction_dynamic")
+    partial_divisor = ctx.sym("radix_reconstruction_partial_divisor")
+
+    def reconstruct(numerator: ixsimpl.Expr, remainder: ixsimpl.Expr, radix: int) -> ixsimpl.Expr:
+        return radix * ixsimpl.floor(numerator / radix) + remainder % radix
+
+    assumptions = [ctx.eq(x % 8, 3), ctx.eq(y % 8, 3), ctx.eq(alias, x), dynamic >= 2]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    reconstructed = reconstruct(x, y, 8)
+    equality = ctx.eq(reconstructed, x)
+    assert ctx.equivalent(reconstructed, x, facts) is True
+    assert ctx.check(equality, facts=facts) is True
+    assert ctx.check(equality, assumptions=assumptions) is True
+    assert ctx.equivalent(x, alias, facts) is True
+
+    mismatch = ctx.facts()
+    mismatch.assume_many([ctx.eq(x % 8, 0), ctx.eq(y % 8, 1)])
+    assert ctx.equivalent(reconstructed, x, mismatch) is not True
+    assert ctx.equivalent(reconstruct(x, y + 1, 8), x, facts) is not True
+    unequal_denominator = 8 * ixsimpl.floor(x / 8) + y % 5
+    symbolic_denominator = 8 * ixsimpl.floor(x / 8) + y % dynamic
+    assert ctx.equivalent(unequal_denominator, x, facts) is not True
+    assert ctx.equivalent(symbolic_denominator, x, facts) is not True
+
+    half = x / 2
+    partial = ixsimpl.floor(x / partial_divisor)
+    assert ctx.equivalent(reconstruct(half, y, 8), half, facts) is not True
+    assert ctx.equivalent(reconstruct(x, y / 2, 8), x, facts) is not True
+    assert ctx.equivalent(reconstruct(partial, y, 8), partial, facts) is not True
+    assert ctx.equivalent(reconstruct(half, y, 1), half, facts) is not True
+    malformed = 8 * ixsimpl.ceil(x / 8) + y % 8
+    wrong_coefficient = 7 * ixsimpl.floor(x / 8) + y % 8
+    wrong_shape = 8 * x + y % 8
+    assert ctx.equivalent(malformed, x, facts) is not True
+    assert ctx.equivalent(reconstructed + 1, x, facts) is not True
+    assert ctx.equivalent(wrong_coefficient, x, facts) is not True
+    assert ctx.equivalent(wrong_shape, x, facts) is not True
+    overflow_numerator = x - 2
+    overflow_remainder = x + (2**63 - 1)
+    assert (
+        ctx.equivalent(
+            reconstruct(overflow_numerator, overflow_remainder, 2),
+            overflow_numerator,
+            facts,
+        )
+        is not True
+    )
+
+    slot = ctx.sym("bounded_radix_slot")
+    witness_alias = ctx.sym("bounded_radix_alias")
+    witness_facts = ctx.facts()
+    t = (slot % 2 + ixsimpl.floor(slot / 2) % 2) % 3
+    t_half = ixsimpl.floor(t / 2)
+    high = t_half % 2
+    low = t % 2
+    witness = 2 * high + low
+    wrapped = witness % 3
+    witness_facts.assume_many([slot >= 0, slot <= 3, ctx.eq(witness_alias, t)])
+    assert ctx.equivalent(high, t_half, witness_facts) is True
+    assert ctx.equivalent(t, witness_alias, witness_facts) is True
+    assert ctx.equivalent(witness, t, witness_facts) is True
+    assert ctx.equivalent(witness, witness_alias, witness_facts) is True
+    assert ctx.check(ctx.eq(wrapped, t), facts=witness_facts) is True
+    bad_witness = 2 * t_half + (t + 1) % 2
+    assert ctx.equivalent(bad_witness, t, witness_facts) is not True
+
+
+@given(
+    radix=st.integers(min_value=2, max_value=8),
+    shift_seed=st.integers(min_value=0, max_value=255),
+)
+def test_congruent_radix_reconstruction_soundness(radix: int, shift_seed: int) -> None:
+    """Every compositional radix proof agrees with its complete residue domain."""
+    ctx = ixsimpl.Context()
+    slot = ctx.sym("radix_soundness_slot")
+    alias = ctx.sym("radix_soundness_alias")
+    modulus = radix * radix
+    value = slot % modulus
+    quotient = ixsimpl.floor(value / radix)
+    delayed_high = quotient % radix
+    reconstructed = radix * delayed_high + value % radix
+    shift = shift_seed % (radix - 1) + 1
+    wrong = radix * delayed_high + (value + shift) % radix
+    facts = ctx.facts()
+    facts.assume(ctx.eq(alias, value))
+
+    assert ctx.equivalent(reconstructed, value, facts) is True
+    assert ctx.equivalent(reconstructed, alias, facts) is True
+    assert ctx.equivalent(wrong, value, facts) is not True
+    for slot_value in range(-modulus, modulus * 2):
+        value_at_slot = slot_value % modulus
+        env = {
+            "radix_soundness_slot": slot_value,
+            "radix_soundness_alias": value_at_slot,
+        }
+        assert eval_ixs(reconstructed, ctx, env) == value_at_slot
+        assert eval_ixs(alias, ctx, env) == value_at_slot
+        assert eval_ixs(wrong, ctx, env) != value_at_slot
 
 
 def test_range_composite_predicate_fact() -> None:

@@ -1779,6 +1779,22 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   memoization remains query-local. The rule never enumerates a finite value
   domain or scans context-wide state.
 
+  A separate radix equality rule recognizes exactly the constant-free two-term
+  form `m*floor(x/m) + Mod(y,m)` for a shared positive integer literal `m > 1`.
+  The private quotient partitioner extracts `x` and the floor denominator; no
+  public quotient-decomposition API participates. Both `x` and `y` must be
+  total and integer-valued, and the congruence engine must prove
+  `y-x == 0 (mod m)`. The reconstruction then equals `x`; pointer identity
+  accepts the direct operand immediately, while any other representation
+  requires a bounded child proof of its equality with `x`. Unequal, symbolic,
+  or nonpositive divisors, a wrong coefficient or low digit, extra terms,
+  partial or nonintegral operands, unrepresentable intermediate arithmetic,
+  cycles, and child-proof exhaustion cannot establish equality. Allocation
+  failure remains a query failure. Matching is O(1) in the two outer terms and
+  O(Q) in the `Q` direct terms inspected by private quotient partitioning, with
+  no context-wide scan. This is an equality proof and is independent of the
+  bounded radix certificate above, which proves only nonnegativity.
+
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,

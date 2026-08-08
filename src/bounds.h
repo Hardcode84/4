@@ -203,6 +203,8 @@ IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
                                        size_t *cache_hits, size_t *cycle_blocks,
                                        size_t *limit_blocks,
                                        size_t *active_count, size_t *nesting);
+IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
 /* Test hook: re-enter one active interval key and verify clean unwind. */
 IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr);
 /* Test hooks keep private query-cache and residue-walker types out of tests. */

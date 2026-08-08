@@ -18350,6 +18350,128 @@ equivalence_floor_mod_partition(equivalence_state *state, ixs_node *lhs,
   return equivalence_floor_mod_partition_direction(state, rhs, lhs);
 }
 
+/* m*floor(x/m) + Mod(y,m) reconstructs x when x and y are congruent modulo
+ * the positive integer radix m. A bounded child proof permits the direct side
+ * to be any already-established representation of x. */
+typedef struct {
+  ixs_node *numerator;
+  ixs_node *remainder_dividend;
+  int64_t modulus;
+} equivalence_radix_reconstruction_parts;
+
+static bool equivalence_extract_radix_reconstruction(
+    equivalence_state *state, ixs_node *reconstructed,
+    equivalence_radix_reconstruction_parts *parts) {
+  ixs_node *mod = NULL;
+  ixs_node *floor = NULL;
+  ixs_node *denominator;
+  ixs_quotient_parts_status quotient_status;
+  int64_t floor_coefficient = 0;
+  uint32_t i;
+
+  if (!reconstructed || reconstructed->tag != IXS_ADD ||
+      reconstructed->u.add.nterms != 2u ||
+      !ixs_node_is_zero(reconstructed->u.add.coeff))
+    return false;
+  for (i = 0; i < reconstructed->u.add.nterms; i++) {
+    ixs_node *term = reconstructed->u.add.terms[i].term;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(reconstructed->u.add.terms[i].coeff, &p, &q);
+    if (q != 1)
+      return false;
+    if (term->tag == IXS_MOD && p == 1 && !mod) {
+      mod = term;
+    } else if (term->tag == IXS_FLOOR && !floor) {
+      floor = term;
+      floor_coefficient = p;
+    } else {
+      return false;
+    }
+  }
+  if (!mod || !floor || mod->u.binary.rhs->tag != IXS_INT ||
+      mod->u.binary.rhs->u.ival <= 1)
+    return false;
+  parts->modulus = mod->u.binary.rhs->u.ival;
+  if (floor_coefficient != parts->modulus)
+    return false;
+  quotient_status = simp_exact_quotient_parts(state->ctx, floor->u.unary.arg,
+                                              &parts->numerator, &denominator);
+  if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
+    state->oom = true;
+    return false;
+  }
+  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
+      denominator != mod->u.binary.rhs)
+    return false;
+  parts->remainder_dividend = mod->u.binary.lhs;
+  return true;
+}
+
+static bool equivalence_radix_reconstruction_domain(
+    equivalence_state *state,
+    const equivalence_radix_reconstruction_parts *parts) {
+  bool numerator_oom = false;
+  bool remainder_oom = false;
+  bool numerator_limited = false;
+  bool remainder_limited = false;
+
+  if (bounds_check_defined_detail(state->bounds, parts->numerator,
+                                  &numerator_oom,
+                                  &numerator_limited) != IXS_CHECK_TRUE ||
+      bounds_check_defined_detail(state->bounds, parts->remainder_dividend,
+                                  &remainder_oom,
+                                  &remainder_limited) != IXS_CHECK_TRUE) {
+    state->oom =
+        state->oom || numerator_oom || remainder_oom || state->bounds->oom;
+    state->limited = state->limited || numerator_limited || remainder_limited;
+    return false;
+  }
+  if (ixs_bounds_check_integer_valued(state->bounds, parts->numerator) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(
+          state->bounds, parts->remainder_dividend) != IXS_CHECK_TRUE) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  return true;
+}
+
+static ixs_check_result
+equivalence_radix_reconstruction_direction(equivalence_state *state,
+                                           ixs_node *reconstructed,
+                                           ixs_node *direct, unsigned depth) {
+  equivalence_radix_reconstruction_parts parts;
+  ixs_node *difference;
+
+  if (!equivalence_extract_radix_reconstruction(state, reconstructed, &parts) ||
+      !equivalence_radix_reconstruction_domain(state, &parts) ||
+      equivalence_build_sub(state, parts.remainder_dividend, parts.numerator,
+                            &difference) != EQUIVALENCE_BUILD_OK ||
+      ixs_node_is_sentinel(difference) ||
+      ixs_bounds_check_congruent(state->bounds, difference, parts.modulus, 0) !=
+          IXS_CHECK_TRUE) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (direct == parts.numerator)
+    return IXS_CHECK_TRUE;
+  return equivalence_bounded_core(state, parts.numerator, direct, depth + 1u);
+}
+
+static ixs_check_result
+equivalence_radix_reconstruction(equivalence_state *state, ixs_node *lhs,
+                                 ixs_node *rhs, unsigned depth) {
+  ixs_check_result result =
+      equivalence_radix_reconstruction_direction(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+      state->oom)
+    return result;
+  return equivalence_radix_reconstruction_direction(state, rhs, lhs, depth);
+}
+
 static ixs_check_result equivalence_expanded(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
@@ -18973,6 +19095,27 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   return result;
 }
 
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+/* Start an otherwise ordinary equivalence query with the bounded child-proof
+ * budget exhausted. This exercises the production stop condition without a
+ * test-only branch in the proof rules. */
+IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
+  equivalence_state state;
+  ixs_check_result result;
+
+  if (!facts || !facts->usable || !lhs || !rhs)
+    return IXS_CHECK_UNKNOWN;
+  equivalence_state_init(&state, facts->ctx, &facts->bounds);
+  state.bounded_subproof_depth = EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH;
+  result = equivalence_core(&state, lhs, rhs, 0);
+  if (state.limited || state.invalid || state.oom)
+    result = IXS_CHECK_UNKNOWN;
+  equivalence_state_destroy(&state);
+  return result;
+}
+#endif
+
 static ixs_check_result equivalence_predicate_truth(equivalence_state *state,
                                                     ixs_node *lhs,
                                                     ixs_node *rhs) {
@@ -19058,6 +19201,11 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
 
   result =
       equivalence_floor_mod_partition(state, simplified_lhs, simplified_rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+
+  result = equivalence_radix_reconstruction(state, simplified_lhs,
+                                            simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
 

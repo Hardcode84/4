@@ -3142,6 +3142,194 @@ static void test_public_grouped_add_wave_identity(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static ixs_node *make_radix_reconstruction(ixs_ctx *ctx, ixs_node *numerator,
+                                           ixs_node *remainder_dividend,
+                                           int64_t radix) {
+  ixs_node *radix_node = ixs_int(ctx, radix);
+  ixs_node *quotient = ixs_floor(ctx, ixs_div(ctx, numerator, radix_node));
+  ixs_node *high = ixs_mul(ctx, radix_node, quotient);
+  ixs_node *low = ixs_mod(ctx, remainder_dividend, radix_node);
+  return ixs_add(ctx, high, low);
+}
+
+static void test_public_congruent_radix_reconstruction(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *oom_ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "radix_reconstruction_x");
+  ixs_node *y = ixs_sym(ctx, "radix_reconstruction_y");
+  ixs_node *alias = ixs_sym(ctx, "radix_reconstruction_alias");
+  ixs_node *dynamic = ixs_sym(ctx, "radix_reconstruction_dynamic");
+  ixs_node *partial_divisor =
+      ixs_sym(ctx, "radix_reconstruction_partial_divisor");
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *x_residue =
+      ixs_cmp(ctx, ixs_mod(ctx, x, eight), IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *y_residue =
+      ixs_cmp(ctx, ixs_mod(ctx, y, eight), IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *alias_relation = ixs_cmp(ctx, alias, IXS_CMP_EQ, x);
+  ixs_node *dynamic_positive =
+      ixs_cmp(ctx, dynamic, IXS_CMP_GE, ixs_int(ctx, 2));
+  ixs_node *reconstructed = make_radix_reconstruction(ctx, x, y, 8);
+  ixs_node *equality = ixs_cmp(ctx, reconstructed, IXS_CMP_EQ, x);
+  ixs_node *assumptions[4] = {x_residue, y_residue, alias_relation,
+                              dynamic_positive};
+  ixs_node *wrong_low =
+      make_radix_reconstruction(ctx, x, ixs_add(ctx, y, ixs_int(ctx, 1)), 8);
+  ixs_node *unequal_denominator =
+      ixs_add(ctx, ixs_mul(ctx, eight, ixs_floor(ctx, ixs_div(ctx, x, eight))),
+              ixs_mod(ctx, y, ixs_int(ctx, 5)));
+  ixs_node *symbolic_denominator =
+      ixs_add(ctx, ixs_mul(ctx, eight, ixs_floor(ctx, ixs_div(ctx, x, eight))),
+              ixs_mod(ctx, y, dynamic));
+  ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *noninteger_numerator = make_radix_reconstruction(ctx, half, y, 8);
+  ixs_node *noninteger_remainder =
+      make_radix_reconstruction(ctx, x, ixs_div(ctx, y, ixs_int(ctx, 2)), 8);
+  ixs_node *partial = ixs_floor(ctx, ixs_div(ctx, x, partial_divisor));
+  ixs_node *partial_reconstruction =
+      make_radix_reconstruction(ctx, partial, y, 8);
+  ixs_node *radix_one = make_radix_reconstruction(ctx, half, y, 1);
+  ixs_node *malformed =
+      ixs_add(ctx, ixs_mul(ctx, eight, ixs_ceil(ctx, ixs_div(ctx, x, eight))),
+              ixs_mod(ctx, y, eight));
+  ixs_node *extra = ixs_add(ctx, reconstructed, ixs_int(ctx, 1));
+  ixs_node *wrong_coefficient = ixs_add(
+      ctx,
+      ixs_mul(ctx, ixs_int(ctx, 7), ixs_floor(ctx, ixs_div(ctx, x, eight))),
+      ixs_mod(ctx, y, eight));
+  ixs_node *wrong_shape =
+      ixs_add(ctx, ixs_mul(ctx, eight, x), ixs_mod(ctx, y, eight));
+  ixs_node *overflow_numerator = ixs_sub(ctx, x, ixs_int(ctx, 2));
+  ixs_node *overflow_remainder = ixs_add(ctx, x, ixs_int(ctx, INT64_MAX));
+  ixs_node *overflow =
+      make_radix_reconstruction(ctx, overflow_numerator, overflow_remainder, 2);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *mismatch = ixs_facts_create(ctx);
+  ixs_facts *cycle = ixs_facts_create(ctx);
+  ixs_node *cycle_a = ixs_sym(ctx, "radix_reconstruction_cycle_a");
+  ixs_node *cycle_b = ixs_sym(ctx, "radix_reconstruction_cycle_b");
+  ixs_node *ox = ixs_sym(oom_ctx, "radix_reconstruction_oom_x");
+  ixs_node *oy = ixs_sym(oom_ctx, "radix_reconstruction_oom_y");
+  ixs_node *oom_reconstructed = make_radix_reconstruction(oom_ctx, ox, oy, 8);
+  ixs_facts *oom_facts = ixs_facts_create(oom_ctx);
+  ixs_node *slot = ixs_sym(ctx, "bounded_radix_slot");
+  ixs_node *slot_half = ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 2)));
+  ixs_node *t = ixs_mod(ctx,
+                        ixs_add(ctx, ixs_mod(ctx, slot, ixs_int(ctx, 2)),
+                                ixs_mod(ctx, slot_half, ixs_int(ctx, 2))),
+                        ixs_int(ctx, 3));
+  ixs_node *t_half = ixs_floor(ctx, ixs_div(ctx, t, ixs_int(ctx, 2)));
+  ixs_node *high = ixs_mod(ctx, t_half, ixs_int(ctx, 2));
+  ixs_node *low = ixs_mod(ctx, t, ixs_int(ctx, 2));
+  ixs_node *witness_reconstructed =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), high), low);
+  ixs_node *wrapped = ixs_mod(ctx, witness_reconstructed, ixs_int(ctx, 3));
+  ixs_node *bad_low =
+      ixs_mod(ctx, ixs_add(ctx, t, ixs_int(ctx, 1)), ixs_int(ctx, 2));
+  ixs_node *bad_witness =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), t_half), bad_low);
+  ixs_node *witness_alias = ixs_sym(ctx, "bounded_radix_alias");
+  ixs_facts *witness_facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && oom_ctx && x && y && alias && dynamic && partial_divisor &&
+        eight && x_residue && y_residue && alias_relation && dynamic_positive &&
+        reconstructed && equality && wrong_low && unequal_denominator &&
+        symbolic_denominator && half && noninteger_numerator &&
+        noninteger_remainder && partial && partial_reconstruction &&
+        radix_one && malformed && extra && wrong_coefficient && wrong_shape &&
+        overflow_numerator && overflow_remainder && overflow && facts &&
+        mismatch && cycle && cycle_a && cycle_b && ox && oy &&
+        oom_reconstructed && oom_facts && slot && slot_half && t && t_half &&
+        high && low && witness_reconstructed && wrapped && bad_low &&
+        bad_witness && witness_alias && witness_facts);
+  CHECK(ixs_facts_assume_preds(facts, assumptions, 4));
+  CHECK(test_ixs_equivalent_facts(facts, reconstructed, x) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, equality) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, equality, assumptions, 4) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, x, alias) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(witness_facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(witness_facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_LE, ixs_int(ctx, 3))));
+  CHECK(ixs_facts_assume_pred(witness_facts,
+                              ixs_cmp(ctx, witness_alias, IXS_CMP_EQ, t)));
+  CHECK(test_ixs_equivalent_facts(witness_facts, t, witness_alias) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(witness_facts, high, t_half) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(witness_facts, witness_reconstructed, t) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(witness_facts, witness_reconstructed,
+                                  witness_alias) == IXS_CHECK_TRUE);
+  CHECK(ixs_bounds_equivalence_subproof_limit_probe(
+            witness_facts, witness_reconstructed, witness_alias) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(witness_facts, ixs_cmp(ctx, wrapped, IXS_CMP_EQ,
+                                                    t)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(witness_facts, bad_witness, t) !=
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(mismatch, ixs_cmp(ctx, ixs_mod(ctx, x, eight),
+                                                IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(mismatch, ixs_cmp(ctx, ixs_mod(ctx, y, eight),
+                                                IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(test_ixs_equivalent_facts(mismatch, reconstructed, x) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, wrong_low, x) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, unequal_denominator, x) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, symbolic_denominator, x) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, noninteger_numerator, half) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, noninteger_remainder, x) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, partial_reconstruction, partial) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, radix_one, half) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, malformed, x) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, extra, x) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, wrong_coefficient, x) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, wrong_shape, x) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, overflow, overflow_numerator) !=
+        IXS_CHECK_TRUE);
+
+  CHECK(
+      ixs_facts_assume_pred(cycle, ixs_cmp(ctx, ixs_sub(ctx, cycle_a, cycle_b),
+                                           IXS_CMP_LE, ixs_int(ctx, -1))));
+  CHECK(
+      ixs_facts_assume_pred(cycle, ixs_cmp(ctx, ixs_sub(ctx, cycle_b, cycle_a),
+                                           IXS_CMP_LE, ixs_int(ctx, 0))));
+  CHECK(cycle->bounds.contradiction);
+  CHECK(test_ixs_equivalent_facts(cycle, reconstructed, x) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      oom_facts, ixs_cmp(oom_ctx, ixs_mod(oom_ctx, ox, ixs_int(oom_ctx, 8)),
+                         IXS_CMP_EQ, ixs_int(oom_ctx, 3))));
+  CHECK(ixs_facts_assume_pred(
+      oom_facts, ixs_cmp(oom_ctx, ixs_mod(oom_ctx, oy, ixs_int(oom_ctx, 8)),
+                         IXS_CMP_EQ, ixs_int(oom_ctx, 3))));
+  ixs_arena_set_fail_after(&oom_ctx->arena, 0);
+  CHECK(test_ixs_equivalent_facts(oom_facts, oom_reconstructed, ox) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(&oom_ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_equivalent_facts(oom_facts, oom_reconstructed, ox) ==
+        IXS_CHECK_TRUE);
+  ixs_arena_set_fail_after(ixs_test_scratch(oom_ctx), 0);
+  CHECK(test_ixs_equivalent_facts(oom_facts, oom_reconstructed, ox) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(oom_ctx),
+                           IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_equivalent_facts(oom_facts, oom_reconstructed, ox) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(oom_ctx);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_congruence_alignment_overflow(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "congruence_overflow_x");
@@ -10649,6 +10837,7 @@ int main(void) {
   test_public_range_congruence_tightens_endpoints();
   test_public_range_grouped_mod_congruence();
   test_public_grouped_add_wave_identity();
+  test_public_congruent_radix_reconstruction();
   test_public_range_congruence_alignment_overflow();
   test_public_range_difference_constraint_propagation();
   test_public_modular_projection_difference();
