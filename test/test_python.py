@@ -2612,6 +2612,45 @@ def test_total_equivalence_discrete_cut_and_mod_shift_property(
     assert result is (True if 0 <= residue + shift < modulus else None)
 
 
+@given(
+    modulus=st.integers(min_value=2, max_value=16),
+    x_seed=st.integers(min_value=0, max_value=255),
+    y_seed=st.integers(min_value=0, max_value=255),
+    scale_p=st.sampled_from((-4, -3, -2, -1, 1, 2, 3, 4)),
+    scale_q=st.integers(min_value=1, max_value=4),
+)
+def test_compositional_mod_shift_equivalence_soundness(
+    modulus: int,
+    x_seed: int,
+    y_seed: int,
+    scale_p: int,
+    scale_q: int,
+) -> None:
+    """Composed symbolic Mod proofs agree with their bounded integer domain."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("composed_mod_x")
+    y = ctx.sym("composed_mod_y")
+    x_hi = x_seed % modulus
+    y_hi = y_seed % (modulus - x_hi)
+    facts = ctx.facts()
+    facts.assume_many([x >= 0, x <= x_hi, y >= 0, y <= y_hi])
+    wrapped = (x + y) % modulus
+    partitioned = x % modulus + y
+
+    assert ctx.equivalent(wrapped, partitioned, facts) is True
+    scale = ctx.rat(scale_p, scale_q)
+    assert ctx.equivalent(scale * wrapped, scale * partitioned, facts) is True
+
+    for x_value in range(x_hi + 1):
+        for y_value in range(y_hi + 1):
+            env = {"composed_mod_x": x_value, "composed_mod_y": y_value}
+            assert eval_ixs(wrapped, ctx, env) == eval_ixs(partitioned, ctx, env)
+
+    wrapping = ctx.facts()
+    wrapping.assume_many([ctx.eq(x, modulus - 1), ctx.eq(y, 1)])
+    assert ctx.equivalent(wrapped, partitioned, wrapping) is not True
+
+
 def test_truncating_remainder_equivalence_projection() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
@@ -3665,6 +3704,58 @@ def test_grouped_mod_congruence_range() -> None:
     assert ctx.range((x / 2) % 64 - (x / 2) % 16, facts=facts) is None
     nontotal = ixsimpl.floor(x + 1 / y)
     assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
+
+
+def test_compositional_mod_wave_identity() -> None:
+    ctx = ixsimpl.Context()
+    item = ctx.sym("item")
+    assumptions = [item >= 0, item <= 255]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    shifted = ctx.parse_expr("Mod(item + floor(Mod(item,16)/4) - Mod(Mod(item,64),16),64)")
+    projected = ctx.parse_expr("16*floor(Mod(item,64)/16) + floor(Mod(Mod(item,64),16)/4)")
+    expression = ctx.parse_expr(
+        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+        "2048*floor(Mod(item,64)/16) - "
+        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+        "128*Mod(item + floor(Mod(item,16)/4) - "
+        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
+    )
+    wrong_expression = ctx.parse_expr(
+        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+        "2048*floor(Mod(item,64)/16) - "
+        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+        "127*Mod(item + floor(Mod(item,16)/4) - "
+        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
+    )
+    equality = ctx.eq(shifted, projected)
+    zero = ctx.int_(0)
+
+    assert ctx.equivalent(shifted, projected, facts) is True
+    assert ctx.check(equality, facts=facts) is True
+    assert ctx.check(equality, assumptions=assumptions) is True
+    assert ctx.equivalent(shifted, projected + 1, facts) is not True
+
+    scale = ctx.rat(3, 2)
+    assert ctx.equivalent(scale * shifted, scale * projected, facts) is True
+    assert ctx.equivalent(scale * shifted, scale * projected + ctx.rat(1, 2), facts) is not True
+
+    expression_equality = ctx.eq(expression, zero)
+    assert ctx.check(expression_equality, facts=facts) is True
+    assert ctx.check(expression_equality, assumptions=assumptions) is True
+    assert ctx.equivalent(expression, zero, facts) is True
+    assert ctx.check(ctx.eq(wrong_expression, zero), facts=facts) is not True
+
+    wrap = (item + 1) % 64
+    unwrapped = item % 64 + 1
+    half = item / 2
+    partial_divisor = ctx.sym("wave_partial_d")
+    partial = ixsimpl.floor(item + 1 / partial_divisor) % 64
+    assert ctx.equivalent(wrap, unwrapped, facts) is not True
+    assert ctx.equivalent(half % 64, ixsimpl.floor(half), facts) is not True
+    assert ctx.equivalent(partial, zero, facts) is not True
 
 
 def test_range_composite_predicate_fact() -> None:

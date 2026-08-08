@@ -1753,6 +1753,32 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
   `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
 
+  More generally, `Mod(A,D)` equals an integer expression `B` only after a
+  bounded child proof establishes `A == B` and the range engine establishes
+  `0 <= B < D`. For an exact `A+s` partition of an `ADD` dividend, the engine
+  may instead construct `Mod(A,D)+s`, prove that result cannot wrap, and pass
+  its equality with the other operand to the same bounded proof engine. A
+  normalized linear residual `c*Mod(A,D)+r` may isolate the remainder as
+  `-r/c` for any nonzero rational `c`; the constructed candidate and the Mod
+  must both be total. Arbitrary `c` requires that this be the residual's only
+  Mod term; a residual with other scaled Mod terms retains the narrower rule
+  that isolates one unique coefficient `1` or `-1`. The representative and
+  isolation rules accept only a `TRUE` child proof, and any representative
+  reached by that child still requires the canonical remainder range. An exact
+  no-wrap partition may also propagate a conclusive `FALSE` for its candidate
+  against the other operand. A composition attempt blocked by a cycle, four
+  nested child proofs, invalid arithmetic, or incomplete integrality,
+  positivity, definedness, or range evidence returns `UNKNOWN`; that failed
+  sufficient rule does not suppress an independent exact strategy. Allocation
+  failure remains a query failure.
+
+  Shift partitioning examines only the queried dividend's direct `ADD` terms.
+  With `T` terms it launches at most `T` bounded child proofs and rebuilds one
+  residual per unit-coefficient candidate, for O(T^2) worst-case construction
+  work and interned residual storage when those canonical nodes are new. Proof
+  memoization remains query-local. The rule never enumerates a finite value
+  domain or scans context-wide state.
+
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,

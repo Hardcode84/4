@@ -3023,6 +3023,125 @@ static void test_public_range_grouped_mod_congruence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_grouped_add_wave_identity(void) {
+  static const char shifted_text[] = "Mod(item + floor(Mod(item,16)/4) - "
+                                     "Mod(Mod(item,64),16),64)";
+  static const char projected_text[] = "16*floor(Mod(item,64)/16) + "
+                                       "floor(Mod(Mod(item,64),16)/4)";
+  static const char expression_text[] =
+      "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+      "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+      "2048*floor(Mod(item,64)/16) - "
+      "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+      "128*Mod(item + floor(Mod(item,16)/4) - "
+      "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)";
+  static const char invalid_text[] =
+      "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+      "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+      "2048*floor(Mod(item,64)/16) - "
+      "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+      "127*Mod(item + floor(Mod(item,16)/4) - "
+      "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)";
+  static const char domain_text[] = "item >= 0 & item <= 255";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_ctx *alloc_ctx = ixs_ctx_create();
+  ixs_node *shifted =
+      ixs_parse_expr(ctx, shifted_text, sizeof(shifted_text) - 1u);
+  ixs_node *projected =
+      ixs_parse_expr(ctx, projected_text, sizeof(projected_text) - 1u);
+  ixs_node *wrong_projected = ixs_add(ctx, projected, ixs_int(ctx, 1));
+  ixs_node *rational = ixs_rat(ctx, 3, 2);
+  ixs_node *scaled_shifted = ixs_mul(ctx, rational, shifted);
+  ixs_node *scaled_projected = ixs_mul(ctx, rational, projected);
+  ixs_node *wrong_scaled_projected =
+      ixs_add(ctx, scaled_projected, ixs_rat(ctx, 1, 2));
+  ixs_node *extreme_scaled = ixs_mul(ctx, ixs_int(ctx, INT64_MAX), shifted);
+  ixs_node *wrong_extreme_scaled = ixs_add(
+      ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MAX), projected), ixs_int(ctx, 1));
+  ixs_node *expression =
+      ixs_parse_expr(ctx, expression_text, sizeof(expression_text) - 1u);
+  ixs_node *invalid =
+      ixs_parse_expr(ctx, invalid_text, sizeof(invalid_text) - 1u);
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, sizeof(domain_text) - 1u);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *item = ixs_sym(ctx, "item");
+  ixs_node *half = ixs_div(ctx, item, ixs_int(ctx, 2));
+  ixs_node *noninteger = ixs_mod(ctx, half, ixs_int(ctx, 64));
+  ixs_node *rounded_half = ixs_floor(ctx, half);
+  ixs_node *wrap =
+      ixs_mod(ctx, ixs_add(ctx, item, ixs_int(ctx, 1)), ixs_int(ctx, 64));
+  ixs_node *unwrapped =
+      ixs_add(ctx, ixs_mod(ctx, item, ixs_int(ctx, 64)), ixs_int(ctx, 1));
+  ixs_node *partial =
+      ixs_mod(ctx,
+              ixs_floor(ctx, ixs_add(ctx, item,
+                                     ixs_div(ctx, ixs_int(ctx, 1),
+                                             ixs_sym(ctx, "wave_partial_d")))),
+              ixs_int(ctx, 64));
+  ixs_node *shifted_eq = ixs_cmp(ctx, shifted, IXS_CMP_EQ, projected);
+  ixs_node *expression_eq = ixs_cmp(ctx, expression, IXS_CMP_EQ, zero);
+  ixs_node *alloc_expression =
+      ixs_parse_expr(alloc_ctx, expression_text, sizeof(expression_text) - 1u);
+  ixs_node *alloc_domain =
+      ixs_parse_pred(alloc_ctx, domain_text, sizeof(domain_text) - 1u);
+  ixs_node *alloc_zero = ixs_int(alloc_ctx, 0);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *oom_facts = ixs_facts_create(ctx);
+  ixs_facts *alloc_facts = ixs_facts_create(alloc_ctx);
+
+  CHECK(ctx && alloc_ctx && shifted && projected && wrong_projected &&
+        rational && scaled_shifted && scaled_projected &&
+        wrong_scaled_projected && extreme_scaled && wrong_extreme_scaled &&
+        expression && invalid && domain && zero && item && half && noninteger &&
+        rounded_half && wrap && unwrapped && partial && shifted_eq &&
+        expression_eq && alloc_expression && alloc_domain && alloc_zero &&
+        facts && oom_facts && alloc_facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(ixs_facts_assume_pred(oom_facts, domain));
+  CHECK(ixs_facts_assume_pred(alloc_facts, alloc_domain));
+
+  CHECK(test_ixs_equivalent_facts(facts, shifted, projected) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, shifted_eq) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, shifted_eq, &domain, 1) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, shifted, wrong_projected) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, scaled_shifted, scaled_projected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, scaled_shifted,
+                                  wrong_scaled_projected) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, extreme_scaled,
+                                  wrong_extreme_scaled) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, expression_eq) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, expression_eq, &domain, 1) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, expression, zero) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, invalid, IXS_CMP_EQ, zero)) !=
+        IXS_CHECK_TRUE);
+
+  /* Composition must not erase wrapping, partiality, or rational values. */
+  CHECK(test_ixs_equivalent_facts(facts, wrap, unwrapped) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, noninteger, rounded_half) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, partial, zero) != IXS_CHECK_TRUE);
+
+  /* Query-local allocation failure remains UNKNOWN and is retryable. */
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(test_ixs_equivalent_facts(oom_facts, shifted, projected) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_equivalent_facts(oom_facts, shifted, projected) ==
+        IXS_CHECK_TRUE);
+
+  ixs_arena_set_fail_after(&alloc_ctx->arena, 0);
+  CHECK(test_ixs_equivalent_facts(alloc_facts, alloc_expression, alloc_zero) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(&alloc_ctx->arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_equivalent_facts(alloc_facts, alloc_expression, alloc_zero) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(alloc_ctx);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_congruence_alignment_overflow(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "congruence_overflow_x");
@@ -10529,6 +10648,7 @@ int main(void) {
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
   test_public_range_grouped_mod_congruence();
+  test_public_grouped_add_wave_identity();
   test_public_range_congruence_alignment_overflow();
   test_public_range_difference_constraint_propagation();
   test_public_modular_projection_difference();
