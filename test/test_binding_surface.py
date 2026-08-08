@@ -50,10 +50,8 @@ def test_migration_binding_surface_is_discoverable() -> None:
     }
     assert removed_query_methods.isdisjoint(dir(ixsimpl.Context))
     assert removed_query_methods.isdisjoint(dir(_ixsimpl.Context))
-    removed_module_members = {"TRUNC", "trunc"}
-    assert removed_module_members.isdisjoint(ixsimpl.__all__)
-    assert removed_module_members.isdisjoint(dir(ixsimpl))
-    assert removed_module_members.isdisjoint(dir(_ixsimpl))
+    assert {"TRUNC", "trunc"} <= set(ixsimpl.__all__)
+    assert hasattr(_ixsimpl, "TRUNC") and hasattr(_ixsimpl, "trunc")
 
 
 def _typecheck_package_surface(

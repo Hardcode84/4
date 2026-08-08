@@ -2737,6 +2737,177 @@ static void test_public_range_congruence_tightens_endpoints(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_grouped_mod_congruence(void) {
+  static const char domain_text[] = "x >= 0 & x <= 255";
+  static const char separate_domain_text[] =
+      "x >= 0 & x <= 255 & y >= 0 & y <= 255";
+  static const char aligned_domain_text[] =
+      "x >= 0 & x <= 255 & Mod(x, 8) == 3";
+  static const char positive_text[] = "Mod(x, 64) - Mod(x, 16)";
+  static const char negative_text[] = "Mod(x, 16) - Mod(x, 64)";
+  static const char aligned_text[] = "Mod(x, 64) + Mod(x, 16)";
+  static const char nested_text[] =
+      "Mod(x, 64) - Mod(x, 16) + 16*Mod(Mod(x, 128), 32)";
+  static const char separate_text[] = "Mod(x, 64) - Mod(y, 16)";
+  static const char noninteger_text[] = "Mod(x/2, 64) - Mod(x/2, 16)";
+  static const char nontotal_text[] =
+      "Mod(floor(x + 1/y), 64) - Mod(floor(x + 1/y), 16)";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, sizeof(domain_text) - 1u);
+  ixs_node *separate_domain = ixs_parse_pred(ctx, separate_domain_text,
+                                             sizeof(separate_domain_text) - 1u);
+  ixs_node *aligned_domain = ixs_parse_pred(ctx, aligned_domain_text,
+                                            sizeof(aligned_domain_text) - 1u);
+  ixs_node *positive =
+      ixs_parse_expr(ctx, positive_text, sizeof(positive_text) - 1u);
+  ixs_node *negative =
+      ixs_parse_expr(ctx, negative_text, sizeof(negative_text) - 1u);
+  ixs_node *aligned =
+      ixs_parse_expr(ctx, aligned_text, sizeof(aligned_text) - 1u);
+  ixs_node *nested = ixs_parse_expr(ctx, nested_text, sizeof(nested_text) - 1u);
+  ixs_node *separate =
+      ixs_parse_expr(ctx, separate_text, sizeof(separate_text) - 1u);
+  ixs_node *noninteger =
+      ixs_parse_expr(ctx, noninteger_text, sizeof(noninteger_text) - 1u);
+  ixs_node *nontotal =
+      ixs_parse_expr(ctx, nontotal_text, sizeof(nontotal_text) - 1u);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *separate_facts = ixs_facts_create(ctx);
+  ixs_facts *aligned_facts = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  CHECK(ctx && domain && separate_domain && aligned_domain && positive &&
+        negative && aligned && nested && separate && noninteger && nontotal &&
+        facts && separate_facts && aligned_facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(ixs_facts_assume_pred(separate_facts, separate_domain));
+  CHECK(ixs_facts_assume_pred(aligned_facts, aligned_domain));
+
+  CHECK(test_ixs_range_facts(facts, positive, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 48 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, negative, &range));
+  CHECK(range.has_lower && range.lower_p == -48 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, aligned, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 78 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(aligned_facts, aligned, &range));
+  CHECK(range.has_lower && range.lower_p == 6 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 70 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, nested, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 544 && range.upper_q == 1);
+
+  /* Equal-shaped Mod terms with distinct representatives remain independent. */
+  CHECK(test_ixs_range_facts(separate_facts, separate, &range));
+  CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 63 && range.upper_q == 1);
+
+  /* Congruence grouping requires a total integer representative. */
+  CHECK(!test_ixs_range_facts(facts, noninteger, &range));
+  CHECK(!test_ixs_range_facts(facts, nontotal, &range));
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_grouped_add_wave_identity(void) {
+  static const char shifted_text[] = "Mod(item + floor(Mod(item,16)/4) - "
+                                     "Mod(Mod(item,64),16),64)";
+  static const char projected_text[] = "16*floor(Mod(item,64)/16) + "
+                                       "floor(Mod(Mod(item,64),16)/4)";
+  static const char expression_text[] =
+      "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+      "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+      "2048*floor(Mod(item,64)/16) - "
+      "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+      "128*Mod(item + floor(Mod(item,16)/4) - "
+      "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)";
+  static const char invalid_text[] =
+      "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+      "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+      "2048*floor(Mod(item,64)/16) - "
+      "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+      "127*Mod(item + floor(Mod(item,16)/4) - "
+      "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)";
+  static const char domain_text[] = "item >= 0 & item <= 255";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *shifted =
+      ixs_parse_expr(ctx, shifted_text, sizeof(shifted_text) - 1u);
+  ixs_node *projected =
+      ixs_parse_expr(ctx, projected_text, sizeof(projected_text) - 1u);
+  ixs_node *wrong_projected = ixs_add(ctx, projected, ixs_int(ctx, 1));
+  ixs_node *rational = ixs_rat(ctx, 3, 2);
+  ixs_node *scaled_shifted = ixs_mul(ctx, rational, shifted);
+  ixs_node *scaled_projected = ixs_mul(ctx, rational, projected);
+  ixs_node *wrong_scaled_projected =
+      ixs_add(ctx, scaled_projected, ixs_rat(ctx, 1, 2));
+  ixs_node *expression =
+      ixs_parse_expr(ctx, expression_text, sizeof(expression_text) - 1u);
+  ixs_node *invalid =
+      ixs_parse_expr(ctx, invalid_text, sizeof(invalid_text) - 1u);
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, sizeof(domain_text) - 1u);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && shifted && projected && wrong_projected && rational &&
+        scaled_shifted && scaled_projected && wrong_scaled_projected &&
+        expression && invalid && domain && zero && facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(test_ixs_equivalent_facts(facts, shifted, projected) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, shifted, wrong_projected) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, scaled_shifted, scaled_projected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, scaled_shifted,
+                                  wrong_scaled_projected) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, expression, IXS_CMP_EQ,
+                                            zero)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, expression, zero) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, invalid, IXS_CMP_EQ, zero)) !=
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_bounded_radix_reconstruction(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *slot = ixs_sym(ctx, "bounded_radix_slot");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *three = ixs_int(ctx, 3);
+  ixs_node *slot_half = ixs_floor(ctx, ixs_div(ctx, slot, two));
+  ixs_node *t = ixs_mod(
+      ctx, ixs_add(ctx, ixs_mod(ctx, slot, two), ixs_mod(ctx, slot_half, two)),
+      three);
+  ixs_node *t_half = ixs_floor(ctx, ixs_div(ctx, t, two));
+  ixs_node *high = ixs_mod(ctx, t_half, two);
+  ixs_node *low = ixs_mod(ctx, t, two);
+  ixs_node *reconstructed = ixs_add(ctx, ixs_mul(ctx, two, high), low);
+  ixs_node *canonical = ixs_add(ctx, ixs_mul(ctx, two, t_half), low);
+  ixs_node *wrapped = ixs_mod(ctx, reconstructed, three);
+  ixs_node *bad_low = ixs_mod(ctx, ixs_add(ctx, t, ixs_int(ctx, 1)), two);
+  ixs_node *bad_reconstruction =
+      ixs_add(ctx, ixs_mul(ctx, two, t_half), bad_low);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && slot && two && three && slot_half && t && t_half && high &&
+        low && reconstructed && canonical && wrapped && bad_low &&
+        bad_reconstruction && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, slot, IXS_CMP_LE, ixs_int(ctx, 3))));
+  CHECK(test_ixs_equivalent_facts(facts, high, t_half) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, t, canonical) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, reconstructed, t) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, wrapped, IXS_CMP_EQ, t)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, bad_reconstruction, t) !=
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_congruence_alignment_overflow(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "congruence_overflow_x");
@@ -9505,6 +9676,9 @@ int main(void) {
   test_public_range_mod_nonnegative_dividend_cap();
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
+  test_public_range_grouped_mod_congruence();
+  test_public_grouped_add_wave_identity();
+  test_public_bounded_radix_reconstruction();
   test_public_range_congruence_alignment_overflow();
   test_public_range_difference_constraint_propagation();
   test_public_modular_projection_difference();

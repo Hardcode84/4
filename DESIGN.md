@@ -1584,7 +1584,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   constraint solver: if propagation cannot derive an interval, the query
   reports unknown; if independent intervals lose correlations, the returned
   interval is conservative rather than the mathematical image of the full
-  assumption set.
+  assumption set. Integer-coefficient `Mod` chains in an `ADD` are grouped by
+  their shared dividend; the subgroup interval is intersected with its proven
+  congruence before independent groups are summed. Non-integer, partial, and
+  distinct-dividend terms remain independent.
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer
@@ -1650,6 +1653,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   interval. The congruence proof requires a known `A == r (mod m)`, `m > 1`,
   `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
   `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
+  More generally, `Mod(A,D)` equals any integer expression `B` proven
+  equivalent to `A` and bounded by `0 <= B < D`. Radix reconstruction uses
+  the same bounded composition: `m*floor(x/m) + Mod(y,m) == x` follows from a
+  positive literal `m` and a proof that `x == y (mod m)`.
 
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove

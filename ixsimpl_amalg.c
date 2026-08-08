@@ -9023,16 +9023,172 @@ static bool bounds_add_has_nonnegative_radix_certificate(ixs_bounds *b,
   return true;
 }
 
+typedef struct {
+  ixs_node *representative;
+  ixs_interval interval;
+  uint64_t modulus;
+  uint64_t coefficient;
+  uint32_t count;
+} bounds_add_residue_group;
+
+/* A chain of positive literal Mods preserves its dividend modulo the gcd of
+ * those literals.  Structural domain proofs keep this interval query from
+ * recursively asking for ranges while it is already aggregating an ADD. */
+static bool bounds_add_mod_chain(ixs_node *term, ixs_node **representative,
+                                 uint64_t *modulus) {
+  uint64_t result = 0;
+
+  while (term->tag == IXS_MOD && term->u.binary.rhs->tag == IXS_INT &&
+         term->u.binary.rhs->u.ival > 0) {
+    uint64_t divisor = (uint64_t)term->u.binary.rhs->u.ival;
+    ixs_node *dividend = term->u.binary.lhs;
+    if (!ixs_node_is_integer_valued(dividend) ||
+        !ixs_node_is_known_total(dividend))
+      return false;
+    result = result == 0 ? divisor : bounds_u64_gcd(result, divisor);
+    term = dividend;
+  }
+  if (result <= 1u)
+    return false;
+  *representative = term;
+  *modulus = result;
+  return true;
+}
+
+/* Direct Mod chains with one representative form congruent sub-sums.  Build
+ * each independent sub-sum once, then intersect it with the residue already
+ * understood by the generic residue engine.  Scratch hashing makes this
+ * expected O(n) in the number of ADD terms. */
+static bool bounds_get_add_residue_groups(ixs_bounds *b, ixs_node *expr,
+                                          size_t candidate_count,
+                                          ixs_interval *out) {
+  ixs_arena_mark mark;
+  bounds_add_residue_group *groups;
+  size_t needed;
+  size_t capacity = 16u;
+  size_t ngroups = 0;
+  uint32_t i;
+  ixs_interval result;
+
+  if (candidate_count < 2u || candidate_count > SIZE_MAX - candidate_count)
+    return false;
+  needed = candidate_count + candidate_count;
+  while (capacity < needed) {
+    if (capacity > SIZE_MAX / 2u ||
+        capacity * 2u > SIZE_MAX / sizeof(*groups)) {
+      b->oom = true;
+      return false;
+    }
+    capacity *= 2u;
+  }
+
+  mark = ixs_arena_save(b->scratch);
+  groups =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*groups), sizeof(void *));
+  if (!groups) {
+    b->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  memset(groups, 0, capacity * sizeof(*groups));
+  result = ixs_bounds_get(b, expr->u.add.coeff);
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
+    ixs_node *representative;
+    ixs_interval term_interval = ixs_bounds_get(b, term);
+    ixs_interval scaled;
+    uint64_t modulus;
+    int64_t p;
+    int64_t q;
+    size_t group;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    scaled = iv_mul_const(term_interval, p, q);
+    if (q != 1 || !bounds_add_mod_chain(term, &representative, &modulus)) {
+      result = iv_add(result, scaled);
+      continue;
+    }
+
+    group = bounds_residue_group_hash(representative) & (capacity - 1u);
+    while (groups[group].representative &&
+           groups[group].representative != representative)
+      group = (group + 1u) & (capacity - 1u);
+    if (!groups[group].representative) {
+      groups[group].representative = representative;
+      groups[group].interval = scaled;
+      groups[group].modulus = modulus;
+      groups[group].coefficient = bounds_normalize_residue(p, modulus);
+      groups[group].count = 1u;
+      ngroups++;
+      continue;
+    }
+
+    groups[group].interval = iv_add(groups[group].interval, scaled);
+    groups[group].modulus = bounds_u64_gcd(groups[group].modulus, modulus);
+    groups[group].coefficient %= groups[group].modulus;
+    groups[group].coefficient =
+        bounds_add_mod(groups[group].coefficient,
+                       bounds_normalize_residue(p, groups[group].modulus),
+                       groups[group].modulus);
+    groups[group].count++;
+  }
+
+  for (i = 0; i < capacity && ngroups != 0; i++) {
+    bounds_add_residue_group *group = &groups[i];
+    ixs_interval interval;
+    uint64_t reduced;
+    uint64_t representative_residue = 0;
+    uint64_t residue;
+
+    if (!group->representative)
+      continue;
+    ngroups--;
+    interval = group->interval;
+    reduced =
+        group->modulus / bounds_u64_gcd(group->coefficient, group->modulus);
+    if (group->count > 1u &&
+        (reduced == 1u ||
+         bounds_known_residue(b, group->representative, reduced,
+                              &representative_residue))) {
+      residue = bounds_mul_mod(group->coefficient, representative_residue,
+                               group->modulus);
+      interval = interval_intersect_congruence(
+          interval, (int64_t)group->modulus, (int64_t)residue);
+    }
+    result = iv_add(result, interval);
+  }
+
+  if (b->oom) {
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  *out = result;
+  ixs_arena_restore(b->scratch, mark);
+  return true;
+}
+
 static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
+  size_t residue_candidate_count = 0;
   ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
   for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
     int64_t cp, cq;
-    ixs_interval ti = ixs_bounds_get(b, expr->u.add.terms[i].term);
+    ixs_interval ti = ixs_bounds_get(b, term);
     ixs_interval scaled;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
     scaled = iv_mul_const(ti, cp, cq);
     result = iv_add(result, scaled);
+    if (term->tag == IXS_MOD && term->u.binary.rhs->tag == IXS_INT &&
+        term->u.binary.rhs->u.ival > 0)
+      residue_candidate_count++;
+  }
+  if (!b->oom) {
+    ixs_interval grouped;
+    if (bounds_get_add_residue_groups(b, expr, residue_candidate_count,
+                                      &grouped))
+      result = iv_intersect(result, grouped);
   }
   if (!b->oom && b->nexprs != 0)
     result = iv_intersect(result, bounds_get_proportional_range(b, expr));
@@ -16140,27 +16296,36 @@ equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
   return equivalence_ordered_congruence_forms(state, lhs, rhs);
 }
 
-static bool equivalence_extract_mod_sum(ixs_node *expr, ixs_node **dividend,
-                                        ixs_node **denominator,
-                                        int64_t *offset) {
-  ixs_node *mod;
-  int64_t cp, cq, kp, kq;
-  if (expr->tag == IXS_MOD) {
+static bool equivalence_extract_mod_sum(equivalence_state *state,
+                                        ixs_node *expr, ixs_node *denominator,
+                                        ixs_node **dividend, ixs_node **shift) {
+  ixs_node *mod = NULL;
+  uint32_t i;
+
+  if (expr->tag == IXS_MOD && expr->u.binary.rhs == denominator) {
     mod = expr;
-    *offset = 0;
-  } else if (expr->tag == IXS_ADD && expr->u.add.nterms == 1u &&
-             expr->u.add.terms[0].term->tag == IXS_MOD) {
-    ixs_node_get_rat(expr->u.add.terms[0].coeff, &cp, &cq);
-    ixs_node_get_rat(expr->u.add.coeff, &kp, &kq);
-    if (cp != 1 || cq != 1 || kq != 1)
+    *shift = state->ctx->node_zero;
+  } else if (expr->tag == IXS_ADD) {
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      ixs_node *term = expr->u.add.terms[i].term;
+      int64_t p;
+      int64_t q;
+      if (term->tag != IXS_MOD || term->u.binary.rhs != denominator)
+        continue;
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+      if (p != 1 || q != 1 || mod)
+        return false;
+      mod = term;
+    }
+    if (!mod ||
+        equivalence_build_sub(state, expr, mod, shift) != EQUIVALENCE_BUILD_OK)
       return false;
-    mod = expr->u.add.terms[0].term;
-    *offset = kp;
+    if (ixs_node_is_sentinel(*shift))
+      return false;
   } else {
     return false;
   }
   *dividend = mod->u.binary.lhs;
-  *denominator = mod->u.binary.rhs;
   return true;
 }
 
@@ -16210,42 +16375,146 @@ static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
 }
 
 static ixs_check_result
-equivalence_mod_shift_direction(equivalence_state *state, ixs_node *shifted,
-                                ixs_node *sum) {
-  ixs_node *shifted_dividend;
-  ixs_node *shifted_denominator;
+equivalence_mod_shift_structural(equivalence_state *state,
+                                 ixs_node *shifted_dividend,
+                                 ixs_node *shifted_denominator, ixs_node *sum) {
   ixs_node *base_dividend;
-  ixs_node *base_denominator;
-  int64_t sum_offset;
-  int64_t dividend_shift;
-  if (shifted->tag != IXS_MOD ||
-      !equivalence_extract_mod_sum(shifted, &shifted_dividend,
-                                   &shifted_denominator, &dividend_shift) ||
-      dividend_shift != 0 ||
-      !equivalence_extract_mod_sum(sum, &base_dividend, &base_denominator,
-                                   &sum_offset) ||
-      shifted_denominator != base_denominator ||
-      !equivalence_integer_delta(state, shifted_dividend, base_dividend,
-                                 &dividend_shift) ||
-      dividend_shift != sum_offset ||
-      ixs_bounds_check_integer_valued(state->bounds, base_dividend) !=
-          IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(state->bounds, base_denominator) !=
-          IXS_CHECK_TRUE)
-    return IXS_CHECK_UNKNOWN;
-  if (equivalence_mod_sum_in_range(state, sum, base_denominator) ||
-      equivalence_mod_shift_by_congruence(state, base_dividend,
-                                          base_denominator, sum_offset))
-    return IXS_CHECK_TRUE;
+  ixs_node *shift;
+  ixs_node *expected_dividend;
+  int64_t delta;
+  int64_t shift_value;
+  int64_t shift_q;
+
+  if (equivalence_extract_mod_sum(state, sum, shifted_denominator,
+                                  &base_dividend, &shift) &&
+      equivalence_build_add(state, base_dividend, shift, &expected_dividend) ==
+          EQUIVALENCE_BUILD_OK &&
+      !ixs_node_is_sentinel(expected_dividend) &&
+      (shifted_dividend == expected_dividend ||
+       (equivalence_integer_delta(state, shifted_dividend, expected_dividend,
+                                  &delta) &&
+        delta == 0)) &&
+      ixs_bounds_check_integer_valued(state->bounds, base_dividend) ==
+          IXS_CHECK_TRUE &&
+      ixs_bounds_check_integer_valued(state->bounds, shift) == IXS_CHECK_TRUE &&
+      ixs_bounds_check_integer_valued(state->bounds, shifted_denominator) ==
+          IXS_CHECK_TRUE) {
+    if (equivalence_mod_sum_in_range(state, sum, shifted_denominator))
+      return IXS_CHECK_TRUE;
+    if (ixs_node_is_const(shift)) {
+      ixs_node_get_rat(shift, &shift_value, &shift_q);
+      if (shift_q == 1 &&
+          equivalence_mod_shift_by_congruence(state, base_dividend,
+                                              shifted_denominator, shift_value))
+        return IXS_CHECK_TRUE;
+    }
+  }
   return IXS_CHECK_UNKNOWN;
 }
 
+/* Mod preserves any equivalent representative already proven to lie in its
+ * canonical range.  The bounded child proof composes algebraic identities;
+ * it does not inspect values from a finite domain. */
+static ixs_check_result equivalence_mod_equivalent_representative(
+    equivalence_state *state, ixs_node *shifted_dividend,
+    ixs_node *shifted_denominator, ixs_node *sum, unsigned depth) {
+  if (sum == shifted_dividend ||
+      ixs_bounds_check_integer_valued(state->bounds, sum) != IXS_CHECK_TRUE ||
+      !equivalence_mod_sum_in_range(state, sum, shifted_denominator))
+    return IXS_CHECK_UNKNOWN;
+  return equivalence_bounded_core(state, shifted_dividend, sum, depth + 1u) ==
+                 IXS_CHECK_TRUE
+             ? IXS_CHECK_TRUE
+             : IXS_CHECK_UNKNOWN;
+}
+
+/* An arbitrary RHS may be equivalent to the canonical residue sum without
+ * containing it structurally.  Try every exact A+s partition of the shifted
+ * dividend, prove that Mod(A,D)+s does not wrap, then hand that smaller
+ * equality back to the ordinary equivalence engine.  An explicit proof query
+ * launches at most one bounded subproof per unit ADD term and rebuilds one
+ * n-term sum for each candidate. */
+static ixs_check_result equivalence_mod_shift_partitions(
+    equivalence_state *state, ixs_node *shifted, ixs_node *shifted_dividend,
+    ixs_node *shifted_denominator, ixs_node *sum, unsigned depth) {
+  ixs_check_result result;
+  uint32_t i;
+
+  if (shifted_dividend->tag != IXS_ADD)
+    return IXS_CHECK_UNKNOWN;
+  for (i = 0; i < shifted_dividend->u.add.nterms; i++) {
+    ixs_node *base = shifted_dividend->u.add.terms[i].term;
+    ixs_node *remainder;
+    ixs_node *candidate;
+    ixs_node *shift;
+    int64_t p;
+    int64_t q;
+
+    ixs_node_get_rat(shifted_dividend->u.add.terms[i].coeff, &p, &q);
+    if (p != 1 || q != 1)
+      continue;
+    if (equivalence_build_sub(state, shifted_dividend, base, &shift) !=
+            EQUIVALENCE_BUILD_OK ||
+        ixs_node_is_sentinel(shift))
+      continue;
+    remainder = simp_mod(state->ctx, base, shifted_denominator);
+    if (!remainder) {
+      state->oom = true;
+      return IXS_CHECK_UNKNOWN;
+    }
+    if (ixs_node_is_sentinel(remainder) ||
+        equivalence_build_add(state, remainder, shift, &candidate) !=
+            EQUIVALENCE_BUILD_OK ||
+        ixs_node_is_sentinel(candidate) || candidate == shifted ||
+        ixs_bounds_check_integer_valued(state->bounds, base) !=
+            IXS_CHECK_TRUE ||
+        ixs_bounds_check_integer_valued(state->bounds, shift) !=
+            IXS_CHECK_TRUE ||
+        !equivalence_mod_sum_in_range(state, candidate, shifted_denominator))
+      continue;
+    if (candidate == sum)
+      return IXS_CHECK_TRUE;
+    result = equivalence_bounded_core(state, candidate, sum, depth + 1u);
+    if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+        state->oom)
+      return result;
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result
+equivalence_mod_shift_direction(equivalence_state *state, ixs_node *shifted,
+                                ixs_node *sum, unsigned depth) {
+  ixs_node *shifted_dividend;
+  ixs_node *shifted_denominator;
+  ixs_check_result result;
+
+  if (shifted->tag != IXS_MOD)
+    return IXS_CHECK_UNKNOWN;
+  shifted_dividend = shifted->u.binary.lhs;
+  shifted_denominator = shifted->u.binary.rhs;
+  result = equivalence_mod_shift_structural(state, shifted_dividend,
+                                            shifted_denominator, sum);
+  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+      state->oom)
+    return result;
+  result = equivalence_mod_equivalent_representative(
+      state, shifted_dividend, shifted_denominator, sum, depth);
+  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+      state->oom)
+    return result;
+  return equivalence_mod_shift_partitions(state, shifted, shifted_dividend,
+                                          shifted_denominator, sum, depth);
+}
+
 static ixs_check_result equivalence_mod_shifts(equivalence_state *state,
-                                               ixs_node *lhs, ixs_node *rhs) {
-  ixs_check_result result = equivalence_mod_shift_direction(state, lhs, rhs);
+                                               ixs_node *lhs, ixs_node *rhs,
+                                               unsigned depth) {
+  ixs_check_result result =
+      equivalence_mod_shift_direction(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  return equivalence_mod_shift_direction(state, rhs, lhs);
+  return equivalence_mod_shift_direction(state, rhs, lhs, depth);
 }
 
 static bool equivalence_extract_positive_scaled_mod(equivalence_state *state,
@@ -16483,15 +16752,15 @@ static bool equivalence_extract_linear_mod(ixs_node *difference, ixs_node **mod,
   return *mod != NULL;
 }
 
-static ixs_check_result equivalence_isolate_unit_mod(equivalence_state *state,
-                                                     ixs_node *difference,
-                                                     unsigned depth) {
+static ixs_check_result equivalence_isolate_linear_mod(equivalence_state *state,
+                                                       ixs_node *difference,
+                                                       unsigned depth) {
   ixs_node *mod = NULL;
   ixs_node *coefficient = NULL;
   ixs_node *mod_term;
   ixs_node *rest;
+  ixs_node *negative_rest;
   ixs_node *candidate;
-  int64_t sign = 0;
   uint32_t i;
 
   if (difference->tag != IXS_ADD)
@@ -16499,19 +16768,13 @@ static ixs_check_result equivalence_isolate_unit_mod(equivalence_state *state,
   for (i = 0; i < difference->u.add.nterms; i++) {
     ixs_node *term = difference->u.add.terms[i].term;
     ixs_node *term_coefficient = difference->u.add.terms[i].coeff;
-    int64_t p;
-    int64_t q;
 
     if (term->tag != IXS_MOD)
-      continue;
-    ixs_node_get_rat(term_coefficient, &p, &q);
-    if (q != 1 || (p != 1 && p != -1))
       continue;
     if (mod)
       return IXS_CHECK_UNKNOWN;
     mod = term;
     coefficient = term_coefficient;
-    sign = p;
   }
   if (!mod)
     return IXS_CHECK_UNKNOWN;
@@ -16520,12 +16783,13 @@ static ixs_check_result equivalence_isolate_unit_mod(equivalence_state *state,
       equivalence_build_sub(state, difference, mod_term, &rest) !=
           EQUIVALENCE_BUILD_OK)
     return IXS_CHECK_UNKNOWN;
-  candidate = rest;
-  if (sign == 1 &&
-      equivalence_build_neg(state, rest, &candidate) != EQUIVALENCE_BUILD_OK)
+  if (equivalence_build_neg(state, rest, &negative_rest) !=
+          EQUIVALENCE_BUILD_OK ||
+      equivalence_build_div_const(state, negative_rest, coefficient,
+                                  &candidate) != EQUIVALENCE_BUILD_OK)
     return IXS_CHECK_UNKNOWN;
   if (ixs_node_is_sentinel(mod_term) || ixs_node_is_sentinel(rest) ||
-      ixs_node_is_sentinel(candidate) ||
+      ixs_node_is_sentinel(negative_rest) || ixs_node_is_sentinel(candidate) ||
       ixs_bounds_check_defined(state->bounds, candidate) != IXS_CHECK_TRUE ||
       ixs_bounds_check_defined(state->bounds, mod) != IXS_CHECK_TRUE) {
     if (state->bounds->oom)
@@ -16593,7 +16857,8 @@ equivalence_mod_quotient_identity(equivalence_state *state, ixs_node *lhs,
   difference = equivalence_simplified_difference(state, lhs, rhs);
   if (!difference)
     return IXS_CHECK_UNKNOWN;
-  if (equivalence_isolate_unit_mod(state, difference, depth) == IXS_CHECK_TRUE)
+  if (equivalence_isolate_linear_mod(state, difference, depth) ==
+      IXS_CHECK_TRUE)
     return IXS_CHECK_TRUE;
   if (!equivalence_extract_linear_mod(difference, &mod, &coefficient) ||
       mod->u.binary.rhs->tag != IXS_INT || mod->u.binary.rhs->u.ival <= 0 ||
@@ -17893,6 +18158,96 @@ equivalence_floor_mod_partition(equivalence_state *state, ixs_node *lhs,
   return equivalence_floor_mod_partition_direction(state, rhs, lhs);
 }
 
+/* m*floor(x/m) + Mod(y,m) reconstructs x when x and y are congruent modulo
+ * the positive integer radix m.  A bounded child proof permits the direct
+ * side to be any already-established representation of x. */
+typedef struct {
+  ixs_node *numerator;
+  ixs_node *remainder_dividend;
+  int64_t modulus;
+} equivalence_radix_reconstruction_parts;
+
+static bool equivalence_extract_radix_reconstruction(
+    equivalence_state *state, ixs_node *reconstructed,
+    equivalence_radix_reconstruction_parts *parts) {
+  ixs_node *mod = NULL;
+  ixs_node *floor = NULL;
+  ixs_node *denominator;
+  ixs_quotient_parts_status quotient_status;
+  int64_t floor_coefficient = 0;
+  uint32_t i;
+
+  if (reconstructed->tag != IXS_ADD || reconstructed->u.add.nterms != 2u ||
+      !ixs_node_is_zero(reconstructed->u.add.coeff))
+    return false;
+  for (i = 0; i < reconstructed->u.add.nterms; i++) {
+    ixs_node *term = reconstructed->u.add.terms[i].term;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(reconstructed->u.add.terms[i].coeff, &p, &q);
+    if (q != 1)
+      return false;
+    if (term->tag == IXS_MOD && p == 1 && !mod) {
+      mod = term;
+    } else if (term->tag == IXS_FLOOR && !floor) {
+      floor = term;
+      floor_coefficient = p;
+    } else {
+      return false;
+    }
+  }
+  if (!mod || !floor || mod->u.binary.rhs->tag != IXS_INT ||
+      mod->u.binary.rhs->u.ival <= 1)
+    return false;
+  parts->modulus = mod->u.binary.rhs->u.ival;
+  if (floor_coefficient != parts->modulus)
+    return false;
+  quotient_status = simp_decompose_exact_quotient(
+      state->ctx, floor->u.unary.arg, &parts->numerator, &denominator);
+  if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
+    state->oom = true;
+    return false;
+  }
+  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
+      denominator != mod->u.binary.rhs)
+    return false;
+  parts->remainder_dividend = mod->u.binary.lhs;
+  return true;
+}
+
+static ixs_check_result
+equivalence_radix_reconstruction_direction(equivalence_state *state,
+                                           ixs_node *reconstructed,
+                                           ixs_node *direct, unsigned depth) {
+  equivalence_radix_reconstruction_parts parts;
+  ixs_node *difference;
+
+  if (!equivalence_extract_radix_reconstruction(state, reconstructed, &parts) ||
+      ixs_bounds_check_integer_valued(state->bounds, parts.numerator) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(
+          state->bounds, parts.remainder_dividend) != IXS_CHECK_TRUE ||
+      equivalence_build_sub(state, parts.remainder_dividend, parts.numerator,
+                            &difference) != EQUIVALENCE_BUILD_OK ||
+      ixs_node_is_sentinel(difference) ||
+      ixs_bounds_check_congruent(state->bounds, difference, parts.modulus, 0) !=
+          IXS_CHECK_TRUE)
+    return IXS_CHECK_UNKNOWN;
+  if (direct == parts.numerator)
+    return IXS_CHECK_TRUE;
+  return equivalence_bounded_core(state, parts.numerator, direct, depth + 1u);
+}
+
+static ixs_check_result
+equivalence_radix_reconstruction(equivalence_state *state, ixs_node *lhs,
+                                 ixs_node *rhs, unsigned depth) {
+  ixs_check_result result =
+      equivalence_radix_reconstruction_direction(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  return equivalence_radix_reconstruction_direction(state, rhs, lhs, depth);
+}
+
 static ixs_check_result equivalence_expanded(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
@@ -17932,7 +18287,7 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
   result = equivalence_difference(state, expanded_lhs, expanded_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  result = equivalence_mod_shifts(state, expanded_lhs, expanded_rhs);
+  result = equivalence_mod_shifts(state, expanded_lhs, expanded_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   result = equivalence_scaled_mods(state, expanded_lhs, expanded_rhs, depth);
@@ -18019,7 +18374,7 @@ static ixs_check_result equivalence_projected(equivalence_state *state,
   result = equivalence_difference(state, projected_lhs, projected_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  result = equivalence_mod_shifts(state, projected_lhs, projected_rhs);
+  result = equivalence_mod_shifts(state, projected_lhs, projected_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   result = equivalence_scaled_mods(state, projected_lhs, projected_rhs, depth);
@@ -18071,12 +18426,17 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   if (result != IXS_CHECK_UNKNOWN)
     return result;
 
+  result = equivalence_radix_reconstruction(state, simplified_lhs,
+                                            simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   if (state->arithmetic_unrepresentable)
     return IXS_CHECK_UNKNOWN;
-  result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs);
+  result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   result =

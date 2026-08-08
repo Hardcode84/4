@@ -3407,6 +3407,100 @@ def test_range_basic() -> None:
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
 
 
+def test_grouped_mod_congruence_and_wave_identity() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("grouped_mod_x")
+    y = ctx.sym("grouped_mod_y")
+    facts = ctx.facts()
+    separate_facts = ctx.facts()
+    aligned_facts = ctx.facts()
+    facts.assume(x >= 0)
+    facts.assume(x <= 255)
+    separate_facts.assume(x >= 0)
+    separate_facts.assume(x <= 255)
+    separate_facts.assume(y >= 0)
+    separate_facts.assume(y <= 255)
+    aligned_facts.assume(x >= 0)
+    aligned_facts.assume(x <= 255)
+    aligned_facts.assume(ctx.eq(x % 8, 3))
+
+    mod64 = x % 64
+    mod16 = x % 16
+    assert ctx.range(mod64 - mod16, facts=facts) == (0, 48)
+    assert ctx.range(mod16 - mod64, facts=facts) == (-48, 0)
+    assert ctx.range(mod64 + mod16, facts=facts) == (0, 78)
+    assert ctx.range(mod64 + mod16, facts=aligned_facts) == (6, 70)
+    assert ctx.range(mod64 - mod16 + 16 * ((x % 128) % 32), facts=facts) == (
+        0,
+        544,
+    )
+    assert ctx.range(mod64 - y % 16, facts=separate_facts) == (-15, 63)
+    assert ctx.range((x / 2) % 64 - (x / 2) % 16, facts=facts) is None
+    nontotal = ixsimpl.floor(x + 1 / y)
+    assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
+
+    expression = ctx.parse_expr(
+        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+        "2048*floor(Mod(item,64)/16) - "
+        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+        "128*Mod(item + floor(Mod(item,16)/4) - "
+        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
+    )
+    invalid = ctx.parse_expr(
+        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
+        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
+        "2048*floor(Mod(item,64)/16) - "
+        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
+        "127*Mod(item + floor(Mod(item,16)/4) - "
+        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
+    )
+    item = ctx.sym("item")
+    wave_facts = ctx.facts()
+    wave_facts.assume(item >= 0)
+    wave_facts.assume(item <= 255)
+    zero = ctx.int_(0)
+    shifted = ctx.parse_expr("Mod(item + floor(Mod(item,16)/4) - Mod(Mod(item,64),16),64)")
+    projected = ctx.parse_expr("16*floor(Mod(item,64)/16) + floor(Mod(Mod(item,64),16)/4)")
+    assert ctx.equivalent(shifted, projected, wave_facts) is True
+    assert ctx.equivalent(shifted, projected + 1, wave_facts) is not True
+    rational = ctx.rat(3, 2)
+    assert ctx.equivalent(rational * shifted, rational * projected, wave_facts) is True
+    assert (
+        ctx.equivalent(
+            rational * shifted,
+            rational * projected + ctx.rat(1, 2),
+            wave_facts,
+        )
+        is not True
+    )
+    assert ctx.check(ctx.eq(expression, zero), facts=wave_facts) is True
+    assert ctx.equivalent(expression, zero, wave_facts) is True
+    assert ctx.check(ctx.eq(invalid, zero), facts=wave_facts) is not True
+
+
+def test_bounded_radix_reconstruction_composes_equivalence() -> None:
+    ctx = ixsimpl.Context()
+    slot = ctx.sym("bounded_radix_slot")
+    facts = ctx.facts()
+    facts.assume(slot >= 0)
+    facts.assume(slot <= 3)
+    t = (slot % 2 + ixsimpl.floor(slot / 2) % 2) % 3
+    t_half = ixsimpl.floor(t / 2)
+    high = t_half % 2
+    low = t % 2
+    reconstructed = 2 * high + low
+    canonical = 2 * t_half + low
+    wrapped = reconstructed % 3
+    bad_reconstruction = 2 * t_half + (t + 1) % 2
+
+    assert ctx.equivalent(high, t_half, facts) is True
+    assert ctx.equivalent(t, canonical, facts) is True
+    assert ctx.equivalent(reconstructed, t, facts) is True
+    assert ctx.check(ctx.eq(wrapped, t), facts=facts) is True
+    assert ctx.equivalent(bad_reconstruction, t, facts) is not True
+
+
 def test_range_composite_predicate_fact() -> None:
     ctx = ixsimpl.Context()
     a, b = ctx.sym("A"), ctx.sym("B")
@@ -3569,7 +3663,7 @@ def test_fact_check_nested_xor_cancellation_parity() -> None:
 
     assert different != x
     assert ctx.check(nonmatching, assumptions=[pred]) is None
-    assert ctx.check(nonmatching, facts=facts) is None
+    assert ctx.check(nonmatching, facts=facts) is False
 
 
 def test_fact_backed_simplification() -> None:
