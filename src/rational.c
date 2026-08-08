@@ -104,6 +104,10 @@ IXS_STATIC int64_t ixs_gcd(int64_t a, int64_t b) {
     return u64_to_i64_clamped(v);
   if (v == 0)
     return u64_to_i64_clamped(u);
+  if (u == v)
+    return u64_to_i64_clamped(u);
+  if (u == 1 || v == 1)
+    return 1;
 
   /* Factor out common 2s */
   for (shift = 0; ((u | v) & 1) == 0; ++shift) {

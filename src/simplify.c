@@ -7286,6 +7286,9 @@ IXS_STATIC ixs_check_result simp_check(ixs_ctx *ctx, ixs_node *expr,
   ixs_arena_mark m = ixs_arena_save(&ctx->scratch);
   ixs_bounds bnds;
   ixs_check_result r;
+  if (!ixs_node_is_known_true(expr) && !ixs_node_is_known_false(expr) &&
+      (!expr || expr->tag != IXS_CMP || !ixs_node_is_zero(expr->u.binary.rhs)))
+    return IXS_CHECK_UNKNOWN;
   if (ixs_bounds_build_ctx(&bnds, ctx, &ctx->scratch, assumptions,
                            n_assumptions) != IXS_BOUNDS_BUILD_OK) {
     ixs_arena_restore(&ctx->scratch, m);

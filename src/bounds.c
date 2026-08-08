@@ -14746,6 +14746,7 @@ typedef struct {
   size_t memo_capacity;
   size_t visited;
   unsigned bounded_subproof_depth;
+  unsigned mod_partition_candidates;
   bool limited;
   bool invalid;
   bool oom;
@@ -14754,6 +14755,8 @@ typedef struct {
 
 /* Algebraic bridge rules may nest only through this fixed allowance. */
 #define EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH 4u
+/* ADD partitions rebuild the dividend. Bound that work across one query. */
+#define EQUIVALENCE_MOD_PARTITION_CANDIDATES 4u
 
 static size_t equivalence_pair_hash(ixs_node *lhs, ixs_node *rhs) {
   uintptr_t left = (uintptr_t)lhs;
@@ -16516,6 +16519,10 @@ equivalence_mod_shift_structural(equivalence_state *state,
        (equivalence_integer_delta(state, shifted_dividend, expected_dividend,
                                   &delta) &&
         delta == 0)) &&
+      ixs_bounds_check_integer_valued(state->bounds, shifted_dividend) ==
+          IXS_CHECK_TRUE &&
+      ixs_bounds_check_integer_valued(state->bounds, shifted_denominator) ==
+          IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(state->bounds, base_dividend) ==
           IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(state->bounds, shift) == IXS_CHECK_TRUE) {
@@ -16537,30 +16544,37 @@ equivalence_mod_shift_structural(equivalence_state *state,
  * does not inspect values from a finite domain. */
 static ixs_check_result equivalence_mod_equivalent_representative(
     equivalence_state *state, ixs_node *shifted_dividend,
-    ixs_node *shifted_denominator, ixs_node *sum, unsigned depth) {
+    ixs_node *shifted_denominator, ixs_node *sum, unsigned depth,
+    bool *sum_is_canonical) {
+  *sum_is_canonical = false;
   if (sum == shifted_dividend ||
       ixs_bounds_check_integer_valued(state->bounds, sum) != IXS_CHECK_TRUE ||
-      !equivalence_mod_sum_in_range(state, sum, shifted_denominator))
+      !equivalence_mod_sum_in_range(state, sum, shifted_denominator) ||
+      ixs_bounds_check_integer_valued(state->bounds, shifted_dividend) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(state->bounds, shifted_denominator) !=
+          IXS_CHECK_TRUE)
     return IXS_CHECK_UNKNOWN;
+  *sum_is_canonical = true;
   return equivalence_bounded_core(state, shifted_dividend, sum, depth + 1u) ==
                  IXS_CHECK_TRUE
              ? IXS_CHECK_TRUE
              : IXS_CHECK_UNKNOWN;
 }
 
-/* An arbitrary RHS may be equivalent to the canonical residue sum without
- * containing it structurally. Try every exact A+s partition of the shifted
- * dividend, prove that Mod(A,D)+s does not wrap, then hand that smaller
- * equality back to the ordinary equivalence engine. An explicit proof query
- * launches at most one bounded subproof per unit ADD term and rebuilds one
- * n-term sum for each candidate. */
+/* An additive RHS already proven to be a canonical residue may be equivalent
+ * without containing that residue structurally. Try exact A+s partitions of
+ * the shifted dividend, prove that Mod(A,D)+s does not wrap, then hand that
+ * smaller equality back to the ordinary equivalence engine. Each call scans
+ * its ADD once, while the query-wide budget permits at most four n-term
+ * rebuilds and bounded subproofs. */
 static ixs_check_result equivalence_mod_shift_partitions(
     equivalence_state *state, ixs_node *shifted, ixs_node *shifted_dividend,
     ixs_node *shifted_denominator, ixs_node *sum, unsigned depth) {
   ixs_check_result result;
   uint32_t i;
 
-  if (shifted_dividend->tag != IXS_ADD)
+  if (shifted_dividend->tag != IXS_ADD || sum->tag != IXS_ADD)
     return IXS_CHECK_UNKNOWN;
   for (i = 0; i < shifted_dividend->u.add.nterms; i++) {
     ixs_node *base = shifted_dividend->u.add.terms[i].term;
@@ -16573,6 +16587,9 @@ static ixs_check_result equivalence_mod_shift_partitions(
     ixs_node_get_rat(shifted_dividend->u.add.terms[i].coeff, &p, &q);
     if (p != 1 || q != 1)
       continue;
+    if (state->mod_partition_candidates >= EQUIVALENCE_MOD_PARTITION_CANDIDATES)
+      return IXS_CHECK_UNKNOWN;
+    state->mod_partition_candidates++;
     if (equivalence_build_sub(state, shifted_dividend, base, &shift) !=
             EQUIVALENCE_BUILD_OK ||
         ixs_node_is_sentinel(shift))
@@ -16608,29 +16625,29 @@ equivalence_mod_shift_direction(equivalence_state *state, ixs_node *shifted,
   ixs_node *shifted_dividend;
   ixs_node *shifted_denominator;
   ixs_check_result result;
+  bool sum_is_canonical;
 
   if (shifted->tag != IXS_MOD)
     return IXS_CHECK_UNKNOWN;
   shifted_dividend = shifted->u.binary.lhs;
   shifted_denominator = shifted->u.binary.rhs;
-  if (ixs_bounds_check_integer_valued(state->bounds, shifted_dividend) !=
-          IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(state->bounds, shifted_denominator) !=
-          IXS_CHECK_TRUE) {
-    if (state->bounds->oom)
-      state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
   result = equivalence_mod_shift_structural(state, shifted_dividend,
                                             shifted_denominator, sum);
+  if (state->bounds->oom)
+    state->oom = true;
   if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
       state->oom)
     return result;
-  result = equivalence_mod_equivalent_representative(
-      state, shifted_dividend, shifted_denominator, sum, depth);
+  result = equivalence_mod_equivalent_representative(state, shifted_dividend,
+                                                     shifted_denominator, sum,
+                                                     depth, &sum_is_canonical);
+  if (state->bounds->oom)
+    state->oom = true;
   if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
       state->oom)
     return result;
+  if (!sum_is_canonical)
+    return IXS_CHECK_UNKNOWN;
   return equivalence_mod_shift_partitions(state, shifted, shifted_dividend,
                                           shifted_denominator, sum, depth);
 }
@@ -19108,6 +19125,24 @@ IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     return IXS_CHECK_UNKNOWN;
   equivalence_state_init(&state, facts->ctx, &facts->bounds);
   state.bounded_subproof_depth = EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH;
+  result = equivalence_core(&state, lhs, rhs, 0);
+  if (state.limited || state.invalid || state.oom)
+    result = IXS_CHECK_UNKNOWN;
+  equivalence_state_destroy(&state);
+  return result;
+}
+
+/* Exercise the production ADD-partition budget without a test-only proof
+ * branch. */
+IXS_STATIC ixs_check_result ixs_bounds_equivalence_partition_limit_probe(
+    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
+  equivalence_state state;
+  ixs_check_result result;
+
+  if (!facts || !facts->usable || !lhs || !rhs)
+    return IXS_CHECK_UNKNOWN;
+  equivalence_state_init(&state, facts->ctx, &facts->bounds);
+  state.mod_partition_candidates = EQUIVALENCE_MOD_PARTITION_CANDIDATES;
   result = equivalence_core(&state, lhs, rhs, 0);
   if (state.limited || state.invalid || state.oom)
     result = IXS_CHECK_UNKNOWN;

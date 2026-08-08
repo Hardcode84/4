@@ -24,6 +24,9 @@ static void test_gcd(void) {
   CHECK(ixs_gcd(12, -8) == 4);
   CHECK(ixs_gcd(-12, -8) == 4);
   CHECK(ixs_gcd(1, 1) == 1);
+  CHECK(ixs_gcd(INT64_MAX, 1) == 1);
+  CHECK(ixs_gcd(-1, INT64_MIN) == 1);
+  CHECK(ixs_gcd(INT64_MAX, INT64_MAX) == INT64_MAX);
   CHECK(ixs_gcd(INT64_MIN, 2) != 0);
   /* dual-INT64_MIN: GCD magnitude is 2^63, must not UB on cast */
   CHECK(ixs_gcd(INT64_MIN, INT64_MIN) > 0);

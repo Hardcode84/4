@@ -24,12 +24,16 @@ Properties tested:
     exhaustively over its finite input domain.
 11. Radix reconstruction soundness: every proven high/low reconstruction is
     checked exhaustively over its complete residue domain.
+12. Combined stronger-proof soundness: production-shaped Mod ranges, floor
+    partitions, radix reconstructions, and int64 edges are checked over every
+    point in generated finite domains through both fact entry points.
 """
 
 from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
 
@@ -52,6 +56,33 @@ BitMaskCase = tuple[str, str, int, int, int, int, str]
 Pow2Case = tuple[str, bool, str, int, str]
 _VARS = ["x", "y", "z", "w", "a", "b", "c", "d"]
 _SERIAL_MAGIC = b"IXSB"
+
+
+@dataclass(frozen=True)
+class _StrongerProofCase:
+    radix: int
+    x_center: int
+    y_center: int
+    x_left_blocks: int
+    x_right_blocks: int
+    y_left_blocks: int
+    y_right_blocks: int
+    related_mods: bool
+    nested_mod: bool
+    modulus_a: int
+    modulus_b: int
+    inner_modulus: int
+    coefficient_a: int
+    coefficient_b: int
+    rational_numerator: int
+    rational_denominator: int
+    rational_mod_coefficient: bool
+    floor_divisor: int
+    floor_shift: int
+    constant: int
+    congruent_reconstruction: bool
+    edge_width: int
+    high_edge: bool
 
 
 def _env_from_val(val_st: st.SearchStrategy[int]) -> st.SearchStrategy[Env]:
@@ -160,6 +191,48 @@ def _mod_composite_case_st(draw: st.DrawFn) -> ModCompositeCase:
         target,
         cmp_op,
         pattern,
+    )
+
+
+@st.composite
+def _stronger_proof_case_st(draw: st.DrawFn) -> _StrongerProofCase:
+    """One finite workload spanning the three stronger symbolic proofs."""
+    radix = draw(st.integers(min_value=2, max_value=8))
+    x_center = draw(st.integers(min_value=-32, max_value=32))
+    congruent = draw(st.booleans())
+    residue_shift = 0
+    if not congruent:
+        residue_shift = draw(st.integers(min_value=1, max_value=radix - 1))
+    y_center = x_center + radix * draw(st.integers(min_value=-4, max_value=4)) + residue_shift
+    rational_denominator = draw(st.integers(min_value=2, max_value=4))
+    rational_numerators = [
+        value for value in range(-4, 5) if value != 0 and value % rational_denominator != 0
+    ]
+    coefficient = st.sampled_from((-4, -3, -2, -1, 1, 2, 3, 4))
+    return _StrongerProofCase(
+        radix=radix,
+        x_center=x_center,
+        y_center=y_center,
+        x_left_blocks=draw(st.integers(min_value=0, max_value=1)),
+        x_right_blocks=draw(st.integers(min_value=0, max_value=1)),
+        y_left_blocks=draw(st.integers(min_value=0, max_value=1)),
+        y_right_blocks=draw(st.integers(min_value=0, max_value=1)),
+        related_mods=draw(st.booleans()),
+        nested_mod=draw(st.booleans()),
+        modulus_a=draw(st.integers(min_value=2, max_value=32)),
+        modulus_b=draw(st.integers(min_value=2, max_value=32)),
+        inner_modulus=draw(st.integers(min_value=2, max_value=32)),
+        coefficient_a=draw(coefficient),
+        coefficient_b=draw(coefficient),
+        rational_numerator=draw(st.sampled_from(rational_numerators)),
+        rational_denominator=rational_denominator,
+        rational_mod_coefficient=draw(st.booleans()),
+        floor_divisor=draw(st.integers(min_value=2, max_value=8)),
+        floor_shift=draw(st.integers(min_value=-8, max_value=8)),
+        constant=draw(st.integers(min_value=-16, max_value=16)),
+        congruent_reconstruction=congruent,
+        edge_width=draw(st.integers(min_value=0, max_value=3)),
+        high_edge=draw(st.booleans()),
     )
 
 
@@ -657,6 +730,19 @@ def eval_ixs(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> int:
         return int(result)
     except TypeError as e:
         raise ValueError(f"result is not an integer constant: {result}") from e
+
+
+def _eval_ixs_fraction(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> Fraction:
+    """Evaluate an expression that may reduce to an exact rational."""
+    result = _subs_all(expr, ctx, env)
+    if result.is_error:
+        raise ValueError("sentinel")
+    if result.tag == ixsimpl.RAT:
+        return Fraction(result.rat_num, result.rat_den)
+    try:
+        return Fraction(int(result), 1)
+    except TypeError as e:
+        raise ValueError(f"result is not a rational constant: {result}") from e
 
 
 def _range_assumptions(ctx: ixsimpl.Context, bounds: RangeBounds) -> list[ixsimpl.Expr]:
@@ -3864,6 +3950,156 @@ def test_congruent_radix_reconstruction_soundness(radix: int, shift_seed: int) -
         assert eval_ixs(reconstructed, ctx, env) == value_at_slot
         assert eval_ixs(alias, ctx, env) == value_at_slot
         assert eval_ixs(wrong, ctx, env) != value_at_slot
+
+
+@given(case=_stronger_proof_case_st())
+def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) -> None:
+    """All combined proof results hold over the complete bounded domain."""
+
+    def assert_boolean_result_sound(result: bool | None, values: list[bool]) -> None:
+        if result is True:
+            assert all(values)
+        elif result is False:
+            assert not any(values)
+
+    ctx = ixsimpl.Context()
+    x = ctx.sym("stronger_proof_x")
+    y = ctx.sym("stronger_proof_y")
+    edge_symbol = ctx.sym("stronger_proof_edge")
+    radix = case.radix
+    x_lo = case.x_center - case.x_left_blocks * radix
+    x_hi = case.x_center + case.x_right_blocks * radix
+    y_lo = case.y_center - case.y_left_blocks * radix
+    y_hi = case.y_center + case.y_right_blocks * radix
+    x_residue = case.x_center % radix
+    y_residue = case.y_center % radix
+    assumptions = [
+        x >= x_lo,
+        x <= x_hi,
+        y >= y_lo,
+        y <= y_hi,
+        ctx.eq(x % radix, x_residue),
+        ctx.eq(y % radix, y_residue),
+        edge_symbol >= 0,
+        edge_symbol <= case.edge_width,
+    ]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    x_values = [value for value in range(x_lo, x_hi + 1) if value % radix == x_residue]
+    y_values = [value for value in range(y_lo, y_hi + 1) if value % radix == y_residue]
+    environments = [
+        {"stronger_proof_x": x_value, "stronger_proof_y": y_value}
+        for x_value in x_values
+        for y_value in y_values
+    ]
+
+    left = x % case.modulus_a
+    representative = x if case.related_mods else y
+    right_source = representative % case.inner_modulus if case.nested_mod else representative
+    right = right_source % case.modulus_b
+    floor_term = ixsimpl.floor((x + case.floor_shift) / case.floor_divisor)
+    scale = ctx.rat(case.rational_numerator, case.rational_denominator)
+    if case.rational_mod_coefficient:
+        range_expr = (
+            case.coefficient_a * left
+            + scale * right
+            + case.coefficient_b * floor_term
+            + case.constant
+        )
+    else:
+        range_expr = (
+            case.coefficient_a * left
+            + case.coefficient_b * right
+            + scale * floor_term
+            + case.constant
+        )
+    assumption_range = ctx.range(range_expr, assumptions=assumptions)
+    facts_range = ctx.range(range_expr, facts=facts)
+    for range_result in (assumption_range, facts_range):
+        assert range_result is not None
+        for env in environments:
+            _assert_range_contains(range_result, _eval_ixs_fraction(range_expr, ctx, env))
+
+    x_local = x - x_lo
+    y_local = y - y_lo
+    partition = ixsimpl.floor(y_local / case.floor_divisor)
+    partition_modulus = (x_hi - x_lo) + (y_hi - y_lo) // case.floor_divisor + 2
+    wrapped = (x_local + partition) % partition_modulus
+    partitioned = x_local % partition_modulus + partition
+    scaled_wrapped = scale * wrapped
+    scaled_partitioned = scale * partitioned
+    partition_equality = ctx.eq(scaled_wrapped, scaled_partitioned)
+    partition_equivalent = ctx.equivalent(scaled_wrapped, scaled_partitioned, facts)
+    partition_facts_check = ctx.check(partition_equality, facts=facts)
+    partition_assumption_check = ctx.check(partition_equality, assumptions=assumptions)
+    partition_values: list[bool] = []
+    for env in environments:
+        partition_values.append(
+            _eval_ixs_fraction(scaled_wrapped, ctx, env)
+            == _eval_ixs_fraction(scaled_partitioned, ctx, env)
+        )
+    assert all(partition_values)
+    for check_result in (
+        partition_equivalent,
+        partition_facts_check,
+        partition_assumption_check,
+    ):
+        assert_boolean_result_sound(check_result, partition_values)
+
+    reconstructed = radix * ixsimpl.floor(x / radix) + y % radix
+    reconstruction_equality = ctx.eq(reconstructed, x)
+    reconstruction_equivalent = ctx.equivalent(reconstructed, x, facts)
+    reconstruction_facts_check = ctx.check(reconstruction_equality, facts=facts)
+    reconstruction_assumption_check = ctx.check(reconstruction_equality, assumptions=assumptions)
+    reconstruction_values = [
+        eval_ixs(reconstructed, ctx, env) == env["stronger_proof_x"] for env in environments
+    ]
+    for check_result in (
+        reconstruction_equivalent,
+        reconstruction_facts_check,
+        reconstruction_assumption_check,
+    ):
+        assert_boolean_result_sound(check_result, reconstruction_values)
+    if case.congruent_reconstruction:
+        assert reconstruction_equivalent is True
+        assert reconstruction_facts_check is True
+        assert all(reconstruction_values)
+    else:
+        assert reconstruction_equivalent is not True
+        assert reconstruction_facts_check is not True
+        assert not any(reconstruction_values)
+
+    int64_min = -(2**63)
+    int64_max = 2**63 - 1
+    if case.high_edge:
+        edge_expr = ctx.int_(int64_max - case.edge_width) + edge_symbol
+        edge_predicate = edge_expr <= int64_max
+    else:
+        edge_expr = ctx.int_(int64_min + case.edge_width) - edge_symbol
+        edge_predicate = edge_expr >= int64_min
+    edge_mod_chain = edge_expr % case.modulus_a - (edge_expr % case.inner_modulus) % case.modulus_b
+    edge_range = ctx.range(edge_expr, facts=facts)
+    edge_assumption_range = ctx.range(edge_expr, assumptions=assumptions)
+    edge_mod_range = ctx.range(edge_mod_chain, facts=facts)
+    edge_mod_assumption_range = ctx.range(edge_mod_chain, assumptions=assumptions)
+    for range_result in (edge_range, edge_assumption_range):
+        assert range_result is not None
+        for edge_value in range(case.edge_width + 1):
+            env = {"stronger_proof_edge": edge_value}
+            _assert_range_contains(range_result, _eval_ixs_fraction(edge_expr, ctx, env))
+    for range_result in (edge_mod_range, edge_mod_assumption_range):
+        assert range_result is not None
+        for edge_value in range(case.edge_width + 1):
+            env = {"stronger_proof_edge": edge_value}
+            _assert_range_contains(range_result, _eval_ixs_fraction(edge_mod_chain, ctx, env))
+    edge_facts_check = ctx.check(edge_predicate, facts=facts)
+    edge_assumption_check = ctx.check(edge_predicate, assumptions=assumptions)
+    edge_values: list[bool] = []
+    for edge_value in range(case.edge_width + 1):
+        env = {"stronger_proof_edge": edge_value}
+        edge_values.append(eval_ixs(edge_predicate, ctx, env) == 1)
+    for check_result in (edge_facts_check, edge_assumption_check):
+        assert_boolean_result_sound(check_result, edge_values)
 
 
 def test_range_composite_predicate_fact() -> None:

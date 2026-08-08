@@ -2481,6 +2481,39 @@ static void test_bounds_check_non_cmp(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_check_extreme_rhs_parity(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "extreme_rhs_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *minimum = ixs_int(ctx, INT64_MIN);
+  ixs_node *assumptions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, zero),
+                              ixs_cmp(ctx, x, IXS_CMP_LE, zero)};
+  ixs_node *at_minimum = ixs_sub(ctx, minimum, x);
+  ixs_node *nonnegative = ixs_cmp(ctx, at_minimum, IXS_CMP_GE, minimum);
+  ixs_node *positive = ixs_cmp(ctx, at_minimum, IXS_CMP_GT, minimum);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && zero && minimum && at_minimum && nonnegative && positive &&
+        facts);
+  CHECK(nonnegative->tag == IXS_CMP && nonnegative->u.binary.rhs == minimum);
+  CHECK(positive->tag == IXS_CMP && positive->u.binary.rhs == minimum);
+  CHECK(ixs_facts_assume_preds(facts, assumptions, 2));
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_check(ctx, nonnegative, assumptions, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, nonnegative) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_predicate_facts(facts, nonnegative) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, positive, assumptions, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, positive) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_predicate_facts(facts, positive) == IXS_CHECK_FALSE);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_partial_predicate_is_semantic_unknown(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "partial_predicate_x");
@@ -3100,6 +3133,8 @@ static void test_public_grouped_add_wave_identity(void) {
   CHECK(ixs_facts_assume_pred(oom_facts, domain));
   CHECK(ixs_facts_assume_pred(alloc_facts, alloc_domain));
 
+  CHECK(ixs_bounds_equivalence_partition_limit_probe(
+            facts, shifted, projected) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, shifted, projected) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(facts, shifted_eq) == IXS_CHECK_TRUE);
   CHECK(ixs_check(ctx, shifted_eq, &domain, 1) == IXS_CHECK_TRUE);
@@ -10821,6 +10856,7 @@ int main(void) {
   test_bounds_check_contradiction_unknown();
   test_public_pow2_fact();
   test_bounds_check_non_cmp();
+  test_bounds_check_extreme_rhs_parity();
   test_bounds_partial_predicate_is_semantic_unknown();
 
   /* Bounds: public range API */

@@ -1269,12 +1269,15 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   the same sufficient divisibility predicate used by simplification rules.
 - **Atomic predicate checks**: `ixs_check` and `ixs_check_facts` accept a
   normalized comparison or the canonical integer `1`/`0` produced when a
-  smart constructor resolves a comparison. Other non-comparison expressions
-  remain unknown. Contradictory fact domains never prove even a constant
-  predicate. Both entry points run the same scalar proof contract: one query
-  generation spans the fast interval, congruence, and bit checks plus the
-  exact fallback for an unresolved `EQ` or `NE` and the bounded radix fallback
-  for an unresolved zero-RHS `GE`. Exact proofs require total operands. Cycles,
+  smart constructor resolves one. A comparison whose right-hand side cannot
+  be moved to zero without overflowing remains unknown under this atomic
+  contract; the general predicate query can still check it directly. Other
+  non-comparison expressions remain unknown. Contradictory fact domains never
+  prove even a constant predicate. Both entry points run the same scalar proof
+  contract: one query generation spans the fast interval, congruence, and bit
+  checks plus the exact fallback for an unresolved `EQ` or `NE` and the
+  bounded radix fallback for an unresolved zero-RHS `GE`. Exact proofs require
+  total operands. Cycles,
   bounded subproof exhaustion, and allocation failure return unknown without
   poisoning the reusable session or fact set.
 
@@ -1757,7 +1760,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   bounded child proof establishes `A == B` and the range engine establishes
   `0 <= B < D`. For an exact `A+s` partition of an `ADD` dividend, the engine
   may instead construct `Mod(A,D)+s`, prove that result cannot wrap, and pass
-  its equality with the other operand to the same bounded proof engine. A
+  its equality with an additive other operand already proven integer-valued
+  and inside `[0,D)` to the same bounded proof engine. Each fallback
+  invocation scans the dividend once. A public query rebuilds at most four
+  candidate sums across all such invocations, avoiding the quadratic retry
+  pattern of rebuilding an n-term sum for every term. A
   normalized linear residual `c*Mod(A,D)+r` may isolate the remainder as
   `-r/c` for any nonzero rational `c`; the constructed candidate and the Mod
   must both be total. Arbitrary `c` requires that this be the residual's only
@@ -3868,6 +3875,15 @@ Property-based fuzz testing uses Python's
 [Hypothesis](https://hypothesis.readthedocs.io/) library to generate random
 expressions within the grammar, simplify them with both ixsimpl and SymPy,
 and verify equivalence via numerical evaluation.
+
+Proof-specific generators also build small, complete integer domains rather
+than relying on sampled points. The combined symbolic-proof property mixes
+bounded related and unrelated nested `Mod` chains, signed integer and rational
+coefficients, floor partitions, congruent and incongruent radix
+reconstructions, and arithmetic at both int64 boundaries. Every reported range
+must contain every reachable value, and every successful equality or predicate
+proof must hold throughout the domain. One-shot assumptions and reusable facts
+are queried against the same semantic oracle.
 
 ```python
 import random
