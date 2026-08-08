@@ -14878,6 +14878,7 @@ typedef struct {
   size_t memo_capacity;
   size_t visited;
   unsigned bounded_subproof_depth;
+  unsigned xor_context_subproof_depth;
   unsigned mod_partition_candidates;
   bool limited;
   bool invalid;
@@ -14978,7 +14979,8 @@ static ixs_check_result equivalence_core(equivalence_state *state,
                                          unsigned depth);
 static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                               ixs_node *lhs, ixs_node *rhs,
-                                              unsigned depth);
+                                              unsigned depth,
+                                              bool allow_context);
 static bool bounds_constant_delta_query(ixs_ctx *ctx, ixs_bounds *bounds,
                                         ixs_node *lhs, ixs_node *rhs,
                                         bool allow_expand, int64_t *delta);
@@ -14993,6 +14995,383 @@ static ixs_check_result equivalence_bounded_core(equivalence_state *state,
   result = equivalence_core(state, lhs, rhs, depth);
   state->bounded_subproof_depth--;
   return result;
+}
+
+static bool equivalence_context_shape(ixs_node *lhs, ixs_node *rhs,
+                                      uint32_t *child_count) {
+  uint32_t lhs_children;
+  uint32_t rhs_children;
+  uint32_t i;
+
+  if (lhs->tag != rhs->tag || !defined_child_count(lhs, &lhs_children) ||
+      !defined_child_count(rhs, &rhs_children) || lhs_children == 0u ||
+      lhs_children != rhs_children)
+    return false;
+  switch (lhs->tag) {
+  case IXS_ADD:
+  case IXS_FLOOR:
+  case IXS_CEIL:
+    break;
+  case IXS_MUL:
+    if (lhs->u.mul.nfactors != rhs->u.mul.nfactors)
+      return false;
+    for (i = 0; i < lhs->u.mul.nfactors; i++)
+      if (lhs->u.mul.factors[i].exp != rhs->u.mul.factors[i].exp)
+        return false;
+    break;
+  default:
+    return false;
+  }
+  *child_count = lhs_children;
+  return true;
+}
+
+static bool equivalence_grouped_add_context(ixs_node *node) {
+  ixs_tag first;
+  ixs_tag second;
+
+  if (node->tag != IXS_ADD || node->u.add.nterms != 2u)
+    return false;
+  first = (ixs_tag)node->u.add.terms[0].term->tag;
+  second = (ixs_tag)node->u.add.terms[1].term->tag;
+  return (first == IXS_MOD && (second == IXS_FLOOR || second == IXS_CEIL)) ||
+         (second == IXS_MOD && (first == IXS_FLOOR || first == IXS_CEIL));
+}
+
+typedef struct {
+  ixs_node *lhs;
+  ixs_node *rhs;
+} equivalence_context_pair;
+
+typedef struct {
+  equivalence_context_pair *pairs;
+  size_t count;
+  size_t capacity;
+  equivalence_context_pair *seen;
+  size_t seen_count;
+  size_t seen_capacity;
+} equivalence_context_worklist;
+
+static bool
+equivalence_context_seen_grow(equivalence_state *state,
+                              equivalence_context_worklist *worklist) {
+  size_t capacity =
+      worklist->seen_capacity ? worklist->seen_capacity * 2u : 32u;
+  equivalence_context_pair *grown;
+  size_t i;
+
+  if (capacity <= worklist->seen_capacity ||
+      capacity > SIZE_MAX / sizeof(*grown))
+    goto oom;
+  grown = ixs_arena_alloc(&state->bounds->query_arena,
+                          capacity * sizeof(*grown), sizeof(void *));
+  if (!grown)
+    goto oom;
+  memset(grown, 0, capacity * sizeof(*grown));
+  for (i = 0; i < worklist->seen_capacity; i++) {
+    equivalence_context_pair pair = worklist->seen[i];
+    size_t slot;
+    if (!pair.lhs)
+      continue;
+    slot = equivalence_pair_hash(pair.lhs, pair.rhs) & (capacity - 1u);
+    while (grown[slot].lhs)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = pair;
+  }
+  worklist->seen = grown;
+  worklist->seen_capacity = capacity;
+  return true;
+
+oom:
+  state->oom = true;
+  return false;
+}
+
+static bool equivalence_context_enqueue(equivalence_state *state,
+                                        equivalence_context_worklist *worklist,
+                                        ixs_node *lhs, ixs_node *rhs) {
+  size_t slot;
+
+  if (!lhs || !rhs) {
+    state->invalid = true;
+    return false;
+  }
+  if ((uintptr_t)lhs > (uintptr_t)rhs) {
+    ixs_node *tmp = lhs;
+    lhs = rhs;
+    rhs = tmp;
+  }
+  if (!worklist->seen_capacity ||
+      worklist->seen_count + 1u > worklist->seen_capacity / 2u)
+    if (!equivalence_context_seen_grow(state, worklist))
+      return false;
+  slot = equivalence_pair_hash(lhs, rhs) & (worklist->seen_capacity - 1u);
+  while (worklist->seen[slot].lhs &&
+         (worklist->seen[slot].lhs != lhs || worklist->seen[slot].rhs != rhs))
+    slot = (slot + 1u) & (worklist->seen_capacity - 1u);
+  if (worklist->seen[slot].lhs)
+    return true;
+  worklist->seen[slot].lhs = lhs;
+  worklist->seen[slot].rhs = rhs;
+  worklist->seen_count++;
+
+  if (worklist->count == worklist->capacity) {
+    size_t capacity = worklist->capacity ? worklist->capacity * 2u : 32u;
+    equivalence_context_pair *grown;
+    if (capacity <= worklist->capacity ||
+        capacity > SIZE_MAX / sizeof(*grown)) {
+      state->oom = true;
+      return false;
+    }
+    grown = ixs_arena_grow(&state->bounds->query_arena, worklist->pairs,
+                           worklist->capacity * sizeof(*grown),
+                           capacity * sizeof(*grown), sizeof(void *));
+    if (!grown) {
+      state->oom = true;
+      return false;
+    }
+    worklist->pairs = grown;
+    worklist->capacity = capacity;
+  }
+  worklist->pairs[worklist->count].lhs = lhs;
+  worklist->pairs[worklist->count].rhs = rhs;
+  worklist->count++;
+  return true;
+}
+
+static uint32_t equivalence_add_relation_size(ixs_node *node) {
+  if (ixs_node_is_zero(node))
+    return 0u;
+  return node->tag == IXS_ADD ? node->u.add.nterms : 1u;
+}
+
+static bool equivalence_cancel_common_add(equivalence_state *state,
+                                          ixs_node *lhs, ixs_node *rhs,
+                                          ixs_node **lhs_residual,
+                                          ixs_node **rhs_residual) {
+  struct ixs_node_impl equality;
+  ixs_node *relation_lhs;
+  ixs_node *relation_rhs;
+  int64_t offset;
+  uint64_t original_size;
+  uint64_t residual_size;
+
+  if (lhs->tag != IXS_ADD || rhs->tag != IXS_ADD ||
+      lhs->u.add.nterms == rhs->u.add.nterms)
+    return false;
+  memset(&equality, 0, sizeof(equality));
+  equality.tag = IXS_CMP;
+  equality.u.binary.lhs = lhs;
+  equality.u.binary.rhs = rhs;
+  equality.u.binary.cmp_op = IXS_CMP_EQ;
+  if (!bounds_extract_cmp_exact_relation(
+          state->bounds, &equality, &relation_lhs, &relation_rhs, &offset)) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  if (offset != 0) {
+    ixs_node *constant = ixs_node_int(state->ctx, offset);
+    bool unrepresentable = false;
+    if (!constant) {
+      state->oom = true;
+      return false;
+    }
+    relation_rhs =
+        simp_try_add(state->ctx, relation_rhs, constant, &unrepresentable);
+    if (unrepresentable)
+      return false;
+    if (!relation_rhs) {
+      state->oom = true;
+      return false;
+    }
+    if (ixs_node_is_sentinel(relation_rhs))
+      return false;
+  }
+  original_size = (uint64_t)lhs->u.add.nterms + (uint64_t)rhs->u.add.nterms;
+  residual_size = (uint64_t)equivalence_add_relation_size(relation_lhs) +
+                  (uint64_t)equivalence_add_relation_size(relation_rhs);
+  if (residual_size >= original_size ||
+      ixs_bounds_check_defined(state->bounds, relation_lhs) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(state->bounds, relation_rhs) != IXS_CHECK_TRUE) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  *lhs_residual = relation_lhs;
+  *rhs_residual = relation_rhs;
+  return true;
+}
+
+static bool equivalence_xor_child_proven(equivalence_state *state,
+                                         ixs_node *lhs, ixs_node *rhs,
+                                         unsigned depth) {
+  ixs_check_result result;
+  state->xor_context_subproof_depth++;
+  result = equivalence_bounded_core(state, lhs, rhs, depth);
+  state->xor_context_subproof_depth--;
+  return result == IXS_CHECK_TRUE;
+}
+
+/* Canonical XOR nodes are already flat. The production-backed binary case
+ * pairs exact arguments before semantic candidates. The matcher remains
+ * O(A^2) in its admitted arity A=2. */
+static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
+                                                      ixs_node *lhs,
+                                                      ixs_node *rhs,
+                                                      unsigned depth) {
+  ixs_node *left_zero;
+  ixs_node *left_one;
+  ixs_node *right_zero;
+  ixs_node *right_one;
+
+  if (lhs->u.assoc.nargs != 2u || rhs->u.assoc.nargs != 2u)
+    return IXS_CHECK_UNKNOWN;
+  left_zero = lhs->u.assoc.args[0];
+  left_one = lhs->u.assoc.args[1];
+  right_zero = rhs->u.assoc.args[0];
+  right_one = rhs->u.assoc.args[1];
+
+  /* Commit exact pairs first. The remaining child then has only one possible
+   * partner, so this preserves deterministic matching without backtracking. */
+  if (left_zero == right_zero)
+    return equivalence_xor_child_proven(state, left_one, right_one, depth)
+               ? IXS_CHECK_TRUE
+               : IXS_CHECK_UNKNOWN;
+  if (left_zero == right_one)
+    return equivalence_xor_child_proven(state, left_one, right_zero, depth)
+               ? IXS_CHECK_TRUE
+               : IXS_CHECK_UNKNOWN;
+  if (left_one == right_zero)
+    return equivalence_xor_child_proven(state, left_zero, right_one, depth)
+               ? IXS_CHECK_TRUE
+               : IXS_CHECK_UNKNOWN;
+  if (left_one == right_one)
+    return equivalence_xor_child_proven(state, left_zero, right_zero, depth)
+               ? IXS_CHECK_TRUE
+               : IXS_CHECK_UNKNOWN;
+
+  if (equivalence_xor_child_proven(state, left_zero, right_zero, depth) &&
+      equivalence_xor_child_proven(state, left_one, right_one, depth))
+    return IXS_CHECK_TRUE;
+  if (state->limited || state->invalid || state->oom ||
+      state->arithmetic_unrepresentable)
+    return IXS_CHECK_UNKNOWN;
+  return equivalence_xor_child_proven(state, left_zero, right_one, depth) &&
+                 equivalence_xor_child_proven(state, left_one, right_zero,
+                                              depth)
+             ? IXS_CHECK_TRUE
+             : IXS_CHECK_UNKNOWN;
+}
+
+static bool
+equivalence_context_simplify_pair(equivalence_state *state,
+                                  const equivalence_context_pair *pair,
+                                  ixs_node **lhs, ixs_node **rhs) {
+  bool lhs_limited = false;
+  bool rhs_limited = false;
+
+  *lhs = simp_simplify_bounds_status(state->ctx, pair->lhs, state->bounds,
+                                     &lhs_limited);
+  *rhs = simp_simplify_bounds_status(state->ctx, pair->rhs, state->bounds,
+                                     &rhs_limited);
+  if (lhs_limited || rhs_limited) {
+    state->limited = true;
+    return false;
+  }
+  if (!*lhs || !*rhs) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(*lhs) || ixs_node_is_sentinel(*rhs)) {
+    state->invalid = true;
+    return false;
+  }
+  return true;
+}
+
+static bool
+equivalence_context_enqueue_children(equivalence_state *state,
+                                     equivalence_context_worklist *worklist,
+                                     ixs_node *lhs, ixs_node *rhs) {
+  uint32_t child_count;
+  uint32_t i;
+
+  if (!equivalence_context_shape(lhs, rhs, &child_count))
+    return false;
+  for (i = 0; i < child_count; i++)
+    if (!equivalence_context_enqueue(state, worklist, defined_child_at(lhs, i),
+                                     defined_child_at(rhs, i)))
+      return false;
+  return true;
+}
+
+static bool equivalence_context_process_pair(
+    equivalence_state *state, equivalence_context_worklist *worklist,
+    const equivalence_context_pair *pair, unsigned depth) {
+  ixs_node *simplified_lhs;
+  ixs_node *simplified_rhs;
+  ixs_node *lhs_residual;
+  ixs_node *rhs_residual;
+  ixs_check_result result;
+
+  if (!equivalence_context_simplify_pair(state, pair, &simplified_lhs,
+                                         &simplified_rhs))
+    return false;
+  if (simplified_lhs == simplified_rhs)
+    return true;
+
+  result = equivalence_core_impl(state, simplified_lhs, simplified_rhs, depth,
+                                 false);
+  if (result == IXS_CHECK_TRUE)
+    return true;
+  if (state->limited || state->invalid || state->oom ||
+      state->arithmetic_unrepresentable)
+    return false;
+  if (simplified_lhs->tag == IXS_XOR && simplified_rhs->tag == IXS_XOR &&
+      simplified_lhs->u.assoc.nargs == 2u &&
+      simplified_rhs->u.assoc.nargs == 2u)
+    return equivalence_match_xor_context(state, simplified_lhs, simplified_rhs,
+                                         depth) == IXS_CHECK_TRUE;
+
+  if (equivalence_cancel_common_add(state, simplified_lhs, simplified_rhs,
+                                    &lhs_residual, &rhs_residual))
+    return equivalence_context_enqueue(state, worklist, lhs_residual,
+                                       rhs_residual);
+  if (state->oom)
+    return false;
+  return equivalence_context_enqueue_children(state, worklist, simplified_lhs,
+                                              simplified_rhs);
+}
+
+/* Worklist insertion and lookup are expected O(N) in the paired canonical DAG.
+ * Existing child proofs keep their own bounds; XOR may add O(A^2) bounded
+ * child proofs after exact argument pairing. */
+static ixs_check_result equivalence_same_context(equivalence_state *state,
+                                                 ixs_node *lhs, ixs_node *rhs,
+                                                 unsigned depth) {
+  equivalence_context_worklist worklist;
+  uint32_t child_count;
+  bool xor_shape = lhs->tag == IXS_XOR && rhs->tag == IXS_XOR &&
+                   lhs->u.assoc.nargs == 2u && rhs->u.assoc.nargs == 2u;
+  bool round_shape = state->xor_context_subproof_depth != 0u &&
+                     lhs->tag == rhs->tag &&
+                     (lhs->tag == IXS_FLOOR || lhs->tag == IXS_CEIL);
+  bool grouped_shape = equivalence_grouped_add_context(lhs) &&
+                       equivalence_grouped_add_context(rhs);
+
+  memset(&worklist, 0, sizeof(worklist));
+  if ((!xor_shape && !round_shape && !grouped_shape) ||
+      (!xor_shape && !equivalence_context_shape(lhs, rhs, &child_count)) ||
+      !equivalence_context_enqueue(state, &worklist, lhs, rhs))
+    return IXS_CHECK_UNKNOWN;
+
+  while (worklist.count > 0u) {
+    equivalence_context_pair pair = worklist.pairs[--worklist.count];
+    if (!equivalence_context_process_pair(state, &worklist, &pair, depth))
+      return IXS_CHECK_UNKNOWN;
+  }
+  return IXS_CHECK_TRUE;
 }
 
 /* Optional algebraic proof rules must not turn a valid query into a session
@@ -17402,6 +17781,108 @@ static bool equivalence_split_affine_round(equivalence_state *state,
   return !ixs_node_is_sentinel(*residual);
 }
 
+static ixs_node *equivalence_optional_mod(equivalence_state *state,
+                                          ixs_node *dividend,
+                                          ixs_node *divisor) {
+  ixs_ctx *ctx = state->ctx;
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_node *result = simp_mod(ctx, dividend, divisor);
+
+  if (!result) {
+    state->oom = true;
+    return NULL;
+  }
+  if (!ixs_node_is_sentinel(result))
+    return result;
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  return NULL;
+}
+
+/* Equal positive literal Mod contexts require congruent integer dividends,
+ * not equal dividends. Exact ADD cancellation is only a smaller retry. */
+static ixs_check_result equivalence_same_modulus(equivalence_state *state,
+                                                 ixs_node *lhs, ixs_node *rhs,
+                                                 unsigned depth) {
+  ixs_node *difference;
+  ixs_node *lhs_residual;
+  ixs_node *rhs_residual;
+  ixs_node *lhs_mod;
+  ixs_node *rhs_mod;
+  int64_t modulus;
+  ixs_check_result congruent;
+
+  if (lhs->tag != IXS_MOD || rhs->tag != IXS_MOD ||
+      lhs->u.binary.rhs != rhs->u.binary.rhs ||
+      lhs->u.binary.rhs->tag != IXS_INT || lhs->u.binary.rhs->u.ival <= 0 ||
+      !equivalence_remainder_integer_proven(state, lhs->u.binary.lhs) ||
+      !equivalence_remainder_integer_proven(state, rhs->u.binary.lhs))
+    return IXS_CHECK_UNKNOWN;
+  modulus = lhs->u.binary.rhs->u.ival;
+  if (equivalence_build_sub(state, lhs->u.binary.lhs, rhs->u.binary.lhs,
+                            &difference) != EQUIVALENCE_BUILD_OK ||
+      ixs_node_is_sentinel(difference))
+    return IXS_CHECK_UNKNOWN;
+  congruent = ixs_bounds_check_congruent(state->bounds, difference, modulus, 0);
+  if (state->bounds->oom)
+    state->oom = true;
+  if (congruent == IXS_CHECK_TRUE)
+    return IXS_CHECK_TRUE;
+
+  if (!equivalence_cancel_common_add(state, lhs->u.binary.lhs,
+                                     rhs->u.binary.lhs, &lhs_residual,
+                                     &rhs_residual))
+    return IXS_CHECK_UNKNOWN;
+  lhs_mod = equivalence_optional_mod(state, lhs_residual, lhs->u.binary.rhs);
+  rhs_mod = equivalence_optional_mod(state, rhs_residual, rhs->u.binary.rhs);
+  if (!lhs_mod || !rhs_mod || (lhs_mod == lhs && rhs_mod == rhs) ||
+      (lhs_mod == rhs && rhs_mod == lhs))
+    return IXS_CHECK_UNKNOWN;
+  return equivalence_bounded_core(state, lhs_mod, rhs_mod, depth);
+}
+
+static ixs_check_result
+equivalence_affine_round_context(equivalence_state *state, ixs_node *lhs,
+                                 ixs_node *rhs, unsigned depth) {
+  const ixs_tag tags[2] = {IXS_FLOOR, IXS_CEIL};
+  size_t i;
+
+  for (i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+    ixs_node *lhs_argument;
+    ixs_node *lhs_residual;
+    ixs_node *rhs_argument;
+    ixs_node *rhs_residual;
+    ixs_node *lhs_shifted;
+    ixs_node *rhs_shifted;
+
+    if (!equivalence_split_affine_round(state, lhs, tags[i], &lhs_argument,
+                                        &lhs_residual) ||
+        !equivalence_split_affine_round(state, rhs, tags[i], &rhs_argument,
+                                        &rhs_residual) ||
+        (ixs_node_is_zero(lhs_residual) && ixs_node_is_zero(rhs_residual)) ||
+        !equivalence_remainder_integer_proven(state, lhs_residual) ||
+        !equivalence_remainder_integer_proven(state, rhs_residual) ||
+        equivalence_build_add(state, lhs_argument, lhs_residual,
+                              &lhs_shifted) != EQUIVALENCE_BUILD_OK ||
+        equivalence_build_add(state, rhs_argument, rhs_residual,
+                              &rhs_shifted) != EQUIVALENCE_BUILD_OK ||
+        ixs_node_is_sentinel(lhs_shifted) || ixs_node_is_sentinel(rhs_shifted))
+      continue;
+    if (equivalence_bounded_core(state, lhs_shifted, rhs_shifted, depth) ==
+        IXS_CHECK_TRUE)
+      return IXS_CHECK_TRUE;
+    if (state->limited || state->invalid || state->oom ||
+        state->arithmetic_unrepresentable)
+      return IXS_CHECK_UNKNOWN;
+  }
+  return IXS_CHECK_UNKNOWN;
+}
+
 static bool equivalence_match_piecewise_truncating_round(
     equivalence_state *state, ixs_node *node, unsigned depth,
     ixs_node **quotient, bool *matched) {
@@ -19245,7 +19726,7 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   if (entry->active)
     return IXS_CHECK_UNKNOWN;
   entry->active = true;
-  result = equivalence_core_impl(state, lhs, rhs, depth);
+  result = equivalence_core_impl(state, lhs, rhs, depth, true);
   entry = equivalence_memo_get(state, lhs, rhs, false);
   if (!entry) {
     state->invalid = true;
@@ -19343,9 +19824,55 @@ static ixs_check_result equivalence_projected(equivalence_state *state,
   return equivalence_expanded(state, projected_lhs, projected_rhs, depth);
 }
 
+static ixs_check_result
+equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
+                              ixs_node *rhs, ixs_node *simplified_lhs,
+                              ixs_node *simplified_rhs, unsigned depth) {
+  ixs_check_result result;
+
+  result = equivalence_difference(state, simplified_lhs, simplified_rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  if (state->arithmetic_unrepresentable)
+    return equivalence_low_bits(state, lhs, rhs, depth);
+
+  result = equivalence_affine_round_context(state, simplified_lhs,
+                                            simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  if (state->arithmetic_unrepresentable)
+    return equivalence_low_bits(state, lhs, rhs, depth);
+
+  result =
+      equivalence_same_modulus(state, simplified_lhs, simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  if (state->arithmetic_unrepresentable)
+    return equivalence_low_bits(state, lhs, rhs, depth);
+
+  return IXS_CHECK_UNKNOWN;
+}
+
+static ixs_check_result
+equivalence_context_composition(equivalence_state *state, ixs_node *lhs,
+                                ixs_node *rhs, ixs_node *simplified_lhs,
+                                ixs_node *simplified_rhs, unsigned depth,
+                                bool allow_context) {
+  ixs_check_result result;
+
+  if (!allow_context)
+    return IXS_CHECK_UNKNOWN;
+  result =
+      equivalence_same_context(state, simplified_lhs, simplified_rhs, depth);
+  if (result == IXS_CHECK_UNKNOWN && state->arithmetic_unrepresentable)
+    return equivalence_low_bits(state, lhs, rhs, depth);
+  return result;
+}
+
 static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                               ixs_node *lhs, ixs_node *rhs,
-                                              unsigned depth) {
+                                              unsigned depth,
+                                              bool allow_context) {
   ixs_node *simplified_lhs;
   ixs_node *simplified_rhs;
   ixs_check_result result;
@@ -19391,11 +19918,10 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   if (result != IXS_CHECK_UNKNOWN)
     return result;
 
-  result = equivalence_difference(state, simplified_lhs, simplified_rhs);
-  if (result != IXS_CHECK_UNKNOWN)
+  result = equivalence_direct_arithmetic(state, lhs, rhs, simplified_lhs,
+                                         simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN || state->arithmetic_unrepresentable)
     return result;
-  if (state->arithmetic_unrepresentable)
-    return equivalence_low_bits(state, lhs, rhs, depth);
   result = equivalence_mod_shifts(state, simplified_lhs, simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
@@ -19406,6 +19932,10 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   result = equivalence_mod_quotient_identity(state, simplified_lhs,
                                              simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_context_composition(
+      state, lhs, rhs, simplified_lhs, simplified_rhs, depth, allow_context);
+  if (result != IXS_CHECK_UNKNOWN || state->arithmetic_unrepresentable)
     return result;
   result = equivalence_projected(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)

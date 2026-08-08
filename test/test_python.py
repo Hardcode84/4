@@ -4050,6 +4050,155 @@ def test_bounded_scaled_mod_projection_soundness(
             assert eval_ixs(lhs, ctx, env) == eval_ixs(rhs, ctx, env)
 
 
+def test_equivalent_expression_context_bindings() -> None:
+    ctx = ixsimpl.Context()
+    item = ctx.sym("context_binding_item")
+    round_seed = ctx.sym("context_binding_round_seed")
+    noninjective = ctx.sym("context_binding_noninjective")
+    partial_divisor = ctx.sym("context_binding_partial_divisor")
+    left = ctx.parse_expr(
+        "context_binding_base + Mod(context_binding_item + "
+        "floor(Mod(context_binding_item, 16)/4) - "
+        "Mod(Mod(context_binding_item, 64), 16), 64)"
+    )
+    right = ctx.parse_expr(
+        "context_binding_base + 16*floor(Mod(context_binding_item, 64)/16) + "
+        "floor(Mod(Mod(context_binding_item, 64), 16)/4)"
+    )
+    right_bad = right + 1
+
+    def grouped(value: ixsimpl.Expr) -> ixsimpl.Expr:
+        return 1024 * ixsimpl.floor(value / 64) + 8 * (value % 64)
+
+    def xored(value: ixsimpl.Expr) -> ixsimpl.Expr:
+        return ixsimpl.xor_(value, ixsimpl.floor(value / 2))
+
+    assumptions = [item >= 0, item <= 255, ctx.eq(round_seed % 2, 0)]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    left_grouped = grouped(left)
+    right_grouped = grouped(right)
+    left_xor = xored(left)
+    right_xor = xored(right)
+
+    assert ctx.equivalent(left, right, facts) is True
+    assert ctx.equivalent(left % 64, right % 64, facts) is True
+    assert ctx.equivalent(left_grouped, right_grouped, facts) is True
+    assert ctx.check(ctx.eq(left_grouped, right_grouped), facts=facts) is True
+    assert ctx.check(ctx.eq(left_grouped, right_grouped), assumptions=assumptions) is True
+    assert ctx.equivalent(left_xor, right_xor, facts) is True
+    assert ctx.check(ctx.eq(left_xor, right_xor), facts=facts) is True
+    assert ctx.check(ctx.eq(left_xor, right_xor), assumptions=assumptions) is True
+
+    residual = round_seed / 2
+    assert (
+        ctx.equivalent(
+            ixsimpl.floor(left / 64) + residual,
+            ixsimpl.floor(right / 64 + residual),
+            facts,
+        )
+        is True
+    )
+    assert (
+        ctx.equivalent(
+            ixsimpl.ceil(left / 64) + residual,
+            ixsimpl.ceil(right / 64 + residual),
+            facts,
+        )
+        is True
+    )
+
+    assert ctx.equivalent(left_grouped, grouped(right_bad), facts) is not True
+    assert ctx.equivalent(left_xor, xored(right_bad), facts) is not True
+    no_residual_integrality = ctx.facts()
+    no_residual_integrality.assume_many([item >= 0, item <= 255])
+    assert (
+        ctx.equivalent(
+            ixsimpl.floor(left / 64) + residual,
+            ixsimpl.floor(right / 64 + residual),
+            no_residual_integrality,
+        )
+        is None
+    )
+    partial = ixsimpl.floor(1 / partial_divisor)
+    assert ctx.equivalent(ixsimpl.xor_(left, partial), ixsimpl.xor_(right, partial), facts) is None
+
+    narrow = ctx.facts()
+    narrow.assume_many([noninjective >= 0, noninjective <= 1])
+    assert (
+        ctx.equivalent(
+            ixsimpl.floor(noninjective / 2),
+            ixsimpl.floor((noninjective + 1) / 2),
+            narrow,
+        )
+        is None
+    )
+
+
+@given(
+    scale=st.integers(min_value=2, max_value=4),
+    modulus=st.integers(min_value=2, max_value=4),
+    context_modulus=st.integers(min_value=2, max_value=6),
+    quotient_scale=st.integers(min_value=1, max_value=4),
+    remainder_scale=st.integers(min_value=1, max_value=4),
+    xor_divisor=st.integers(min_value=2, max_value=4),
+)
+def test_equivalent_context_composition_soundness(
+    scale: int,
+    modulus: int,
+    context_modulus: int,
+    quotient_scale: int,
+    remainder_scale: int,
+    xor_divisor: int,
+) -> None:
+    """Every grouped and XOR context proof holds over its complete domain."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("context_soundness_x")
+    seed = ctx.sym("context_soundness_seed")
+    alias = ctx.sym("context_soundness_alias")
+    residual = seed % scale
+    value = (scale * x + residual) % (scale * modulus)
+
+    def grouped(expr: ixsimpl.Expr) -> ixsimpl.Expr:
+        return quotient_scale * ixsimpl.floor(expr / context_modulus) + remainder_scale * (
+            expr % context_modulus
+        )
+
+    def xored(expr: ixsimpl.Expr) -> ixsimpl.Expr:
+        return ixsimpl.xor_(expr, ixsimpl.floor(expr / xor_divisor))
+
+    assumptions = [
+        x >= -modulus,
+        x <= modulus,
+        seed >= -scale,
+        seed <= scale,
+        ctx.eq(alias, value),
+    ]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    grouped_value = grouped(value)
+    grouped_alias = grouped(alias)
+    xor_value = xored(value)
+    xor_alias = xored(alias)
+
+    assert ctx.equivalent(value, alias, facts) is True
+    assert ctx.equivalent(grouped_value, grouped_alias, facts) is True
+    assert ctx.equivalent(xor_value, xor_alias, facts) is True
+    assert ctx.check(ctx.eq(grouped_value, grouped_alias), facts=facts) is True
+    assert ctx.check(ctx.eq(xor_value, xor_alias), assumptions=assumptions) is True
+
+    for x_value in range(-modulus, modulus + 1):
+        for seed_value in range(-scale, scale + 1):
+            base_env = {
+                "context_soundness_x": x_value,
+                "context_soundness_seed": seed_value,
+            }
+            alias_value = eval_ixs(value, ctx, base_env)
+            env = {**base_env, "context_soundness_alias": alias_value}
+            assert eval_ixs(grouped_value, ctx, env) == eval_ixs(grouped_alias, ctx, env)
+            assert eval_ixs(xor_value, ctx, env) == eval_ixs(xor_alias, ctx, env)
+
+
 @given(case=_stronger_proof_case_st())
 def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) -> None:
     """All combined proof results hold over the complete bounded domain."""

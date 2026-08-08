@@ -176,6 +176,12 @@ if(NOT USE_AMALGAMATION)
     target_include_directories(test_bounds PRIVATE src)
     target_compile_definitions(test_bounds PRIVATE IXS_TEST_INTERNAL)
     add_test(NAME test_bounds COMMAND test_bounds)
+
+    add_executable(test_equivalence_context test/test_equivalence_context.c)
+    target_link_libraries(test_equivalence_context ixsimpl_stats)
+    target_include_directories(test_equivalence_context PRIVATE src)
+    target_compile_definitions(test_equivalence_context PRIVATE IXS_TEST_INTERNAL)
+    add_test(NAME test_equivalence_context COMMAND test_equivalence_context)
 endif()
 
 # --- Static hot-path complexity check ---

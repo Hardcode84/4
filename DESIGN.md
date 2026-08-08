@@ -1813,6 +1813,29 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   ordinary equivalence proof. Other predicate equalities retain their existing
   entry path.
 
+  Equivalence composes those exact proofs through a narrow set of canonical
+  numeric contexts. Entry is restricted to canonical two-term `floor`/`Mod`
+  groups and production-backed binary XORs. A query-local iterative worklist
+  pairs `ADD`, `MUL`, `floor`, and `ceil` DAG nodes with expected O(N)
+  insertion and lookup work and O(N) query state; invoked child proof rules
+  retain their own documented bounds. Canonical ADDs with different arity use
+  exact relation partitioning only when removing common terms strictly reduces
+  the relation. Equal positive literal `Mod` contexts require both dividends
+  to be integer-valued and congruent at that modulus; a smaller exact-ADD
+  residual is only a bounded retry. Affine `floor` and `ceil` contexts may move
+  residuals into their arguments only when each residual is proven
+  integer-valued.
+
+  Production-backed binary numeric XOR nodes pair pointer-identical arguments
+  first, then use bounded semantic child proofs. The matcher is O(A^2) in its
+  admitted arity A=2; wider canonical XORs retain the existing exact and
+  low-bit strategies instead of starting quadratic semantic matching. Only
+  complete child proofs establish the outer equality; failed children, cycles,
+  exhausted child-proof depth, partial expressions, and allocation failure
+  remain `UNKNOWN`. This is not generic congruence for extrema, Piecewise,
+  truncation, or predicates. Boolean AND/OR keep their dedicated predicate-tree
+  matcher.
+
   The representative and isolation rules accept only a `TRUE` child proof,
   and any representative reached by that child still requires the canonical
   remainder range. An exact no-wrap partition may also propagate a conclusive
@@ -2860,6 +2883,7 @@ ixsimpl/
 │   ├── test_serialize.c
 │   ├── test_introspect.c
 │   ├── test_bounds.c
+│   ├── test_equivalence_context.c
 │   ├── test_relational_contract.c
 │   ├── test_simplify.c
 │   ├── test_expand.c
