@@ -156,18 +156,16 @@ composition between APIs.
 There is one public range contract: `ixs_range_result` with exact rational
 endpoints. Consumers that require an integer enclosure first prove
 integer-valuedness with `ixs_check_integer_valued`, then round the returned
-finite endpoints inward. A separate `integer_range` API would duplicate those
-two contracts and is intentionally absent from C, C++, and Python.
+finite endpoints inward. No second integer-enclosure surface is exposed.
 
 Equivalence has one public contract as well: `ixs_equivalent_facts`. General
 predicate checking may exhaustively check a small finite symbol domain, but
-that fixed-budget fallback is an implementation detail. There is no separately
-budgeted `equivalent_finite_domain` endpoint.
+that fixed-budget fallback is an implementation detail, not a separate public
+query.
 
 Structural numerator/denominator decomposition is internal to Trunc and exact
 equivalence proofs. Public callers use `ixs_try_exact_divide_facts`, which
-returns a quotient only after proving exact divisibility; there is no
-`decompose_exact_quotient` query.
+returns a quotient only after proving exact divisibility.
 
 ## Rule-Hit Statistics
 
