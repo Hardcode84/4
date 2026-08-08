@@ -30,6 +30,10 @@ Properties tested:
 13. Scaled-Mod projection soundness: every conclusive public proof is checked
     over the complete generated domain, including a separately proved Mod
     residual and a common outer scale.
+14. Adapted proof-stack soundness: local implications, scaled-Mod projection,
+    grouped and XOR contexts, and first-match Piecewise proofs are checked
+    together through assumption-backed and reusable-facts entry points over
+    complete generated domains.
 """
 
 from __future__ import annotations
@@ -84,6 +88,25 @@ class _StrongerProofCase:
     floor_shift: int
     constant: int
     congruent_reconstruction: bool
+    edge_width: int
+    high_edge: bool
+
+
+@dataclass(frozen=True)
+class _AdaptedProofCase:
+    row_extent: int
+    column_extent: int
+    scale: int
+    modulus: int
+    outer_scale: int
+    context_modulus: int
+    quotient_scale: int
+    remainder_scale: int
+    xor_divisor: int
+    piecewise_points: tuple[int, ...]
+    piecewise_order: tuple[int, ...]
+    piecewise_scale: int
+    wrong_piecewise_index: int
     edge_width: int
     high_edge: bool
 
@@ -235,6 +258,35 @@ def _stronger_proof_case_st(draw: st.DrawFn) -> _StrongerProofCase:
         constant=draw(st.integers(min_value=-16, max_value=16)),
         congruent_reconstruction=congruent,
         edge_width=draw(st.integers(min_value=0, max_value=3)),
+        high_edge=draw(st.booleans()),
+    )
+
+
+@st.composite
+def _adapted_proof_case_st(draw: st.DrawFn) -> _AdaptedProofCase:
+    """One small workload spanning every proof adapted from my/rem-fix."""
+    piecewise_size = draw(st.integers(min_value=2, max_value=5))
+    piecewise_step = draw(st.integers(min_value=1, max_value=3))
+    piecewise_start = draw(st.integers(min_value=-4, max_value=4))
+    piecewise_points = tuple(
+        piecewise_start + piecewise_step * index for index in range(piecewise_size)
+    )
+    piecewise_scales = [value for value in range(-3, 4) if value != 0]
+    return _AdaptedProofCase(
+        row_extent=draw(st.integers(min_value=2, max_value=5)),
+        column_extent=draw(st.integers(min_value=2, max_value=4)),
+        scale=draw(st.integers(min_value=2, max_value=4)),
+        modulus=draw(st.integers(min_value=2, max_value=4)),
+        outer_scale=draw(st.integers(min_value=1, max_value=3)),
+        context_modulus=draw(st.integers(min_value=2, max_value=6)),
+        quotient_scale=draw(st.integers(min_value=1, max_value=4)),
+        remainder_scale=draw(st.integers(min_value=1, max_value=4)),
+        xor_divisor=draw(st.integers(min_value=2, max_value=4)),
+        piecewise_points=piecewise_points,
+        piecewise_order=tuple(draw(st.permutations(piecewise_points))),
+        piecewise_scale=draw(st.sampled_from(piecewise_scales)),
+        wrong_piecewise_index=draw(st.integers(min_value=0, max_value=piecewise_size - 1)),
+        edge_width=draw(st.integers(min_value=1, max_value=4)),
         high_edge=draw(st.booleans()),
     )
 
@@ -746,6 +798,15 @@ def _eval_ixs_fraction(expr: ixsimpl.Expr, ctx: ixsimpl.Context, env: Env) -> Fr
         return Fraction(int(result), 1)
     except TypeError as e:
         raise ValueError(f"result is not a rational constant: {result}") from e
+
+
+def _assert_boolean_result_sound(result: bool | None, values: list[bool]) -> None:
+    """A conclusive tri-state result must hold over the complete domain."""
+    assert values
+    if result is True:
+        assert all(values)
+    elif result is False:
+        assert not any(values)
 
 
 def _range_assumptions(ctx: ixsimpl.Context, bounds: RangeBounds) -> list[ixsimpl.Expr]:
@@ -4322,15 +4383,368 @@ def test_piecewise_partition_equivalence_soundness(
             assert eval_ixs(lookup, ctx, env) == expected_value
 
 
+@given(case=_adapted_proof_case_st())
+def test_adapted_proof_stack_complete_domain_soundness(case: _AdaptedProofCase) -> None:
+    """All adapted proofs agree with complete workload-sized domains."""
+    ctx = ixsimpl.Context()
+
+    row = ctx.sym("adapted_implication_row")
+    column = ctx.sym("adapted_implication_column")
+    antecedent = ixsimpl.and_(
+        row >= 0,
+        row < case.row_extent,
+        column >= 0,
+        column < case.column_extent,
+    )
+    linear = row + case.row_extent * column
+    linear_limit = case.row_extent * case.column_extent
+    consequent = ixsimpl.and_(linear >= 0, linear < linear_limit)
+    implication = ixsimpl.or_(ixsimpl.not_(antecedent), consequent)
+    tight_consequent = ixsimpl.and_(linear >= 0, linear < linear_limit - 1)
+    tight_implication = ixsimpl.or_(ixsimpl.not_(antecedent), tight_consequent)
+    implication_assumptions = [
+        row >= -1,
+        row <= case.row_extent,
+        column >= -1,
+        column <= case.column_extent,
+    ]
+    implication_facts = ctx.facts()
+    implication_facts.assume_many(implication_assumptions)
+    implication_envs = [
+        {"adapted_implication_row": row_value, "adapted_implication_column": column_value}
+        for row_value in range(-1, case.row_extent + 1)
+        for column_value in range(-1, case.column_extent + 1)
+    ]
+    implication_values = [eval_ixs(implication, ctx, env) == 1 for env in implication_envs]
+    implication_results = (
+        ctx.check_predicate(implication, implication_facts),
+        ctx.check(implication, facts=implication_facts),
+        ctx.check(implication, assumptions=implication_assumptions),
+    )
+    assert implication_results[0] is True
+    for result in implication_results:
+        _assert_boolean_result_sound(result, implication_values)
+
+    tight_values = [eval_ixs(tight_implication, ctx, env) == 1 for env in implication_envs]
+    for result in (
+        ctx.check_predicate(tight_implication, implication_facts),
+        ctx.check(tight_implication, facts=implication_facts),
+        ctx.check(tight_implication, assumptions=implication_assumptions),
+    ):
+        _assert_boolean_result_sound(result, tight_values)
+    partial_implication = ixsimpl.or_(
+        ixsimpl.not_(antecedent),
+        1 / (row - (case.row_extent - 1)) > 0,
+    )
+    assert ctx.check_predicate(partial_implication, implication_facts) is None
+    assert ctx.check(partial_implication, assumptions=implication_assumptions) is None
+
+    x = ctx.sym("adapted_scaled_x")
+    residual = ctx.sym("adapted_scaled_residual")
+    other_residual = ctx.sym("adapted_scaled_other_residual")
+    scaled_assumptions = [
+        x >= -case.modulus,
+        x <= case.modulus,
+        residual >= 0,
+        residual < case.scale,
+    ]
+    scaled_facts = ctx.facts()
+    scaled_facts.assume_many(scaled_assumptions)
+    wrapped = (case.scale * x + residual) % (case.scale * case.modulus)
+    projected = case.scale * (x % case.modulus) + residual
+    scaled_lhs = case.outer_scale * wrapped
+    scaled_rhs = case.outer_scale * projected
+    scaled_equality = ctx.eq(scaled_lhs, scaled_rhs)
+    scaled_envs = [
+        {"adapted_scaled_x": x_value, "adapted_scaled_residual": residual_value}
+        for x_value in range(-case.modulus, case.modulus + 1)
+        for residual_value in range(case.scale)
+    ]
+    scaled_values = [
+        eval_ixs(scaled_lhs, ctx, env) == eval_ixs(scaled_rhs, ctx, env) for env in scaled_envs
+    ]
+    scaled_results = (
+        ctx.equivalent(scaled_lhs, scaled_rhs, scaled_facts),
+        ctx.check(scaled_equality, facts=scaled_facts),
+        ctx.check(scaled_equality, assumptions=scaled_assumptions),
+        ctx.check_predicate(scaled_equality, scaled_facts),
+    )
+    assert scaled_results == (True, True, True, True)
+    for result in scaled_results:
+        _assert_boolean_result_sound(result, scaled_values)
+
+    outside = ctx.facts()
+    outside.assume_many(
+        [
+            ctx.eq(x, case.modulus - 1),
+            ctx.eq(residual, case.scale),
+        ]
+    )
+    outside_env = {
+        "adapted_scaled_x": case.modulus - 1,
+        "adapted_scaled_residual": case.scale,
+    }
+    outside_values = [
+        eval_ixs(scaled_lhs, ctx, outside_env) == eval_ixs(scaled_rhs, ctx, outside_env)
+    ]
+    outside_results = (
+        ctx.equivalent(scaled_lhs, scaled_rhs, outside),
+        ctx.check(scaled_equality, facts=outside),
+        ctx.check_predicate(scaled_equality, outside),
+    )
+    assert outside_results == (False, False, False)
+    for result in outside_results:
+        _assert_boolean_result_sound(result, outside_values)
+
+    unrelated_assumptions = [
+        *scaled_assumptions,
+        other_residual >= 0,
+        other_residual < case.scale,
+    ]
+    unrelated_facts = ctx.facts()
+    unrelated_facts.assume_many(unrelated_assumptions)
+    unrelated_rhs = case.outer_scale * (case.scale * (x % case.modulus) + other_residual)
+    unrelated_equality = ctx.eq(scaled_lhs, unrelated_rhs)
+    unrelated_envs = [
+        {
+            "adapted_scaled_x": x_value,
+            "adapted_scaled_residual": residual_value,
+            "adapted_scaled_other_residual": other_value,
+        }
+        for x_value in range(-case.modulus, case.modulus + 1)
+        for residual_value in range(case.scale)
+        for other_value in range(case.scale)
+    ]
+    unrelated_values = [
+        eval_ixs(scaled_lhs, ctx, env) == eval_ixs(unrelated_rhs, ctx, env)
+        for env in unrelated_envs
+    ]
+    for result in (
+        ctx.equivalent(scaled_lhs, unrelated_rhs, unrelated_facts),
+        ctx.check(unrelated_equality, facts=unrelated_facts),
+        ctx.check(unrelated_equality, assumptions=unrelated_assumptions),
+    ):
+        _assert_boolean_result_sound(result, unrelated_values)
+
+    def grouped(expr: ixsimpl.Expr) -> ixsimpl.Expr:
+        return case.quotient_scale * ixsimpl.floor(
+            expr / case.context_modulus
+        ) + case.remainder_scale * (expr % case.context_modulus)
+
+    def xored(expr: ixsimpl.Expr) -> ixsimpl.Expr:
+        return ixsimpl.xor_(expr, ixsimpl.floor(expr / case.xor_divisor))
+
+    stacked_grouped_lhs = grouped(scaled_lhs)
+    stacked_grouped_rhs = grouped(scaled_rhs)
+    stacked_xor_lhs = xored(scaled_lhs)
+    stacked_xor_rhs = xored(scaled_rhs)
+    for result in (
+        ctx.equivalent(stacked_grouped_lhs, stacked_grouped_rhs, scaled_facts),
+        ctx.equivalent(stacked_xor_lhs, stacked_xor_rhs, scaled_facts),
+    ):
+        _assert_boolean_result_sound(result, scaled_values)
+
+    alias = ctx.sym("adapted_context_alias")
+    context_assumptions = [*scaled_assumptions, ctx.eq(alias, wrapped)]
+    context_facts = ctx.facts()
+    context_facts.assume_many(context_assumptions)
+    context_envs = [
+        {**env, "adapted_context_alias": eval_ixs(wrapped, ctx, env)} for env in scaled_envs
+    ]
+    grouped_lhs = grouped(wrapped)
+    grouped_rhs = grouped(alias)
+    xor_lhs = xored(wrapped)
+    xor_rhs = xored(alias)
+    grouped_equality = ctx.eq(grouped_lhs, grouped_rhs)
+    xor_equality = ctx.eq(xor_lhs, xor_rhs)
+    grouped_context_values = [
+        eval_ixs(grouped_lhs, ctx, env) == eval_ixs(grouped_rhs, ctx, env) for env in context_envs
+    ]
+    xor_context_values = [
+        eval_ixs(xor_lhs, ctx, env) == eval_ixs(xor_rhs, ctx, env) for env in context_envs
+    ]
+    context_results = (
+        ctx.equivalent(grouped_lhs, grouped_rhs, context_facts),
+        ctx.check(grouped_equality, facts=context_facts),
+        ctx.check(grouped_equality, assumptions=context_assumptions),
+        ctx.equivalent(xor_lhs, xor_rhs, context_facts),
+        ctx.check(xor_equality, facts=context_facts),
+        ctx.check(xor_equality, assumptions=context_assumptions),
+    )
+    assert context_results == (True, True, True, True, True, True)
+    for result, values in zip(
+        context_results,
+        (
+            grouped_context_values,
+            grouped_context_values,
+            grouped_context_values,
+            xor_context_values,
+            xor_context_values,
+            xor_context_values,
+        ),
+        strict=True,
+    ):
+        _assert_boolean_result_sound(result, values)
+
+    bad_grouped = grouped(alias + 1)
+    bad_xor = xored(alias + 1)
+    grouped_bad_values = [
+        eval_ixs(grouped_lhs, ctx, env) == eval_ixs(bad_grouped, ctx, env) for env in context_envs
+    ]
+    xor_bad_values = [
+        eval_ixs(xor_lhs, ctx, env) == eval_ixs(bad_xor, ctx, env) for env in context_envs
+    ]
+    _assert_boolean_result_sound(
+        ctx.equivalent(grouped_lhs, bad_grouped, context_facts),
+        grouped_bad_values,
+    )
+    _assert_boolean_result_sound(
+        ctx.equivalent(xor_lhs, bad_xor, context_facts),
+        xor_bad_values,
+    )
+
+    outer_predicate = residual >= 0
+    lhs_predicate = x < case.modulus
+    rhs_predicate = x <= case.modulus - 1
+    lhs_and = ixsimpl.and_(outer_predicate, lhs_predicate)
+    rhs_and = ixsimpl.and_(rhs_predicate, outer_predicate)
+    and_values = [eval_ixs(lhs_and, ctx, env) == eval_ixs(rhs_and, ctx, env) for env in scaled_envs]
+    and_result = ctx.equivalent(lhs_and, rhs_and, scaled_facts)
+    assert and_result is True
+    _assert_boolean_result_sound(and_result, and_values)
+
+    selector = ctx.sym("adapted_piecewise_selector")
+    base = ctx.sym("adapted_piecewise_base")
+    points = case.piecewise_points
+    expected = base + case.piecewise_scale * selector
+    threshold_cases = [
+        (base + case.piecewise_scale * point, selector < point + 1) for point in points[:-1]
+    ]
+    threshold_cases.append((base + case.piecewise_scale * points[-1], ctx.true_()))
+    lookup_cases = [
+        (base + case.piecewise_scale * point, ctx.eq(selector, point))
+        for point in case.piecewise_order
+    ]
+    lookup_cases.append((base + 999, ctx.true_()))
+    wrong_point = points[case.wrong_piecewise_index]
+    wrong_lookup_cases = [
+        (
+            base + case.piecewise_scale * point + (1 if point == wrong_point else 0),
+            ctx.eq(selector, point),
+        )
+        for point in case.piecewise_order
+    ]
+    wrong_lookup_cases.append((base + 999, ctx.true_()))
+    threshold = ixsimpl.pw(*threshold_cases)
+    lookup = ixsimpl.pw(*lookup_cases)
+    wrong_lookup = ixsimpl.pw(*wrong_lookup_cases)
+    piecewise_assumptions = [
+        selector >= points[0],
+        selector <= points[-1],
+        base >= -2,
+        base <= 2,
+    ]
+    piecewise_step = points[1] - points[0]
+    if piecewise_step > 1:
+        piecewise_assumptions.append(ctx.eq(selector % piecewise_step, points[0] % piecewise_step))
+    piecewise_facts = ctx.facts()
+    piecewise_facts.assume_many(piecewise_assumptions)
+    piecewise_envs = [
+        {"adapted_piecewise_selector": selector_value, "adapted_piecewise_base": base_value}
+        for selector_value in points
+        for base_value in range(-2, 3)
+    ]
+    threshold_values = [
+        eval_ixs(threshold, ctx, env) == eval_ixs(expected, ctx, env) for env in piecewise_envs
+    ]
+    lookup_values = [
+        eval_ixs(lookup, ctx, env) == eval_ixs(expected, ctx, env) for env in piecewise_envs
+    ]
+    piecewise_results = (
+        ctx.equivalent(threshold, expected, piecewise_facts),
+        ctx.equivalent(lookup, expected, piecewise_facts),
+        ctx.check(ctx.eq(threshold, expected), facts=piecewise_facts),
+        ctx.check(ctx.eq(lookup, expected), assumptions=piecewise_assumptions),
+    )
+    assert piecewise_results == (True, True, True, True)
+    for result, values in zip(
+        piecewise_results,
+        (threshold_values, lookup_values, threshold_values, lookup_values),
+        strict=True,
+    ):
+        _assert_boolean_result_sound(result, values)
+
+    wrong_values = [
+        eval_ixs(wrong_lookup, ctx, env) == eval_ixs(expected, ctx, env) for env in piecewise_envs
+    ]
+    for result in (
+        ctx.equivalent(wrong_lookup, expected, piecewise_facts),
+        ctx.check(ctx.eq(wrong_lookup, expected), facts=piecewise_facts),
+    ):
+        _assert_boolean_result_sound(result, wrong_values)
+    exact_wrong = ctx.facts()
+    exact_wrong.assume(ctx.eq(selector, wrong_point))
+    exact_wrong_result = ctx.equivalent(wrong_lookup, expected, exact_wrong)
+    assert exact_wrong_result is False
+    _assert_boolean_result_sound(
+        exact_wrong_result,
+        [
+            eval_ixs(wrong_lookup, ctx, env) == eval_ixs(expected, ctx, env)
+            for env in piecewise_envs
+            if env["adapted_piecewise_selector"] == wrong_point
+        ],
+    )
+
+    edge_selector = ctx.sym("adapted_piecewise_edge_selector")
+    edge_scale = 1 if case.high_edge else -1
+    edge_base = (1 << 63) - 1 - case.edge_width if case.high_edge else -(1 << 63) + case.edge_width
+    edge_expected = ctx.int_(edge_base) + edge_scale * edge_selector
+    edge_cases = [
+        (edge_base + edge_scale * value, edge_selector < value + 1)
+        for value in range(case.edge_width)
+    ]
+    edge_cases.append((edge_base + edge_scale * case.edge_width, ctx.true_()))
+    edge_piecewise = ixsimpl.pw(*edge_cases)
+    edge_assumptions = [edge_selector >= 0, edge_selector <= case.edge_width]
+    edge_facts = ctx.facts()
+    edge_facts.assume_many(edge_assumptions)
+    edge_values = [
+        eval_ixs(edge_piecewise, ctx, {"adapted_piecewise_edge_selector": value})
+        == eval_ixs(edge_expected, ctx, {"adapted_piecewise_edge_selector": value})
+        for value in range(case.edge_width + 1)
+    ]
+    edge_results = (
+        ctx.equivalent(edge_piecewise, edge_expected, edge_facts),
+        ctx.check(ctx.eq(edge_piecewise, edge_expected), assumptions=edge_assumptions),
+    )
+    assert edge_results == (True, True)
+    for result in edge_results:
+        _assert_boolean_result_sound(result, edge_values)
+
+
+def test_adapted_proof_partial_and_overflow_contracts() -> None:
+    ctx = ixsimpl.Context()
+    selector = ctx.sym("adapted_contract_selector")
+    expected = selector - 1
+    assumptions = [selector >= 1, selector <= 2]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    partial = ixsimpl.pw(
+        (expected, 1 / (selector - 1) > 0),
+        (expected, ctx.true_()),
+    )
+    overflow_guard = ctx.eq(((1 << 63) - 1) * selector, (1 << 63) - 1)
+    overflowing = ixsimpl.pw((0, overflow_guard), (1, ctx.true_()))
+
+    assert ctx.equivalent(partial, expected, facts) is None
+    assert ctx.check(ctx.eq(partial, expected), assumptions=assumptions) is None
+    assert ctx.equivalent(overflowing, expected, facts) is None
+    assert ctx.check(ctx.eq(overflowing, expected), assumptions=assumptions) is None
+
+
 @given(case=_stronger_proof_case_st())
 def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) -> None:
     """All combined proof results hold over the complete bounded domain."""
-
-    def assert_boolean_result_sound(result: bool | None, values: list[bool]) -> None:
-        if result is True:
-            assert all(values)
-        elif result is False:
-            assert not any(values)
 
     ctx = ixsimpl.Context()
     x = ctx.sym("stronger_proof_x")
@@ -4414,7 +4828,7 @@ def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) ->
         partition_facts_check,
         partition_assumption_check,
     ):
-        assert_boolean_result_sound(check_result, partition_values)
+        _assert_boolean_result_sound(check_result, partition_values)
 
     reconstructed = radix * ixsimpl.floor(x / radix) + y % radix
     reconstruction_equality = ctx.eq(reconstructed, x)
@@ -4429,7 +4843,7 @@ def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) ->
         reconstruction_facts_check,
         reconstruction_assumption_check,
     ):
-        assert_boolean_result_sound(check_result, reconstruction_values)
+        _assert_boolean_result_sound(check_result, reconstruction_values)
     if case.congruent_reconstruction:
         assert reconstruction_equivalent is True
         assert reconstruction_facts_check is True
@@ -4469,7 +4883,7 @@ def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) ->
         env = {"stronger_proof_edge": edge_value}
         edge_values.append(eval_ixs(edge_predicate, ctx, env) == 1)
     for check_result in (edge_facts_check, edge_assumption_check):
-        assert_boolean_result_sound(check_result, edge_values)
+        _assert_boolean_result_sound(check_result, edge_values)
 
 
 def test_range_composite_predicate_fact() -> None:

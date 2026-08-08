@@ -8252,6 +8252,7 @@ static void test_generic_bounded_scaled_mod_equivalence(void) {
   ixs_facts *dynamic = ixs_facts_create(ctx);
   ixs_facts *dynamic_no_positive = ixs_facts_create(ctx);
   ixs_facts *dynamic_no_integrality = ixs_facts_create(ctx);
+  ixs_facts *shared_equal = ixs_facts_create(ctx);
   ixs_facts *shared_unknown = ixs_facts_create(ctx);
   ixs_facts *empty = ixs_facts_create(ctx);
   ixs_facts *oom_facts = ixs_facts_create(ctx);
@@ -8269,7 +8270,8 @@ static void test_generic_bounded_scaled_mod_equivalence(void) {
         divisor_quarter && dynamic_wrapped && dynamic_projected &&
         dynamic_equality && half_projected && half_wrapped && mismatched &&
         bounded && lower_only && outside && dynamic && dynamic_no_positive &&
-        dynamic_no_integrality && shared_unknown && empty && oom_facts);
+        dynamic_no_integrality && shared_equal && shared_unknown && empty &&
+        oom_facts);
 
   CHECK(ixs_facts_assume_pred(bounded, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
   CHECK(ixs_facts_assume_pred(bounded, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
@@ -8327,6 +8329,13 @@ static void test_generic_bounded_scaled_mod_equivalence(void) {
                                   dynamic_projected) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(empty, half_projected, half_wrapped) ==
         IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(shared_equal,
+                              ixs_cmp(ctx, r, IXS_CMP_EQ, other_r)));
+  CHECK(ixs_facts_assume_pred(shared_equal, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(shared_equal, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(test_ixs_equivalent_facts(shared_equal, wrapped, mismatched) ==
+        IXS_CHECK_TRUE);
 
   CHECK(
       ixs_facts_assume_pred(shared_unknown, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));

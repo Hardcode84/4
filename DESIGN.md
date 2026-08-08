@@ -1784,16 +1784,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `-r/c` for any nonzero rational `c`; the constructed candidate and the Mod
   must both be total. Arbitrary `c` requires that this be the residual's only
   Mod term; a residual with other scaled Mod terms retains the narrower rule
-  that isolates one unique coefficient `1` or `-1`. When no unit candidate
-  exists, a normalized zero-sum residual may contain several non-unit Mod
-  terms. Each Mod is isolated in turn by an exact rearrangement, and at most
-  one bounded child proof checks that candidate against the selected Mod. The
-  other Mod terms remain in the candidate, so only a proof of the complete
-  residual can establish equality. For `T` terms and `M` Mod candidates this
-  performs O(M*T) canonical construction work and starts at most `M` bounded
-  child proofs; `M <= T`, so the construction bound is O(T^2). Proof results
-  share the query memo and cycle guard and no candidate scans retained context
-  state.
+  that isolates one unique coefficient `1` or `-1`. If every coefficient of a
+  normalized zero-sum ADD has integer content greater than one, the engine
+  divides that content once and retries the unique-unit rule. Several
+  remaining non-unit Mod terms are ambiguous and rejected rather than rebuilt
+  as a sequence of speculative candidates. Content discovery and primitive
+  reconstruction are O(T), and the path starts at most one bounded child
+  proof. Proof results share the query memo and cycle guard and no candidate
+  scan retains context state.
 
   The scaled projection proves
   `Mod(g*x+r,g*m) == g*Mod(x,m)+r` only for an exact positive integer literal
@@ -1807,7 +1805,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `Mod(4*x+Mod(seed,4),32) == 4*Mod(x,8)+Mod(seed,4)` composes, while a missing
   upper bound does not. Extraction and partitioning each scan the queried ADD
   once and start at most two bounded child proofs, with no finite-domain or
-  context-wide scan. A predicate equality whose normalized zero-sum ADD
+  context-wide scan. Equal outer MUL coefficients around the wrapped Mod and
+  projected ADD are canceled structurally before zero-sum reconstruction.
+  Distinct bare-symbol residuals use the direct arithmetic result as their
+  terminal proof result; they cannot enter compositional rules. A predicate
+  equality whose normalized zero-sum ADD
   contains a non-unit scaled Mod first partitions that ADD into exact positive
   and negative sides. One with a single unit Piecewise term instead isolates
   that term and rebuilds its peer once, without distributing into the arms.
