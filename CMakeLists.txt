@@ -203,7 +203,3 @@ target_link_libraries(bench_corpus ixsimpl)
 
 add_executable(bench_relational_facts bench/bench_relational_facts.c)
 target_link_libraries(bench_relational_facts ixsimpl)
-
-add_executable(bench_fact_closure bench/bench_fact_closure.c)
-target_link_libraries(bench_fact_closure ixsimpl)
-target_include_directories(bench_fact_closure PRIVATE src)
