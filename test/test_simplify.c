@@ -3828,6 +3828,43 @@ static void test_floor_mod_cancel_symbolic(void) {
     CHECK(e == expected);
   }
 
+  /* A symbolic floor multiplier can contain a cancellable radix pair plus a
+   * single residual product.  Repeating the bounded rewrite removes the
+   * next radix digit without expanding the surrounding ADD. */
+  {
+    ixs_node *x64 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 64)));
+    ixs_node *x128 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 128)));
+    ixs_node *x256 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 256)));
+    ixs_node *expected =
+        ixs_add(ctx, M,
+                ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4),
+                                     ixs_mul(ctx, L, x256)),
+                        ixs_mul(ctx, L, x64)));
+    e = ixs_add(ctx, M,
+                ixs_mul(ctx, ixs_int(ctx, 8), ixs_mul(ctx, L, x256)));
+    e = ixs_add(ctx, e,
+                ixs_mul(ctx, ixs_int(ctx, 2),
+                        ixs_mul(ctx, L, ixs_mod(ctx, x128, ixs_int(ctx, 2)))));
+    e = ixs_add(ctx, e,
+                ixs_mul(ctx, L, ixs_mod(ctx, x64, ixs_int(ctx, 2))));
+    CHECK(ixs_node_tag(e) == IXS_ADD);
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == expected);
+  }
+
+  /* Partial cancellation must reduce a larger matched floor multiplier, not
+   * expand a smaller one into a negative residual. */
+  {
+    ixs_node *x64 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 64)));
+    ixs_node *r64 = ixs_mod(ctx, x, ixs_int(ctx, 64));
+    e = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8192), x64),
+                ixs_mul(ctx, ixs_int(ctx, 16),
+                        ixs_floor(ctx, ixs_div(ctx, r64, ixs_int(ctx, 32)))));
+    e = ixs_add(ctx, e,
+                ixs_mul(ctx, ixs_int(ctx, 256),
+                        ixs_mod(ctx, r64, ixs_int(ctx, 32))));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == e);
+  }
+
   /* Different outer factors must not cancel. */
   {
     ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
@@ -3844,6 +3881,19 @@ static void test_floor_mod_cancel_symbolic(void) {
         ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 2), ixs_mul(ctx, L, K)), flK),
         ixs_mul(ctx, L, ixs_mod(ctx, x, K)));
     CHECK(ixs_node_tag(e) == IXS_ADD);
+  }
+
+  /* Partial cancellation requires a positive literal modulus.  A symbolic
+   * modulus has no valid Mod domain until positivity is established, so the
+   * rewrite must not turn it into an expression that is defined for K <= 0. */
+  {
+    ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
+    ixs_node *fractional_mod =
+        ixs_div(ctx, ixs_mod(ctx, x, K), K);
+    e = ixs_add(ctx, M,
+                ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), flK),
+                        fractional_mod));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == e);
   }
 }
 

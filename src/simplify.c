@@ -1378,7 +1378,7 @@ cleanup:
 
 static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
                                     uint32_t nterms, uint32_t i,
-                                    size_t *inspected) {
+                                    size_t *inspected, bool allow_wide) {
   uint32_t j;
   mod_term_parts mod;
   ixs_node *ci_outer, *ci_outer_times_m, *expected_floor;
@@ -1400,15 +1400,18 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
 
   for (j = 0; j < nterms; j++) {
     floor_term_parts parts;
+    ixs_node *inv;
+    ixs_node *ratio;
     ixs_node *replacement;
+    ixs_node *residual;
+    ixs_node *residual_floor;
+    int64_t ratio_p, ratio_q;
     if (j == i || !terms[j].term)
       continue;
     if (*inspected >= FLOOR_MOD_PAIR_LIMIT)
       return 0;
     (*inspected)++;
     if (!floor_parts_from_addterm(ctx, &terms[j], &parts))
-      continue;
-    if (!floor_mul_matches(ctx, parts.mul, ci_outer_times_m))
       continue;
     if (!floor_pair_matches(ctx, expected_floor, &parts, mod.modulus, mod.arg))
       continue;
@@ -1417,10 +1420,51 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
       return -1;
     if (ixs_node_is_sentinel(replacement))
       return 0;
-    terms[i].term = NULL;
-    terms[j].term = replacement;
-    terms[j].coeff = make_const(ctx, ci_p, ci_q);
-    return terms[j].coeff ? 1 : -1;
+    if (floor_mul_matches(ctx, parts.mul, ci_outer_times_m)) {
+      terms[i].term = NULL;
+      terms[j].term = replacement;
+      terms[j].coeff = make_const(ctx, ci_p, ci_q);
+      return terms[j].coeff ? 1 : -1;
+    }
+
+    /* A floor multiplier may be a larger positive rational multiple of the
+     * exact floor-Mod multiplier.  Consume one copy; this exposes radix-chain
+     * cancellation without turning a compact positive combination into a
+     * subtractive expansion. */
+    if (!allow_wide || mod.modulus->tag != IXS_INT ||
+        mod.modulus->u.ival <= 0)
+      continue;
+    inv = simp_div(ctx, ixs_node_int(ctx, 1), ci_outer_times_m);
+    ratio = inv ? simp_mul_decompose(ctx, parts.mul, inv) : NULL;
+    if (!ratio || ixs_node_is_sentinel(ratio) || !ixs_node_is_const(ratio))
+      continue;
+    ixs_node_get_rat(ratio, &ratio_p, &ratio_q);
+    if (ixs_rat_cmp(ratio_p, ratio_q, 1, 1) <= 0)
+      continue;
+    residual = simp_sub(ctx, parts.mul, ci_outer_times_m);
+    if (!residual)
+      return -1;
+    if (ixs_node_is_sentinel(residual))
+      continue;
+    if (ixs_node_is_const(residual)) {
+      terms[i].term = replacement;
+      terms[j].term = parts.node;
+      terms[j].coeff = residual;
+      return 1;
+    }
+    if (residual->tag != IXS_MUL)
+      continue;
+    residual_floor = simp_mul(ctx, residual, parts.node);
+    if (!residual_floor)
+      return -1;
+    if (ixs_node_is_sentinel(residual_floor))
+      continue;
+    terms[i].term = replacement;
+    terms[j].term = residual_floor;
+    terms[j].coeff = make_const(ctx, 1, 1);
+    if (!terms[j].coeff)
+      return -1;
+    return 1;
   }
   return 0;
 }
@@ -1444,7 +1488,8 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
   saved_errors = ctx->errors;
   saved_nerrors = ctx->nerrors;
   saved_errors_cap = ctx->errors_cap;
-  result = cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected);
+  result =
+      cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected, allow_wide);
 
   ixs_arena_restore(&ctx->diag, diag_mark);
   ctx->errors = saved_errors;

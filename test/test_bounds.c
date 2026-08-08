@@ -2151,6 +2151,44 @@ static void test_bounds_check_mod_remainder(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_check_wave_radix_floor_sums(void) {
+  static const char asmbuf_text[] =
+      "-65280*floor(wi/128) + 32768*floor(wi/64) - "
+      "8176*floor(Mod(wi, 64)/16) + 512*Mod(wi, 64)";
+  static const char aiter_text[] =
+      "16*wi + 16384*raw1 + 3072*floor(wi/64) - 15872*floor(wi/256) - "
+      "3840*floor(Mod(wi, 64)/32) + 1792*floor(Mod(wi, 64)/16)";
+  static const char invalid_text[] =
+      "-65280*floor(wi/128) + 32768*floor(wi/64) - "
+      "8193*floor(Mod(wi, 64)/16) + 512*Mod(wi, 64)";
+  static const char domain_text[] =
+      "wi >= 0 & wi <= 255 & raw1 >= 0 & raw1 <= 1";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *asmbuf = ixs_parse_expr(ctx, asmbuf_text, strlen(asmbuf_text));
+  ixs_node *asmbuf_offset = ixs_add(ctx, asmbuf, ixs_int(ctx, 8192));
+  ixs_node *aiter = ixs_parse_expr(ctx, aiter_text, strlen(aiter_text));
+  ixs_node *invalid = ixs_parse_expr(ctx, invalid_text, strlen(invalid_text));
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, strlen(domain_text));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(asmbuf && asmbuf_offset && aiter && invalid && domain && facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(test_ixs_check_facts(
+            facts, ixs_cmp(ctx, asmbuf, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(
+            facts, ixs_cmp(ctx, asmbuf_offset, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(
+            facts, ixs_cmp(ctx, aiter, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(
+            facts, ixs_cmp(ctx, invalid, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_check_composite_divisibility(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *K = ixs_sym(ctx, "K");
@@ -9446,6 +9484,7 @@ int main(void) {
   test_bounds_check_ne();
   test_bounds_check_mod_congruence();
   test_bounds_check_mod_remainder();
+  test_bounds_check_wave_radix_floor_sums();
   test_bounds_check_composite_divisibility();
   test_bounds_check_pow2_fact();
   test_bounds_check_mask_fact();

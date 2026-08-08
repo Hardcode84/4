@@ -8856,6 +8856,173 @@ bounds_note_truncating_range_status(ixs_bounds *b,
     bounds_query_note_limit(b->query_state);
 }
 
+/* Preserve the queried expression while recovering correlations lost by
+ * interval addition.  Each transfer uses
+ * x = m*floor(x/m) + Mod(x,m), discarding only a nonnegative remainder. */
+#define BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS 16u
+#define BOUNDS_RADIX_CERTIFICATE_MAX_STEPS 16u
+
+typedef struct {
+  ixs_node *node;
+  ixs_node *floor_base;
+  int64_t coefficient;
+  int64_t floor_divisor;
+} bounds_radix_certificate_slot;
+
+static bool bounds_floor_radix_parts(ixs_node *node, ixs_node **base,
+                                     int64_t *divisor) {
+  ixs_node *argument;
+  int64_t numerator;
+  int64_t denominator;
+
+  if (!node || node->tag != IXS_FLOOR)
+    return false;
+  argument = node->u.unary.arg;
+  if (!argument || argument->tag != IXS_MUL || argument->u.mul.nfactors != 1u ||
+      argument->u.mul.factors[0].exp != 1)
+    return false;
+  ixs_node_get_rat(argument->u.mul.coeff, &numerator, &denominator);
+  if (numerator != 1 || denominator <= 1)
+    return false;
+  *base = argument->u.mul.factors[0].base;
+  *divisor = denominator;
+  return true;
+}
+
+static bool bounds_add_has_nonnegative_radix_certificate(ixs_bounds *b,
+                                                         ixs_node *expr) {
+  bounds_radix_certificate_slot slots[BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS];
+  size_t nslots;
+  size_t step;
+  uint32_t i;
+  int64_t constant_p;
+  int64_t constant_q;
+  bool has_negative_floor = false;
+
+  if (expr->u.add.nterms == 0u ||
+      expr->u.add.nterms > BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS / 2u)
+    return false;
+  ixs_node_get_rat(expr->u.add.coeff, &constant_p, &constant_q);
+  if (constant_q <= 0 || constant_p < 0)
+    return false;
+
+  memset(slots, 0, sizeof(slots));
+  nslots = expr->u.add.nterms;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t coefficient;
+    int64_t coefficient_q;
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &coefficient, &coefficient_q);
+    if (coefficient_q != 1)
+      return false;
+    slots[i].node = expr->u.add.terms[i].term;
+    slots[i].coefficient = coefficient;
+  }
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    size_t base_slot;
+    if (!bounds_floor_radix_parts(slots[i].node, &slots[i].floor_base,
+                                  &slots[i].floor_divisor))
+      continue;
+    has_negative_floor |= slots[i].coefficient < 0;
+    for (base_slot = 0; base_slot < nslots; base_slot++)
+      if (slots[base_slot].node == slots[i].floor_base)
+        break;
+    if (base_slot == nslots)
+      slots[nslots++].node = slots[i].floor_base;
+  }
+  if (!has_negative_floor)
+    return false;
+
+  for (step = 0; step < BOUNDS_RADIX_CERTIFICATE_MAX_STEPS; step++) {
+    size_t parent_index = nslots;
+    size_t child_index = nslots;
+    int64_t child_radix = 0;
+    size_t candidate_parent;
+
+    for (candidate_parent = 0; candidate_parent < nslots; candidate_parent++) {
+      size_t candidate;
+      if (slots[candidate_parent].coefficient <= 0)
+        continue;
+      for (candidate = 0; candidate < nslots; candidate++) {
+        int64_t radix = 0;
+        if (slots[candidate].floor_divisor == 0)
+          continue;
+        if (slots[candidate].floor_base == slots[candidate_parent].node)
+          radix = slots[candidate].floor_divisor;
+        else if (slots[candidate_parent].floor_divisor > 0 &&
+                 slots[candidate].floor_base ==
+                     slots[candidate_parent].floor_base &&
+                 slots[candidate].floor_divisor >
+                     slots[candidate_parent].floor_divisor &&
+                 slots[candidate].floor_divisor %
+                         slots[candidate_parent].floor_divisor ==
+                     0)
+          radix = slots[candidate].floor_divisor /
+                  slots[candidate_parent].floor_divisor;
+        if (radix > 1 && (child_index == nslots || radix < child_radix)) {
+          child_index = candidate;
+          child_radix = radix;
+        }
+      }
+      if (child_index != nslots) {
+        parent_index = candidate_parent;
+        break;
+      }
+    }
+
+    if (parent_index == nslots)
+      break;
+    {
+      size_t residual_index = nslots;
+      int64_t residual_modulus = 0;
+      int64_t coefficient = slots[parent_index].coefficient;
+      int64_t transferred;
+      int64_t combined;
+      size_t candidate;
+
+      if (!ixs_safe_mul(coefficient, child_radix, &transferred) ||
+          !ixs_safe_add(slots[child_index].coefficient, transferred, &combined))
+        return false;
+      slots[parent_index].coefficient = 0;
+      slots[child_index].coefficient = combined;
+
+      /* Mod(parent, child_radix) >= Mod(parent, d) for positive d dividing
+       * child_radix.  Transfer to only the largest matching existing slot. */
+      for (candidate = 0; candidate < nslots; candidate++) {
+        ixs_node *node = slots[candidate].node;
+        int64_t modulus;
+        if (node->tag != IXS_MOD ||
+            node->u.binary.lhs != slots[parent_index].node ||
+            node->u.binary.rhs->tag != IXS_INT)
+          continue;
+        modulus = node->u.binary.rhs->u.ival;
+        if (modulus > residual_modulus && modulus > 0 &&
+            child_radix % modulus == 0) {
+          residual_index = candidate;
+          residual_modulus = modulus;
+        }
+      }
+      if (residual_index != nslots &&
+          !ixs_safe_add(slots[residual_index].coefficient, coefficient,
+                        &slots[residual_index].coefficient))
+        return false;
+    }
+  }
+  if (step == BOUNDS_RADIX_CERTIFICATE_MAX_STEPS)
+    return false;
+
+  for (step = 0; step < nslots; step++) {
+    ixs_interval range;
+    if (slots[step].coefficient < 0)
+      return false;
+    if (slots[step].coefficient == 0)
+      continue;
+    range = ixs_bounds_get(b, slots[step].node);
+    if (b->oom || !interval_lower_at_least(&range, 0, 1))
+      return false;
+  }
+  return true;
+}
+
 static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
   ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
@@ -10616,6 +10783,7 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval rhs_iv;
   ixs_interval truncating_remainder;
   ixs_check_result mod_result, quotient_result, congruence_result, bit_result;
+  ixs_check_result interval_result;
   bounds_truncating_range_status truncating_status;
 
   if (!cmp)
@@ -10663,10 +10831,15 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
     iv = iv_intersect(iv, truncating_remainder);
   else
     bounds_note_truncating_range_status(b, truncating_status);
-  if (!iv.valid)
-    return IXS_CHECK_UNKNOWN;
-
-  return interval_check_zero(&iv, cmp->u.binary.cmp_op);
+  if (iv.valid) {
+    interval_result = interval_check_zero(&iv, cmp->u.binary.cmp_op);
+    if (interval_result != IXS_CHECK_UNKNOWN)
+      return interval_result;
+  }
+  if (cmp->u.binary.cmp_op == IXS_CMP_GE && cmp->u.binary.lhs->tag == IXS_ADD &&
+      bounds_add_has_nonnegative_radix_certificate(b, cmp->u.binary.lhs))
+    return IXS_CHECK_TRUE;
+  return IXS_CHECK_UNKNOWN;
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
@@ -29261,7 +29434,7 @@ cleanup:
 
 static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
                                     uint32_t nterms, uint32_t i,
-                                    size_t *inspected) {
+                                    size_t *inspected, bool allow_wide) {
   uint32_t j;
   mod_term_parts mod;
   ixs_node *ci_outer, *ci_outer_times_m, *expected_floor;
@@ -29283,15 +29456,18 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
 
   for (j = 0; j < nterms; j++) {
     floor_term_parts parts;
+    ixs_node *inv;
+    ixs_node *ratio;
     ixs_node *replacement;
+    ixs_node *residual;
+    ixs_node *residual_floor;
+    int64_t ratio_p, ratio_q;
     if (j == i || !terms[j].term)
       continue;
     if (*inspected >= FLOOR_MOD_PAIR_LIMIT)
       return 0;
     (*inspected)++;
     if (!floor_parts_from_addterm(ctx, &terms[j], &parts))
-      continue;
-    if (!floor_mul_matches(ctx, parts.mul, ci_outer_times_m))
       continue;
     if (!floor_pair_matches(ctx, expected_floor, &parts, mod.modulus, mod.arg))
       continue;
@@ -29300,10 +29476,51 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
       return -1;
     if (ixs_node_is_sentinel(replacement))
       return 0;
-    terms[i].term = NULL;
-    terms[j].term = replacement;
-    terms[j].coeff = make_const(ctx, ci_p, ci_q);
-    return terms[j].coeff ? 1 : -1;
+    if (floor_mul_matches(ctx, parts.mul, ci_outer_times_m)) {
+      terms[i].term = NULL;
+      terms[j].term = replacement;
+      terms[j].coeff = make_const(ctx, ci_p, ci_q);
+      return terms[j].coeff ? 1 : -1;
+    }
+
+    /* A floor multiplier may be a larger positive rational multiple of the
+     * exact floor-Mod multiplier.  Consume one copy; this exposes radix-chain
+     * cancellation without turning a compact positive combination into a
+     * subtractive expansion. */
+    if (!allow_wide || mod.modulus->tag != IXS_INT ||
+        mod.modulus->u.ival <= 0)
+      continue;
+    inv = simp_div(ctx, ixs_node_int(ctx, 1), ci_outer_times_m);
+    ratio = inv ? simp_mul_decompose(ctx, parts.mul, inv) : NULL;
+    if (!ratio || ixs_node_is_sentinel(ratio) || !ixs_node_is_const(ratio))
+      continue;
+    ixs_node_get_rat(ratio, &ratio_p, &ratio_q);
+    if (ixs_rat_cmp(ratio_p, ratio_q, 1, 1) <= 0)
+      continue;
+    residual = simp_sub(ctx, parts.mul, ci_outer_times_m);
+    if (!residual)
+      return -1;
+    if (ixs_node_is_sentinel(residual))
+      continue;
+    if (ixs_node_is_const(residual)) {
+      terms[i].term = replacement;
+      terms[j].term = parts.node;
+      terms[j].coeff = residual;
+      return 1;
+    }
+    if (residual->tag != IXS_MUL)
+      continue;
+    residual_floor = simp_mul(ctx, residual, parts.node);
+    if (!residual_floor)
+      return -1;
+    if (ixs_node_is_sentinel(residual_floor))
+      continue;
+    terms[i].term = replacement;
+    terms[j].term = residual_floor;
+    terms[j].coeff = make_const(ctx, 1, 1);
+    if (!terms[j].coeff)
+      return -1;
+    return 1;
   }
   return 0;
 }
@@ -29327,7 +29544,8 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
   saved_errors = ctx->errors;
   saved_nerrors = ctx->nerrors;
   saved_errors_cap = ctx->errors_cap;
-  result = cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected);
+  result =
+      cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected, allow_wide);
 
   ixs_arena_restore(&ctx->diag, diag_mark);
   ctx->errors = saved_errors;
