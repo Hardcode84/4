@@ -14168,6 +14168,97 @@ cleanup:
   return bounds->oom ? IXS_CHECK_UNKNOWN : answer;
 }
 
+/* Prove A => B by checking B in a private copy of the current facts extended
+ * with A.  The source predicate must remain total: AND/OR are eager integer
+ * operators, so a true branch does not hide an undefined sibling. */
+static ixs_check_result predicate_query_implication(ixs_bounds *bounds,
+                                                    ixs_node *predicate,
+                                                    bool *limited) {
+  ixs_ctx *ctx;
+  ixs_node *antecedent;
+  ixs_node *consequent;
+  ixs_node *predicate_array[1];
+  ixs_bounds branch;
+  ixs_bounds_build_status status;
+  ixs_arena_mark scratch_mark;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
+  size_t limit_blocks;
+  bool branch_ready = false;
+  bool branch_limited = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (!bounds || !predicate || predicate->tag != IXS_OR ||
+      predicate->u.assoc.nargs != 2u)
+    return IXS_CHECK_UNKNOWN;
+  if (predicate->u.assoc.args[0]->tag == IXS_NOT) {
+    antecedent = predicate->u.assoc.args[0]->u.unary_bool.arg;
+    consequent = predicate->u.assoc.args[1];
+  } else if (predicate->u.assoc.args[1]->tag == IXS_NOT) {
+    antecedent = predicate->u.assoc.args[1]->u.unary_bool.arg;
+    consequent = predicate->u.assoc.args[0];
+  } else {
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (!antecedent ||
+      (antecedent->tag != IXS_AND && antecedent->tag != IXS_CMP) ||
+      !predicate_query_assoc_domain_proven(bounds, predicate))
+    return IXS_CHECK_UNKNOWN;
+
+  ctx = bounds->ctx;
+  limit_blocks = bounds->query_state ? bounds->query_state->limit_blocks : 0u;
+  scratch_mark = ixs_arena_save(bounds->scratch);
+  if (!ixs_bounds_fork(&branch, bounds)) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  branch_ready = true;
+  predicate_array[0] = antecedent;
+
+  /* Unsupported assumption shapes are simply not implication proofs.  Keep
+   * their private validation diagnostics out of the public query. */
+  diag_mark = ixs_arena_save(&ctx->diag);
+  saved_errors = ctx->errors;
+  saved_nerrors = ctx->nerrors;
+  saved_errors_cap = ctx->errors_cap;
+  status = bounds_validate_predicate(&branch, antecedent);
+  if (status == IXS_BOUNDS_BUILD_OK)
+    status = facts_ingest_predicate_closure(ctx, &branch, predicate_array, 1u);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+
+  if (status == IXS_BOUNDS_BUILD_OOM || branch.oom) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  if (status == IXS_BOUNDS_BUILD_LIMIT) {
+    bounds_query_note_limit(bounds->query_state);
+    goto cleanup;
+  }
+  if (status != IXS_BOUNDS_BUILD_OK)
+    goto cleanup;
+  if (ixs_bounds_has_empty(&branch)) {
+    result = IXS_CHECK_TRUE;
+    goto cleanup;
+  }
+  result = predicate_query_eval_detail(&branch, consequent, &branch_limited);
+  if (result != IXS_CHECK_TRUE)
+    result = IXS_CHECK_UNKNOWN;
+
+cleanup:
+  if (branch_ready)
+    ixs_bounds_destroy(&branch);
+  ixs_arena_restore(bounds->scratch, scratch_mark);
+  if (limited &&
+      (branch_limited || bounds_query_limited_since(bounds, limit_blocks)))
+    *limited = true;
+  return bounds->oom ? IXS_CHECK_UNKNOWN : result;
+}
+
 #define PREDICATE_FINITE_MAX_SYMBOLS 8u
 #define PREDICATE_FINITE_MAX_POINTS 64u
 #define PREDICATE_FINITE_MAX_NODES 4096u
@@ -18542,6 +18633,9 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
    * whose original form is inconclusive. */
   result.check = predicate_query_eval_detail(&facts->bounds, predicate,
                                              &predicate_limited);
+  if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
+    result.check = predicate_query_implication(&facts->bounds, predicate,
+                                               &predicate_limited);
   if (predicate_limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
     goto cleanup;

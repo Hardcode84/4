@@ -1623,8 +1623,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   child is false; `NOT` inverts true and false. Predicate-valued `Piecewise`
   nodes that do not collapse during fact-backed simplification remain
   unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
-  diagnostic rather than interpreted as boolean trees. The evaluator uses a
-  1024-frame stack and an 8192-node visit budget.
+  diagnostic rather than interpreted as boolean trees. An otherwise unknown
+  `OR(NOT(A), B)` with an ingestible `AND` or comparison antecedent is also
+  checked as an implication: the query first proves the original predicate
+  total, then forks the bounds state, ingests `A`, and proves `B` in that local
+  state. The fork shares the enclosing query guard and resource budget and is
+  discarded after this single implication level.
 - **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
   `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
   defined over every valuation admitted by the incoming facts before pointer

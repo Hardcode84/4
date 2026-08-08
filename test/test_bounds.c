@@ -6601,6 +6601,28 @@ static void test_public_predicate_tree_query(void) {
   ixs_facts *partial = ixs_facts_create(ctx);
   ixs_facts *no_domain = ixs_facts_create(ctx);
   ixs_facts *defined = ixs_facts_create(ctx);
+  ixs_node *row = ixs_sym(ctx, "predicate_row");
+  ixs_node *column = ixs_sym(ctx, "predicate_column");
+  ixs_node *row_domain =
+      ixs_and(ctx, ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, row, IXS_CMP_LT, ixs_int(ctx, 8)));
+  ixs_node *column_domain =
+      ixs_and(ctx, ixs_cmp(ctx, column, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, column, IXS_CMP_LT, ixs_int(ctx, 4)));
+  ixs_node *coordinate_domain = ixs_and(ctx, row_domain, column_domain);
+  ixs_node *linear = ixs_add(ctx, row, ixs_mul(ctx, ixs_int(ctx, 8), column));
+  ixs_node *linear_domain =
+      ixs_and(ctx, ixs_cmp(ctx, linear, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, linear, IXS_CMP_LT, ixs_int(ctx, 32)));
+  ixs_node *bounded_implication =
+      ixs_or(ctx, ixs_not(ctx, coordinate_domain), linear_domain);
+  ixs_node *unproved_implication =
+      ixs_or(ctx, ixs_not(ctx, coordinate_domain),
+             ixs_cmp(ctx, linear, IXS_CMP_LT, ixs_int(ctx, 31)));
+  ixs_node *partial_implication =
+      ixs_or(ctx, ixs_not(ctx, coordinate_domain),
+             ixs_cmp(ctx, ixs_div(ctx, ixs_int(ctx, 1), row), IXS_CMP_GT,
+                     ixs_int(ctx, 0)));
 
   CHECK(ixs_facts_assume_pred(all_true, x_nonnegative));
   CHECK(ixs_facts_assume_pred(all_true, y_small));
@@ -6633,6 +6655,13 @@ static void test_public_predicate_tree_query(void) {
   CHECK(test_ixs_check_predicate_facts(partial, ixs_not(ctx, y)) ==
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_check_predicate_facts(partial, both) == IXS_CHECK_UNKNOWN);
+
+  CHECK(test_ixs_check_predicate_facts(no_domain, bounded_implication) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(no_domain, unproved_implication) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(no_domain, partial_implication) ==
+        IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_node_tag(guarded_false) == IXS_AND);
   CHECK(ixs_node_tag(guarded_true) == IXS_OR);

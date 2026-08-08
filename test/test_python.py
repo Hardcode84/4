@@ -2374,6 +2374,20 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
         ctx.check_predicate(ixsimpl.or_(x, y), empty)
 
 
+def test_predicate_implication_uses_local_antecedent_bounds() -> None:
+    ctx = ixsimpl.Context()
+    row = ctx.sym("implication_row")
+    column = ctx.sym("implication_column")
+    antecedent = ixsimpl.and_(row >= 0, row < 8, column >= 0, column < 4)
+    linear = row + 8 * column
+    consequent = ixsimpl.and_(linear >= 0, linear < 32)
+    facts = ctx.facts()
+
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), consequent), facts) is True
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), linear < 31), facts) is None
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), 1 / row > 0), facts) is None
+
+
 def test_ordered_equivalence_uses_full_tree_congruence() -> None:
     ctx = ixsimpl.Context()
     base = ctx.sym("python_ordered_base")
