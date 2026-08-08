@@ -182,6 +182,12 @@ if(NOT USE_AMALGAMATION)
     target_include_directories(test_equivalence_context PRIVATE src)
     target_compile_definitions(test_equivalence_context PRIVATE IXS_TEST_INTERNAL)
     add_test(NAME test_equivalence_context COMMAND test_equivalence_context)
+
+    add_executable(test_piecewise_equivalence test/test_piecewise_equivalence.c)
+    target_link_libraries(test_piecewise_equivalence ixsimpl_stats)
+    target_include_directories(test_piecewise_equivalence PRIVATE src)
+    target_compile_definitions(test_piecewise_equivalence PRIVATE IXS_TEST_INTERNAL)
+    add_test(NAME test_piecewise_equivalence COMMAND test_piecewise_equivalence)
 endif()
 
 # --- Static hot-path complexity check ---

@@ -1809,7 +1809,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   once and start at most two bounded child proofs, with no finite-domain or
   context-wide scan. A predicate equality whose normalized zero-sum ADD
   contains a non-unit scaled Mod first partitions that ADD into exact positive
-  and negative sides in O(T) work and O(T) query scratch, then runs the same
+  and negative sides. One with a single unit Piecewise term instead isolates
+  that term and rebuilds its peer once, without distributing into the arms.
+  Both paths use O(T) work and O(T) query scratch before running the same
   ordinary equivalence proof. Other predicate equalities retain their existing
   entry path.
 
@@ -1835,6 +1837,29 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   remain `UNKNOWN`. This is not generic congruence for extrema, Piecewise,
   truncation, or predicates. Boolean AND/OR keep their dedicated predicate-tree
   matcher.
+
+  After all existing arithmetic, projection, expansion, and low-bit strategies
+  miss, equivalence has one bounded Piecewise fallback. Exactly one simplified
+  operand must be a root Piecewise with at most 16 arms; the peer and each
+  reachable arm must be complete Piecewise-free DAGs of at most 64 nodes. One
+  affine integer-symbol selector must have a complete incoming interval and
+  congruence domain of at most 64 points. A fixed 64-bit mask applies affine
+  guards in first-match order, so repeated equality guards do not count twice
+  and distinct exclusions can prove that a finite congruent domain is
+  exhausted. Each reachable arm must select exactly one remaining point. The
+  proof substitutes that selector point into only the arm and peer, then uses
+  one existing bounded child proof; it never substitutes a Piecewise through a
+  containing operand or forks the fact table. Equality is `TRUE` only when all
+  reachable arms prove equal and no selector point remains uncovered.
+
+  For `C <= 16` arms, `P <= 64` selector points, and admitted operand size
+  `N <= 64`, guard partitioning is O(C*P), the fixed-stack admission walk is
+  O(N^2), and at most C bounded arm proofs operate on the admitted DAGs.
+  Wider domains, multi-point arms, nested or non-root Piecewise structure,
+  non-affine or overflowing guards, duplicate coverage gaps, partial
+  expressions, uncovered points, child-proof exhaustion, and allocation
+  failure remain `UNKNOWN`. This is a local first-match proof, not generic
+  finite-domain equivalence, and it adds no context-wide scan.
 
   The representative and isolation rules accept only a `TRUE` child proof,
   and any representative reached by that child still requires the canonical
@@ -2884,6 +2909,7 @@ ixsimpl/
 │   ├── test_introspect.c
 │   ├── test_bounds.c
 │   ├── test_equivalence_context.c
+│   ├── test_piecewise_equivalence.c
 │   ├── test_relational_contract.c
 │   ├── test_simplify.c
 │   ├── test_expand.c

@@ -4199,6 +4199,129 @@ def test_equivalent_context_composition_soundness(
             assert eval_ixs(xor_value, ctx, env) == eval_ixs(xor_alias, ctx, env)
 
 
+def test_piecewise_partition_equivalence_bindings() -> None:
+    ctx = ixsimpl.Context()
+    selector = ctx.sym("piecewise_binding_selector")
+    base = ctx.sym("piecewise_binding_base")
+    partial_divisor = ctx.sym("piecewise_binding_partial_divisor")
+    expected = base + selector
+    lookup_expected = base + 16 * selector
+    threshold = ixsimpl.pw(
+        (base, selector < 1),
+        (base + 1, selector < 2),
+        (base + 2, selector < 3),
+        (base + 3, ctx.true_()),
+    )
+    dead_first = ixsimpl.pw(
+        (base + 99, selector < 0),
+        (base, selector < 1),
+        (base + 1, selector < 2),
+        (base + 2, selector < 3),
+        (base + 3, ctx.true_()),
+    )
+    wrong = ixsimpl.pw(
+        (base, selector < 1),
+        (base + 1, selector < 2),
+        (base + 99, selector < 3),
+        (base + 3, ctx.true_()),
+    )
+    uncovered = ixsimpl.pw(
+        (base, selector < 1),
+        (base + 1, selector < 2),
+        (base + 2, selector < 3),
+    )
+    lookup = ixsimpl.pw(
+        (base + 32, ctx.eq(selector, 2)),
+        (base, ctx.eq(selector, 0)),
+        (base + 48, ctx.eq(selector, 3)),
+        (base + 16, ctx.eq(selector, 1)),
+        (base + 99, ctx.true_()),
+    )
+    duplicate = ixsimpl.pw(
+        (base, ctx.eq(selector, 0)),
+        (base + 16, ctx.eq(selector, 1)),
+        (base + 16, ctx.eq(selector, 1)),
+        (base + 32, ctx.eq(selector, 2)),
+        (base + 99, ctx.true_()),
+    )
+    partial = ixsimpl.pw(
+        (expected, 1 / partial_divisor > 0),
+        (expected, ctx.true_()),
+    )
+    facts = ctx.facts()
+    facts.assume_many([selector >= 0, selector <= 3])
+
+    assert ctx.equivalent(threshold, expected, facts) is True
+    assert ctx.equivalent(expected, threshold, facts) is True
+    assert ctx.check(ctx.eq(threshold, expected), facts=facts) is True
+    assert (
+        ctx.check(ctx.eq(threshold, expected), assumptions=[selector >= 0, selector <= 3]) is True
+    )
+    assert ctx.equivalent(dead_first, expected, facts) is True
+    assert ctx.equivalent(lookup, lookup_expected, facts) is True
+
+    assert ctx.equivalent(duplicate, lookup_expected, facts) is None
+    assert ctx.equivalent(wrong, expected, facts) is None
+    exact = ctx.facts()
+    exact.assume(ctx.eq(selector, 2))
+    assert ctx.equivalent(wrong, expected, exact) is False
+    assert ctx.equivalent(uncovered, expected, facts) is None
+    huge = ctx.facts()
+    huge.assume_many([selector >= 0, selector <= (1 << 63) - 1])
+    assert ctx.equivalent(lookup, lookup_expected, huge) is None
+    assert ctx.equivalent(partial, expected, facts) is None
+
+
+@st.composite
+def _piecewise_partition_case(
+    draw: st.DrawFn,
+) -> tuple[tuple[int, ...], tuple[int, ...], int]:
+    size = draw(st.integers(min_value=2, max_value=6))
+    step = draw(st.integers(min_value=1, max_value=3))
+    start = draw(st.integers(min_value=-6, max_value=6))
+    scale = draw(st.integers(min_value=-4, max_value=4).filter(lambda value: value != 0))
+    points = tuple(start + step * index for index in range(size))
+    order = tuple(draw(st.permutations(points)))
+    return points, order, scale
+
+
+@given(case=_piecewise_partition_case())
+def test_piecewise_partition_equivalence_soundness(
+    case: tuple[tuple[int, ...], tuple[int, ...], int],
+) -> None:
+    """Every bounded Piecewise proof agrees on its complete selector domain."""
+    points, order, scale = case
+    ctx = ixsimpl.Context()
+    selector = ctx.sym("piecewise_soundness_selector")
+    base = ctx.sym("piecewise_soundness_base")
+    expected = base + scale * selector
+    threshold_cases = [(base + scale * point, selector < point + 1) for point in points[:-1]]
+    threshold_cases.append((base + scale * points[-1], ctx.true_()))
+    lookup_cases = [(base + scale * point, ctx.eq(selector, point)) for point in order]
+    lookup_cases.append((base + 999, ctx.true_()))
+    threshold = ixsimpl.pw(*threshold_cases)
+    lookup = ixsimpl.pw(*lookup_cases)
+    assumptions = [selector >= points[0], selector <= points[-1]]
+    step = points[1] - points[0]
+    if step > 1:
+        assumptions.append(ctx.eq(selector % step, points[0] % step))
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+
+    assert ctx.equivalent(threshold, expected, facts) is True
+    assert ctx.equivalent(lookup, expected, facts) is True
+    assert ctx.check(ctx.eq(lookup, expected), facts=facts) is True
+    for selector_value in points:
+        for base_value in (-2, 3):
+            env = {
+                "piecewise_soundness_selector": selector_value,
+                "piecewise_soundness_base": base_value,
+            }
+            expected_value = eval_ixs(expected, ctx, env)
+            assert eval_ixs(threshold, ctx, env) == expected_value
+            assert eval_ixs(lookup, ctx, env) == expected_value
+
+
 @given(case=_stronger_proof_case_st())
 def test_combined_stronger_symbolic_proof_soundness(case: _StrongerProofCase) -> None:
     """All combined proof results hold over the complete bounded domain."""

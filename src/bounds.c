@@ -14890,6 +14890,9 @@ typedef struct {
 #define EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH 4u
 /* ADD partitions rebuild the dividend. Bound that work across one query. */
 #define EQUIVALENCE_MOD_PARTITION_CANDIDATES 4u
+/* The Piecewise fallback represents one complete selector domain in a mask. */
+#define EQUIVALENCE_PIECEWISE_MAX_CASES 16u
+#define EQUIVALENCE_PIECEWISE_MAX_POINTS 64u
 
 static size_t equivalence_pair_hash(ixs_node *lhs, ixs_node *rhs) {
   uintptr_t left = (uintptr_t)lhs;
@@ -19824,6 +19827,331 @@ static ixs_check_result equivalence_projected(equivalence_state *state,
   return equivalence_expanded(state, projected_lhs, projected_rhs, depth);
 }
 
+typedef struct {
+  ixs_node *selector;
+  const char *name;
+  int64_t points[EQUIVALENCE_PIECEWISE_MAX_POINTS];
+  size_t count;
+  uint64_t remaining;
+} equivalence_piecewise_domain;
+
+static ixs_cmp_op equivalence_reverse_cmp(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LT;
+  case IXS_CMP_GE:
+    return IXS_CMP_LE;
+  case IXS_CMP_LT:
+    return IXS_CMP_GT;
+  case IXS_CMP_LE:
+    return IXS_CMP_GE;
+  case IXS_CMP_EQ:
+  case IXS_CMP_NE:
+    return op;
+  }
+  return op;
+}
+
+static ixs_node *equivalence_piecewise_affine_symbol(ixs_node *expr) {
+  if (expr->tag == IXS_SYM)
+    return expr;
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1u &&
+      expr->u.mul.factors[0].exp == 1 &&
+      expr->u.mul.factors[0].base->tag == IXS_SYM)
+    return expr->u.mul.factors[0].base;
+  if (expr->tag == IXS_ADD && expr->u.add.nterms == 1u &&
+      expr->u.add.terms[0].term->tag == IXS_SYM)
+    return expr->u.add.terms[0].term;
+  return NULL;
+}
+
+static bool equivalence_piecewise_affine_guard(ixs_node *condition,
+                                               ixs_node **selector,
+                                               int64_t *scale, int64_t *offset,
+                                               ixs_cmp_op *op) {
+  ixs_node *affine;
+  const char *name;
+
+  if (!condition || condition->tag != IXS_CMP)
+    return false;
+  *op = condition->u.binary.cmp_op;
+  if (ixs_node_is_zero(condition->u.binary.rhs)) {
+    affine = condition->u.binary.lhs;
+  } else if (ixs_node_is_zero(condition->u.binary.lhs)) {
+    affine = condition->u.binary.rhs;
+    *op = equivalence_reverse_cmp(*op);
+  } else {
+    return false;
+  }
+  if (!bounds_extract_integer_affine(affine, &name, scale, offset))
+    return false;
+  *selector = equivalence_piecewise_affine_symbol(affine);
+  return *selector && (*selector)->u.name == name;
+}
+
+static bool equivalence_piecewise_find_selector(ixs_node *piecewise,
+                                                ixs_node **selector) {
+  uint32_t i;
+
+  *selector = NULL;
+  for (i = 0; i < piecewise->u.pw.ncases; i++) {
+    ixs_node *condition = piecewise->u.pw.cases[i].cond;
+    int64_t scale;
+    int64_t offset;
+    ixs_cmp_op op;
+    if (!condition)
+      return false;
+    if (ixs_node_is_known_true(condition) || ixs_node_is_known_false(condition))
+      continue;
+    if (!equivalence_piecewise_affine_guard(condition, selector, &scale,
+                                            &offset, &op))
+      return false;
+    return true;
+  }
+  return false;
+}
+
+static bool
+equivalence_piecewise_domain_init(equivalence_state *state, ixs_node *piecewise,
+                                  equivalence_piecewise_domain *domain) {
+  ixs_var_bound *var;
+  int64_t modulus;
+  int64_t remainder;
+  int64_t lower;
+  int64_t upper;
+  int64_t point;
+
+  memset(domain, 0, sizeof(*domain));
+  if (!equivalence_piecewise_find_selector(piecewise, &domain->selector))
+    return false;
+  domain->name = domain->selector->u.name;
+  var = find_var(state->bounds, domain->name);
+  if (!var || !var->iv.valid || var->iv.lo_inf || var->iv.hi_inf)
+    return false;
+  lower = ixs_rat_ceil(var->iv.lo_p, var->iv.lo_q);
+  upper = ixs_rat_floor(var->iv.hi_p, var->iv.hi_q);
+  if (lower > upper)
+    return false;
+  modulus = var->modulus > 0 ? var->modulus : 1;
+  remainder = var->modulus > 0 ? var->remainder : 0;
+  if (!integer_align_congruence_up(lower, modulus, remainder, &point) ||
+      point > upper)
+    return false;
+
+  for (;;) {
+    int64_t next;
+    if (domain->count == EQUIVALENCE_PIECEWISE_MAX_POINTS)
+      return false;
+    domain->points[domain->count++] = point;
+    if (!ixs_safe_add(point, modulus, &next) || next > upper)
+      break;
+    point = next;
+  }
+  domain->remaining = domain->count == EQUIVALENCE_PIECEWISE_MAX_POINTS
+                          ? UINT64_MAX
+                          : (UINT64_C(1) << domain->count) - UINT64_C(1);
+  return true;
+}
+
+static bool equivalence_piecewise_cmp_zero(ixs_cmp_op op, int64_t value) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return value > 0;
+  case IXS_CMP_GE:
+    return value >= 0;
+  case IXS_CMP_LT:
+    return value < 0;
+  case IXS_CMP_LE:
+    return value <= 0;
+  case IXS_CMP_EQ:
+    return value == 0;
+  case IXS_CMP_NE:
+    return value != 0;
+  }
+  return false;
+}
+
+static bool
+equivalence_piecewise_guard_mask(const equivalence_piecewise_domain *domain,
+                                 ixs_node *condition, uint64_t *mask) {
+  ixs_node *selector;
+  int64_t scale;
+  int64_t offset;
+  ixs_cmp_op op;
+  size_t i;
+
+  *mask = 0u;
+  if (ixs_node_is_known_false(condition))
+    return true;
+  if (ixs_node_is_known_true(condition)) {
+    *mask = domain->count == EQUIVALENCE_PIECEWISE_MAX_POINTS
+                ? UINT64_MAX
+                : (UINT64_C(1) << domain->count) - UINT64_C(1);
+    return true;
+  }
+  if (!equivalence_piecewise_affine_guard(condition, &selector, &scale, &offset,
+                                          &op) ||
+      selector != domain->selector)
+    return false;
+  for (i = 0; i < domain->count; i++) {
+    int64_t product;
+    int64_t value;
+    if (!ixs_safe_mul(scale, domain->points[i], &product) ||
+        !ixs_safe_add(product, offset, &value))
+      return false;
+    if (equivalence_piecewise_cmp_zero(op, value))
+      *mask |= UINT64_C(1) << i;
+  }
+  return true;
+}
+
+static bool equivalence_piecewise_single_point(uint64_t mask, size_t *index) {
+  size_t i;
+
+  if (mask == 0u || (mask & (mask - UINT64_C(1))) != 0u)
+    return false;
+  for (i = 0; i < EQUIVALENCE_PIECEWISE_MAX_POINTS; i++)
+    if ((mask & (UINT64_C(1) << i)) != 0u) {
+      *index = i;
+      return true;
+    }
+  return false;
+}
+
+/* Piecewise arm substitution is admitted only for small complete DAGs. This
+ * cap prevents branch count from multiplying reconstruction of a large peer. */
+static bool equivalence_piecewise_small_operand(ixs_node *root) {
+  ixs_node *stack[EQUIVALENCE_PIECEWISE_MAX_POINTS];
+  ixs_node *seen[EQUIVALENCE_PIECEWISE_MAX_POINTS];
+  size_t stack_count = 0u;
+  size_t seen_count = 0u;
+
+  if (!root)
+    return false;
+  stack[stack_count++] = root;
+  while (stack_count != 0u) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+    uint32_t child;
+    size_t i;
+    for (i = 0; i < seen_count; i++)
+      if (seen[i] == node)
+        break;
+    if (i != seen_count)
+      continue;
+    if (seen_count == EQUIVALENCE_PIECEWISE_MAX_POINTS ||
+        node->tag == IXS_PIECEWISE ||
+        !defined_child_count(node, &child_count) ||
+        child_count > EQUIVALENCE_PIECEWISE_MAX_POINTS - stack_count)
+      return false;
+    seen[seen_count++] = node;
+    for (child = 0; child < child_count; child++)
+      stack[stack_count++] = defined_child_at(node, child);
+  }
+  return true;
+}
+
+static bool
+equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
+                                  ixs_node *other,
+                                  const equivalence_piecewise_domain *domain,
+                                  size_t point_index, unsigned depth) {
+  ixs_ctx *ctx = state->ctx;
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_node *point = ixs_node_int(ctx, domain->points[point_index]);
+  ixs_node *substituted_value =
+      point ? simp_subs(ctx, value, domain->selector, point) : NULL;
+  ixs_node *substituted_other =
+      point ? simp_subs(ctx, other, domain->selector, point) : NULL;
+  bool value_oom = false;
+  bool value_limited = false;
+  bool other_oom = false;
+  bool other_limited = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  if (!point || !substituted_value || !substituted_other) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(substituted_value) ||
+      ixs_node_is_sentinel(substituted_other))
+    return false;
+  if (bounds_check_defined_detail(state->bounds, substituted_value, &value_oom,
+                                  &value_limited) != IXS_CHECK_TRUE ||
+      bounds_check_defined_detail(state->bounds, substituted_other, &other_oom,
+                                  &other_limited) != IXS_CHECK_TRUE) {
+    if (value_oom || other_oom || state->bounds->oom)
+      state->oom = true;
+    if (value_limited || other_limited)
+      state->limited = true;
+    return false;
+  }
+  result = equivalence_bounded_core(state, substituted_value, substituted_other,
+                                    depth);
+  return result == IXS_CHECK_TRUE;
+}
+
+/* Final bounded fallback for an exact root Piecewise. It tracks first-match
+ * reachability in a complete finite congruent selector mask, then proves only
+ * single-point arms. No fact-table fork or whole-operand Piecewise
+ * substitution occurs. Work is bounded by 16 arms, 64 selector points, and
+ * 64-node arm/peer DAGs. */
+static ixs_check_result equivalence_piecewise_root(equivalence_state *state,
+                                                   ixs_node *lhs, ixs_node *rhs,
+                                                   unsigned depth) {
+  equivalence_piecewise_domain domain;
+  ixs_node *piecewise;
+  ixs_node *other;
+  bool have_reachable = false;
+  uint32_t i;
+
+  if ((lhs->tag == IXS_PIECEWISE) == (rhs->tag == IXS_PIECEWISE))
+    return IXS_CHECK_UNKNOWN;
+  piecewise = lhs->tag == IXS_PIECEWISE ? lhs : rhs;
+  other = lhs->tag == IXS_PIECEWISE ? rhs : lhs;
+  if (piecewise->u.pw.ncases == 0u || !piecewise->u.pw.cases) {
+    state->invalid = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (piecewise->u.pw.ncases > EQUIVALENCE_PIECEWISE_MAX_CASES ||
+      !equivalence_piecewise_small_operand(other) ||
+      !equivalence_piecewise_domain_init(state, piecewise, &domain))
+    return IXS_CHECK_UNKNOWN;
+
+  for (i = 0; i < piecewise->u.pw.ncases; i++) {
+    ixs_node *condition = piecewise->u.pw.cases[i].cond;
+    ixs_node *value = piecewise->u.pw.cases[i].value;
+    uint64_t condition_mask;
+    uint64_t active;
+    size_t point_index;
+
+    if (domain.remaining == 0u)
+      return have_reachable ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+    if (!condition || !value ||
+        !equivalence_piecewise_guard_mask(&domain, condition, &condition_mask))
+      return IXS_CHECK_UNKNOWN;
+    active = domain.remaining & condition_mask;
+    if (active != 0u) {
+      if (!equivalence_piecewise_single_point(active, &point_index) ||
+          !equivalence_piecewise_small_operand(value) ||
+          !equivalence_piecewise_prove_point(state, value, other, &domain,
+                                             point_index, depth))
+        return IXS_CHECK_UNKNOWN;
+      have_reachable = true;
+    }
+    domain.remaining &= ~condition_mask;
+  }
+  return domain.remaining == 0u && have_reachable ? IXS_CHECK_TRUE
+                                                  : IXS_CHECK_UNKNOWN;
+}
+
 static ixs_check_result
 equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
                               ixs_node *rhs, ixs_node *simplified_lhs,
@@ -19943,7 +20271,11 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   result = equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  return equivalence_low_bits(state, lhs, rhs, depth);
+  result = equivalence_low_bits(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN || !allow_context)
+    return result;
+  return equivalence_piecewise_root(state, simplified_lhs, simplified_rhs,
+                                    depth);
 }
 
 typedef enum {
@@ -20013,39 +20345,151 @@ equivalence_query_bound_detail(ixs_facts *facts, ixs_ctx *ctx, ixs_node *lhs,
   return equivalence_query_bounds_detail(&facts->bounds, ctx, lhs, rhs, result);
 }
 
-static bool equivalence_atom_has_nonunit_scaled_mod(ixs_node *difference) {
+typedef struct {
+  ixs_node *unit_piecewise;
+  int unit_piecewise_sign;
+  bool has_piecewise;
+  bool has_nonunit_scaled_mod;
+} equivalence_atom_exact_sides;
+
+static void
+equivalence_atom_find_exact_sides(ixs_node *difference,
+                                  equivalence_atom_exact_sides *sides) {
   uint32_t i;
 
+  memset(sides, 0, sizeof(*sides));
   if (!difference || difference->tag != IXS_ADD)
-    return false;
+    return;
   for (i = 0; i < difference->u.add.nterms; i++) {
     int64_t p;
     int64_t q;
+    if (difference->u.add.terms[i].term->tag == IXS_PIECEWISE) {
+      ixs_node_get_rat(difference->u.add.terms[i].coeff, &p, &q);
+      if (!sides->has_piecewise && q == 1 && (p == -1 || p == 1)) {
+        sides->unit_piecewise = difference->u.add.terms[i].term;
+        sides->unit_piecewise_sign = p < 0 ? -1 : 1;
+      } else {
+        sides->unit_piecewise = NULL;
+        sides->unit_piecewise_sign = 0;
+      }
+      sides->has_piecewise = true;
+      continue;
+    }
     if (difference->u.add.terms[i].term->tag != IXS_MOD)
       continue;
     ixs_node_get_rat(difference->u.add.terms[i].coeff, &p, &q);
     if (q == 1 && p != -1 && p != 0 && p != 1)
-      return true;
+      sides->has_nonunit_scaled_mod = true;
   }
-  return false;
+}
+
+/* Isolate one unit Piecewise term from a normalized zero-sum ADD. Multiplying
+ * every other coefficient by the opposite unit preserves canonical term
+ * order, so the peer is rebuilt once without distributing into any arm. */
+static bool bounds_isolate_piecewise_relation(ixs_bounds *bounds,
+                                              ixs_node *difference,
+                                              ixs_node *piecewise,
+                                              int piecewise_sign,
+                                              ixs_node **other) {
+  ixs_arena_mark mark = ixs_arena_save(bounds->scratch);
+  ixs_addterm *terms;
+  ixs_node *constant;
+  int64_t constant_p;
+  int64_t constant_q;
+  size_t bytes;
+  uint32_t count = 0u;
+  uint32_t i;
+  bool ok = false;
+
+  bytes = (size_t)difference->u.add.nterms * sizeof(*terms);
+  if (bytes / sizeof(*terms) != difference->u.add.nterms) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  terms = ixs_arena_alloc(bounds->scratch, bytes, sizeof(void *));
+  if (!terms) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    ixs_node *term = difference->u.add.terms[i].term;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+
+    ixs_node_get_rat(difference->u.add.terms[i].coeff, &coefficient_p,
+                     &coefficient_q);
+    if (term == piecewise)
+      continue;
+    if (piecewise_sign > 0 && !ixs_rat_neg(coefficient_p, coefficient_q,
+                                           &coefficient_p, &coefficient_q))
+      goto cleanup;
+    terms[count].term = term;
+    terms[count].coeff =
+        ixs_node_rat(bounds->ctx, coefficient_p, coefficient_q);
+    if (!terms[count].coeff) {
+      bounds->oom = true;
+      goto cleanup;
+    }
+    count++;
+  }
+
+  ixs_node_get_rat(difference->u.add.coeff, &constant_p, &constant_q);
+  if (piecewise_sign > 0 &&
+      !ixs_rat_neg(constant_p, constant_q, &constant_p, &constant_q))
+    goto cleanup;
+  constant = ixs_node_rat(bounds->ctx, constant_p, constant_q);
+  if (!constant) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  if (count == 0u)
+    *other = constant;
+  else if (count == 1u && ixs_node_is_zero(constant) &&
+           ixs_node_is_one(terms[0].coeff))
+    *other = terms[0].term;
+  else
+    *other = ixs_node_add(bounds->ctx, constant, count, terms);
+  if (!*other) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  ok = !ixs_node_is_sentinel(*other);
+
+cleanup:
+  ixs_arena_restore(bounds->scratch, mark);
+  return ok;
 }
 
 /* Predicate construction normalizes equality to a zero-sum ADD. Recover its
- * exact positive and negative sides so the ordinary equivalence rules see the
- * same scaled-Mod projection as the direct API. Both passes are O(T) in the
- * direct terms and use O(T) query scratch. */
+ * exact operands so the ordinary equivalence rules see the same scaled-Mod or
+ * exact root-Piecewise relation as the direct API. Each path is O(T) in the
+ * direct terms and uses O(T) query scratch. */
 static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
                                           ixs_node **lhs, ixs_node **rhs) {
   struct ixs_node_impl equality;
   ixs_node *relation_lhs;
   ixs_node *relation_rhs;
   int64_t offset;
+  equivalence_atom_exact_sides sides;
 
   *lhs = cmp->u.binary.lhs;
   *rhs = cmp->u.binary.rhs;
   if (!ixs_node_is_zero(*rhs) || extract_add_node_equality(*lhs, lhs, rhs))
     return;
-  if (!equivalence_atom_has_nonunit_scaled_mod(*lhs))
+  equivalence_atom_find_exact_sides(*lhs, &sides);
+  if (sides.has_piecewise) {
+    if (sides.unit_piecewise && bounds_isolate_piecewise_relation(
+                                    bounds, *lhs, sides.unit_piecewise,
+                                    sides.unit_piecewise_sign, &relation_rhs)) {
+      *lhs = sides.unit_piecewise;
+      *rhs = relation_rhs;
+      return;
+    }
+    if (!sides.has_nonunit_scaled_mod)
+      return;
+  }
+  if (!sides.has_nonunit_scaled_mod)
     return;
 
   equality = *(const struct ixs_node_impl *)cmp;
