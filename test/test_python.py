@@ -1390,6 +1390,59 @@ def test_range_soundness(expr: ExprTree, bounds: RangeBounds, envs: list[Env]) -
 
 
 @given(
+    lo=st.integers(min_value=-32, max_value=32),
+    width=st.integers(min_value=0, max_value=32),
+    modulus_a=st.integers(min_value=2, max_value=64),
+    modulus_b=st.integers(min_value=2, max_value=64),
+    inner_modulus=st.integers(min_value=2, max_value=64),
+    coefficient_a=st.integers(min_value=-4, max_value=4).filter(bool),
+    coefficient_b=st.integers(min_value=-4, max_value=4).filter(bool),
+    offset=st.integers(min_value=-16, max_value=16),
+    nested=st.booleans(),
+    known_modulus=st.integers(min_value=2, max_value=16),
+    known_residue=st.integers(min_value=0, max_value=15),
+)
+def test_grouped_mod_range_soundness(
+    lo: int,
+    width: int,
+    modulus_a: int,
+    modulus_b: int,
+    inner_modulus: int,
+    coefficient_a: int,
+    coefficient_b: int,
+    offset: int,
+    nested: bool,
+    known_modulus: int,
+    known_residue: int,
+) -> None:
+    """Grouped Mod ranges enclose every reachable value under both APIs."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("grouped_mod_fuzz_x")
+    hi = lo + width
+    known_residue %= known_modulus
+    left = x % modulus_a
+    right_base = x % inner_modulus if nested else x
+    right = right_base % modulus_b
+    expr = coefficient_a * left + coefficient_b * right + offset
+    assumptions = [x >= lo, x <= hi, ctx.eq(x % known_modulus, known_residue)]
+    assumption_range = ctx.range(expr, assumptions=assumptions)
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    facts_range = ctx.range(expr, facts=facts)
+    reachable = [value for value in range(lo, hi + 1) if value % known_modulus == known_residue]
+
+    if not reachable:
+        assert assumption_range is None
+        assert facts_range is None
+        return
+    for result in (assumption_range, facts_range):
+        assert result is not None
+        for value in reachable:
+            actual = eval_ixs(expr, ctx, {"grouped_mod_fuzz_x": value})
+            _assert_range_contains(result, actual)
+
+
+@given(
     lo=st.integers(min_value=-64, max_value=32),
     width=st.integers(min_value=0, max_value=64),
     known_modulus=st.integers(min_value=2, max_value=16),
@@ -3576,6 +3629,42 @@ def test_range_basic() -> None:
     assert ctx.range(-x, assumptions=[x >= 10, x <= 5]) is None
     assert ctx.range(ctx.int_(int64_min)) == (int64_min, int64_min)
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
+
+
+def test_grouped_mod_congruence_range() -> None:
+    ctx = ixsimpl.Context()
+    x, y, d = (ctx.sym(name) for name in ("grouped_x", "grouped_y", "grouped_d"))
+    facts = ctx.facts()
+    facts.assume_many([x >= 0, x <= 255])
+    assumptions = [x >= 0, x <= 255]
+
+    assert ctx.range(x % 64 - x % 16, facts=facts) == (0, 48)
+    assert ctx.range(x % 16 - x % 64, facts=facts) == (-48, 0)
+    assert ctx.range(x % 64 - x % 16, assumptions=assumptions) == (0, 48)
+    assert ctx.range(x % 64 + x % 16, facts=facts) == (0, 78)
+    assert ctx.range(x % 64 - x % 16 + 16 * ((x % 128) % 32), facts=facts) == (
+        0,
+        544,
+    )
+
+    aligned = ctx.facts()
+    aligned.assume_many([x >= 0, x <= 255, ctx.eq(x % 8, 3)])
+    assert ctx.range(x % 64 + x % 16, facts=aligned) == (6, 70)
+
+    separate = ctx.facts()
+    separate.assume_many([x >= 0, x <= 255, y >= 0, y <= 255])
+    assert ctx.range(x % 64 - y % 16, facts=separate) == (-15, 63)
+    assert ctx.range(ctx.rat(3, 2) * (x % 64) - x % 16, facts=facts) == (
+        -15,
+        Fraction(189, 2),
+    )
+
+    symbolic = ctx.facts()
+    symbolic.assume_many([x >= 0, x <= 255, d >= 2, d <= 64])
+    assert ctx.range(x % d - x % 16, facts=symbolic) == (-15, 63)
+    assert ctx.range((x / 2) % 64 - (x / 2) % 16, facts=facts) is None
+    nontotal = ixsimpl.floor(x + 1 / y)
+    assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
 
 
 def test_range_composite_predicate_fact() -> None:

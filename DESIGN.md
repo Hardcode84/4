@@ -1670,7 +1670,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   constraint solver: if propagation cannot derive an interval, the query
   reports unknown; if independent intervals lose correlations, the returned
   interval is conservative rather than the mathematical image of the full
-  assumption set. There is no parallel integer-range contract. Consumers
+  assumption set. Integer-coefficient positive-literal `Mod` chains in one
+  `ADD` are grouped by their exact structurally total integer representative.
+  Each subgroup interval is intersected with its proven gcd congruence before
+  independent groups are summed; fractional coefficients, partial or
+  noninteger representatives, symbolic moduli, and distinct representatives
+  stay independent. The grouping pass is expected O(n) in `ADD` terms and
+  uses O(k) query-local scratch for k candidate terms. It never scans retained
+  context state. There is no parallel integer-range contract. Consumers
   combine this canonical range with the definedness and integer-valued proof
   queries; internal exact proofs refine the same interval representation
   rather than materializing a second result type.

@@ -9095,16 +9095,184 @@ static bool bounds_add_has_nonnegative_radix_certificate(ixs_bounds *b,
   return bounds_radix_certificate_residuals_nonnegative(b, slots, nslots);
 }
 
+typedef struct {
+  ixs_node *representative;
+  ixs_interval interval;
+  uint64_t modulus;
+  uint64_t coefficient;
+  uint32_t count;
+} bounds_add_residue_group;
+
+/* A chain of positive literal Mods preserves its dividend modulo the gcd of
+ * those literals. Structural domain proofs avoid a recursive range query
+ * while bounds_get_add is already aggregating the surrounding ADD. */
+static bool bounds_add_mod_chain(ixs_node *term, ixs_node **representative,
+                                 uint64_t *modulus) {
+  uint64_t result = 0;
+
+  while (term->tag == IXS_MOD && term->u.binary.rhs->tag == IXS_INT &&
+         term->u.binary.rhs->u.ival > 0) {
+    uint64_t divisor = (uint64_t)term->u.binary.rhs->u.ival;
+    ixs_node *dividend = term->u.binary.lhs;
+    if (!ixs_node_is_integer_valued(dividend) ||
+        !ixs_node_is_known_total(dividend))
+      return false;
+    result = result == 0 ? divisor : bounds_u64_gcd(result, divisor);
+    term = dividend;
+  }
+  if (result <= 1u)
+    return false;
+  *representative = term;
+  *modulus = result;
+  return true;
+}
+
+/* Direct Mod chains with one representative form congruent sub-sums. Build
+ * each independent sub-sum once, then intersect it with the residue already
+ * understood by the generic residue engine. Scratch hashing makes this
+ * expected O(n) in the number of ADD terms. */
+static bool bounds_get_add_residue_groups(ixs_bounds *b, ixs_node *expr,
+                                          size_t candidate_count,
+                                          ixs_interval *out) {
+  ixs_arena_mark mark;
+  bounds_add_residue_group *groups;
+  size_t needed;
+  size_t capacity = 16u;
+  size_t ngroups = 0;
+  size_t slot;
+  uint32_t i;
+  ixs_interval baseline;
+  ixs_interval result;
+
+  if (candidate_count < 2u || candidate_count > SIZE_MAX - candidate_count)
+    return false;
+  needed = candidate_count + candidate_count;
+  while (capacity < needed) {
+    if (capacity > SIZE_MAX / 2u ||
+        capacity * 2u > SIZE_MAX / sizeof(*groups)) {
+      b->oom = true;
+      return false;
+    }
+    capacity *= 2u;
+  }
+
+  mark = ixs_arena_save(b->scratch);
+  groups =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*groups), sizeof(void *));
+  if (!groups) {
+    b->oom = true;
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  memset(groups, 0, capacity * sizeof(*groups));
+  result = ixs_bounds_get(b, expr->u.add.coeff);
+  /* Regrouping changes addition order. Retain the original accumulation so
+   * overflow widening can only be tightened, never replaced. */
+  baseline = result;
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_node *term = expr->u.add.terms[i].term;
+    ixs_node *representative;
+    ixs_interval term_interval = ixs_bounds_get(b, term);
+    ixs_interval scaled;
+    uint64_t modulus;
+    int64_t p;
+    int64_t q;
+    size_t group;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+    scaled = iv_mul_const(term_interval, p, q);
+    baseline = iv_add(baseline, scaled);
+    if (q != 1 || !bounds_add_mod_chain(term, &representative, &modulus)) {
+      result = iv_add(result, scaled);
+      continue;
+    }
+
+    group = bounds_residue_group_hash(representative) & (capacity - 1u);
+    while (groups[group].representative &&
+           groups[group].representative != representative)
+      group = (group + 1u) & (capacity - 1u);
+    if (!groups[group].representative) {
+      groups[group].representative = representative;
+      groups[group].interval = scaled;
+      groups[group].modulus = modulus;
+      groups[group].coefficient = bounds_normalize_residue(p, modulus);
+      groups[group].count = 1u;
+      ngroups++;
+      continue;
+    }
+
+    groups[group].interval = iv_add(groups[group].interval, scaled);
+    groups[group].modulus = bounds_u64_gcd(groups[group].modulus, modulus);
+    groups[group].coefficient %= groups[group].modulus;
+    groups[group].coefficient =
+        bounds_add_mod(groups[group].coefficient,
+                       bounds_normalize_residue(p, groups[group].modulus),
+                       groups[group].modulus);
+    groups[group].count++;
+  }
+
+  for (slot = 0; slot < capacity && ngroups != 0; slot++) {
+    bounds_add_residue_group *group = &groups[slot];
+    ixs_interval interval;
+    uint64_t reduced;
+    uint64_t representative_residue = 0;
+    uint64_t residue;
+
+    if (!group->representative)
+      continue;
+    ngroups--;
+    interval = group->interval;
+    reduced =
+        group->modulus / bounds_u64_gcd(group->coefficient, group->modulus);
+    if (group->count > 1u &&
+        (reduced == 1u ||
+         bounds_known_residue(b, group->representative, reduced,
+                              &representative_residue))) {
+      residue = bounds_mul_mod(group->coefficient, representative_residue,
+                               group->modulus);
+      interval = interval_intersect_congruence(
+          interval, (int64_t)group->modulus, (int64_t)residue);
+    }
+    result = iv_add(result, interval);
+  }
+
+  if (b->oom) {
+    ixs_arena_restore(b->scratch, mark);
+    return false;
+  }
+  *out = iv_intersect(baseline, result);
+  ixs_arena_restore(b->scratch, mark);
+  return true;
+}
+
 static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   uint32_t i;
-  ixs_interval result = ixs_bounds_get(b, expr->u.add.coeff);
+  size_t residue_candidate_count = 0;
+  ixs_interval result;
+
   for (i = 0; i < expr->u.add.nterms; i++) {
-    int64_t cp, cq;
-    ixs_interval ti = ixs_bounds_get(b, expr->u.add.terms[i].term);
-    ixs_interval scaled;
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
-    scaled = iv_mul_const(ti, cp, cq);
-    result = iv_add(result, scaled);
+    ixs_node *term = expr->u.add.terms[i].term;
+    if (term->tag == IXS_MOD && term->u.binary.rhs->tag == IXS_INT &&
+        term->u.binary.rhs->u.ival > 0)
+      residue_candidate_count++;
+  }
+
+  result = ixs_bounds_get(b, expr->u.add.coeff);
+  if (residue_candidate_count >= 2u) {
+    (void)bounds_get_add_residue_groups(b, expr, residue_candidate_count,
+                                        &result);
+  } else {
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      int64_t cp;
+      int64_t cq;
+      ixs_interval ti = ixs_bounds_get(b, expr->u.add.terms[i].term);
+      ixs_interval scaled;
+
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &cp, &cq);
+      scaled = iv_mul_const(ti, cp, cq);
+      result = iv_add(result, scaled);
+    }
   }
   if (!b->oom && b->nexprs != 0)
     result = iv_intersect(result, bounds_get_proportional_range(b, expr));

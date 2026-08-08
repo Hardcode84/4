@@ -2885,6 +2885,144 @@ static void test_public_range_congruence_tightens_endpoints(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_range_grouped_mod_congruence(void) {
+  static const char domain_text[] = "x >= 0 & x <= 255";
+  static const char separate_domain_text[] =
+      "x >= 0 & x <= 255 & y >= 0 & y <= 255";
+  static const char aligned_domain_text[] =
+      "x >= 0 & x <= 255 & Mod(x, 8) == 3";
+  static const char symbolic_domain_text[] =
+      "x >= 0 & x <= 255 & d >= 2 & d <= 64";
+  static const char positive_text[] = "Mod(x, 64) - Mod(x, 16)";
+  static const char negative_text[] = "Mod(x, 16) - Mod(x, 64)";
+  static const char aligned_text[] = "Mod(x, 64) + Mod(x, 16)";
+  static const char nested_text[] =
+      "Mod(x, 64) - Mod(x, 16) + 16*Mod(Mod(x, 128), 32)";
+  static const char separate_text[] = "Mod(x, 64) - Mod(y, 16)";
+  static const char one_candidate_text[] = "Mod(x, 64) + x";
+  static const char fractional_text[] = "3*Mod(x, 64)/2 - Mod(x, 16)";
+  static const char symbolic_text[] = "Mod(x, d) - Mod(x, 16)";
+  static const char noninteger_text[] = "Mod(x/2, 64) - Mod(x/2, 16)";
+  static const char nontotal_text[] =
+      "Mod(floor(x + 1/y), 64) - Mod(floor(x + 1/y), 16)";
+  static const char overflow_text[] = "9223372036854775807*Mod(x, 64) + "
+                                      "9223372036854775807*Mod(x, 16)";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, sizeof(domain_text) - 1u);
+  ixs_node *separate_domain = ixs_parse_pred(ctx, separate_domain_text,
+                                             sizeof(separate_domain_text) - 1u);
+  ixs_node *aligned_domain = ixs_parse_pred(ctx, aligned_domain_text,
+                                            sizeof(aligned_domain_text) - 1u);
+  ixs_node *symbolic_domain = ixs_parse_pred(ctx, symbolic_domain_text,
+                                             sizeof(symbolic_domain_text) - 1u);
+  ixs_node *positive =
+      ixs_parse_expr(ctx, positive_text, sizeof(positive_text) - 1u);
+  ixs_node *negative =
+      ixs_parse_expr(ctx, negative_text, sizeof(negative_text) - 1u);
+  ixs_node *aligned =
+      ixs_parse_expr(ctx, aligned_text, sizeof(aligned_text) - 1u);
+  ixs_node *nested = ixs_parse_expr(ctx, nested_text, sizeof(nested_text) - 1u);
+  ixs_node *separate =
+      ixs_parse_expr(ctx, separate_text, sizeof(separate_text) - 1u);
+  ixs_node *one_candidate =
+      ixs_parse_expr(ctx, one_candidate_text, sizeof(one_candidate_text) - 1u);
+  ixs_node *fractional =
+      ixs_parse_expr(ctx, fractional_text, sizeof(fractional_text) - 1u);
+  ixs_node *symbolic =
+      ixs_parse_expr(ctx, symbolic_text, sizeof(symbolic_text) - 1u);
+  ixs_node *noninteger =
+      ixs_parse_expr(ctx, noninteger_text, sizeof(noninteger_text) - 1u);
+  ixs_node *nontotal =
+      ixs_parse_expr(ctx, nontotal_text, sizeof(nontotal_text) - 1u);
+  ixs_node *overflow =
+      ixs_parse_expr(ctx, overflow_text, sizeof(overflow_text) - 1u);
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *mod64 = ixs_mod(ctx, x, ixs_int(ctx, 64));
+  ixs_node *mod16 = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *separate_facts = ixs_facts_create(ctx);
+  ixs_facts *aligned_facts = ixs_facts_create(ctx);
+  ixs_facts *symbolic_facts = ixs_facts_create(ctx);
+  ixs_facts *oom_facts = ixs_facts_create(ctx);
+  ixs_range_result range;
+  ixs_range_result assumption_range;
+
+  CHECK(ctx && domain && separate_domain && aligned_domain && symbolic_domain &&
+        positive && negative && aligned && nested && separate &&
+        one_candidate && fractional && symbolic && noninteger && nontotal &&
+        overflow && x && mod64 && mod16 && facts && separate_facts &&
+        aligned_facts && symbolic_facts && oom_facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(ixs_facts_assume_pred(separate_facts, separate_domain));
+  CHECK(ixs_facts_assume_pred(aligned_facts, aligned_domain));
+  CHECK(ixs_facts_assume_pred(symbolic_facts, symbolic_domain));
+  CHECK(ixs_facts_assume_pred(oom_facts, domain));
+
+  CHECK(test_ixs_range_facts(facts, positive, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 48 && range.upper_q == 1);
+  CHECK(ixs_range(ctx, positive, &domain, 1, &assumption_range));
+  CHECK(assumption_range.has_lower == range.has_lower &&
+        assumption_range.lower_p == range.lower_p &&
+        assumption_range.lower_q == range.lower_q &&
+        assumption_range.has_upper == range.has_upper &&
+        assumption_range.upper_p == range.upper_p &&
+        assumption_range.upper_q == range.upper_q);
+
+  CHECK(test_ixs_range_facts(facts, negative, &range));
+  CHECK(range.has_lower && range.lower_p == -48 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, aligned, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 78 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(aligned_facts, aligned, &range));
+  CHECK(range.has_lower && range.lower_p == 6 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 70 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, nested, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 544 && range.upper_q == 1);
+
+  /* Distinct representatives and ineligible terms remain independent. */
+  CHECK(test_ixs_range_facts(separate_facts, separate, &range));
+  CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 63 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, one_candidate, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 318 && range.upper_q == 1);
+  CHECK(test_ixs_range_facts(facts, fractional, &range));
+  CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 189 && range.upper_q == 2);
+  CHECK(test_ixs_range_facts(symbolic_facts, symbolic, &range));
+  CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 63 && range.upper_q == 1);
+
+  /* Congruence grouping requires a total integer representative. */
+  CHECK(!test_ixs_range_facts(facts, noninteger, &range));
+  CHECK(!test_ixs_range_facts(facts, nontotal, &range));
+  CHECK(!test_ixs_range_facts(
+      facts, ixs_add(ctx, ixs_mod(ctx, x, ixs_int(ctx, 0)), mod16), &range));
+  CHECK(!test_ixs_range_facts(
+      facts, ixs_add(ctx, ixs_mod(ctx, x, ixs_int(ctx, -2)), mod16), &range));
+
+  /* Interval overflow widens rather than manufacturing a finite endpoint. */
+  CHECK(test_ixs_range_facts(facts, overflow, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(!range.has_upper);
+
+  /* The query-local group allocation is recoverable and leaves facts usable. */
+  CHECK(test_ixs_range_facts(oom_facts, mod64, &range));
+  CHECK(test_ixs_range_facts(oom_facts, mod16, &range));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(!test_ixs_range_facts(oom_facts, positive, &range));
+  CHECK(!range.has_lower && !range.has_upper && !oom_facts->bounds.oom);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_range_facts(oom_facts, positive, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 48 && range.upper_q == 1);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_range_congruence_alignment_overflow(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "congruence_overflow_x");
@@ -10390,6 +10528,7 @@ int main(void) {
   test_public_range_mod_nonnegative_dividend_cap();
   test_public_range_mod_congruence_intersection();
   test_public_range_congruence_tightens_endpoints();
+  test_public_range_grouped_mod_congruence();
   test_public_range_congruence_alignment_overflow();
   test_public_range_difference_constraint_propagation();
   test_public_modular_projection_difference();
