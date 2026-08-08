@@ -1784,15 +1784,43 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `-r/c` for any nonzero rational `c`; the constructed candidate and the Mod
   must both be total. Arbitrary `c` requires that this be the residual's only
   Mod term; a residual with other scaled Mod terms retains the narrower rule
-  that isolates one unique coefficient `1` or `-1`. The representative and
-  isolation rules accept only a `TRUE` child proof, and any representative
-  reached by that child still requires the canonical remainder range. An exact
-  no-wrap partition may also propagate a conclusive `FALSE` for its candidate
-  against the other operand. A composition attempt blocked by a cycle, four
-  nested child proofs, invalid arithmetic, or incomplete integrality,
-  positivity, definedness, or range evidence returns `UNKNOWN`; that failed
-  sufficient rule does not suppress an independent exact strategy. Allocation
-  failure remains a query failure.
+  that isolates one unique coefficient `1` or `-1`. When no unit candidate
+  exists, a normalized zero-sum residual may contain several non-unit Mod
+  terms. Each Mod is isolated in turn by an exact rearrangement, and at most
+  one bounded child proof checks that candidate against the selected Mod. The
+  other Mod terms remain in the candidate, so only a proof of the complete
+  residual can establish equality. For `T` terms and `M` Mod candidates this
+  performs O(M*T) canonical construction work and starts at most `M` bounded
+  child proofs; `M <= T`, so the construction bound is O(T^2). Proof results
+  share the query memo and cycle guard and no candidate scans retained context
+  state.
+
+  The scaled projection proves
+  `Mod(g*x+r,g*m) == g*Mod(x,m)+r` only for an exact positive integer literal
+  scale `g > 1`, a proven-positive wrapped divisor, integer-valued projected
+  dividend and divisor, and an integer residual proven inside `0 <= r < g`.
+  The wrapped dividend is partitioned structurally into its scaled quotient
+  and residual. A residual may itself contain unrelated Mod terms, but its
+  equality with the wrapped residual must be exact pointer identity or a
+  successful bounded child proof; a second positive scaled-Mod candidate is
+  ambiguous and rejected. Thus
+  `Mod(4*x+Mod(seed,4),32) == 4*Mod(x,8)+Mod(seed,4)` composes, while a missing
+  upper bound does not. Extraction and partitioning each scan the queried ADD
+  once and start at most two bounded child proofs, with no finite-domain or
+  context-wide scan. A predicate equality whose normalized zero-sum ADD
+  contains a non-unit scaled Mod first partitions that ADD into exact positive
+  and negative sides in O(T) work and O(T) query scratch, then runs the same
+  ordinary equivalence proof. Other predicate equalities retain their existing
+  entry path.
+
+  The representative and isolation rules accept only a `TRUE` child proof,
+  and any representative reached by that child still requires the canonical
+  remainder range. An exact no-wrap partition may also propagate a conclusive
+  `FALSE` for its candidate against the other operand. A composition attempt
+  blocked by a cycle, four nested child proofs, invalid arithmetic, or
+  incomplete integrality, positivity, definedness, or range evidence returns
+  `UNKNOWN`; that failed sufficient rule does not suppress an independent
+  exact strategy. Allocation failure remains a query failure.
 
   Shift partitioning examines only the queried dividend's direct `ADD` terms.
   With `T` terms it launches at most `T` bounded child proofs and rebuilds one

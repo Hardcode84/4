@@ -27,6 +27,9 @@ Properties tested:
 12. Combined stronger-proof soundness: production-shaped Mod ranges, floor
     partitions, radix reconstructions, and int64 edges are checked over every
     point in generated finite domains through both fact entry points.
+13. Scaled-Mod projection soundness: every conclusive public proof is checked
+    over the complete generated domain, including a separately proved Mod
+    residual and a common outer scale.
 """
 
 from __future__ import annotations
@@ -3999,6 +4002,52 @@ def test_congruent_radix_reconstruction_soundness(radix: int, shift_seed: int) -
         assert eval_ixs(reconstructed, ctx, env) == value_at_slot
         assert eval_ixs(alias, ctx, env) == value_at_slot
         assert eval_ixs(wrong, ctx, env) != value_at_slot
+
+
+@given(
+    scale=st.integers(min_value=2, max_value=5),
+    modulus=st.integers(min_value=2, max_value=5),
+    outer_scale=st.integers(min_value=1, max_value=4),
+)
+def test_bounded_scaled_mod_projection_soundness(
+    scale: int,
+    modulus: int,
+    outer_scale: int,
+) -> None:
+    """Every scaled-Mod proof holds over its complete small domain."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("scaled_mod_soundness_x")
+    seed = ctx.sym("scaled_mod_soundness_seed")
+    residual = seed % scale
+    wrapped_residual = (seed % (2 * scale)) % scale
+    wrapped = (scale * x + wrapped_residual) % (scale * modulus)
+    projected = scale * (x % modulus) + residual
+    lhs = outer_scale * wrapped
+    rhs = outer_scale * projected
+    equality = ctx.eq(lhs, rhs)
+    assumptions = [
+        x >= -modulus,
+        x <= modulus,
+        seed >= -scale,
+        seed <= scale,
+    ]
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+
+    results = (
+        ctx.equivalent(lhs, rhs, facts),
+        ctx.check(equality, facts=facts),
+        ctx.check(equality, assumptions=assumptions),
+    )
+    assert results == (True, True, True)
+
+    for x_value in range(-modulus, modulus + 1):
+        for seed_value in range(-scale, scale + 1):
+            env = {
+                "scaled_mod_soundness_x": x_value,
+                "scaled_mod_soundness_seed": seed_value,
+            }
+            assert eval_ixs(lhs, ctx, env) == eval_ixs(rhs, ctx, env)
 
 
 @given(case=_stronger_proof_case_st())

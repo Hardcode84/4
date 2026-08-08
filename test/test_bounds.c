@@ -8204,6 +8204,167 @@ static void test_generic_modulo_recurrence_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_generic_bounded_scaled_mod_equivalence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "bounded_scaled_mod_x");
+  ixs_node *r = ixs_sym(ctx, "bounded_scaled_mod_r");
+  ixs_node *other_r = ixs_sym(ctx, "bounded_scaled_mod_other_r");
+  ixs_node *seed = ixs_sym(ctx, "bounded_scaled_mod_seed");
+  ixs_node *divisor = ixs_sym(ctx, "bounded_scaled_mod_divisor");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_node *thirty_two = ixs_int(ctx, 32);
+  ixs_node *wrapped =
+      ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, x), r), thirty_two);
+  ixs_node *projected =
+      ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, eight)), r);
+  ixs_node *lhs = ixs_mul(ctx, sixteen, wrapped);
+  ixs_node *rhs = ixs_mul(ctx, sixteen, projected);
+  ixs_node *equality = ixs_cmp(ctx, lhs, IXS_CMP_EQ, rhs);
+  ixs_node *residual = ixs_mod(ctx, seed, four);
+  ixs_node *wrapped_residual = ixs_mod(ctx, ixs_mod(ctx, seed, eight), four);
+  ixs_node *nested_wrapped =
+      ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, x), residual), thirty_two);
+  ixs_node *equivalent_residual_wrapped = ixs_mod(
+      ctx, ixs_add(ctx, ixs_mul(ctx, four, x), wrapped_residual), thirty_two);
+  ixs_node *nested_projected =
+      ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, eight)), residual);
+  ixs_node *nested_equality =
+      ixs_cmp(ctx, nested_wrapped, IXS_CMP_EQ, nested_projected);
+  ixs_node *divisor_quarter = ixs_div(ctx, divisor, four);
+  ixs_node *dynamic_wrapped =
+      ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, x), r), divisor);
+  ixs_node *dynamic_projected =
+      ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, divisor_quarter)), r);
+  ixs_node *dynamic_equality =
+      ixs_cmp(ctx, dynamic_wrapped, IXS_CMP_EQ, dynamic_projected);
+  ixs_node *half_projected =
+      ixs_mul(ctx, two, ixs_mod(ctx, ixs_div(ctx, x, two), ixs_int(ctx, 8)));
+  ixs_node *half_wrapped = ixs_mod(ctx, x, ixs_int(ctx, 16));
+  ixs_node *mismatched =
+      ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, eight)), other_r);
+  ixs_facts *bounded = ixs_facts_create(ctx);
+  ixs_facts *lower_only = ixs_facts_create(ctx);
+  ixs_facts *outside = ixs_facts_create(ctx);
+  ixs_facts *dynamic = ixs_facts_create(ctx);
+  ixs_facts *dynamic_no_positive = ixs_facts_create(ctx);
+  ixs_facts *dynamic_no_integrality = ixs_facts_create(ctx);
+  ixs_facts *shared_unknown = ixs_facts_create(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *oom_facts = ixs_facts_create(ctx);
+  ixs_arena *scratch;
+  ixs_arena_mark scratch_mark;
+  size_t errors;
+  size_t align;
+  size_t offset;
+  size_t remaining;
+
+  CHECK(ctx && x && r && other_r && seed && divisor && zero && two && four &&
+        eight && sixteen && thirty_two && wrapped && projected && lhs && rhs &&
+        equality && residual && wrapped_residual && nested_wrapped &&
+        equivalent_residual_wrapped && nested_projected && nested_equality &&
+        divisor_quarter && dynamic_wrapped && dynamic_projected &&
+        dynamic_equality && half_projected && half_wrapped && mismatched &&
+        bounded && lower_only && outside && dynamic && dynamic_no_positive &&
+        dynamic_no_integrality && shared_unknown && empty && oom_facts);
+
+  CHECK(ixs_facts_assume_pred(bounded, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(bounded, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(test_ixs_equivalent_facts(bounded, lhs, rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(bounded, equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(bounded, equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(bounded, nested_wrapped, nested_projected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(bounded, nested_equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(bounded, nested_equality) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(bounded, equivalent_residual_wrapped,
+                                  nested_projected) == IXS_CHECK_TRUE);
+  CHECK(ixs_bounds_equivalence_subproof_limit_probe(bounded, lhs, rhs) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(lower_only, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(test_ixs_equivalent_facts(lower_only, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(lower_only, equality) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(outside,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7))));
+  CHECK(ixs_facts_assume_pred(outside, ixs_cmp(ctx, r, IXS_CMP_EQ, four)));
+  CHECK(test_ixs_equivalent_facts(outside, lhs, rhs) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_facts(outside, equality) == IXS_CHECK_FALSE);
+
+  CHECK(ixs_facts_assume_pred(dynamic, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(dynamic, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(
+      ixs_facts_assume_pred(dynamic, ixs_cmp(ctx, divisor, IXS_CMP_GT, zero)));
+  CHECK(ixs_facts_assume_pred(
+      dynamic, ixs_cmp(ctx, ixs_mod(ctx, divisor, four), IXS_CMP_EQ, zero)));
+  CHECK(test_ixs_equivalent_facts(dynamic, dynamic_wrapped,
+                                  dynamic_projected) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(dynamic, dynamic_equality) ==
+        IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(dynamic_no_positive,
+                              ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(dynamic_no_positive,
+                              ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(ixs_facts_assume_pred(
+      dynamic_no_positive,
+      ixs_cmp(ctx, ixs_mod(ctx, divisor, four), IXS_CMP_EQ, zero)));
+  CHECK(test_ixs_equivalent_facts(dynamic_no_positive, dynamic_wrapped,
+                                  dynamic_projected) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(dynamic_no_integrality,
+                              ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(dynamic_no_integrality,
+                              ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(ixs_facts_assume_pred(dynamic_no_integrality,
+                              ixs_cmp(ctx, divisor, IXS_CMP_GT, zero)));
+  CHECK(test_ixs_equivalent_facts(dynamic_no_integrality, dynamic_wrapped,
+                                  dynamic_projected) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(empty, half_projected, half_wrapped) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(
+      ixs_facts_assume_pred(shared_unknown, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(
+      ixs_facts_assume_pred(shared_unknown, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(ixs_facts_assume_pred(shared_unknown,
+                              ixs_cmp(ctx, other_r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(shared_unknown,
+                              ixs_cmp(ctx, other_r, IXS_CMP_LT, four)));
+  CHECK(test_ixs_equivalent_facts(shared_unknown, wrapped, mismatched) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(oom_facts, ixs_cmp(ctx, r, IXS_CMP_GE, zero)));
+  CHECK(ixs_facts_assume_pred(oom_facts, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  scratch = ixs_test_scratch(ctx);
+  scratch_mark = ixs_arena_save(scratch);
+  align = sizeof(void *);
+  offset = (scratch->current->used + align - 1u) & ~(align - 1u);
+  remaining = scratch->current->capacity - offset;
+  if (remaining > 0u)
+    CHECK(ixs_arena_alloc(scratch, remaining, align) != NULL);
+  errors = ixs_ctx_nerrors(ctx);
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(test_ixs_check_predicate_facts(oom_facts, equality) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!oom_facts->bounds.oom);
+  CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  if (ixs_ctx_nerrors(ctx) != errors)
+    CHECK(strstr(ixs_ctx_error(ctx, errors), "out of memory") != NULL);
+  ixs_arena_restore(scratch, scratch_mark);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_predicate_facts(oom_facts, equality) == IXS_CHECK_TRUE);
+  CHECK(ixs_ctx_nerrors(ctx) == 0u);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_generic_mod_reconstruction_from_quotient_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "mod_reconstruct_item");
@@ -11118,6 +11279,7 @@ int main(void) {
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
   test_generic_modulo_recurrence_equivalence();
+  test_generic_bounded_scaled_mod_equivalence();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_public_trunc_primitive_constant_difference();
   test_public_truncating_remainder_equivalence();

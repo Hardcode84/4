@@ -16823,7 +16823,11 @@ static bool equivalence_extract_positive_scaled_mod(equivalence_state *state,
     if (expr->u.add.terms[i].term->tag != IXS_MOD)
       continue;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q != 1 || p <= 1 || *mod)
+    /* Other Mod terms belong to the residual. Only a positive integer
+     * coefficient greater than one identifies the projected term. */
+    if (q != 1 || p <= 1)
+      continue;
+    if (*mod)
       return false;
     *scale = p;
     *mod = expr->u.add.terms[i].term;
@@ -17093,48 +17097,59 @@ static ixs_check_result equivalence_isolate_unit_mod(equivalence_state *state,
 static ixs_check_result equivalence_isolate_linear_mod(equivalence_state *state,
                                                        ixs_node *difference,
                                                        unsigned depth) {
-  ixs_node *mod = NULL;
-  ixs_node *coefficient = NULL;
-  ixs_node *mod_term;
-  ixs_node *rest;
-  ixs_node *negative_rest;
-  ixs_node *candidate;
   uint32_t i;
 
   if (difference->tag != IXS_ADD)
     return IXS_CHECK_UNKNOWN;
-  for (i = 0; i < difference->u.add.nterms; i++) {
-    ixs_node *term = difference->u.add.terms[i].term;
-    ixs_node *term_coefficient = difference->u.add.terms[i].coeff;
 
-    if (term->tag != IXS_MOD)
+  /* Each Mod term gives one exact rearrangement of difference == 0. A
+   * bounded child proof must discharge the complete residual, including any
+   * other Mod terms. For T terms this starts at most T child proofs and does
+   * O(T^2) canonical construction work. */
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    ixs_node *mod = difference->u.add.terms[i].term;
+    ixs_node *coefficient = difference->u.add.terms[i].coeff;
+    ixs_node *mod_term;
+    ixs_node *rest;
+    ixs_node *negative_rest;
+    ixs_node *candidate;
+    ixs_check_result result;
+    equivalence_build_status status;
+
+    if (mod->tag != IXS_MOD)
       continue;
-    if (mod)
-      return IXS_CHECK_UNKNOWN;
-    mod = term;
-    coefficient = term_coefficient;
+
+    status = equivalence_build_scale(state, coefficient, mod, &mod_term);
+    if (status == EQUIVALENCE_BUILD_OK)
+      status = equivalence_build_sub(state, difference, mod_term, &rest);
+    if (status == EQUIVALENCE_BUILD_OK)
+      status = equivalence_build_neg(state, rest, &negative_rest);
+    if (status == EQUIVALENCE_BUILD_OK)
+      status = equivalence_build_div_const(state, negative_rest, coefficient,
+                                           &candidate);
+    if (status != EQUIVALENCE_BUILD_OK) {
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        return IXS_CHECK_UNKNOWN;
+      continue;
+    }
+    if (ixs_node_is_sentinel(mod_term) || ixs_node_is_sentinel(rest) ||
+        ixs_node_is_sentinel(negative_rest) ||
+        ixs_node_is_sentinel(candidate) ||
+        ixs_bounds_check_defined(state->bounds, candidate) != IXS_CHECK_TRUE ||
+        ixs_bounds_check_defined(state->bounds, mod) != IXS_CHECK_TRUE) {
+      if (state->bounds->oom) {
+        state->oom = true;
+        return IXS_CHECK_UNKNOWN;
+      }
+      continue;
+    }
+    result = equivalence_bounded_core(state, candidate, mod, depth + 1u);
+    if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+        state->oom || state->arithmetic_unrepresentable)
+      return result;
   }
-  if (!mod)
-    return IXS_CHECK_UNKNOWN;
-  if (equivalence_build_scale(state, coefficient, mod, &mod_term) !=
-          EQUIVALENCE_BUILD_OK ||
-      equivalence_build_sub(state, difference, mod_term, &rest) !=
-          EQUIVALENCE_BUILD_OK)
-    return IXS_CHECK_UNKNOWN;
-  if (equivalence_build_neg(state, rest, &negative_rest) !=
-          EQUIVALENCE_BUILD_OK ||
-      equivalence_build_div_const(state, negative_rest, coefficient,
-                                  &candidate) != EQUIVALENCE_BUILD_OK)
-    return IXS_CHECK_UNKNOWN;
-  if (ixs_node_is_sentinel(mod_term) || ixs_node_is_sentinel(rest) ||
-      ixs_node_is_sentinel(negative_rest) || ixs_node_is_sentinel(candidate) ||
-      ixs_bounds_check_defined(state->bounds, candidate) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_defined(state->bounds, mod) != IXS_CHECK_TRUE) {
-    if (state->bounds->oom)
-      state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
-  return equivalence_bounded_core(state, candidate, mod, depth + 1u);
+  return IXS_CHECK_UNKNOWN;
 }
 
 static ixs_node *equivalence_simplified_difference(equivalence_state *state,
@@ -19468,6 +19483,61 @@ equivalence_query_bound_detail(ixs_facts *facts, ixs_ctx *ctx, ixs_node *lhs,
   return equivalence_query_bounds_detail(&facts->bounds, ctx, lhs, rhs, result);
 }
 
+static bool equivalence_atom_has_nonunit_scaled_mod(ixs_node *difference) {
+  uint32_t i;
+
+  if (!difference || difference->tag != IXS_ADD)
+    return false;
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    int64_t p;
+    int64_t q;
+    if (difference->u.add.terms[i].term->tag != IXS_MOD)
+      continue;
+    ixs_node_get_rat(difference->u.add.terms[i].coeff, &p, &q);
+    if (q == 1 && p != -1 && p != 0 && p != 1)
+      return true;
+  }
+  return false;
+}
+
+/* Predicate construction normalizes equality to a zero-sum ADD. Recover its
+ * exact positive and negative sides so the ordinary equivalence rules see the
+ * same scaled-Mod projection as the direct API. Both passes are O(T) in the
+ * direct terms and use O(T) query scratch. */
+static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
+                                          ixs_node **lhs, ixs_node **rhs) {
+  struct ixs_node_impl equality;
+  ixs_node *relation_lhs;
+  ixs_node *relation_rhs;
+  int64_t offset;
+
+  *lhs = cmp->u.binary.lhs;
+  *rhs = cmp->u.binary.rhs;
+  if (!ixs_node_is_zero(*rhs) || extract_add_node_equality(*lhs, lhs, rhs))
+    return;
+  if (!equivalence_atom_has_nonunit_scaled_mod(*lhs))
+    return;
+
+  equality = *(const struct ixs_node_impl *)cmp;
+  equality.u.binary.cmp_op = IXS_CMP_EQ;
+  if (!bounds_extract_cmp_exact_relation(bounds, &equality, &relation_lhs,
+                                         &relation_rhs, &offset))
+    return;
+  if (offset != 0) {
+    ixs_node *constant = ixs_node_int(bounds->ctx, offset);
+    bool unrepresentable = false;
+    relation_rhs = constant ? simp_try_add(bounds->ctx, relation_rhs, constant,
+                                           &unrepresentable)
+                            : NULL;
+    if (!relation_rhs && !unrepresentable)
+      bounds->oom = true;
+    if (unrepresentable || !relation_rhs || ixs_node_is_sentinel(relation_rhs))
+      return;
+  }
+  *lhs = relation_lhs;
+  *rhs = relation_rhs;
+}
+
 static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
                                                       ixs_node *cmp) {
   uint64_t saved_owner;
@@ -19486,12 +19556,7 @@ static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
        cmp->u.binary.rhs->tag != IXS_INT))
     return IXS_CHECK_UNKNOWN;
 
-  lhs = cmp->u.binary.lhs;
-  rhs = cmp->u.binary.rhs;
-  if (ixs_node_is_zero(rhs) && !extract_add_node_equality(lhs, &lhs, &rhs)) {
-    lhs = cmp->u.binary.lhs;
-    rhs = cmp->u.binary.rhs;
-  }
+  bounds_equivalence_atom_sides(bounds, cmp, &lhs, &rhs);
 
   saved_owner = bounds->query_owner;
   bounds->predicate_equivalence_depth++;
