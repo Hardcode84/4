@@ -2170,6 +2170,173 @@ static void test_bounds_check_mod_remainder(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void check_radix_certificate_case(ixs_ctx *ctx, ixs_node *expr,
+                                         ixs_node *domain,
+                                         ixs_check_result expected) {
+  ixs_node *query = ixs_cmp(ctx, expr, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(expr && domain && query && facts);
+  CHECK(ixs_check(ctx, query, &domain, 1) == expected);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(test_ixs_check_facts(facts, query) == expected);
+}
+
+static void test_bounds_check_wave_radix_floor_sums(void) {
+  static const char asmbuf_text[] =
+      "-65280*floor(wi/128) + 32768*floor(wi/64) - "
+      "8176*floor(Mod(wi, 64)/16) + 512*Mod(wi, 64)";
+  static const char aiter_text[] =
+      "16*wi + 16384*raw1 + 3072*floor(wi/64) - 15872*floor(wi/256) - "
+      "3840*floor(Mod(wi, 64)/32) + 1792*floor(Mod(wi, 64)/16)";
+  static const char invalid_text[] =
+      "-65280*floor(wi/128) + 32768*floor(wi/64) - "
+      "8193*floor(Mod(wi, 64)/16) + 512*Mod(wi, 64)";
+  static const char domain_text[] =
+      "wi >= 0 & wi <= 255 & raw1 >= 0 & raw1 <= 1";
+  static const char missing_lower_text[] = "wi <= 255 & raw1 >= 0 & raw1 <= 1";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *asmbuf = ixs_parse_expr(ctx, asmbuf_text, strlen(asmbuf_text));
+  ixs_node *offset = ixs_add(ctx, asmbuf, ixs_int(ctx, 8192));
+  ixs_node *aiter = ixs_parse_expr(ctx, aiter_text, strlen(aiter_text));
+  ixs_node *invalid = ixs_parse_expr(ctx, invalid_text, strlen(invalid_text));
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, strlen(domain_text));
+  ixs_node *missing_lower =
+      ixs_parse_pred(ctx, missing_lower_text, strlen(missing_lower_text));
+  ixs_node *wi_at_48 = ixs_parse_pred(ctx, "wi == 48", strlen("wi == 48"));
+  ixs_node *contradiction =
+      ixs_parse_pred(ctx, "wi >= 300", strlen("wi >= 300"));
+  ixs_node *asmbuf_query = ixs_cmp(ctx, asmbuf, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *oom_facts = ixs_facts_create(ctx);
+  ixs_node *contradictory_domain;
+  size_t active_count;
+  size_t nesting;
+
+  CHECK(ctx && asmbuf && offset && aiter && invalid && domain &&
+        missing_lower && wi_at_48 && contradiction && asmbuf_query && facts &&
+        oom_facts);
+  check_radix_certificate_case(ctx, asmbuf, domain, IXS_CHECK_TRUE);
+  check_radix_certificate_case(ctx, offset, domain, IXS_CHECK_TRUE);
+  check_radix_certificate_case(ctx, aiter, domain, IXS_CHECK_TRUE);
+  check_radix_certificate_case(ctx, invalid, domain, IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, invalid, wi_at_48, IXS_CHECK_FALSE);
+  check_radix_certificate_case(ctx, asmbuf, missing_lower, IXS_CHECK_UNKNOWN);
+
+  contradictory_domain = ixs_and(ctx, domain, contradiction);
+  check_radix_certificate_case(ctx, asmbuf, contradictory_domain,
+                               IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  CHECK(test_ixs_check_facts(facts, asmbuf_query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, asmbuf_query) == IXS_CHECK_TRUE);
+  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
+                         NULL, &active_count, &nesting);
+  CHECK(facts->bounds.query_tracking_depth == 0 && active_count == 0 &&
+        nesting == 0);
+
+  CHECK(ixs_facts_assume_pred(oom_facts, domain));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(test_ixs_check_facts(oom_facts, asmbuf_query) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(ctx);
+  ixs_bounds_query_stats(&oom_facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
+                         NULL, &active_count, &nesting);
+  CHECK(oom_facts->bounds.query_tracking_depth == 0 && active_count == 0 &&
+        nesting == 0);
+  CHECK(test_ixs_check_facts(oom_facts, asmbuf_query) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(oom_facts, asmbuf_query) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_bounds_check_radix_certificate_guards(void) {
+  static const char domain_text[] = "wi >= 0 & wi <= 255";
+  static const char four_symbol_domain_text[] =
+      "a >= 0 & a <= 31 & b >= 0 & b <= 31 & "
+      "c >= 0 & c <= 31 & d >= 0 & d <= 31";
+  static const char five_symbol_domain_text[] =
+      "a >= 0 & a <= 31 & b >= 0 & b <= 31 & "
+      "c >= 0 & c <= 31 & d >= 0 & d <= 31 & x >= 0 & x <= 31";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *domain = ixs_parse_pred(ctx, domain_text, strlen(domain_text));
+  ixs_node *small_domain =
+      ixs_parse_pred(ctx, "wi >= 0 & wi <= 31", strlen("wi >= 0 & wi <= 31"));
+  ixs_node *four_symbol_domain = ixs_parse_pred(
+      ctx, four_symbol_domain_text, strlen(four_symbol_domain_text));
+  ixs_node *five_symbol_domain = ixs_parse_pred(
+      ctx, five_symbol_domain_text, strlen(five_symbol_domain_text));
+  ixs_node *nonintegral = ixs_parse_expr(ctx, "1/2*wi - 1/2*floor(wi/2)",
+                                         strlen("1/2*wi - 1/2*floor(wi/2)"));
+  ixs_node *negative_divisor = ixs_parse_expr(ctx, "-wi - 2*floor(-wi/2)",
+                                              strlen("-wi - 2*floor(-wi/2)"));
+  ixs_node *slot_limit = ixs_parse_expr(
+      ctx,
+      "a - floor(a/2) + b - floor(b/2) + c - floor(c/2) + "
+      "d - floor(d/2)",
+      strlen("a - floor(a/2) + b - floor(b/2) + c - floor(c/2) + "
+             "d - floor(d/2)"));
+  ixs_node *slot_overflow = ixs_parse_expr(
+      ctx,
+      "a - floor(a/2) + b - floor(b/2) + c - floor(c/2) + "
+      "d - floor(d/2) + x",
+      strlen("a - floor(a/2) + b - floor(b/2) + c - floor(c/2) + "
+             "d - floor(d/2) + x"));
+  ixs_node *slot_storage_limit =
+      ixs_parse_expr(ctx,
+                     "-floor(Max(a, 0)/2) - floor(Max(b, 0)/2) - "
+                     "floor(Max(c, 0)/2) - floor(Max(d, 0)/2) - "
+                     "floor(Max(e, 0)/2) - floor(Max(f, 0)/2) - "
+                     "floor(Max(g, 0)/2) - floor(Max(h, 0)/2)",
+                     strlen("-floor(Max(a, 0)/2) - floor(Max(b, 0)/2) - "
+                            "floor(Max(c, 0)/2) - floor(Max(d, 0)/2) - "
+                            "floor(Max(e, 0)/2) - floor(Max(f, 0)/2) - "
+                            "floor(Max(g, 0)/2) - floor(Max(h, 0)/2)"));
+  /* Canonical floor order makes the first chain take 11 transfers. The added
+   * level takes exactly 16, so it reaches the fixed rejection ceiling. */
+  ixs_node *step_limit =
+      ixs_parse_expr(ctx,
+                     "wi + floor(wi/2) + floor(wi/4) + floor(wi/8) + "
+                     "floor(wi/16) - 62*floor(wi/32)",
+                     strlen("wi + floor(wi/2) + floor(wi/4) + floor(wi/8) + "
+                            "floor(wi/16) - 62*floor(wi/32)"));
+  ixs_node *step_overflow =
+      ixs_parse_expr(ctx,
+                     "wi + floor(wi/2) + floor(wi/4) + floor(wi/8) + "
+                     "floor(wi/16) + floor(wi/32) - 126*floor(wi/64)",
+                     strlen("wi + floor(wi/2) + floor(wi/4) + floor(wi/8) + "
+                            "floor(wi/16) + floor(wi/32) - 126*floor(wi/64)"));
+  ixs_node *multiply_overflow =
+      ixs_parse_expr(ctx, "9223372036854775807*wi - floor(wi/2)",
+                     strlen("9223372036854775807*wi - floor(wi/2)"));
+  ixs_node *addition_overflow = ixs_parse_expr(
+      ctx, "4611686018427387903*wi + 2*floor(wi/2) - floor(wi/4)",
+      strlen("4611686018427387903*wi + 2*floor(wi/2) - floor(wi/4)"));
+
+  CHECK(ctx && domain && small_domain && four_symbol_domain &&
+        five_symbol_domain && nonintegral && negative_divisor && slot_limit &&
+        slot_overflow && slot_storage_limit && step_limit && step_overflow &&
+        multiply_overflow && addition_overflow);
+  check_radix_certificate_case(ctx, nonintegral, domain, IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, negative_divisor, domain,
+                               IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, slot_limit, four_symbol_domain,
+                               IXS_CHECK_TRUE);
+  check_radix_certificate_case(ctx, slot_overflow, five_symbol_domain,
+                               IXS_CHECK_UNKNOWN);
+  /* Eight absent floor bases fill all 16 stack slots. */
+  check_radix_certificate_case(ctx, slot_storage_limit, ixs_true(ctx),
+                               IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, step_limit, domain, IXS_CHECK_TRUE);
+  check_radix_certificate_case(ctx, step_overflow, domain, IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, multiply_overflow, small_domain,
+                               IXS_CHECK_UNKNOWN);
+  check_radix_certificate_case(ctx, addition_overflow, small_domain,
+                               IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_check_composite_divisibility(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *K = ixs_sym(ctx, "K");
@@ -10201,6 +10368,8 @@ int main(void) {
   test_bounds_check_ne();
   test_bounds_check_mod_congruence();
   test_bounds_check_mod_remainder();
+  test_bounds_check_wave_radix_floor_sums();
+  test_bounds_check_radix_certificate_guards();
   test_bounds_check_composite_divisibility();
   test_bounds_check_pow2_fact();
   test_bounds_check_mask_fact();

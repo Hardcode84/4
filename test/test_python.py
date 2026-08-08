@@ -20,6 +20,8 @@ Properties tested:
    comparisons agree with sampled evaluations satisfying the input assumptions.
 9. Invalid deserialize fuzzing: garbage and byte-flipped payloads do not
    crash the forked test subprocess.
+10. Radix certificate soundness: every proven nonnegative floor sum is checked
+    exhaustively over its finite input domain.
 """
 
 from __future__ import annotations
@@ -3201,6 +3203,62 @@ def test_check_modular_symbol_entailment_soundness(
         assert result is expected, f"check={result}, expected={expected}, env={env}, case={case}"
         checked += 1
     assume(checked > 0)
+
+
+@given(
+    first_radix=st.integers(min_value=2, max_value=8),
+    second_radix=st.integers(min_value=2, max_value=8),
+    residual_radix=st.integers(min_value=2, max_value=8),
+    constant=st.integers(min_value=-16, max_value=16),
+    coefficients=st.lists(
+        st.integers(min_value=-16, max_value=16),
+        min_size=5,
+        max_size=5,
+    ),
+)
+def test_check_radix_certificate_soundness(
+    first_radix: int,
+    second_radix: int,
+    residual_radix: int,
+    constant: int,
+    coefficients: list[int],
+) -> None:
+    """Every TRUE radix certificate agrees with an exhaustive integer oracle."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("radix_certificate_x")
+    residual = x % first_radix
+    c0, c1, c2, c3, c4 = coefficients
+    expr = (
+        constant
+        + c0 * x
+        + c1 * ixsimpl.floor(x / first_radix)
+        + c2 * ixsimpl.floor(x / (first_radix * second_radix))
+        + c3 * residual
+        + c4 * ixsimpl.floor(residual / residual_radix)
+    )
+    query = expr >= 0
+    assumptions = [x >= 0, x <= 31]
+    assumption_result = ctx.check(query, assumptions=assumptions)
+    facts = ctx.facts()
+    facts.assume_many(assumptions)
+    facts_result = ctx.check(query, facts=facts)
+
+    assert facts_result is assumption_result
+    values = []
+    for value in range(32):
+        remainder = value % first_radix
+        values.append(
+            constant
+            + c0 * value
+            + c1 * (value // first_radix)
+            + c2 * (value // (first_radix * second_radix))
+            + c3 * remainder
+            + c4 * (remainder // residual_radix)
+        )
+    if assumption_result is True:
+        assert min(values) >= 0
+    elif assumption_result is False:
+        assert max(values) < 0
 
 
 @given(
