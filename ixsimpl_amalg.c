@@ -29941,8 +29941,7 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
      * exact floor-Mod multiplier.  Consume one copy; this exposes radix-chain
      * cancellation without turning a compact positive combination into a
      * subtractive expansion. */
-    if (!allow_wide || mod.modulus->tag != IXS_INT ||
-        mod.modulus->u.ival <= 0)
+    if (!allow_wide || mod.modulus->tag != IXS_INT || mod.modulus->u.ival <= 0)
       continue;
     inv = simp_div(ctx, ixs_node_int(ctx, 1), ci_outer_times_m);
     ratio = inv ? simp_mul_decompose(ctx, parts.mul, inv) : NULL;
@@ -34873,6 +34872,336 @@ static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   }
 }
 
+typedef struct {
+  const ixs_addterm *terms;
+  ixs_node *atom;
+  uint32_t nterms;
+  int64_t offset_p;
+  int64_t offset_q;
+} piecewise_affine_parts;
+
+/* View an expression as one canonical additive base plus a rational offset.
+ * A non-ADD node is a virtual one-term base, while a constant has no base. */
+static bool piecewise_affine_split(ixs_node *expr,
+                                   piecewise_affine_parts *parts) {
+  if (!expr || ixs_node_is_sentinel(expr))
+    return false;
+  parts->terms = NULL;
+  parts->atom = NULL;
+  if (ixs_node_is_const(expr)) {
+    parts->nterms = 0;
+    ixs_node_get_rat(expr, &parts->offset_p, &parts->offset_q);
+    return true;
+  }
+  if (expr->tag == IXS_ADD) {
+    if (expr->u.add.nterms != 0 && !expr->u.add.terms)
+      return false;
+    parts->terms = expr->u.add.terms;
+    parts->nterms = expr->u.add.nterms;
+    ixs_node_get_rat(expr->u.add.coeff, &parts->offset_p, &parts->offset_q);
+    return true;
+  }
+  parts->atom = expr;
+  parts->nterms = 1;
+  parts->offset_p = 0;
+  parts->offset_q = 1;
+  return true;
+}
+
+static void piecewise_affine_term(const piecewise_affine_parts *parts,
+                                  uint32_t index, ixs_node **term,
+                                  int64_t *coefficient_p,
+                                  int64_t *coefficient_q) {
+  assert(index < parts->nterms);
+  if (parts->atom) {
+    assert(index == 0);
+    *term = parts->atom;
+    *coefficient_p = 1;
+    *coefficient_q = 1;
+    return;
+  }
+  *term = parts->terms[index].term;
+  ixs_node_get_rat(parts->terms[index].coeff, coefficient_p, coefficient_q);
+}
+
+static bool piecewise_affine_same_base(const piecewise_affine_parts *lhs,
+                                       const piecewise_affine_parts *rhs) {
+  uint32_t i;
+  if (lhs->nterms != rhs->nterms)
+    return false;
+  for (i = 0; i < lhs->nterms; i++) {
+    ixs_node *lhs_term;
+    ixs_node *rhs_term;
+    int64_t lhs_p;
+    int64_t lhs_q;
+    int64_t rhs_p;
+    int64_t rhs_q;
+    piecewise_affine_term(lhs, i, &lhs_term, &lhs_p, &lhs_q);
+    piecewise_affine_term(rhs, i, &rhs_term, &rhs_p, &rhs_q);
+    if (lhs_term != rhs_term || lhs_p != rhs_p || lhs_q != rhs_q)
+      return false;
+  }
+  return true;
+}
+
+static ixs_node *
+piecewise_affine_build_base(ixs_ctx *ctx, const piecewise_affine_parts *parts) {
+  if (parts->atom)
+    return parts->atom;
+  if (parts->nterms == 0)
+    return ctx->node_zero;
+  if (parts->nterms == 1)
+    return simp_mul(ctx, parts->terms[0].coeff, parts->terms[0].term);
+  /* The terms came from a canonical ADD and remain sorted and coalesced.
+   * Replacing only its constant therefore needs no prefix-building pass. */
+  return ixs_node_add(ctx, ctx->node_zero, parts->nterms, parts->terms);
+}
+
+/* Match one equality arm as `selector == key`.  Comparisons normally reach
+ * this pass normalized to `(selector - key) == 0`; accepting a constant on
+ * either side also keeps the matcher independent of that canonical detail. */
+static bool piecewise_affine_equality(ixs_node *condition,
+                                      piecewise_affine_parts *selector,
+                                      int64_t *key) {
+  piecewise_affine_parts lhs;
+  piecewise_affine_parts rhs;
+  int64_t key_p;
+  int64_t key_q;
+  if (!condition || condition->tag != IXS_CMP ||
+      condition->u.binary.cmp_op != IXS_CMP_EQ ||
+      !piecewise_affine_split(condition->u.binary.lhs, &lhs) ||
+      !piecewise_affine_split(condition->u.binary.rhs, &rhs))
+    return false;
+  if (lhs.nterms != 0 && rhs.nterms == 0) {
+    *selector = lhs;
+    if (!ixs_rat_sub(rhs.offset_p, rhs.offset_q, lhs.offset_p, lhs.offset_q,
+                     &key_p, &key_q) ||
+        key_q != 1)
+      return false;
+  } else if (lhs.nterms == 0 && rhs.nterms != 0) {
+    *selector = rhs;
+    if (!ixs_rat_sub(lhs.offset_p, lhs.offset_q, rhs.offset_p, rhs.offset_q,
+                     &key_p, &key_q) ||
+        key_q != 1)
+      return false;
+  } else {
+    return false;
+  }
+  *key = key_p;
+  return true;
+}
+
+typedef struct {
+  piecewise_affine_parts selector_parts;
+  piecewise_affine_parts value_parts;
+  ixs_integer_range_result range;
+  unsigned char *seen;
+  uint32_t explicit_cases;
+  int64_t reference_key;
+  int64_t reference_offset_p;
+  int64_t reference_offset_q;
+  int64_t stride_p;
+  int64_t stride_q;
+  bool have_reference;
+  bool have_stride;
+} piecewise_affine_state;
+
+static bool
+piecewise_affine_derive_stride(piecewise_affine_state *state, int64_t key,
+                               const piecewise_affine_parts *value) {
+  int64_t offset_delta_p;
+  int64_t offset_delta_q;
+  int64_t key_delta;
+  if (!ixs_safe_sub(key, state->reference_key, &key_delta) || key_delta == 0)
+    return false;
+  if (!ixs_rat_sub(value->offset_p, value->offset_q, state->reference_offset_p,
+                   state->reference_offset_q, &offset_delta_p, &offset_delta_q))
+    return false;
+  if (!ixs_rat_div(offset_delta_p, offset_delta_q, key_delta, 1,
+                   &state->stride_p, &state->stride_q))
+    return false;
+  state->have_stride = true;
+  return true;
+}
+
+static bool
+piecewise_affine_offset_matches(const piecewise_affine_state *state,
+                                int64_t key,
+                                const piecewise_affine_parts *value) {
+  int64_t key_delta;
+  int64_t offset_delta_p;
+  int64_t offset_delta_q;
+  int64_t expected_p;
+  int64_t expected_q;
+  if (!ixs_safe_sub(key, state->reference_key, &key_delta))
+    return false;
+  if (!ixs_rat_mul(state->stride_p, state->stride_q, key_delta, 1,
+                   &offset_delta_p, &offset_delta_q))
+    return false;
+  if (!ixs_rat_add(state->reference_offset_p, state->reference_offset_q,
+                   offset_delta_p, offset_delta_q, &expected_p, &expected_q))
+    return false;
+  return expected_p == value->offset_p && expected_q == value->offset_q;
+}
+
+static bool piecewise_affine_accept_value(piecewise_affine_state *state,
+                                          int64_t key,
+                                          const piecewise_affine_parts *value) {
+  if (!state->have_reference) {
+    state->value_parts = *value;
+    state->reference_key = key;
+    state->reference_offset_p = value->offset_p;
+    state->reference_offset_q = value->offset_q;
+    state->have_reference = true;
+    return true;
+  }
+  if (!piecewise_affine_same_base(&state->value_parts, value))
+    return false;
+  if (!state->have_stride)
+    return piecewise_affine_derive_stride(state, key, value);
+  return piecewise_affine_offset_matches(state, key, value);
+}
+
+static bool piecewise_affine_accept_case(piecewise_affine_state *state,
+                                         const ixs_pwcase *pwcase) {
+  piecewise_affine_parts case_selector;
+  piecewise_affine_parts value;
+  int64_t key;
+  int64_t range_index;
+  if (!piecewise_affine_equality(pwcase->cond, &case_selector, &key))
+    return false;
+  if (!piecewise_affine_same_base(&state->selector_parts, &case_selector))
+    return false;
+  if (key < state->range.lower || key > state->range.upper)
+    return false;
+  if (!ixs_safe_sub(key, state->range.lower, &range_index) || range_index < 0)
+    return false;
+  if ((uint64_t)range_index >= state->explicit_cases ||
+      state->seen[(size_t)range_index] != 0)
+    return false;
+  if (!piecewise_affine_split(pwcase->value, &value))
+    return false;
+  state->seen[(size_t)range_index] = 1;
+  return piecewise_affine_accept_value(state, key, &value);
+}
+
+static bool piecewise_affine_scan_cases(ixs_node *piecewise,
+                                        piecewise_affine_state *state) {
+  uint32_t i;
+  for (i = 0; i < state->explicit_cases; i++) {
+    if (!piecewise_affine_accept_case(state, &piecewise->u.pw.cases[i]))
+      return false;
+  }
+  return state->have_reference && state->have_stride;
+}
+
+static ixs_node *piecewise_affine_finish(ixs_ctx *ctx, ixs_node *piecewise,
+                                         ixs_node *selector,
+                                         piecewise_affine_state *state) {
+  int64_t scaled_reference_p;
+  int64_t scaled_reference_q;
+  int64_t intercept_p;
+  int64_t intercept_q;
+  ixs_node *base;
+  ixs_node *stride;
+  ixs_node *intercept;
+  ixs_node *scaled_selector;
+  ixs_node *shifted_base;
+  ixs_node *result;
+  bool unrepresentable;
+
+  base = piecewise_affine_build_base(ctx, &state->value_parts);
+  if (!base)
+    return NULL;
+  if (ixs_node_is_sentinel(base))
+    return piecewise;
+  if (!ixs_rat_mul(state->stride_p, state->stride_q, state->reference_key, 1,
+                   &scaled_reference_p, &scaled_reference_q))
+    return piecewise;
+  if (!ixs_rat_sub(state->reference_offset_p, state->reference_offset_q,
+                   scaled_reference_p, scaled_reference_q, &intercept_p,
+                   &intercept_q))
+    return piecewise;
+  stride = make_const(ctx, state->stride_p, state->stride_q);
+  intercept = make_const(ctx, intercept_p, intercept_q);
+  if (!stride || !intercept)
+    return NULL;
+  scaled_selector = simp_try_mul(ctx, stride, selector, &unrepresentable);
+  if (unrepresentable)
+    return piecewise;
+  if (!scaled_selector)
+    return NULL;
+  shifted_base = simp_try_add(ctx, base, intercept, &unrepresentable);
+  if (unrepresentable)
+    return piecewise;
+  if (!shifted_base)
+    return NULL;
+  result = simp_try_add(ctx, shifted_base, scaled_selector, &unrepresentable);
+  if (unrepresentable)
+    return piecewise;
+  if (!result)
+    return NULL;
+  if (ixs_node_is_sentinel(result))
+    return piecewise;
+  return result;
+}
+
+/* Under a proven finite integer selector range, a duplicate-free exact cover
+ * by equality arms makes the default unreachable.  If all arm values share
+ * the same additive base and their offsets form one affine sequence, replace
+ * the first-match lookup by that affine expression. */
+static ixs_node *piecewise_affine_lookup(ixs_ctx *ctx, ixs_bounds *bnds,
+                                         ixs_node *piecewise) {
+  piecewise_affine_parts selector_parts;
+  piecewise_affine_state state;
+  ixs_integer_range_result range;
+  unsigned char *seen;
+  uint32_t explicit_cases;
+  int64_t reference_key = 0;
+  ixs_node *selector;
+  int64_t expected_upper;
+
+  if (!bnds || !piecewise || piecewise->tag != IXS_PIECEWISE ||
+      piecewise->u.pw.ncases < 3u || !piecewise->u.pw.cases ||
+      !ixs_node_is_known_true(
+          piecewise->u.pw.cases[piecewise->u.pw.ncases - 1u].cond))
+    return piecewise;
+  explicit_cases = piecewise->u.pw.ncases - 1u;
+  if (!piecewise_affine_equality(piecewise->u.pw.cases[0].cond, &selector_parts,
+                                 &reference_key))
+    return piecewise;
+  selector = piecewise_affine_build_base(ctx, &selector_parts);
+  if (!selector)
+    return NULL;
+  if (ixs_node_is_sentinel(selector))
+    return piecewise;
+  if (!ixs_bounds_get_integer_range(bnds, selector, &range))
+    return bnds->oom ? NULL : piecewise;
+  if (!range.has_lower || !range.has_upper ||
+      !ixs_safe_add(range.lower, (int64_t)explicit_cases - 1,
+                    &expected_upper) ||
+      expected_upper != range.upper)
+    return piecewise;
+
+  seen = ixs_arena_alloc(&ctx->scratch, explicit_cases, 1);
+  if (!seen)
+    return NULL;
+  memset(seen, 0, explicit_cases);
+
+  memset(&state, 0, sizeof(state));
+  state.selector_parts = selector_parts;
+  state.range = range;
+  state.seen = seen;
+  state.explicit_cases = explicit_cases;
+  if (!piecewise_affine_scan_cases(piecewise, &state))
+    return piecewise;
+  {
+    ixs_node *result =
+        piecewise_affine_finish(ctx, piecewise, selector, &state);
+    return result;
+  }
+}
+
 static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                    rewrite_memo_slot *memo,
                                    rewrite_shared_cache *shared) {
@@ -34937,6 +35266,8 @@ static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
       pw = simp_mul(ctx, vals[0], cds[0]);
     else
       pw = simp_pw(ctx, nc, vals, cds);
+    if (pw && !ixs_node_is_sentinel(pw) && pw->tag == IXS_PIECEWISE)
+      pw = piecewise_affine_lookup(ctx, bnds, pw);
     ixs_arena_restore(&ctx->scratch, sm);
     return pw;
   }

@@ -1076,6 +1076,19 @@ simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
 
+**Bounded affine lookups**: Under facts proving that an expression `s` is a
+defined integer in a finite interval `[lo, hi]`, a first-match Piecewise whose
+guarded cases are a duplicate-free permutation of every equality `s == k` in
+that interval has an unreachable default.  When every guarded value has one
+identical canonical additive base `b` and its rational constant offsets form
+`offset + stride*k`, the Piecewise simplifies to
+`b + offset + stride*s`.  The exact-cover check makes case order irrelevant
+without weakening first-match semantics.  Requiring the same additive base in
+every live arm also preserves partiality: the replacement evaluates precisely
+the shared expression that every selected arm evaluated.  Missing, duplicate,
+non-equality, non-affine, unbounded, and fallback-reachable forms remain
+Piecewise.
+
 **Branch-aware bounds**: During bounds-aware rewriting, each non-default
 Piecewise branch gets a forked copy of the current bounds augmented with
 the branch condition.  Conditions like `E > 0` tighten the lower bound of
