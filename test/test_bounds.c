@@ -7283,6 +7283,127 @@ static void test_generic_modulo_recurrence_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_generic_bounded_scaled_mod_equivalence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "bounded_scaled_mod_x");
+  ixs_node *r = ixs_sym(ctx, "bounded_scaled_mod_r");
+  ixs_node *seed = ixs_sym(ctx, "bounded_scaled_mod_seed");
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *thirty_two = ixs_int(ctx, 32);
+  ixs_node *residue = ixs_mod(ctx, seed, four);
+  ixs_node *lhs =
+      ixs_mul(ctx, ixs_int(ctx, 16),
+              ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, x), r), thirty_two));
+  ixs_node *rhs =
+      ixs_mul(ctx, ixs_int(ctx, 16),
+              ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, eight)), r));
+  ixs_node *nested_lhs =
+      ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, x), residue), thirty_two);
+  ixs_node *nested_rhs =
+      ixs_add(ctx, ixs_mul(ctx, four, ixs_mod(ctx, x, eight)), residue);
+  ixs_node *equality = ixs_cmp(ctx, lhs, IXS_CMP_EQ, rhs);
+  ixs_node *nested_equality = ixs_cmp(ctx, nested_lhs, IXS_CMP_EQ, nested_rhs);
+  ixs_facts *bounded = ixs_facts_create(ctx);
+  ixs_facts *lower_only = ixs_facts_create(ctx);
+  ixs_facts *outside = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && r && seed && residue && lhs && rhs && nested_lhs &&
+        nested_rhs && equality && nested_equality && bounded && lower_only &&
+        outside);
+  CHECK(ixs_facts_assume_pred(bounded,
+                              ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(bounded, ixs_cmp(ctx, r, IXS_CMP_LT, four)));
+  CHECK(test_ixs_check_facts(bounded, equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(bounded, equality) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(bounded, lhs, rhs) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(bounded, nested_equality) == IXS_CHECK_TRUE);
+
+  CHECK(ixs_facts_assume_pred(lower_only,
+                              ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_facts(lower_only, equality) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(outside,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 7))));
+  CHECK(ixs_facts_assume_pred(outside,
+                              ixs_cmp(ctx, r, IXS_CMP_EQ, ixs_int(ctx, 4))));
+  CHECK(test_ixs_check_facts(outside, equality) == IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_generic_equivalent_expression_contexts(void) {
+  static const char left_text[] =
+      "context_base + Mod(context_item + floor(Mod(context_item, 16)/4) - "
+      "Mod(Mod(context_item, 64), 16), 64)";
+  static const char right_text[] =
+      "context_base + 16*floor(Mod(context_item, 64)/16) + "
+      "floor(Mod(Mod(context_item, 64), 16)/4)";
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "context_item");
+  ixs_node *left = ixs_parse_expr(ctx, left_text, sizeof(left_text) - 1u);
+  ixs_node *right = ixs_parse_expr(ctx, right_text, sizeof(right_text) - 1u);
+  ixs_node *right_bad = ixs_add(ctx, right, ixs_int(ctx, 1));
+  ixs_node *sixty_four = ixs_int(ctx, 64);
+  ixs_node *left_grouped =
+      ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 1024),
+                      ixs_floor(ctx, ixs_div(ctx, left, sixty_four))),
+              ixs_mul(ctx, ixs_int(ctx, 8), ixs_mod(ctx, left, sixty_four)));
+  ixs_node *right_grouped =
+      ixs_add(ctx,
+              ixs_mul(ctx, ixs_int(ctx, 1024),
+                      ixs_floor(ctx, ixs_div(ctx, right, sixty_four))),
+              ixs_mul(ctx, ixs_int(ctx, 8), ixs_mod(ctx, right, sixty_four)));
+  ixs_node *bad_grouped = ixs_add(
+      ctx,
+      ixs_mul(ctx, ixs_int(ctx, 1024),
+              ixs_floor(ctx, ixs_div(ctx, right_bad, sixty_four))),
+      ixs_mul(ctx, ixs_int(ctx, 8), ixs_mod(ctx, right_bad, sixty_four)));
+  ixs_node *left_xor =
+      ixs_xor(ctx, left, ixs_floor(ctx, ixs_div(ctx, left, ixs_int(ctx, 2))));
+  ixs_node *right_xor =
+      ixs_xor(ctx, right, ixs_floor(ctx, ixs_div(ctx, right, ixs_int(ctx, 2))));
+  ixs_node *bad_xor = ixs_xor(
+      ctx, right_bad, ixs_floor(ctx, ixs_div(ctx, right_bad, ixs_int(ctx, 2))));
+  ixs_node *outer =
+      ixs_cmp(ctx, ixs_sym(ctx, "context_outer"), IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *left_predicate = ixs_cmp(ctx, item, IXS_CMP_LT, ixs_int(ctx, 4));
+  ixs_node *right_predicate = ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 3));
+  ixs_node *left_and = ixs_and(ctx, outer, left_predicate);
+  ixs_node *right_and = ixs_and(ctx, right_predicate, outer);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && item && left && right && right_bad && sixty_four &&
+        left_grouped && right_grouped && bad_grouped && left_xor && right_xor &&
+        bad_xor && outer && left_predicate && right_predicate && left_and &&
+        right_and && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 255))));
+
+  CHECK(test_ixs_equivalent_facts(facts, left, right) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_grouped, right_grouped) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, left_grouped, IXS_CMP_EQ,
+                                            right_grouped)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_xor, right_xor) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, left_xor, IXS_CMP_EQ,
+                                            right_xor)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_and, right_and) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, left_and, IXS_CMP_EQ,
+                                            right_and)) == IXS_CHECK_TRUE);
+
+  CHECK(test_ixs_equivalent_facts(facts, left_grouped, bad_grouped) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_xor, bad_xor) != IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_generic_mod_reconstruction_from_quotient_fact(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "mod_reconstruct_item");
@@ -9838,6 +9959,8 @@ int main(void) {
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
   test_generic_modulo_recurrence_equivalence();
+  test_generic_bounded_scaled_mod_equivalence();
+  test_generic_equivalent_expression_contexts();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_public_trunc_primitive_constant_difference();
   test_public_truncating_remainder_equivalence();

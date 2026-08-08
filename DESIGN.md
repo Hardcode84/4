@@ -1677,6 +1677,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   the same bounded composition: `m*floor(x/m) + Mod(y,m) == x` follows from a
   positive literal `m` and a proof that `x == y (mod m)`.
 
+  A normalized zero-sum equality may contain several `Mod` terms. The query
+  isolates each term in turn and launches at most one bounded subproof for
+  that exact rearrangement. This lets the scaled projection prove
+  `Mod(k*x+r,k*m) == k*Mod(x,m)+r` for positive integer literals `k,m`,
+  integer-valued `x,r`, and `0 <= r < k`; other `Mod` terms may remain inside
+  the residual. Missing integrality or range proofs leave the result unknown.
+
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,
@@ -1689,6 +1696,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   combined with checked `int64_t` arithmetic. This models mathematical Mod
   composition used by fixed-width wrappers; it does not add machine-overflow
   semantics.
+
+  Equivalence also applies functional congruence through canonical contexts.
+  A query-local iterative worklist visits each paired DAG node once without
+  spending the bounded algebraic-subproof depth. Canonical ADDs with different
+  arity reuse exact-residual partitioning only when it strictly reduces the
+  term count. Equal positive literal `Mod` contexts accept congruent integer
+  dividends; affine `floor` and `ceil` contexts move proven-integer residuals
+  into their arguments. XOR arguments match exact nodes first, then use bounded
+  semantic pairing. Only complete child proofs yield `TRUE`; a failed child
+  proof stays `UNKNOWN` because these contexts need not be injective.
 
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,
