@@ -25,6 +25,13 @@ typedef struct {
   ixs_pow2_fact pow2;
 } ixs_bitfacts;
 
+typedef struct {
+  bool has_lower;
+  bool has_upper;
+  int64_t lower;
+  int64_t upper;
+} ixs_integer_range_result;
+
 typedef struct ixs_difference_constraint ixs_difference_constraint;
 typedef struct ixs_equality_edge ixs_equality_edge;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;

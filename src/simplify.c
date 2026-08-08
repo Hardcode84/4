@@ -7267,30 +7267,3 @@ cleanup:
   simp_bounds_scope_destroy(&scope);
   return ok;
 }
-
-IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
-                                   ixs_node *const *assumptions,
-                                   size_t n_assumptions,
-                                   ixs_integer_range_result *out) {
-  simp_bounds_scope scope;
-  bool ok;
-
-  if (!out)
-    return false;
-  out->has_lower = false;
-  out->has_upper = false;
-  out->lower = 0;
-  out->upper = 0;
-  if (!ctx || !expr || ixs_node_is_sentinel(expr) ||
-      !ixs_ctx_owns_node(ctx, expr) ||
-      !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
-    return false;
-  if (!simp_bounds_scope_hold(&scope, expr)) {
-    simp_bounds_scope_destroy(&scope);
-    return false;
-  }
-  ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
-  simp_bounds_scope_end_query(&scope);
-  simp_bounds_scope_destroy(&scope);
-  return ok;
-}

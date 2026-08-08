@@ -227,15 +227,8 @@ typedef struct {
   int64_t upper_q;
 } ixs_range_result;
 
-typedef struct {
-  bool has_lower;
-  bool has_upper;
-  int64_t lower;
-  int64_t upper;
-} ixs_integer_range_result;
-
 /* Assumption contract shared by simplify, simplify_batch, check,
- * check_integer_valued, check_defined, get_pow2_fact, range, integer_range, and
+ * check_integer_valued, check_defined, get_pow2_fact, range, and
  * facts_assume_pred: each predicate root must be a CMP, a canonical true/false
  * node, or an AND tree whose leaves have those forms.  True contributes no
  * fact; false marks the set contradictory.  Trees are walked iteratively and
@@ -293,16 +286,6 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, const ixs_node *expr,
 bool ixs_range(ixs_session *s, const ixs_node *expr,
                const ixs_node *const *assumptions, size_t n_assumptions,
                ixs_range_result *out);
-
-/* Infer an inclusive integer range for expr under assumptions.  The query
- * first proves expr defined and integer-valued over the complete assumption
- * domain, then rounds rational interval bounds inward and applies any
- * structural congruence known by the bounds engine.  Unbounded sides are
- * reported with has_lower/has_upper false.  Failure leaves out initialized to
- * the no-information value. */
-bool ixs_integer_range(ixs_session *s, const ixs_node *expr,
-                       const ixs_node *const *assumptions, size_t n_assumptions,
-                       ixs_integer_range_result *out);
 
 /* --- Fact sets --------------------------------------------------------- */
 
@@ -392,16 +375,6 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
  * limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
-/* Try ordinary equivalence first, then enumerate the Cartesian product of
- * finite integer symbol ranges still present in lhs-rhs.  Symbols without a
- * finite range remain symbolic at every point.  The complete product is
- * deducted from *remaining_points before evaluation; direct proofs and
- * over-budget queries leave it unchanged.  A failed reserved proof remains
- * charged.  remaining_points must be non-NULL. */
-ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
-                                                    const ixs_node *lhs,
-                                                    const ixs_node *rhs,
-                                                    size_t *remaining_points);
 /* Prove that lhs - rhs is an exactly representable integer constant.  The
  * operands must be defined over the complete fact domain. */
 bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
@@ -412,12 +385,6 @@ bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
                                 const ixs_node *symbol,
                                 const ixs_node **coefficient,
                                 const ixs_node **residual);
-/* Decompose a rational product or common-denominator sum exactly after
- * simplifying under facts.  This does not prove integer-valued parts or a
- * nonzero denominator. */
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
-                                        const ixs_node **numerator,
-                                        const ixs_node **denominator);
 /* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
  * still reference symbol; callers decide whether it is loop invariant. */
 bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
@@ -467,9 +434,6 @@ ixs_check_result ixs_check_congruent_facts(ixs_facts *facts,
                                            int64_t modulus, int64_t residue);
 bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
                      ixs_range_result *out);
-/* Reusable-fact form of ixs_integer_range. */
-bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
-                             ixs_integer_range_result *out);
 
 /* --- Simplification ---------------------------------------------------- */
 
@@ -638,7 +602,9 @@ int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, IXS_TRUNC, or IXS_NOT. */
 const ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
-/* Only valid when tag is IXS_MOD or IXS_CMP. */
+/* Only valid when tag is IXS_MOD or IXS_CMP, or when tag is IXS_MAX,
+ * IXS_MIN, or IXS_XOR and the associative node has exactly two arguments.
+ * Associative operands are returned in canonical order. */
 const ixs_node *ixs_node_binary_lhs(const ixs_node *node);
 const ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
@@ -649,6 +615,10 @@ ixs_cmp_op ixs_node_cmp_op(const ixs_node *node);
 uint32_t ixs_node_pw_ncases(const ixs_node *node);
 const ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
 const ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
+
+/* Only valid when tag is IXS_AND or IXS_OR. i must be < nargs. */
+uint32_t ixs_node_logic_nargs(const ixs_node *node);
+const ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
 
 /* Only valid for MAX, MIN, XOR, AND, or OR. i must be < nargs. */
 uint32_t ixs_node_assoc_nargs(const ixs_node *node);

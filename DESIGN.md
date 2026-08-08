@@ -2381,7 +2381,9 @@ int32_t ixs_node_mul_factor_exp(const ixs_node *node, uint32_t i);
 /* Only valid when tag is IXS_FLOOR, IXS_CEIL, IXS_TRUNC, or IXS_NOT. */
 ixs_node *ixs_node_unary_arg(const ixs_node *node);
 
-/* Only valid when tag is IXS_MOD or IXS_CMP. */
+/* Only valid when tag is IXS_MOD or IXS_CMP, or when tag is IXS_MAX,
+ * IXS_MIN, or IXS_XOR and the associative node has exactly two arguments.
+ * Associative operands are returned in canonical order. */
 ixs_node *ixs_node_binary_lhs(const ixs_node *node);
 ixs_node *ixs_node_binary_rhs(const ixs_node *node);
 
@@ -2393,13 +2395,18 @@ uint32_t ixs_node_pw_ncases(const ixs_node *node);
 ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i);
 ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i);
 
+/* Only valid when tag is IXS_AND or IXS_OR.  i must be < nargs. */
+uint32_t ixs_node_logic_nargs(const ixs_node *node);
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i);
+
 /* Only valid for MAX, MIN, XOR, AND, or OR.  i must be < nargs. */
 uint32_t ixs_node_assoc_nargs(const ixs_node *node);
 ixs_node *ixs_node_assoc_arg(const ixs_node *node, uint32_t i);
 ```
 
-The type-specific accessors are trivial one-liners into the internal union fields
-(except `ixs_node_unary_arg` which branches on tag internally).
+The type-specific accessors read the internal union fields directly. The unary
+accessor branches for boolean NOT, while the binary accessors branch between
+binary storage and two-argument associative storage.
 
 #### Generic child access
 

@@ -125,20 +125,20 @@ static void test_binary_accessors(void) {
   ixs_node *mx = ixs_max(ctx, a, b);
   CHECK(ixs_node_tag(mx) == IXS_MAX);
   CHECK(ixs_node_assoc_nargs(mx) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(mx, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(mx, 1), a));
+  CHECK(ixs_same_node(ixs_node_binary_lhs(mx), ixs_node_assoc_arg(mx, 0)));
+  CHECK(ixs_same_node(ixs_node_binary_rhs(mx), ixs_node_assoc_arg(mx, 1)));
 
   ixs_node *mn = ixs_min(ctx, a, b);
   CHECK(ixs_node_tag(mn) == IXS_MIN);
   CHECK(ixs_node_assoc_nargs(mn) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(mn, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(mn, 1), a));
+  CHECK(ixs_same_node(ixs_node_binary_lhs(mn), ixs_node_assoc_arg(mn, 0)));
+  CHECK(ixs_same_node(ixs_node_binary_rhs(mn), ixs_node_assoc_arg(mn, 1)));
 
   ixs_node *xr = ixs_xor(ctx, a, b);
   CHECK(ixs_node_tag(xr) == IXS_XOR);
   CHECK(ixs_node_assoc_nargs(xr) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(xr, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(xr, 1), a));
+  CHECK(ixs_same_node(ixs_node_binary_lhs(xr), ixs_node_assoc_arg(xr, 0)));
+  CHECK(ixs_same_node(ixs_node_binary_rhs(xr), ixs_node_assoc_arg(xr, 1)));
 
   ixs_node *diff = ixs_sub(ctx, a, b);
   ixs_node *cmp = ixs_cmp(ctx, diff, IXS_CMP_LT, ixs_int(ctx, 0));
@@ -181,15 +181,17 @@ static void test_logic_accessors(void) {
 
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_tag(and_node) == IXS_AND);
-  CHECK(ixs_node_assoc_nargs(and_node) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c1) ||
-        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c1));
-  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c2) ||
-        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c2));
+  CHECK(ixs_node_logic_nargs(and_node) == 2);
+  CHECK(ixs_node_logic_nargs(and_node) == ixs_node_assoc_nargs(and_node));
+  CHECK(ixs_same_node(ixs_node_logic_arg(and_node, 0), c1) ||
+        ixs_same_node(ixs_node_logic_arg(and_node, 1), c1));
+  CHECK(ixs_same_node(ixs_node_logic_arg(and_node, 0), c2) ||
+        ixs_same_node(ixs_node_logic_arg(and_node, 1), c2));
 
   ixs_node *or_node = ixs_or(ctx, c1, c2);
   CHECK(ixs_node_tag(or_node) == IXS_OR);
-  CHECK(ixs_node_assoc_nargs(or_node) == 2);
+  CHECK(ixs_node_logic_nargs(or_node) == 2);
+  CHECK(ixs_node_logic_nargs(or_node) == ixs_node_assoc_nargs(or_node));
 
   ixs_ctx_destroy(ctx);
   printf("  logic_accessors: OK\n");
@@ -305,9 +307,9 @@ static void test_nchildren_child_logic(void) {
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_nchildren(and_node) == 2);
   CHECK(ixs_same_node(ixs_node_child(and_node, 0),
-                      ixs_node_assoc_arg(and_node, 0)));
+                      ixs_node_logic_arg(and_node, 0)));
   CHECK(ixs_same_node(ixs_node_child(and_node, 1),
-                      ixs_node_assoc_arg(and_node, 1)));
+                      ixs_node_logic_arg(and_node, 1)));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_logic: OK\n");
@@ -619,8 +621,8 @@ static void test_immutable_node_api(void) {
   CHECK(ixs_node_binary_lhs(cmp) != NULL);
   CHECK(ixs_node_int_val(ixs_node_binary_rhs(cmp)) == 0);
   CHECK(ixs_node_cmp_op(cmp) == IXS_CMP_LT);
-  CHECK(ixs_node_assoc_nargs(logic) == 2);
-  CHECK(ixs_node_assoc_arg(logic, 0) != NULL);
+  CHECK(ixs_node_logic_nargs(logic) == 2);
+  CHECK(ixs_node_logic_arg(logic, 0) != NULL);
   CHECK(ixs_node_pw_ncases(piecewise) == 2);
   CHECK(ixs_same_node(ixs_node_pw_value(piecewise, 0), x));
   CHECK(ixs_same_node(ixs_node_pw_cond(piecewise, 1), ixs_true(ctx)));

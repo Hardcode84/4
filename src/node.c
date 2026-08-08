@@ -1791,12 +1791,24 @@ ixs_node *ixs_node_unary_arg(const ixs_node *node) {
 }
 
 ixs_node *ixs_node_binary_lhs(const ixs_node *node) {
-  assert(node && (node->tag == IXS_MOD || node->tag == IXS_CMP));
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  if (node->tag == IXS_MAX || node->tag == IXS_MIN || node->tag == IXS_XOR) {
+    assert(node->u.assoc.nargs == 2);
+    return node->u.assoc.args[0];
+  }
   return node->u.binary.lhs;
 }
 
 ixs_node *ixs_node_binary_rhs(const ixs_node *node) {
-  assert(node && (node->tag == IXS_MOD || node->tag == IXS_CMP));
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  if (node->tag == IXS_MAX || node->tag == IXS_MIN || node->tag == IXS_XOR) {
+    assert(node->u.assoc.nargs == 2);
+    return node->u.assoc.args[1];
+  }
   return node->u.binary.rhs;
 }
 
@@ -1818,6 +1830,17 @@ ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i) {
 ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
   return node->u.pw.cases[i].cond;
+}
+
+uint32_t ixs_node_logic_nargs(const ixs_node *node) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR));
+  return node->u.assoc.nargs;
+}
+
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
+         i < node->u.assoc.nargs);
+  return node->u.assoc.args[i];
 }
 
 uint32_t ixs_node_assoc_nargs(const ixs_node *node) {

@@ -326,7 +326,7 @@ typedef struct {
 #define BOUNDS_EQUALITY_WALK_INIT_CAP 16u
 #define BOUNDS_EQUALITY_PROJECTION_CACHE_INIT_CAP 64u
 #define BOUNDS_CACHE_CAP 32u
-#define BOUNDS_CACHE_DISABLED ((size_t) - 1)
+#define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define FACT_WORK_INIT_CAP 64u
 #define BOUNDS_QUERY_ACTIVE_INIT_CAP 16u
 #define BOUNDS_QUERY_CACHE_INIT_CAP 256u
@@ -21336,49 +21336,6 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                                   : IXS_CHECK_UNKNOWN;
 }
 
-ixs_check_result ixs_equivalent_finite_domain_facts(ixs_facts *facts,
-                                                    const ixs_node *lhs,
-                                                    const ixs_node *rhs,
-                                                    size_t *remaining_points) {
-  ixs_fact_check_result direct;
-  ixs_session_binding binding;
-  ixs_ctx *ctx;
-  ixs_node *predicate;
-  ixs_check_result result = IXS_CHECK_UNKNOWN;
-  bool query_held = false;
-
-  if (!remaining_points) {
-    facts_public_output_error(facts, "finite equivalence",
-                              "remaining_points is NULL");
-    return IXS_CHECK_UNKNOWN;
-  }
-  direct = facts_query_equivalent(facts, (ixs_node *)lhs, (ixs_node *)rhs);
-  if (direct.status != IXS_FACT_QUERY_COMPLETE ||
-      direct.check != IXS_CHECK_UNKNOWN)
-    return direct.status == IXS_FACT_QUERY_COMPLETE ? direct.check
-                                                    : IXS_CHECK_UNKNOWN;
-  if (!facts_bind(facts, &binding, &ctx))
-    return IXS_CHECK_UNKNOWN;
-  if (!facts_ready(facts) ||
-      !facts_query_node_ok(ctx, (ixs_node *)lhs, "finite equivalence") ||
-      !facts_query_node_ok(ctx, (ixs_node *)rhs, "finite equivalence") ||
-      ixs_bounds_has_empty(&facts->bounds))
-    goto cleanup;
-  predicate = simp_cmp(ctx, (ixs_node *)lhs, IXS_CMP_EQ, (ixs_node *)rhs);
-  if (!predicate || ixs_node_is_sentinel(predicate))
-    goto cleanup;
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, predicate, &query_held))
-    goto cleanup;
-  result = predicate_query_finite_domain(&facts->bounds, predicate,
-                                         remaining_points);
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  ixs_session_unbind(&binding);
-  return result;
-}
-
 bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
                                    const ixs_node *rhs, int64_t *delta) {
   ixs_constant_difference_result result;
@@ -21417,47 +21374,6 @@ bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
   *coefficient = result.coefficient;
   *residual = result.residual;
   return true;
-}
-
-bool ixs_decompose_exact_quotient_facts(ixs_facts *facts, const ixs_node *expr,
-                                        const ixs_node **numerator,
-                                        const ixs_node **denominator) {
-  algebra_query_scope scope;
-  ixs_node *nodes[1] = {(ixs_node *)expr};
-  ixs_node *result_numerator = NULL;
-  ixs_node *result_denominator = NULL;
-  ixs_quotient_parts_status status;
-  bool outputs_ok = numerator && denominator && numerator != denominator;
-  bool ok = false;
-
-  if (numerator)
-    *numerator = NULL;
-  if (denominator)
-    *denominator = NULL;
-  if (!algebra_query_begin(facts, nodes, 1, "exact quotient decomposition",
-                           outputs_ok, "outputs must be non-NULL and distinct",
-                           &scope))
-    return false;
-  algebra_query_start(&scope);
-  if (!algebra_query_defined(&scope, nodes[0]))
-    goto cleanup;
-  nodes[0] = algebra_query_normalize(&scope, nodes[0]);
-  if (!nodes[0])
-    goto cleanup;
-  status = simp_decompose_exact_quotient(scope.ctx, nodes[0], &result_numerator,
-                                         &result_denominator);
-  if (status == IXS_QUOTIENT_PARTS_OOM)
-    scope.status = IXS_FACT_QUERY_OOM;
-  else
-    ok = status == IXS_QUOTIENT_PARTS_MATCH;
-
-cleanup:
-  ok = algebra_query_finish(&scope, ok);
-  if (ok) {
-    *numerator = result_numerator;
-    *denominator = result_denominator;
-  }
-  return ok;
 }
 
 bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
@@ -21591,32 +21507,6 @@ bool ixs_range_facts(ixs_facts *facts, const ixs_node *expr,
   if (result.status != IXS_FACT_QUERY_COMPLETE || !result.available)
     return false;
   *out = result.range;
-  return true;
-}
-
-bool ixs_integer_range_facts(ixs_facts *facts, const ixs_node *expr,
-                             ixs_integer_range_result *out) {
-  ixs_fact_check_result integer_valued;
-  ixs_range_query_result range;
-
-  if (out)
-    memset(out, 0, sizeof(*out));
-  if (!out) {
-    facts_public_output_error(facts, "integer range", "NULL output");
-    return false;
-  }
-  integer_valued = facts_query_check_integer_valued(facts, (ixs_node *)expr);
-  if (integer_valued.status != IXS_FACT_QUERY_COMPLETE ||
-      integer_valued.check != IXS_CHECK_TRUE)
-    return false;
-  range = facts_query_range(facts, (ixs_node *)expr);
-  if (range.status != IXS_FACT_QUERY_COMPLETE || !range.available ||
-      range.range.lower_q != 1 || range.range.upper_q != 1)
-    return false;
-  out->has_lower = range.range.has_lower;
-  out->has_upper = range.range.has_upper;
-  out->lower = range.range.lower_p;
-  out->upper = range.range.upper_p;
   return true;
 }
 
@@ -22294,16 +22184,6 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
   bool result = simp_range(ctx, expr, assumptions, n_assumptions, out);
-  ixs_session_unbind(&binding);
-  return result;
-}
-
-bool ixs_integer_range(ixs_session *s, ixs_node *expr,
-                       ixs_node *const *assumptions, size_t n_assumptions,
-                       ixs_integer_range_result *out) {
-  ixs_session_binding binding;
-  ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  bool result = simp_integer_range(ctx, expr, assumptions, n_assumptions, out);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -25807,12 +25687,24 @@ ixs_node *ixs_node_unary_arg(const ixs_node *node) {
 }
 
 ixs_node *ixs_node_binary_lhs(const ixs_node *node) {
-  assert(node && (node->tag == IXS_MOD || node->tag == IXS_CMP));
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  if (node->tag == IXS_MAX || node->tag == IXS_MIN || node->tag == IXS_XOR) {
+    assert(node->u.assoc.nargs == 2);
+    return node->u.assoc.args[0];
+  }
   return node->u.binary.lhs;
 }
 
 ixs_node *ixs_node_binary_rhs(const ixs_node *node) {
-  assert(node && (node->tag == IXS_MOD || node->tag == IXS_CMP));
+  assert(node && (node->tag == IXS_MOD || node->tag == IXS_MAX ||
+                  node->tag == IXS_MIN || node->tag == IXS_XOR ||
+                  node->tag == IXS_CMP));
+  if (node->tag == IXS_MAX || node->tag == IXS_MIN || node->tag == IXS_XOR) {
+    assert(node->u.assoc.nargs == 2);
+    return node->u.assoc.args[1];
+  }
   return node->u.binary.rhs;
 }
 
@@ -25834,6 +25726,17 @@ ixs_node *ixs_node_pw_value(const ixs_node *node, uint32_t i) {
 ixs_node *ixs_node_pw_cond(const ixs_node *node, uint32_t i) {
   assert(node && node->tag == IXS_PIECEWISE && i < node->u.pw.ncases);
   return node->u.pw.cases[i].cond;
+}
+
+uint32_t ixs_node_logic_nargs(const ixs_node *node) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR));
+  return node->u.assoc.nargs;
+}
+
+ixs_node *ixs_node_logic_arg(const ixs_node *node, uint32_t i) {
+  assert(node && (node->tag == IXS_AND || node->tag == IXS_OR) &&
+         i < node->u.assoc.nargs);
+  return node->u.assoc.args[i];
 }
 
 uint32_t ixs_node_assoc_nargs(const ixs_node *node) {
@@ -36807,33 +36710,6 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
   ok = true;
 
 cleanup:
-  simp_bounds_scope_end_query(&scope);
-  simp_bounds_scope_destroy(&scope);
-  return ok;
-}
-
-IXS_STATIC bool simp_integer_range(ixs_ctx *ctx, ixs_node *expr,
-                                   ixs_node *const *assumptions,
-                                   size_t n_assumptions,
-                                   ixs_integer_range_result *out) {
-  simp_bounds_scope scope;
-  bool ok;
-
-  if (!out)
-    return false;
-  out->has_lower = false;
-  out->has_upper = false;
-  out->lower = 0;
-  out->upper = 0;
-  if (!ctx || !expr || ixs_node_is_sentinel(expr) ||
-      !ixs_ctx_owns_node(ctx, expr) ||
-      !simp_bounds_scope_init(&scope, ctx, assumptions, n_assumptions))
-    return false;
-  if (!simp_bounds_scope_hold(&scope, expr)) {
-    simp_bounds_scope_destroy(&scope);
-    return false;
-  }
-  ok = ixs_bounds_get_integer_range(&scope.bounds, expr, out);
   simp_bounds_scope_end_query(&scope);
   simp_bounds_scope_destroy(&scope);
   return ok;
