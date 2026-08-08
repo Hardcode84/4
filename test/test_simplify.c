@@ -1526,6 +1526,54 @@ static void test_substitution_failure_retry(void) {
   CHECK(store_successes == 4u);
   ixs_ctx_destroy(ctx);
 }
+
+static void test_floor_mod_partial_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *x = ixs_sym(ctx, "floor_mod_retry_x");
+  ixs_node *outer = ixs_sym(ctx, "floor_mod_retry_outer");
+  ixs_node *unrelated = ixs_sym(ctx, "floor_mod_retry_unrelated");
+  ixs_node *floor_term = ixs_mul(
+      ctx, ixs_int(ctx, 6),
+      ixs_mul(ctx, outer, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)))));
+  ixs_node *mod_term = ixs_mul(ctx, outer, ixs_mod(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *expected = ixs_add(
+      ctx, unrelated,
+      ixs_add(
+          ctx, ixs_mul(ctx, outer, x),
+          ixs_mul(ctx, ixs_int(ctx, 4),
+                  ixs_mul(ctx, outer,
+                          ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)))))));
+  ixs_node *expr = ixs_add(ctx, unrelated, ixs_add(ctx, floor_term, mod_term));
+  size_t allowance = 4096u;
+  size_t allocations;
+  size_t budget;
+  size_t failures = 0;
+
+  ixs_arena_set_fail_after(scratch, allowance);
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) == expected);
+  allocations = allowance - scratch->fail_after;
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(allocations > 0 && allocations < allowance);
+
+  for (budget = 0; budget < allocations; budget++) {
+    ixs_node *result;
+    ixs_arena_set_fail_after(scratch, budget);
+    result = ixs_simplify(ctx, expr, NULL, 0);
+    ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+    if (result) {
+      CHECK(result == expected);
+    } else {
+      failures++;
+      CHECK(ixs_simplify(ctx, expr, NULL, 0) == expected);
+    }
+  }
+  CHECK(failures > 0);
+  ixs_arena_set_fail_after(scratch, allocations);
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) == expected);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_destroy(ctx);
+}
 #endif
 
 /* Local context: error/sentinel tests push domain errors and clear them,
@@ -3921,6 +3969,54 @@ static void test_floor_mod_cancel_symbolic(void) {
     CHECK(e == expected);
   }
 
+  /* A larger symbolic multiplier may contain one cancellable pair plus a
+   * compact residual.  Repeating the bounded rewrite exposes both radix
+   * digits without expanding the surrounding ADD. */
+  {
+    ixs_node *x64 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 64)));
+    ixs_node *x128 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 128)));
+    ixs_node *x256 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 256)));
+    ixs_node *expected = ixs_add(
+        ctx, M,
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), ixs_mul(ctx, L, x256)),
+                ixs_mul(ctx, L, x64)));
+    e = ixs_add(ctx, M, ixs_mul(ctx, ixs_int(ctx, 8), ixs_mul(ctx, L, x256)));
+    e = ixs_add(ctx, e,
+                ixs_mul(ctx, ixs_int(ctx, 2),
+                        ixs_mul(ctx, L, ixs_mod(ctx, x128, ixs_int(ctx, 2)))));
+    e = ixs_add(ctx, e, ixs_mul(ctx, L, ixs_mod(ctx, x64, ixs_int(ctx, 2))));
+    CHECK(ixs_node_tag(e) == IXS_ADD);
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == expected);
+  }
+
+  /* The multiplier ratio may be rational even though every term remains
+   * integer-valued: 3*L*K*floor(x/2) + L*K*Mod(x,2)
+   * -> L*K*x + L*K*floor(x/2). */
+  {
+    ixs_node *outer = ixs_mul(ctx, L, K);
+    ixs_node *fl2 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+    ixs_node *expected = ixs_add(
+        ctx, M, ixs_add(ctx, ixs_mul(ctx, outer, x), ixs_mul(ctx, outer, fl2)));
+    e = ixs_add(ctx, M,
+                ixs_add(ctx,
+                        ixs_mul(ctx, ixs_int(ctx, 3), ixs_mul(ctx, outer, fl2)),
+                        ixs_mul(ctx, outer, ixs_mod(ctx, x, ixs_int(ctx, 2)))));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == expected);
+  }
+
+  /* A smaller matched floor multiplier must not become a negative residual. */
+  {
+    ixs_node *x64 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 64)));
+    ixs_node *r64 = ixs_mod(ctx, x, ixs_int(ctx, 64));
+    e = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8192), x64),
+                ixs_mul(ctx, ixs_int(ctx, 16),
+                        ixs_floor(ctx, ixs_div(ctx, r64, ixs_int(ctx, 32)))));
+    e = ixs_add(
+        ctx, e,
+        ixs_mul(ctx, ixs_int(ctx, 256), ixs_mod(ctx, r64, ixs_int(ctx, 32))));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == e);
+  }
+
   /* Different outer factors must not cancel. */
   {
     ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
@@ -3937,6 +4033,75 @@ static void test_floor_mod_cancel_symbolic(void) {
         ixs_mul(ctx, ixs_mul(ctx, ixs_int(ctx, 2), ixs_mul(ctx, L, K)), flK),
         ixs_mul(ctx, L, ixs_mod(ctx, x, K)));
     CHECK(ixs_node_tag(e) == IXS_ADD);
+  }
+
+  /* Partial cancellation requires a positive literal modulus.  Preserving a
+   * symbolic divisor keeps the original definedness boundary visible. */
+  {
+    ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
+    ixs_node *fractional_mod = ixs_div(ctx, ixs_mod(ctx, x, K), K);
+    e = ixs_add(
+        ctx, M,
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), flK), fractional_mod));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == e);
+  }
+
+  /* An unrepresentable exact multiplier is a failed probe, not a diagnostic
+   * and not permission to consume the Mod term. */
+  {
+    size_t errors = ixs_ctx_nerrors(ctx);
+    ixs_node *fl2 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+    e = ixs_add(
+        ctx, M,
+        ixs_add(ctx,
+                ixs_mul(ctx, ixs_int(ctx, INT64_MAX), ixs_mul(ctx, L, fl2)),
+                ixs_mul(ctx, ixs_int(ctx, INT64_MAX),
+                        ixs_mul(ctx, L, ixs_mod(ctx, x, ixs_int(ctx, 2))))));
+    CHECK(ixs_simplify(ctx, e, NULL, 0) == e);
+    CHECK(ixs_ctx_nerrors(ctx) == errors);
+  }
+
+  /* Literal zero and negative moduli are sentinels before cancellation and
+   * remain so through explicit simplification. */
+  {
+    ixs_node *bad = ixs_mod(ctx, x, ixs_int(ctx, 0));
+    CHECK(bad && ixs_is_domain_error(bad));
+    CHECK(ixs_simplify(ctx, bad, NULL, 0) == bad);
+    ixs_ctx_clear_errors(ctx);
+    bad = ixs_mod(ctx, x, ixs_int(ctx, -2));
+    CHECK(bad && ixs_is_domain_error(bad));
+    CHECK(ixs_simplify(ctx, bad, NULL, 0) == bad);
+    ixs_ctx_clear_errors(ctx);
+  }
+
+  /* The wide scan is deliberately bounded.  Put the only matching floor
+   * after 300 unrelated terms and verify that the 256-probe pass stops. */
+  {
+    enum { UNRELATED_TERMS = 300 };
+    char name[64];
+    ixs_node *bounded = ixs_int(ctx, 0);
+    ixs_node *fl2 = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+    ixs_node *floor_body = ixs_mul(ctx, L, fl2);
+    ixs_node *mod_body = ixs_mul(ctx, L, ixs_mod(ctx, x, ixs_int(ctx, 2)));
+    uint32_t floor_index;
+    uint32_t i;
+
+    for (i = 0; i < UNRELATED_TERMS; i++) {
+      (void)snprintf(name, sizeof(name), "floor_mod_unrelated_%03u", i);
+      bounded = ixs_add(ctx, bounded, ixs_sym(ctx, name));
+    }
+    bounded = ixs_add(ctx, bounded, ixs_mul(ctx, ixs_int(ctx, 3), floor_body));
+    bounded = ixs_add(ctx, bounded, mod_body);
+    CHECK(bounded && ixs_node_tag(bounded) == IXS_ADD);
+    floor_index = ixs_node_add_nterms(bounded);
+    for (i = 0; i < ixs_node_add_nterms(bounded); i++) {
+      if (ixs_node_add_term(bounded, i) == floor_body) {
+        floor_index = i;
+        break;
+      }
+    }
+    CHECK(floor_index >= 256u);
+    CHECK(ixs_simplify(ctx, bounded, NULL, 0) == bounded);
   }
 }
 
@@ -4793,6 +4958,7 @@ int main(void) {
 #ifdef IXS_TEST_INTERNAL
   test_simplify_assumption_cache();
   test_substitution_failure_retry();
+  test_floor_mod_partial_failure_retry();
 #endif
   test_sentinel_propagation();
   test_nested_floor_ceil();

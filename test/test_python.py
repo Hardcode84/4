@@ -2039,6 +2039,41 @@ def test_cancel_floor_mod_pairs_shared_outer() -> None:
 
 
 @given(
+    m=st.integers(min_value=2, max_value=32),
+    denominator=st.integers(min_value=1, max_value=4),
+    excess=st.integers(min_value=1, max_value=4),
+    sign=st.sampled_from([-1, 1]),
+    envs=st.lists(_mixed_env_st(), min_size=1, max_size=6),
+)
+def test_cancel_floor_mod_partial_semantics(
+    m: int,
+    denominator: int,
+    excess: int,
+    sign: int,
+    envs: list[Env],
+) -> None:
+    """Consume one pair from a larger same-sign rational multiplier."""
+    ctx = ixsimpl.Context()
+    x = ctx.sym("x")
+    outer = ctx.sym("a")
+    unrelated = ctx.sym("b")
+    numerator = denominator + excess
+    floor_term = sign * numerator * m * outer * ixsimpl.floor(x / m)
+    mod_term = sign * denominator * outer * (x % m)
+    original = unrelated + floor_term + mod_term
+    expected = (
+        unrelated
+        + sign * denominator * outer * x
+        + sign * excess * m * outer * ixsimpl.floor(x / m)
+    )
+    simplified = original.simplify()
+
+    assert ixsimpl.same_node(simplified, expected)
+    for env in envs:
+        assert eval_ixs(original, ctx, env) == eval_ixs(simplified, ctx, env)
+
+
+@given(
     other_sym=st.sampled_from(_VARS),
     c=st.integers(min_value=1, max_value=15),
     K_val=st.integers(min_value=16, max_value=50),

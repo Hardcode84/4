@@ -349,9 +349,10 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                uint32_t nterms, int64_t const_p,
                                int64_t const_q);
-static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
-                                        uint32_t nterms, int64_t const_p,
-                                        int64_t const_q, bool allow_wide);
+static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
+                                  uint32_t nterms, int64_t const_p,
+                                  int64_t const_q, bool allow_wide,
+                                  ixs_node **result);
 static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
                                        uint32_t nterms, int64_t const_p,
                                        int64_t const_q);
@@ -550,22 +551,23 @@ static inline int add_accum_flatten_mod_terms(ixs_ctx *ctx, add_accum *acc) {
   return add_accum_coalesce(ctx, acc);
 }
 
-static ixs_node *add_try_rewrites(ixs_ctx *ctx, add_accum *acc) {
-  ixs_node *result;
-  result =
+static int add_try_rewrites(ixs_ctx *ctx, add_accum *acc, ixs_node **result) {
+  int status;
+  *result =
       recognize_mod(ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
-  if (result)
-    return result;
-  result = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
-                                  acc->const_q, false);
-  if (result)
-    return result;
-  result = xor_difference_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
-                                 acc->const_q);
-  if (result)
-    return result;
-  return pw_fold_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
-                        acc->const_q);
+  if (*result)
+    return 1;
+  status = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
+                                  acc->const_q, false, result);
+  if (status != 0)
+    return status;
+  *result = xor_difference_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
+                                  acc->const_q);
+  if (*result)
+    return 1;
+  *result =
+      pw_fold_in_add(ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
+  return *result ? 1 : 0;
 }
 
 static ixs_node *add_build_result(ixs_ctx *ctx, add_accum *acc) {
@@ -1114,8 +1116,8 @@ typedef struct {
   ixs_node *outer;
 } mod_term_parts;
 
-static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
-                                     floor_term_parts *parts) {
+static int floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
+                                    floor_term_parts *parts) {
   int32_t floor_idx;
   ixs_node *mul_rest;
   parts->node = NULL;
@@ -1126,25 +1128,29 @@ static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
     parts->node = term->term;
     parts->arg = term->term->u.unary.arg;
     parts->mul = term->coeff;
-    return true;
+    return 1;
   }
 
   if (term->term->tag != IXS_MUL)
-    return false;
+    return 0;
   floor_idx = find_pow1_factor(term->term, IXS_FLOOR);
   if (floor_idx < 0)
-    return false;
+    return 0;
   mul_rest = mul_without_factor(ctx, term->term, floor_idx);
-  if (!mul_rest || ixs_node_is_sentinel(mul_rest))
-    return false;
+  if (!mul_rest)
+    return -1;
+  if (ixs_node_is_sentinel(mul_rest))
+    return 0;
   parts->node = term->term->u.mul.factors[floor_idx].base;
   parts->arg = parts->node->u.unary.arg;
   parts->mul = simp_mul(ctx, term->coeff, mul_rest);
-  return parts->mul != NULL;
+  if (!parts->mul)
+    return -1;
+  return ixs_node_is_sentinel(parts->mul) ? 0 : 1;
 }
 
-static bool mod_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
-                                   mod_term_parts *parts) {
+static int mod_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
+                                  mod_term_parts *parts) {
   int32_t mod_idx;
   parts->node = NULL;
   parts->arg = NULL;
@@ -1156,39 +1162,188 @@ static bool mod_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
     parts->outer = ixs_node_int(ctx, 1);
   } else {
     if (term->term->tag != IXS_MUL)
-      return false;
+      return 0;
     mod_idx = find_pow1_factor(term->term, IXS_MOD);
     if (mod_idx < 0)
-      return false;
+      return 0;
     parts->node = term->term->u.mul.factors[mod_idx].base;
     parts->outer = mul_without_factor(ctx, term->term, mod_idx);
   }
-  if (!parts->outer || ixs_node_is_sentinel(parts->outer))
-    return false;
+  if (!parts->outer)
+    return -1;
+  if (ixs_node_is_sentinel(parts->outer))
+    return 0;
   parts->arg = parts->node->u.binary.lhs;
   parts->modulus = parts->node->u.binary.rhs;
-  return true;
+  return 1;
 }
 
-static bool floor_mul_matches(ixs_ctx *ctx, ixs_node *floor_mul,
-                              ixs_node *ci_times_m) {
-  ixs_node *ratio;
+/* Returns 2 for an exact multiplier, 1 with a non-unit exact ratio, 0 when
+ * no ratio can be represented, and -1 on allocation failure. */
+static int floor_mul_ratio(ixs_ctx *ctx, ixs_node *floor_mul,
+                           ixs_node *ci_times_m, ixs_node **ratio) {
+  ixs_node *one;
   ixs_node *inv;
+  *ratio = NULL;
   if (floor_mul == ci_times_m)
-    return true;
-  inv = simp_div(ctx, ixs_node_int(ctx, 1), ci_times_m);
-  ratio = inv ? simp_mul_decompose(ctx, floor_mul, inv) : NULL;
-  return ratio && ratio == ixs_node_int(ctx, 1);
+    return 2;
+  one = ixs_node_int(ctx, 1);
+  if (!one)
+    return -1;
+  inv = simp_div(ctx, one, ci_times_m);
+  if (!inv)
+    return -1;
+  if (ixs_node_is_sentinel(inv))
+    return 0;
+  *ratio = simp_mul_decompose(ctx, floor_mul, inv);
+  if (!*ratio)
+    return -1;
+  if (ixs_node_is_sentinel(*ratio))
+    return 0;
+  return *ratio == one ? 2 : 1;
 }
 
-static bool floor_pair_matches(ixs_ctx *ctx, ixs_node *expected_floor,
-                               floor_term_parts *parts, ixs_node *m,
-                               ixs_node *A) {
+static int floor_pair_matches(ixs_ctx *ctx, ixs_node *expected_floor,
+                              floor_term_parts *parts, ixs_node *m,
+                              ixs_node *A) {
   ixs_node *E;
   if (expected_floor && expected_floor == parts->node)
-    return true;
+    return 1;
   E = distribute_mul_decompose(ctx, m, parts->arg);
-  return E && !ixs_node_is_sentinel(E) && E == A;
+  if (!E)
+    return -1;
+  if (ixs_node_is_sentinel(E))
+    return 0;
+  return E == A ? 1 : 0;
+}
+
+typedef struct {
+  mod_term_parts mod;
+  ixs_node *exact_mul;
+  ixs_node *expected_floor;
+  int64_t coefficient_p;
+  int64_t coefficient_q;
+} floor_mod_cancel_plan;
+
+static int floor_mod_cancel_plan_init(ixs_ctx *ctx, ixs_addterm *term,
+                                      floor_mod_cancel_plan *plan) {
+  ixs_node *ci_outer;
+  ixs_node *quotient;
+  int status = mod_parts_from_addterm(ctx, term, &plan->mod);
+  if (status <= 0)
+    return status;
+
+  ixs_node_get_rat(term->coeff, &plan->coefficient_p, &plan->coefficient_q);
+  ci_outer = simp_mul(ctx, term->coeff, plan->mod.outer);
+  if (!ci_outer)
+    return -1;
+  if (ixs_node_is_sentinel(ci_outer))
+    return 0;
+  plan->exact_mul = simp_mul(ctx, ci_outer, plan->mod.modulus);
+  if (!plan->exact_mul)
+    return -1;
+  if (ixs_node_is_sentinel(plan->exact_mul))
+    return 0;
+
+  quotient = simp_div(ctx, plan->mod.arg, plan->mod.modulus);
+  if (!quotient)
+    return -1;
+  plan->expected_floor = simp_floor(ctx, quotient);
+  if (!plan->expected_floor)
+    return -1;
+  if (ixs_node_is_sentinel(plan->expected_floor))
+    plan->expected_floor = NULL;
+  return 1;
+}
+
+static bool floor_mod_partial_allowed(const floor_mod_cancel_plan *plan,
+                                      ixs_node *ratio, bool allow_wide) {
+  int64_t ratio_p, ratio_q;
+  if (!allow_wide || plan->mod.modulus->tag != IXS_INT ||
+      plan->mod.modulus->u.ival <= 0 || !ixs_node_is_const(ratio))
+    return false;
+  ixs_node_get_rat(ratio, &ratio_p, &ratio_q);
+  return ixs_rat_cmp(ratio_p, ratio_q, 1, 1) > 0;
+}
+
+static int floor_mod_apply_exact(ixs_ctx *ctx, ixs_addterm *mod_term,
+                                 ixs_addterm *floor_term,
+                                 const floor_mod_cancel_plan *plan,
+                                 ixs_node *replacement) {
+  ixs_node *coefficient =
+      make_const(ctx, plan->coefficient_p, plan->coefficient_q);
+  if (!coefficient)
+    return -1;
+  mod_term->term = NULL;
+  floor_term->term = replacement;
+  floor_term->coeff = coefficient;
+  return 1;
+}
+
+static int floor_mod_apply_partial(ixs_ctx *ctx, ixs_addterm *mod_term,
+                                   ixs_addterm *floor_term,
+                                   const floor_mod_cancel_plan *plan,
+                                   const floor_term_parts *parts,
+                                   ixs_node *replacement) {
+  ixs_node *residual = simp_sub(ctx, parts->mul, plan->exact_mul);
+  ixs_node *residual_floor;
+  ixs_node *one;
+  if (!residual)
+    return -1;
+  if (ixs_node_is_sentinel(residual))
+    return 0;
+  if (ixs_node_is_const(residual)) {
+    mod_term->term = replacement;
+    floor_term->term = parts->node;
+    floor_term->coeff = residual;
+    return 1;
+  }
+  if (residual->tag != IXS_MUL)
+    return 0;
+  residual_floor = simp_mul(ctx, residual, parts->node);
+  if (!residual_floor)
+    return -1;
+  if (ixs_node_is_sentinel(residual_floor))
+    return 0;
+  one = make_const(ctx, 1, 1);
+  if (!one)
+    return -1;
+  mod_term->term = replacement;
+  floor_term->term = residual_floor;
+  floor_term->coeff = one;
+  return 1;
+}
+
+static int floor_mod_cancel_candidate(ixs_ctx *ctx, ixs_addterm *mod_term,
+                                      ixs_addterm *floor_term,
+                                      const floor_mod_cancel_plan *plan,
+                                      bool allow_wide) {
+  floor_term_parts parts;
+  ixs_node *ratio;
+  ixs_node *replacement;
+  int multiplier_match;
+  int status = floor_parts_from_addterm(ctx, floor_term, &parts);
+  if (status <= 0)
+    return status;
+  multiplier_match = floor_mul_ratio(ctx, parts.mul, plan->exact_mul, &ratio);
+  if (multiplier_match <= 0)
+    return multiplier_match;
+  if (multiplier_match == 1 &&
+      !floor_mod_partial_allowed(plan, ratio, allow_wide))
+    return 0;
+  status = floor_pair_matches(ctx, plan->expected_floor, &parts,
+                              plan->mod.modulus, plan->mod.arg);
+  if (status <= 0)
+    return status;
+  replacement = simp_mul(ctx, plan->mod.outer, plan->mod.arg);
+  if (!replacement)
+    return -1;
+  if (ixs_node_is_sentinel(replacement))
+    return 0;
+  if (multiplier_match == 2)
+    return floor_mod_apply_exact(ctx, mod_term, floor_term, plan, replacement);
+  return floor_mod_apply_partial(ctx, mod_term, floor_term, plan, &parts,
+                                 replacement);
 }
 
 static ixs_node *rebuild_add_from_terms(ixs_ctx *ctx, ixs_addterm *terms,
@@ -1378,49 +1533,26 @@ cleanup:
 
 static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
                                     uint32_t nterms, uint32_t i,
-                                    size_t *inspected) {
+                                    size_t *inspected, bool allow_wide) {
   uint32_t j;
-  mod_term_parts mod;
-  ixs_node *ci_outer, *ci_outer_times_m, *expected_floor;
-  int64_t ci_p, ci_q;
+  floor_mod_cancel_plan plan;
+  int status = floor_mod_cancel_plan_init(ctx, &terms[i], &plan);
 
-  if (!terms[i].term || !mod_parts_from_addterm(ctx, &terms[i], &mod))
-    return 0;
-
-  ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
-
-  ci_outer = simp_mul(ctx, terms[i].coeff, mod.outer);
-  ci_outer_times_m = ci_outer ? simp_mul(ctx, ci_outer, mod.modulus) : NULL;
-  if (!ci_outer_times_m || ixs_node_is_sentinel(ci_outer_times_m))
-    return 0;
-
-  expected_floor = simp_floor(ctx, simp_div(ctx, mod.arg, mod.modulus));
-  if (!expected_floor || ixs_node_is_sentinel(expected_floor))
-    expected_floor = NULL;
+  if (status <= 0)
+    return status;
 
   for (j = 0; j < nterms; j++) {
-    floor_term_parts parts;
-    ixs_node *replacement;
     if (j == i || !terms[j].term)
       continue;
     if (*inspected >= FLOOR_MOD_PAIR_LIMIT)
       return 0;
     (*inspected)++;
-    if (!floor_parts_from_addterm(ctx, &terms[j], &parts))
-      continue;
-    if (!floor_mul_matches(ctx, parts.mul, ci_outer_times_m))
-      continue;
-    if (!floor_pair_matches(ctx, expected_floor, &parts, mod.modulus, mod.arg))
-      continue;
-    replacement = simp_mul(ctx, mod.outer, mod.arg);
-    if (!replacement)
+    status = floor_mod_cancel_candidate(ctx, &terms[i], &terms[j], &plan,
+                                        allow_wide);
+    if (status < 0)
       return -1;
-    if (ixs_node_is_sentinel(replacement))
-      return 0;
-    terms[i].term = NULL;
-    terms[j].term = replacement;
-    terms[j].coeff = make_const(ctx, ci_p, ci_q);
-    return terms[j].coeff ? 1 : -1;
+    if (status > 0)
+      return 1;
   }
   return 0;
 }
@@ -1444,7 +1576,8 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
   saved_errors = ctx->errors;
   saved_nerrors = ctx->nerrors;
   saved_errors_cap = ctx->errors_cap;
-  result = cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected);
+  result =
+      cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected, allow_wide);
 
   ixs_arena_restore(&ctx->diag, diag_mark);
   ctx->errors = saved_errors;
@@ -1454,18 +1587,23 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
 }
 
 /* O(total ADD structure + FLOOR_MOD_PAIR_LIMIT pair probes).
- * c*o*m*floor(E/m) + c*o*Mod(E,m) -> c*o*E. */
-static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
-                                        uint32_t nterms, int64_t const_p,
-                                        int64_t const_q, bool allow_wide) {
+ * C*m*floor(E/m) + C*Mod(E,m) -> C*E.
+ * F*floor(E/m) + C*Mod(E,m) -> C*E + (F-C*m)*floor(E/m), when the
+ * residual is a compact positive-ratio product. */
+static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
+                                  uint32_t nterms, int64_t const_p,
+                                  int64_t const_q, bool allow_wide,
+                                  ixs_node **result) {
   bool found = false;
   uint32_t i;
   size_t inspected = 0;
 
+  *result = NULL;
+
   for (i = 0; i < nterms; i++) {
     int rc = cancel_floor_mod_at(ctx, terms, nterms, i, &inspected, allow_wide);
     if (rc < 0)
-      return NULL;
+      return -1;
     if (rc > 0)
       found = true;
     if (inspected >= FLOOR_MOD_PAIR_LIMIT)
@@ -1473,10 +1611,11 @@ static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
   }
 
   if (!found)
-    return NULL;
+    return 0;
 
   IXS_STAT_HIT(ctx);
-  return rebuild_add_from_terms(ctx, terms, nterms, const_p, const_q);
+  *result = rebuild_add_from_terms(ctx, terms, nterms, const_p, const_q);
+  return *result ? 1 : -1;
 }
 
 /* Wide nested-factor scans run once per completed rewrite, not per term added.
@@ -1486,6 +1625,7 @@ static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
   ixs_addterm *terms;
   ixs_node *result;
   int64_t const_p, const_q;
+  int status;
   uint32_t i;
 
   if (!add || add->tag != IXS_ADD || add->u.add.nterms <= 2u)
@@ -1502,14 +1642,16 @@ static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
                           sizeof(void *));
   if (!terms) {
     ixs_arena_restore(&ctx->scratch, mark);
-    return add;
+    return NULL;
   }
   memcpy(terms, add->u.add.terms, add->u.add.nterms * sizeof(*terms));
   ixs_node_get_rat(add->u.add.coeff, &const_p, &const_q);
-  result = cancel_floor_mod_pairs(ctx, terms, add->u.add.nterms, const_p,
-                                  const_q, true);
+  status = cancel_floor_mod_pairs(ctx, terms, add->u.add.nterms, const_p,
+                                  const_q, true, &result);
   ixs_arena_restore(&ctx->scratch, mark);
-  return result ? result : add;
+  if (status < 0)
+    return NULL;
+  return status > 0 ? result : add;
 }
 
 static bool split_const_offset(ixs_node *expr, ixs_node **base,
@@ -1801,8 +1943,10 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
   if (rc == 0)
     return NULL;
 
-  prop = add_try_rewrites(ctx, &acc);
-  if (prop)
+  rc = add_try_rewrites(ctx, &acc, &prop);
+  if (rc < 0)
+    return NULL;
+  if (rc > 0)
     return prop;
   return add_build_result(ctx, &acc);
 

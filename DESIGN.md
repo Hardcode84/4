@@ -992,6 +992,10 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
+F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
+                     when m is a positive integer literal,
+                     F/(C*m) is an exact rational greater than one,
+                     and the residual stays a constant or one MUL
 
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
@@ -1029,7 +1033,16 @@ so unrelated large sums retain their original form rather than turning the
 hot construction path into an unbounded quadratic scan. Nested-factor pairs in
 two-term ADDs cancel during construction. Wider ADDs use one candidate-gated
 pass during explicit simplification, avoiding repeated scans while the sum is
-built term by term. The rule uses two verification strategies:
+built term by term. During that explicit pass, a larger same-sign floor
+multiplier may consume exactly one floor-Mod identity. Requiring a positive
+literal modulus preserves the Mod definedness domain, and requiring a compact
+positive residual avoids expanding a smaller multiplier into a subtractive
+ADD. Fixed-point simplification can consume another identity on the next pass,
+which exposes radix chains while every individual pass keeps the 256-probe
+bound. Failed arithmetic probes discard their private diagnostics; allocation
+failure remains visible as `NULL`, so retrying the same simplification is safe.
+
+The rule uses two verification strategies:
 
 1. **floor(A/m) == floor_node** — reconstructs the expected floor via
    `simp_floor(simp_div(A, m))` and checks hash-consed pointer equality.
