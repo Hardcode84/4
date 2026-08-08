@@ -4374,111 +4374,6 @@ static void test_pw_branch_eq_substitution(void) {
   }
 }
 
-static ixs_node *make_affine_lookup(ixs_ctx *ctx, ixs_node *selector,
-                                    ixs_node *base, const int64_t *keys,
-                                    uint32_t nkeys, int64_t stride,
-                                    int32_t perturbed_index,
-                                    ixs_node *fallback) {
-  ixs_node *values[9];
-  ixs_node *conditions[9];
-  uint32_t i;
-  if (nkeys > 8u)
-    return NULL;
-  for (i = 0; i < nkeys; i++) {
-    int64_t offset = stride * keys[i];
-    if ((int32_t)i == perturbed_index)
-      offset++;
-    values[i] = ixs_add(ctx, base, ixs_int(ctx, offset));
-    conditions[i] = ixs_cmp(ctx, selector, IXS_CMP_EQ, ixs_int(ctx, keys[i]));
-  }
-  values[nkeys] = fallback;
-  conditions[nkeys] = ixs_true(ctx);
-  return ixs_pw(ctx, nkeys + 1u, values, conditions);
-}
-
-static void test_piecewise_affine_lookup(void) {
-  static const int64_t ordered_keys[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-  static const int64_t unordered_keys[8] = {4, 0, 7, 2, 6, 1, 5, 3};
-  static const int64_t missing_keys[7] = {0, 1, 2, 4, 5, 6, 7};
-  static const int64_t duplicate_keys[8] = {0, 1, 2, 4, 2, 5, 6, 7};
-  ixs_ctx *ctx = get_ctx();
-  ixs_node *selector = ixs_sym(ctx, "affine_lookup_selector");
-  ixs_node *payload = ixs_sym(ctx, "affine_lookup_payload");
-  ixs_node *divisor = ixs_sym(ctx, "affine_lookup_divisor");
-  ixs_node *fallback_payload = ixs_sym(ctx, "affine_lookup_fallback");
-  ixs_node *fallback_divisor = ixs_sym(ctx, "affine_lookup_fallback_divisor");
-  ixs_node *base = ixs_mod(ctx, payload, divisor);
-  ixs_node *fallback = ixs_mod(ctx, fallback_payload, fallback_divisor);
-  ixs_node *lo = ixs_cmp(ctx, selector, IXS_CMP_GE, ixs_int(ctx, 0));
-  ixs_node *hi = ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 8));
-  ixs_node *wide_hi = ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 9));
-  ixs_node *bounds[2] = {lo, hi};
-  ixs_node *wide_bounds[2] = {lo, wide_hi};
-  ixs_node *expected =
-      ixs_add(ctx, base, ixs_mul(ctx, ixs_int(ctx, 16), selector));
-  ixs_node *ordered = make_affine_lookup(ctx, selector, base, ordered_keys, 8,
-                                         16, -1, fallback);
-  ixs_node *unordered = make_affine_lookup(ctx, selector, base, unordered_keys,
-                                           8, 16, -1, fallback);
-  ixs_node *result;
-
-  CHECK(ordered != NULL);
-  CHECK(unordered != NULL);
-  CHECK(ixs_node_tag(ixs_simplify(ctx, ordered, NULL, 0)) == IXS_PIECEWISE);
-  CHECK(ixs_simplify(ctx, ordered, bounds, 2) == expected);
-  CHECK(ixs_simplify(ctx, unordered, bounds, 2) == expected);
-  CHECK(ixs_check_defined(ctx, expected, bounds, 2) == IXS_CHECK_UNKNOWN);
-
-  {
-    static const int64_t rational_keys[4] = {2, -1, 1, 0};
-    ixs_node *values[5];
-    ixs_node *conditions[5];
-    ixs_node *rational_bounds[2] = {
-        ixs_cmp(ctx, selector, IXS_CMP_GE, ixs_int(ctx, -1)),
-        ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 3)),
-    };
-    ixs_node *rational_expected =
-        ixs_add(ctx, ixs_add(ctx, base, ixs_rat(ctx, 3, 2)),
-                ixs_mul(ctx, ixs_rat(ctx, 1, 2), selector));
-    uint32_t i;
-    for (i = 0; i < 4u; i++) {
-      values[i] = ixs_add(ctx, base, ixs_rat(ctx, 3 + rational_keys[i], 2));
-      conditions[i] =
-          ixs_cmp(ctx, selector, IXS_CMP_EQ, ixs_int(ctx, rational_keys[i]));
-    }
-    values[4] = fallback;
-    conditions[4] = ixs_true(ctx);
-    rational_expected =
-        ixs_simplify(ctx, rational_expected, rational_bounds, 2);
-    result = ixs_simplify(ctx, ixs_pw(ctx, 5, values, conditions),
-                          rational_bounds, 2);
-    CHECK(result == rational_expected);
-  }
-
-  result = ixs_simplify(ctx,
-                        make_affine_lookup(ctx, selector, base, missing_keys, 7,
-                                           16, -1, fallback),
-                        bounds, 2);
-  CHECK(ixs_node_tag(result) == IXS_PIECEWISE);
-
-  result = ixs_simplify(ctx,
-                        make_affine_lookup(ctx, selector, base, duplicate_keys,
-                                           8, 16, -1, fallback),
-                        bounds, 2);
-  CHECK(ixs_node_tag(result) == IXS_PIECEWISE);
-
-  result = ixs_simplify(
-      ctx,
-      make_affine_lookup(ctx, selector, base, ordered_keys, 8, 16, 3, fallback),
-      bounds, 2);
-  CHECK(ixs_node_tag(result) == IXS_PIECEWISE);
-
-  result = ixs_simplify(ctx, ordered, wide_bounds, 2);
-  CHECK(ixs_node_tag(result) == IXS_PIECEWISE);
-  result = ixs_simplify(ctx, ordered, &lo, 1);
-  CHECK(ixs_node_tag(result) == IXS_PIECEWISE);
-}
-
 /* Inside a Piecewise branch whose condition implies x - y > 0,
  * Max(x - y, 1) should collapse to x - y. */
 static void test_pw_max_bounds_collapse(void) {
@@ -4838,7 +4733,6 @@ int main(void) {
   test_simplify_with_bounds();
   test_eq_substitution();
   test_pw_branch_eq_substitution();
-  test_piecewise_affine_lookup();
   test_floor_bounds_collapse();
   test_mod_bounds_tighten();
   test_mod_extract_constant();

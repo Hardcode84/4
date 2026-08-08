@@ -7332,6 +7332,114 @@ static void test_generic_bounded_scaled_mod_equivalence(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_generic_piecewise_partition_equivalence(void) {
+  static const int64_t keys[4] = {2, 0, 3, 1};
+  static const int64_t duplicate_keys[4] = {0, 1, 1, 2};
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *selector = ixs_sym(ctx, "piecewise_partition_selector");
+  ixs_node *base = ixs_sym(ctx, "piecewise_partition_base");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *expected = ixs_add(ctx, base, selector);
+  ixs_node *lookup_expected =
+      ixs_add(ctx, base, ixs_mul(ctx, ixs_int(ctx, 16), selector));
+  ixs_node *conditions[5];
+  ixs_node *values[5];
+  ixs_node *wrong_values[5];
+  ixs_node *lookup_conditions[5];
+  ixs_node *lookup_values[5];
+  ixs_node *duplicate_conditions[5];
+  ixs_node *duplicate_values[5];
+  ixs_node *piecewise;
+  ixs_node *dead_first;
+  ixs_node *wrong;
+  ixs_node *uncovered;
+  ixs_node *lookup;
+  ixs_node *duplicate;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *exact = ixs_facts_create(ctx);
+  ixs_facts *huge = ixs_facts_create(ctx);
+  size_t errors;
+  uint32_t i;
+
+  conditions[0] = ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 1));
+  conditions[1] = ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 2));
+  conditions[2] = ixs_cmp(ctx, selector, IXS_CMP_LT, ixs_int(ctx, 3));
+  conditions[3] = ixs_true(ctx);
+  for (i = 0; i < 4u; i++)
+    values[i] = ixs_add(ctx, base, ixs_int(ctx, (int64_t)i));
+  piecewise = ixs_pw(ctx, 4u, values, conditions);
+
+  conditions[4] = conditions[3];
+  for (i = 4u; i != 0u; i--) {
+    conditions[i] = conditions[i - 1u];
+    values[i] = values[i - 1u];
+  }
+  conditions[0] = ixs_cmp(ctx, selector, IXS_CMP_LT, zero);
+  values[0] = ixs_add(ctx, base, ixs_int(ctx, 99));
+  dead_first = ixs_pw(ctx, 5u, values, conditions);
+
+  for (i = 0; i < 5u; i++)
+    wrong_values[i] = values[i];
+  wrong_values[3] = ixs_add(ctx, base, ixs_int(ctx, 99));
+  wrong = ixs_pw(ctx, 5u, wrong_values, conditions);
+  uncovered = ixs_pw(ctx, 3u, &values[1], &conditions[1]);
+
+  for (i = 0; i < 4u; i++) {
+    lookup_conditions[i] =
+        ixs_cmp(ctx, selector, IXS_CMP_EQ, ixs_int(ctx, keys[i]));
+    lookup_values[i] = ixs_add(ctx, base, ixs_int(ctx, INT64_C(16) * keys[i]));
+  }
+  lookup_conditions[4] = ixs_true(ctx);
+  lookup_values[4] = ixs_add(ctx, base, ixs_int(ctx, 99));
+  lookup = ixs_pw(ctx, 5u, lookup_values, lookup_conditions);
+  for (i = 0; i < 4u; i++) {
+    duplicate_conditions[i] =
+        ixs_cmp(ctx, selector, IXS_CMP_EQ, ixs_int(ctx, duplicate_keys[i]));
+    duplicate_values[i] =
+        ixs_add(ctx, base, ixs_int(ctx, INT64_C(16) * duplicate_keys[i]));
+  }
+  duplicate_conditions[4] = ixs_true(ctx);
+  duplicate_values[4] = ixs_add(ctx, base, ixs_int(ctx, 99));
+  duplicate = ixs_pw(ctx, 5u, duplicate_values, duplicate_conditions);
+
+  CHECK(ctx && selector && base && zero && expected && lookup_expected &&
+        piecewise && dead_first && wrong && uncovered && lookup && duplicate &&
+        facts && exact && huge);
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, selector, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, selector, IXS_CMP_LE, ixs_int(ctx, 3))));
+  CHECK(ixs_facts_assume_pred(
+      exact, ixs_cmp(ctx, selector, IXS_CMP_EQ, ixs_int(ctx, 2))));
+  CHECK(ixs_facts_assume_pred(
+      huge, ixs_cmp(ctx, selector, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      huge, ixs_cmp(ctx, selector, IXS_CMP_LE, ixs_int(ctx, INT64_MAX))));
+
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(ixs_node_tag(test_ixs_simplify_facts(facts, piecewise)) ==
+        IXS_PIECEWISE);
+  CHECK(test_ixs_equivalent_facts(facts, piecewise, expected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, piecewise, IXS_CMP_EQ,
+                                            expected)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, dead_first, expected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, lookup, lookup_expected) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, duplicate, lookup_expected) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(huge, lookup, lookup_expected) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, wrong, expected) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(exact, wrong, expected) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(facts, uncovered, expected) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_generic_equivalent_expression_contexts(void) {
   static const char left_text[] =
       "context_base + Mod(context_item + floor(Mod(context_item, 16)/4) - "
@@ -7708,9 +7816,11 @@ static void test_public_truncating_remainder_equivalence(void) {
   CHECK(test_ixs_equivalent_facts(negative_divisor, overlap1,
                                   ixs_add(ctx, overlap0, sixteen)) ==
         IXS_CHECK_UNKNOWN);
+  /* These guards are not globally exhaustive, but x >= 0 and d == -4 close
+   * their residual domain. Fact-backed totality and equality both hold. */
   CHECK(test_ixs_equivalent_facts(negative_divisor, uncovered1,
                                   ixs_add(ctx, uncovered0, sixteen)) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "x >= 0")));
   CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "x <= 100")));
   CHECK(ixs_facts_assume_pred(nonintegral, parse_bounds_pred(ctx, "d == -4")));
@@ -9960,6 +10070,7 @@ int main(void) {
   test_public_total_equivalence();
   test_generic_modulo_recurrence_equivalence();
   test_generic_bounded_scaled_mod_equivalence();
+  test_generic_piecewise_partition_equivalence();
   test_generic_equivalent_expression_contexts();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_public_trunc_primitive_constant_difference();

@@ -88,7 +88,7 @@ typedef struct {
 #define BOUNDS_EQUALITY_WALK_INIT_CAP 16u
 #define BOUNDS_EQUALITY_PROJECTION_CACHE_INIT_CAP 64u
 #define BOUNDS_CACHE_CAP 32u
-#define BOUNDS_CACHE_DISABLED ((size_t)-1)
+#define BOUNDS_CACHE_DISABLED ((size_t) - 1)
 #define FACT_WORK_INIT_CAP 64u
 #define BOUNDS_QUERY_ACTIVE_INIT_CAP 16u
 #define BOUNDS_QUERY_CACHE_INIT_CAP 256u
@@ -327,6 +327,8 @@ bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
                                  int64_t *delta);
 static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
                                            ixs_node *rhs, int64_t *delta);
+static bool bounds_extract_integer_affine(ixs_node *expr, const char **name,
+                                          int64_t *scale, int64_t *offset);
 
 static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
   return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
@@ -10237,6 +10239,176 @@ static bool bounds_has_zero_nonzero_conflict(ixs_bounds *b) {
   return false;
 }
 
+typedef struct {
+  ixs_var_bound *var;
+  int64_t value;
+} bounds_excluded_integer;
+
+/* Return the exact number of congruent integers in a finite interval only
+ * when it is no larger than limit. Huge intervals stop after O(1) arithmetic;
+ * no value enumeration is involved. */
+static bool bounds_small_integer_domain(const ixs_var_bound *var, size_t limit,
+                                        size_t *count) {
+  int64_t lo;
+  int64_t hi;
+  int64_t first;
+  int64_t step = 1;
+  uint64_t span;
+  uint64_t quotient;
+
+  if (!var || !count || limit == 0u || !var->iv.valid || var->iv.lo_inf ||
+      var->iv.hi_inf)
+    return false;
+  lo = ixs_rat_ceil(var->iv.lo_p, var->iv.lo_q);
+  hi = ixs_rat_floor(var->iv.hi_p, var->iv.hi_q);
+  if (lo > hi) {
+    *count = 0u;
+    return true;
+  }
+  first = lo;
+  if (var->modulus > 0) {
+    step = var->modulus;
+    if (!integer_align_congruence_up(lo, step, var->remainder, &first) ||
+        first > hi) {
+      *count = 0u;
+      return true;
+    }
+  }
+  span = (uint64_t)hi - (uint64_t)first;
+  quotient = span / (uint64_t)step;
+  if (quotient >= (uint64_t)limit)
+    return false;
+  *count = (size_t)quotient + 1u;
+  return true;
+}
+
+static bool bounds_affine_excluded_integer(ixs_bounds *b, ixs_node *expr,
+                                           ixs_var_bound **var,
+                                           int64_t *value) {
+  const char *name;
+  int64_t scale;
+  int64_t offset;
+  uint64_t numerator;
+  uint64_t denominator;
+  uint64_t magnitude;
+  bool negative;
+
+  if (!bounds_extract_integer_affine(expr, &name, &scale, &offset))
+    return false;
+  *var = find_var(b, name);
+  if (!*var)
+    return false;
+  numerator = bounds_int64_magnitude(offset);
+  denominator = bounds_int64_magnitude(scale);
+  if (denominator == 0u || numerator % denominator != 0u)
+    return false;
+  magnitude = numerator / denominator;
+  negative = magnitude != 0u && ((offset > 0) != (scale < 0));
+  if (negative) {
+    if (magnitude > (UINT64_C(1) << 63))
+      return false;
+    *value = magnitude == (UINT64_C(1) << 63) ? INT64_MIN : -(int64_t)magnitude;
+  } else {
+    if (magnitude > (uint64_t)INT64_MAX)
+      return false;
+    *value = (int64_t)magnitude;
+  }
+  if ((!(*var)->iv.lo_inf &&
+       ixs_rat_cmp(*value, 1, (*var)->iv.lo_p, (*var)->iv.lo_q) < 0) ||
+      (!(*var)->iv.hi_inf &&
+       ixs_rat_cmp(*value, 1, (*var)->iv.hi_p, (*var)->iv.hi_q) > 0) ||
+      ((*var)->modulus > 0 &&
+       integer_congruence_residue(*value, (*var)->modulus) !=
+           (*var)->remainder))
+    return false;
+  return true;
+}
+
+static size_t bounds_excluded_integer_hash(ixs_var_bound *var, int64_t value) {
+  uint64_t mixed = (uint64_t)(uintptr_t)var >> 3u;
+  mixed ^= (uint64_t)value + UINT64_C(0x9e3779b97f4a7c15) + (mixed << 6u) +
+           (mixed >> 2u);
+  return (size_t)mixed;
+}
+
+/* A finite integer domain is empty when distinct affine NE facts exclude every
+ * congruent value in it. The cache in ixs_bounds_has_empty keeps repeat calls
+ * O(1); a miss builds this query-local table in O(V + E) expected time. */
+static bool bounds_has_exhausted_integer_domain(ixs_bounds *b) {
+  ixs_arena_mark mark;
+  bounds_excluded_integer *excluded;
+  size_t *counts;
+  size_t capacity = 4u;
+  size_t i;
+  bool have_small_domain = false;
+  bool empty = false;
+
+  if (!b || b->oom || b->nvars == 0u || b->nnonzero == 0u)
+    return false;
+  for (i = 0; i < b->nvars; i++) {
+    size_t domain_count;
+    if (bounds_small_integer_domain(&b->vars[i], b->nnonzero, &domain_count) &&
+        domain_count != 0u) {
+      have_small_domain = true;
+      break;
+    }
+  }
+  if (!have_small_domain)
+    return false;
+  while (capacity <= b->nnonzero) {
+    if (capacity > SIZE_MAX / 2u ||
+        capacity * 2u > SIZE_MAX / sizeof(*excluded)) {
+      b->oom = true;
+      return false;
+    }
+    capacity *= 2u;
+  }
+  if (b->nvars > SIZE_MAX / sizeof(*counts)) {
+    b->oom = true;
+    return false;
+  }
+
+  mark = ixs_arena_save(b->scratch);
+  excluded =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*excluded), sizeof(void *));
+  counts =
+      ixs_arena_alloc(b->scratch, b->nvars * sizeof(*counts), sizeof(void *));
+  if (!excluded || !counts) {
+    b->oom = true;
+    goto cleanup;
+  }
+  memset(excluded, 0, capacity * sizeof(*excluded));
+  memset(counts, 0, b->nvars * sizeof(*counts));
+  for (i = 0; i < b->nnonzero; i++) {
+    ixs_var_bound *var;
+    int64_t value;
+    size_t slot;
+    if (!bounds_affine_excluded_integer(b, b->nonzero[i], &var, &value))
+      continue;
+    slot = bounds_excluded_integer_hash(var, value) & (capacity - 1u);
+    while (excluded[slot].var &&
+           (excluded[slot].var != var || excluded[slot].value != value))
+      slot = (slot + 1u) & (capacity - 1u);
+    if (excluded[slot].var)
+      continue;
+    excluded[slot].var = var;
+    excluded[slot].value = value;
+    counts[(size_t)(var - b->vars)]++;
+  }
+  for (i = 0; i < b->nvars; i++) {
+    size_t domain_count;
+    if (bounds_small_integer_domain(&b->vars[i], b->nnonzero, &domain_count) &&
+        domain_count != 0u && counts[i] >= domain_count) {
+      empty = true;
+      break;
+    }
+  }
+
+cleanup:
+  ixs_arena_restore(b->scratch, mark);
+  return empty;
+}
+
 static bool bounds_cache_empty_result(ixs_bounds *b, bool result) {
   b->empty_cache_valid = true;
   b->empty_cache_value = result;
@@ -10278,6 +10450,11 @@ IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b) {
 
   if (bounds_has_zero_nonzero_conflict(b))
     return bounds_cache_empty_result(b, true);
+
+  if (bounds_has_exhausted_integer_domain(b))
+    return bounds_cache_empty_result(b, true);
+  if (b->oom)
+    return false;
 
   return bounds_cache_empty_result(b, false);
 }
@@ -14510,6 +14687,13 @@ typedef struct {
 /* Algebraic bridge rules may nest only through this fixed allowance. */
 #define EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH 4u
 
+typedef enum {
+  EQUIVALENCE_QUERY_COMPLETE,
+  EQUIVALENCE_QUERY_LIMITED,
+  EQUIVALENCE_QUERY_INVALID,
+  EQUIVALENCE_QUERY_OOM
+} equivalence_query_status;
+
 static size_t equivalence_pair_hash(ixs_node *lhs, ixs_node *rhs) {
   uintptr_t left = (uintptr_t)lhs;
   uintptr_t right = (uintptr_t)rhs;
@@ -14600,6 +14784,9 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                               ixs_node *lhs, ixs_node *rhs,
                                               unsigned depth,
                                               bool allow_context);
+static equivalence_query_status equivalence_query_bounds_detail_at_depth(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    unsigned bounded_subproof_depth, ixs_check_result *result);
 static bool bounds_constant_delta_query(ixs_ctx *ctx, ixs_bounds *bounds,
                                         ixs_node *lhs, ixs_node *rhs,
                                         bool allow_expand, int64_t *delta);
@@ -14608,7 +14795,8 @@ static ixs_check_result equivalence_bounded_core(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
   ixs_check_result result;
-  if (state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
+  if (state->limited || state->invalid || state->oom ||
+      state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
     return IXS_CHECK_UNKNOWN;
   state->bounded_subproof_depth++;
   result = equivalence_core(state, lhs, rhs, depth);
@@ -18731,6 +18919,313 @@ static ixs_check_result equivalence_projected(equivalence_state *state,
   return equivalence_expanded(state, projected_lhs, projected_rhs, depth);
 }
 
+/* Find one outermost Piecewise without following a Piecewise's lazy children.
+ * The explicit stack keeps discovery independent of expression depth. */
+static bool equivalence_find_piecewise(equivalence_state *state, ixs_node *root,
+                                       ixs_node **piecewise) {
+  ixs_arena *arena = &state->ctx->scratch;
+  ixs_arena_mark mark = ixs_arena_save(arena);
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t count = 0;
+  size_t capacity = 0;
+  bool ok = false;
+
+  memset(&visited, 0, sizeof(visited));
+  *piecewise = NULL;
+  if (!query_node_stack_push(arena, &stack, &count, &capacity, root))
+    goto oom;
+  while (count != 0u) {
+    ixs_node *node = stack[--count];
+    uint32_t nchildren;
+    uint32_t i;
+    bool inserted;
+
+    if (!node || !query_node_set_insert(arena, &visited, node, &inserted))
+      goto oom;
+    if (!inserted)
+      continue;
+    if (state->visited != SIZE_MAX)
+      state->visited++;
+    if (node->tag == IXS_PIECEWISE) {
+      *piecewise = node;
+      ok = true;
+      goto cleanup;
+    }
+    if (!defined_child_count(node, &nchildren)) {
+      state->invalid = true;
+      goto cleanup;
+    }
+    for (i = nchildren; i != 0u; i--)
+      if (!query_node_stack_push(arena, &stack, &count, &capacity,
+                                 defined_child_at(node, i - 1u)))
+        goto oom;
+  }
+  ok = true;
+  goto cleanup;
+
+oom:
+  state->oom = true;
+cleanup:
+  ixs_arena_restore(arena, mark);
+  return ok;
+}
+
+/* Substitution is an optional proof probe. A representability/domain sentinel
+ * is a rule miss; only allocation failure becomes a query failure. */
+static bool
+equivalence_substitute_piecewise(equivalence_state *state, ixs_node *lhs,
+                                 ixs_node *rhs, ixs_node *piecewise,
+                                 ixs_node *value, ixs_node **substituted_lhs,
+                                 ixs_node **substituted_rhs, bool *matched) {
+  ixs_ctx *ctx = state->ctx;
+  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+  const char **saved_errors = ctx->errors;
+  size_t saved_nerrors = ctx->nerrors;
+  size_t saved_errors_cap = ctx->errors_cap;
+
+  *matched = false;
+  *substituted_lhs = simp_subs(ctx, lhs, piecewise, value);
+  *substituted_rhs = simp_subs(ctx, rhs, piecewise, value);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+  if (!*substituted_lhs || !*substituted_rhs) {
+    state->oom = true;
+    return false;
+  }
+  if (ixs_node_is_sentinel(*substituted_lhs) ||
+      ixs_node_is_sentinel(*substituted_rhs))
+    return true;
+  *matched = true;
+  return true;
+}
+
+static bool equivalence_piecewise_observe(equivalence_state *state,
+                                          ixs_bounds *bounds,
+                                          size_t limit_blocks,
+                                          size_t invalid_blocks) {
+  if (bounds->oom)
+    state->oom = true;
+  if (bounds_query_invalid_since(bounds, invalid_blocks))
+    state->invalid = true;
+  if (bounds_query_limited_since(bounds, limit_blocks))
+    state->limited = true;
+  return !state->oom && !state->invalid && !state->limited;
+}
+
+static bool equivalence_piecewise_add_assumption(equivalence_state *state,
+                                                 ixs_bounds *bounds,
+                                                 ixs_node *cond, bool truth) {
+  struct ixs_node_impl assumption;
+  if (ixs_bounds_add_assumption(bounds, bounds_condition_assumption(
+                                            bounds, cond, truth, &assumption)))
+    return true;
+  if (bounds->oom)
+    state->oom = true;
+  else
+    state->invalid = true;
+  return false;
+}
+
+static bool equivalence_piecewise_prove_arm(equivalence_state *state,
+                                            ixs_bounds *remaining,
+                                            ixs_node *cond, ixs_node *value,
+                                            ixs_node *piecewise, ixs_node *lhs,
+                                            ixs_node *rhs, bool *reachable) {
+  ixs_arena_mark arm_mark = ixs_arena_save(state->bounds->scratch);
+  ixs_bounds active;
+  ixs_node *substituted_lhs = NULL;
+  ixs_node *substituted_rhs = NULL;
+  ixs_check_result branch_result = IXS_CHECK_UNKNOWN;
+  equivalence_query_status branch_status = EQUIVALENCE_QUERY_COMPLETE;
+  bool active_ready = false;
+  bool matched = false;
+  bool proved = false;
+
+  *reachable = false;
+  memset(&active, 0, sizeof(active));
+  if (!ixs_bounds_fork(&active, remaining)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  active_ready = true;
+  if (!equivalence_piecewise_add_assumption(state, &active, cond, true))
+    goto cleanup;
+  if (ixs_bounds_has_empty(&active)) {
+    proved = true;
+    goto cleanup;
+  }
+  *reachable = true;
+  if (!equivalence_substitute_piecewise(state, lhs, rhs, piecewise, value,
+                                        &substituted_lhs, &substituted_rhs,
+                                        &matched) ||
+      !matched)
+    goto cleanup;
+  {
+    ixs_ctx *ctx = state->ctx;
+    ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
+    const char **saved_errors = ctx->errors;
+    size_t saved_nerrors = ctx->nerrors;
+    size_t saved_errors_cap = ctx->errors_cap;
+
+    branch_status = equivalence_query_bounds_detail_at_depth(
+        &active, ctx, substituted_lhs, substituted_rhs,
+        state->bounded_subproof_depth + 1u, &branch_result);
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+  }
+  if (branch_status == EQUIVALENCE_QUERY_LIMITED)
+    state->limited = true;
+  else if (branch_status == EQUIVALENCE_QUERY_INVALID)
+    state->invalid = true;
+  else if (branch_status == EQUIVALENCE_QUERY_OOM)
+    state->oom = true;
+  proved = branch_status == EQUIVALENCE_QUERY_COMPLETE &&
+           branch_result == IXS_CHECK_TRUE;
+
+cleanup:
+  if (active_ready && active.oom)
+    state->oom = true;
+  bounds_destroy_if_initialized(&active, active_ready);
+  ixs_arena_restore(state->bounds->scratch, arm_mark);
+  return proved;
+}
+
+typedef enum {
+  EQUIVALENCE_PIECEWISE_CASE_CONTINUE,
+  EQUIVALENCE_PIECEWISE_CASE_COVERED,
+  EQUIVALENCE_PIECEWISE_CASE_FAILED
+} equivalence_piecewise_case_result;
+
+static equivalence_piecewise_case_result equivalence_piecewise_prove_case(
+    equivalence_state *state, ixs_bounds *remaining, ixs_node *piecewise,
+    uint32_t index, ixs_node *lhs, ixs_node *rhs, size_t limit_blocks,
+    size_t invalid_blocks, bool *reachable) {
+  ixs_node *cond = piecewise->u.pw.cases[index].cond;
+  ixs_node *value = piecewise->u.pw.cases[index].value;
+  ixs_check_result truth;
+  bool cond_oom = false;
+  bool cond_limited = false;
+
+  *reachable = false;
+  if (!cond || !value) {
+    state->invalid = true;
+    return EQUIVALENCE_PIECEWISE_CASE_FAILED;
+  }
+  if (ixs_bounds_has_empty(remaining))
+    return EQUIVALENCE_PIECEWISE_CASE_COVERED;
+  if (bounds_check_defined_detail(remaining, cond, &cond_oom, &cond_limited) !=
+      IXS_CHECK_TRUE) {
+    if (cond_oom)
+      state->oom = true;
+    if (cond_limited)
+      state->limited = true;
+    return EQUIVALENCE_PIECEWISE_CASE_FAILED;
+  }
+  truth = bounds_condition_truth(remaining, cond);
+  if (!equivalence_piecewise_observe(state, remaining, limit_blocks,
+                                     invalid_blocks))
+    return EQUIVALENCE_PIECEWISE_CASE_FAILED;
+  if (truth == IXS_CHECK_FALSE)
+    return EQUIVALENCE_PIECEWISE_CASE_CONTINUE;
+  if (!equivalence_piecewise_prove_arm(state, remaining, cond, value, piecewise,
+                                       lhs, rhs, reachable))
+    return EQUIVALENCE_PIECEWISE_CASE_FAILED;
+  if (truth == IXS_CHECK_TRUE)
+    return EQUIVALENCE_PIECEWISE_CASE_COVERED;
+  if (!equivalence_piecewise_add_assumption(state, remaining, cond, false))
+    return EQUIVALENCE_PIECEWISE_CASE_FAILED;
+  return EQUIVALENCE_PIECEWISE_CASE_CONTINUE;
+}
+
+/* A first-match Piecewise P partitions the incoming facts into
+ *
+ *   c0, !c0 & c1, ..., !c0 & ... & !c(n-2) & c(n-1).
+ *
+ * Equality is proved only when every reachable partition proves the complete
+ * operands equal after replacing this exact P by its selected value, and the
+ * residual facts are exhausted. Branch facts get fresh equivalence memos:
+ * memo answers from the parent or a sibling are not valid in another fact
+ * environment. Each nested partition consumes the fixed algebraic-subproof
+ * allowance, so C recursion is statically bounded even for nested Piecewise
+ * DAGs. */
+static ixs_check_result
+equivalence_piecewise_partitions(equivalence_state *state, ixs_node *lhs,
+                                 ixs_node *rhs) {
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  ixs_node *piecewise = NULL;
+  size_t limit_blocks;
+  size_t invalid_blocks;
+  bool remaining_ready = false;
+  bool covered = false;
+  bool have_reachable = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  uint32_t i;
+
+  if (state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
+    return IXS_CHECK_UNKNOWN;
+  if (!equivalence_find_piecewise(state, lhs, &piecewise) ||
+      (!piecewise && !equivalence_find_piecewise(state, rhs, &piecewise)))
+    return IXS_CHECK_UNKNOWN;
+  if (!piecewise)
+    return IXS_CHECK_UNKNOWN;
+  if (piecewise->u.pw.ncases == 0u || !piecewise->u.pw.cases) {
+    state->invalid = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+
+  limit_blocks = state->bounds->query_state
+                     ? state->bounds->query_state->limit_blocks
+                     : 0u;
+  invalid_blocks = state->bounds->query_state
+                       ? state->bounds->query_state->invalid_blocks
+                       : 0u;
+  outer_mark = ixs_arena_save(state->bounds->scratch);
+  memset(&remaining, 0, sizeof(remaining));
+  if (!ixs_bounds_fork(&remaining, state->bounds)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  remaining_ready = true;
+
+  for (i = 0; i < piecewise->u.pw.ncases; i++) {
+    bool reachable;
+    equivalence_piecewise_case_result case_result =
+        equivalence_piecewise_prove_case(state, &remaining, piecewise, i, lhs,
+                                         rhs, limit_blocks, invalid_blocks,
+                                         &reachable);
+    if (case_result == EQUIVALENCE_PIECEWISE_CASE_FAILED)
+      goto cleanup;
+    if (reachable)
+      have_reachable = true;
+    if (case_result == EQUIVALENCE_PIECEWISE_CASE_COVERED) {
+      covered = true;
+      break;
+    }
+  }
+
+  if (!covered && ixs_bounds_has_empty(&remaining))
+    covered = true;
+  if (covered && have_reachable)
+    result = IXS_CHECK_TRUE;
+
+cleanup:
+  if (remaining_ready) {
+    if (remaining.oom)
+      state->oom = true;
+    (void)equivalence_piecewise_observe(state, &remaining, limit_blocks,
+                                        invalid_blocks);
+  }
+  bounds_destroy_if_initialized(&remaining, remaining_ready);
+  ixs_arena_restore(state->bounds->scratch, outer_mark);
+  return result;
+}
+
 static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                               ixs_node *lhs, ixs_node *rhs,
                                               unsigned depth,
@@ -18816,19 +19311,13 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   result = equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  return IXS_CHECK_UNKNOWN;
+  return equivalence_piecewise_partitions(state, simplified_lhs,
+                                          simplified_rhs);
 }
 
-typedef enum {
-  EQUIVALENCE_QUERY_COMPLETE,
-  EQUIVALENCE_QUERY_LIMITED,
-  EQUIVALENCE_QUERY_INVALID,
-  EQUIVALENCE_QUERY_OOM
-} equivalence_query_status;
-
-static equivalence_query_status
-equivalence_query_bounds_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
-                                ixs_node *rhs, ixs_check_result *result) {
+static equivalence_query_status equivalence_query_bounds_detail_at_depth(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    unsigned bounded_subproof_depth, ixs_check_result *result) {
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
   equivalence_state state;
   size_t limit_blocks =
@@ -18844,6 +19333,7 @@ equivalence_query_bounds_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   equivalence_query_status status = EQUIVALENCE_QUERY_COMPLETE;
 
   equivalence_state_init(&state, ctx, bounds);
+  state.bounded_subproof_depth = bounded_subproof_depth;
   *result = IXS_CHECK_UNKNOWN;
   if (bounds_check_defined_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
@@ -18878,6 +19368,13 @@ restore:
   bounds->oom = old_oom;
   ixs_arena_restore(&ctx->scratch, mark);
   return status;
+}
+
+static equivalence_query_status
+equivalence_query_bounds_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
+                                ixs_node *rhs, ixs_check_result *result) {
+  return equivalence_query_bounds_detail_at_depth(bounds, ctx, lhs, rhs, 0u,
+                                                  result);
 }
 
 static equivalence_query_status

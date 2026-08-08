@@ -1076,19 +1076,6 @@ simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
 
-**Bounded affine lookups**: Under facts proving that an expression `s` is a
-defined integer in a finite interval `[lo, hi]`, a first-match Piecewise whose
-guarded cases are a duplicate-free permutation of every equality `s == k` in
-that interval has an unreachable default.  When every guarded value has one
-identical canonical additive base `b` and its rational constant offsets form
-`offset + stride*k`, the Piecewise simplifies to
-`b + offset + stride*s`.  The exact-cover check makes case order irrelevant
-without weakening first-match semantics.  Requiring the same additive base in
-every live arm also preserves partiality: the replacement evaluates precisely
-the shared expression that every selected arm evaluated.  Missing, duplicate,
-non-equality, non-affine, unbounded, and fallback-reachable forms remain
-Piecewise.
-
 **Branch-aware bounds**: During bounds-aware rewriting, each non-default
 Piecewise branch gets a forked copy of the current bounds augmented with
 the branch condition.  Conditions like `E > 0` tighten the lower bound of
@@ -1241,7 +1228,12 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   pointer-keyed expression set. The set is copied by bounds forks and fact
   substitution, so reciprocal guards can use both incoming disequalities and
   branch-local conditions. A direct zero range for the same expression is a
-  detected contradiction.
+  detected contradiction. On an emptiness-cache miss, distinct integer roots
+  excluded by affine nonzero facts are also counted per finite symbol domain.
+  Excluding every congruent value makes that domain empty. A query-local hash
+  table makes this O(V + E) expected for variables and exclusions; domain
+  cardinality uses interval arithmetic and never enumerates values, including
+  huge intervals.
 - **Contradiction cache**: the detected-empty result is cached until any bound,
   congruence, bit, nonzero, or expression-range mutation. Query hits are O(1);
   a miss scans unique variables, expressions, and exclusions once.
@@ -1706,6 +1698,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   into their arguments. XOR arguments match exact nodes first, then use bounded
   semantic pairing. Only complete child proofs yield `TRUE`; a failed child
   proof stays `UNKNOWN` because these contexts need not be injective.
+
+  As the final general proof, equivalence partitions one outermost
+  `Piecewise` by its first-match guards. A residual fact fork accumulates each
+  preceding guard as false; a branch fork adds the current guard as true and
+  substitutes that exact `Piecewise` node in both complete operands. Equality
+  is true only when every reachable branch proves true and the guards exhaust
+  the residual facts. Dead and shadowed branches are skipped. Branches use
+  fresh equivalence memos because memo results are specific to one fact
+  environment. Discovery and substitution are iterative, and nested branch
+  queries consume the fixed algebraic-subproof allowance, so arbitrary DAG
+  depth does not become C recursion. The rule assumes no affine arm shape and
+  does not enumerate selector values.
 
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,
