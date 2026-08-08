@@ -12996,6 +12996,12 @@ typedef struct {
   bool overflow;
 } facts_closure_capture;
 
+typedef struct {
+  facts_closure_capture capture;
+  uint64_t hash;
+  bool store;
+} facts_closure_cache_result;
+
 static facts_closure_cache *facts_closure_cache_get(ixs_ctx *ctx) {
   facts_closure_cache *cache;
   if (!ctx)
@@ -13581,24 +13587,24 @@ facts_replay_predicate_closure(ixs_bounds *candidate,
 static ixs_bounds_build_status
 facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
                                ixs_node *const *predicates, size_t n_predicates,
-                               facts_closure_capture *capture,
-                               uint64_t *cache_hash, bool *store_closure) {
+                               facts_closure_cache_result *cache_result) {
   facts_closure_cache_entry *cached = NULL;
   facts_closure_capture *capture_ptr = NULL;
   facts_work_storage storage;
   facts_worklist work;
   ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OOM;
-  bool cacheable = facts_bounds_is_empty_domain(candidate);
+  bool cacheable = cache_result && facts_bounds_is_empty_domain(candidate);
 
-  *store_closure = false;
+  if (cache_result)
+    cache_result->store = false;
   if (cacheable) {
-    cached =
-        facts_closure_cache_lookup(ctx, predicates, n_predicates, cache_hash);
+    cached = facts_closure_cache_lookup(ctx, predicates, n_predicates,
+                                        &cache_result->hash);
     if (cached)
       return facts_replay_predicate_closure(candidate, cached);
     if (n_predicates <= FACTS_CLOSURE_CACHE_SLOT_NODES) {
-      facts_closure_capture_init(capture, n_predicates);
-      capture_ptr = capture;
+      facts_closure_capture_init(&cache_result->capture, n_predicates);
+      capture_ptr = &cache_result->capture;
     }
   }
   if (!facts_worklist_init(&work, &storage, n_predicates))
@@ -13622,7 +13628,7 @@ facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
 cleanup:
   candidate->semantic_changed = NULL;
   if (status == IXS_BOUNDS_BUILD_OK && cacheable && capture_ptr)
-    *store_closure = true;
+    cache_result->store = true;
   facts_worklist_destroy(&work);
   return status;
 }
@@ -13710,10 +13716,8 @@ static bool facts_assume_predicates(ixs_facts *facts,
   ixs_arena_mark mark;
   ixs_bounds candidate;
   ixs_bounds_build_status status;
-  facts_closure_capture closure_capture;
-  uint64_t closure_hash = 0;
+  facts_closure_cache_result closure_cache;
   bool candidate_ready = false;
-  bool store_closure = false;
   if (!facts_bind(facts, &binding, &ctx))
     return false;
   if (!facts_ready(facts)) {
@@ -13741,15 +13745,14 @@ static bool facts_assume_predicates(ixs_facts *facts,
   status = bounds_validate_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_ingest_predicate_closure(ctx, &candidate, predicates,
-                                            n_predicates, &closure_capture,
-                                            &closure_hash, &store_closure);
+                                            n_predicates, &closure_cache);
   if (status == IXS_BOUNDS_BUILD_OK && require_closed)
     status =
         facts_validate_closed_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
-    if (store_closure)
-      facts_closure_cache_store(ctx, predicates, n_predicates, &closure_capture,
-                                closure_hash);
+    if (closure_cache.store)
+      facts_closure_cache_store(ctx, predicates, n_predicates,
+                                &closure_cache.capture, closure_cache.hash);
     facts_commit(facts, &candidate);
   } else {
     if (candidate_ready)
@@ -14541,6 +14544,135 @@ static ixs_check_result predicate_query_eval_detail(ixs_bounds *bounds,
 cleanup:
   ixs_arena_restore(arena, mark);
   return bounds->oom ? IXS_CHECK_UNKNOWN : answer;
+}
+
+/* Check B under a query-local A assumption.  The fork borrows the enclosing
+ * query state, so a limit or transport failure invalidates the whole proof. */
+static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
+                                                           ixs_node *antecedent,
+                                                           ixs_node *consequent,
+                                                           bool *limited) {
+  ixs_ctx *ctx;
+  ixs_node *predicate_array[1];
+  ixs_bounds branch;
+  ixs_bounds_build_status status;
+  ixs_arena_mark scratch_mark;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors;
+  size_t saved_errors_cap;
+  size_t limit_blocks;
+  bool branch_ready = false;
+  bool branch_limited = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (!bounds || !antecedent || !consequent ||
+      (antecedent->tag != IXS_AND && antecedent->tag != IXS_CMP))
+    return IXS_CHECK_UNKNOWN;
+
+  ctx = bounds->ctx;
+  limit_blocks = bounds->query_state ? bounds->query_state->limit_blocks : 0u;
+  scratch_mark = ixs_arena_save(bounds->scratch);
+  if (!ixs_bounds_fork(&branch, bounds)) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  branch_ready = true;
+  predicate_array[0] = antecedent;
+
+  /* Unsupported local assumptions are proof misses.  Their diagnostics and
+   * closure are private to this branch. */
+  diag_mark = ixs_arena_save(&ctx->diag);
+  saved_errors = ctx->errors;
+  saved_nerrors = ctx->nerrors;
+  saved_errors_cap = ctx->errors_cap;
+  status = bounds_validate_predicate(&branch, antecedent);
+  if (status == IXS_BOUNDS_BUILD_OK)
+    status =
+        facts_ingest_predicate_closure(ctx, &branch, predicate_array, 1u, NULL);
+  ixs_arena_restore(&ctx->diag, diag_mark);
+  ctx->errors = saved_errors;
+  ctx->nerrors = saved_nerrors;
+  ctx->errors_cap = saved_errors_cap;
+
+  if (status == IXS_BOUNDS_BUILD_OOM || branch.oom) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  if (status == IXS_BOUNDS_BUILD_LIMIT) {
+    bounds_query_note_limit(bounds->query_state);
+    goto cleanup;
+  }
+  if (status != IXS_BOUNDS_BUILD_OK)
+    goto cleanup;
+  if (ixs_bounds_has_empty(&branch)) {
+    result = IXS_CHECK_TRUE;
+    goto cleanup;
+  }
+  result = predicate_query_eval_detail(&branch, consequent, &branch_limited);
+  if (branch.oom) {
+    bounds->oom = true;
+    goto cleanup;
+  }
+  if (result != IXS_CHECK_TRUE)
+    result = IXS_CHECK_UNKNOWN;
+
+cleanup:
+  if (branch_ready)
+    ixs_bounds_destroy(&branch);
+  ixs_arena_restore(bounds->scratch, scratch_mark);
+  if (limited &&
+      (branch_limited || bounds_query_limited_since(bounds, limit_blocks)))
+    *limited = true;
+  return bounds->oom ? IXS_CHECK_UNKNOWN : result;
+}
+
+/* A | B is !A => B.  Canonicalization folds NOT(CMP), so reconstruct the
+ * complementary comparison when either disjunct is a comparison.  The total
+ * source check preserves eager AND/OR semantics, and the branch evaluator
+ * deliberately has no implication fallback of its own. */
+static ixs_check_result predicate_query_implication(ixs_bounds *bounds,
+                                                    ixs_node *predicate,
+                                                    bool *limited) {
+  unsigned pass;
+  uint32_t i;
+
+  if (!bounds || !predicate || predicate->tag != IXS_OR ||
+      predicate->u.assoc.nargs != 2u ||
+      !predicate_query_assoc_domain_proven(bounds, predicate))
+    return IXS_CHECK_UNKNOWN;
+
+  /* Retain explicit NOT intent before deriving a comparison complement. */
+  for (pass = 0u; pass < 2u; pass++) {
+    for (i = 0u; i < 2u; i++) {
+      ixs_node *disjunct = predicate->u.assoc.args[i];
+      ixs_node *antecedent;
+      bool branch_limited = false;
+      ixs_check_result result;
+
+      if (pass == 0u && disjunct->tag == IXS_NOT) {
+        antecedent = disjunct->u.unary_bool.arg;
+      } else if (pass == 1u && disjunct->tag == IXS_CMP) {
+        antecedent = simp_not(bounds->ctx, disjunct);
+        if (!antecedent) {
+          bounds->oom = true;
+          return IXS_CHECK_UNKNOWN;
+        }
+      } else {
+        continue;
+      }
+      result = predicate_query_implication_branch(
+          bounds, antecedent, predicate->u.assoc.args[1u - i], &branch_limited);
+      if (branch_limited) {
+        if (limited)
+          *limited = true;
+        return IXS_CHECK_UNKNOWN;
+      }
+      if (result == IXS_CHECK_TRUE || bounds->oom)
+        return result;
+    }
+  }
+  return IXS_CHECK_UNKNOWN;
 }
 
 /* General predicate fallback budget: inspect at most 4096 expression nodes
@@ -19611,6 +19743,9 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
    * whose original form is inconclusive. */
   result.check = predicate_query_eval_detail(&facts->bounds, predicate,
                                              &predicate_limited);
+  if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
+    result.check = predicate_query_implication(&facts->bounds, predicate,
+                                               &predicate_limited);
   if (predicate_limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
     goto cleanup;

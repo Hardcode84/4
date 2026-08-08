@@ -7508,6 +7508,164 @@ static void test_public_predicate_tree_query(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_predicate_implications(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *row = ixs_sym(ctx, "predicate_implication_row");
+  ixs_node *column = ixs_sym(ctx, "predicate_implication_column");
+  ixs_node *row_domain =
+      ixs_and(ctx, ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, row, IXS_CMP_LT, ixs_int(ctx, 8)));
+  ixs_node *column_domain =
+      ixs_and(ctx, ixs_cmp(ctx, column, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, column, IXS_CMP_LT, ixs_int(ctx, 4)));
+  ixs_node *coordinate_domain = ixs_and(ctx, row_domain, column_domain);
+  ixs_node *linear = ixs_add(ctx, row, ixs_mul(ctx, ixs_int(ctx, 8), column));
+  ixs_node *linear_domain =
+      ixs_and(ctx, ixs_cmp(ctx, linear, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, linear, IXS_CMP_LT, ixs_int(ctx, 32)));
+  ixs_node *bounded =
+      ixs_or(ctx, ixs_not(ctx, coordinate_domain), linear_domain);
+  ixs_node *tight = ixs_or(ctx, ixs_not(ctx, coordinate_domain),
+                           ixs_cmp(ctx, linear, IXS_CMP_LT, ixs_int(ctx, 31)));
+  ixs_node *partial = ixs_or(ctx, ixs_not(ctx, coordinate_domain),
+                             ixs_cmp(ctx, ixs_div(ctx, ixs_int(ctx, 1), row),
+                                     IXS_CMP_GT, ixs_int(ctx, 0)));
+  ixs_node *unsupported = ixs_or(
+      ctx, ixs_not(ctx, row), ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 0)));
+  ixs_node *unsupported_antecedent =
+      ixs_and(ctx,
+              ixs_or(ctx, ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 0)),
+                     ixs_cmp(ctx, column, IXS_CMP_GE, ixs_int(ctx, 0))),
+              ixs_cmp(ctx, row, IXS_CMP_LT, ixs_int(ctx, 8)));
+  ixs_node *diagnostic_isolated =
+      ixs_or(ctx, ixs_not(ctx, unsupported_antecedent), ixs_not(ctx, column));
+  ixs_node *ternary_args[3] = {
+      ixs_not(ctx, coordinate_domain),
+      linear_domain,
+      ixs_cmp(ctx, row, IXS_CMP_EQ, ixs_int(ctx, 99)),
+  };
+  ixs_node *ternary = ixs_or_many(ctx, 3, ternary_args);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+
+  CHECK(ctx && row && column && coordinate_domain && linear && linear_domain &&
+        bounded && tight && partial && unsupported && unsupported_antecedent &&
+        diagnostic_isolated && ternary && empty && contradictory);
+  CHECK(ixs_node_tag(bounded) == IXS_OR);
+  CHECK(ixs_node_assoc_nargs(bounded) == 2);
+  CHECK(test_ixs_check_predicate_facts(empty, bounded) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(empty, tight) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(empty, partial) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_node_tag(ternary) == IXS_OR);
+  CHECK(ixs_node_assoc_nargs(ternary) == 3);
+  CHECK(test_ixs_check_predicate_facts(empty, ternary) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_predicate_facts(empty, unsupported) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(empty, diagnostic_isolated) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 10))));
+  CHECK(ixs_facts_assume_pred(contradictory,
+                              ixs_cmp(ctx, row, IXS_CMP_LE, ixs_int(ctx, 5))));
+  CHECK(test_ixs_check_predicate_facts(contradictory, bounded) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_predicate_implication_oom_is_reusable(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *row = ixs_sym(ctx, "predicate_implication_oom_row");
+  ixs_node *domain =
+      ixs_and(ctx, ixs_cmp(ctx, row, IXS_CMP_GE, ixs_int(ctx, 0)),
+              ixs_cmp(ctx, row, IXS_CMP_LT, ixs_int(ctx, 8)));
+  ixs_node *query = ixs_or(ctx, ixs_not(ctx, domain),
+                           ixs_cmp(ctx, row, IXS_CMP_LE, ixs_int(ctx, 7)));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_arena_mark mark = ixs_arena_save(scratch);
+  size_t align = sizeof(void *);
+  size_t offset = (scratch->current->used + align - 1u) & ~(align - 1u);
+  size_t remaining = scratch->current->capacity - offset;
+
+  CHECK(ctx && row && domain && query && facts);
+  if (remaining > 0u)
+    CHECK(ixs_arena_alloc(scratch, remaining, align) != NULL);
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(test_ixs_check_predicate_facts(facts, query) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!facts->bounds.oom);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  if (ixs_ctx_nerrors(ctx) != 0)
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_arena_restore(scratch, mark);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_predicate_facts(facts, query) == IXS_CHECK_TRUE);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_predicate_comparison_implications(void) {
+  static const ixs_cmp_op operations[] = {
+      IXS_CMP_GT, IXS_CMP_GE, IXS_CMP_LT, IXS_CMP_LE, IXS_CMP_EQ, IXS_CMP_NE,
+  };
+  static const char folded_address_query[] =
+      "-1 + Mod(slot, 4) >= 0 | "
+      "-2016 + 1024*floor(1/32*xor(32, item)) + 2048*Mod(slot, 4) + "
+      "32*xor(Mod(floor(1/32*xor(32, item)) + 2*Mod(slot, 4), 32), "
+      "Mod(xor(32, item), 32)) <= 0";
+  static const char *folded_address_facts[] = {
+      "item == floor(item)", "item >= 0", "item < 64",
+      "slot == floor(slot)", "slot >= 0", "slot < 4",
+  };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "comparison_implication_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *truth = ixs_true(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_node
+      *facts[sizeof(folded_address_facts) / sizeof(folded_address_facts[0])];
+  ixs_facts *folded;
+  size_t i;
+
+  CHECK(ctx && x && zero && one && two && truth && empty);
+  for (i = 0; i < sizeof(operations) / sizeof(operations[0]); i++) {
+    ixs_node *disjunct = ixs_cmp(ctx, x, operations[i], zero);
+    ixs_node *values[2] = {one, two};
+    ixs_node *conditions[2] = {disjunct, truth};
+    ixs_node *selected = ixs_pw(ctx, 2, values, conditions);
+    ixs_node *consequent = ixs_cmp(ctx, selected, IXS_CMP_EQ, two);
+    ixs_node *query = ixs_or(ctx, disjunct, consequent);
+
+    CHECK(ixs_node_tag(query) == IXS_OR);
+    CHECK(ixs_node_assoc_nargs(query) == 2);
+    CHECK(test_ixs_check_predicate_facts(empty, query) == IXS_CHECK_TRUE);
+  }
+
+  for (i = 0;
+       i < sizeof(folded_address_facts) / sizeof(folded_address_facts[0]); i++)
+    facts[i] = ixs_parse_pred(ctx, folded_address_facts[i],
+                              strlen(folded_address_facts[i]));
+  folded = ixs_facts_create_preds(IXS_TEST_SESSION(ctx), facts,
+                                  sizeof(folded_address_facts) /
+                                      sizeof(folded_address_facts[0]));
+  CHECK(folded);
+  CHECK(test_ixs_check_predicate_facts(
+            folded, ixs_parse_pred(ctx, folded_address_query,
+                                   strlen(folded_address_query))) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static ixs_node *signed_i32_offset_cmp(ixs_ctx *ctx, ixs_node *value,
                                        ixs_node *limit, int64_t offset,
                                        ixs_cmp_op op) {
@@ -10952,6 +11110,9 @@ int main(void) {
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();
+  test_public_predicate_implications();
+  test_public_predicate_implication_oom_is_reusable();
+  test_public_predicate_comparison_implications();
   test_public_equivalence_congruent_signed_no_wrap();
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();

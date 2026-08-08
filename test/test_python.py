@@ -2602,6 +2602,55 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
         ctx.check_predicate(ixsimpl.or_(x, y), empty)
 
 
+def test_predicate_implication_bindings() -> None:
+    ctx = ixsimpl.Context()
+    row = ctx.sym("binding_implication_row")
+    column = ctx.sym("binding_implication_column")
+    antecedent = ixsimpl.and_(row >= 0, row < 8, column >= 0, column < 4)
+    linear = row + 8 * column
+    consequent = ixsimpl.and_(linear >= 0, linear < 32)
+    facts = ctx.facts()
+
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), consequent), facts) is True
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), linear < 31), facts) is None
+    assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), 1 / row > 0), facts) is None
+
+    comparisons = [
+        row > 0,
+        row >= 0,
+        row < 0,
+        row <= 0,
+        ctx.eq(row, 0),
+        ctx.ne(row, 0),
+    ]
+    for disjunct in comparisons:
+        selected = ixsimpl.pw((1, disjunct), (2, ctx.true_()))
+        assert ctx.check_predicate(ixsimpl.or_(disjunct, ctx.eq(selected, 2)), facts) is True
+
+
+def test_folded_address_predicate_implication_binding() -> None:
+    ctx = ixsimpl.Context()
+    facts = ctx.facts()
+    facts.assume_many(
+        [
+            ctx.parse_pred("item == floor(item)"),
+            ctx.parse_pred("item >= 0"),
+            ctx.parse_pred("item < 64"),
+            ctx.parse_pred("slot == floor(slot)"),
+            ctx.parse_pred("slot >= 0"),
+            ctx.parse_pred("slot < 4"),
+        ]
+    )
+    query = ctx.parse_pred(
+        "-1 + Mod(slot, 4) >= 0 | "
+        "-2016 + 1024*floor(1/32*xor(32, item)) + 2048*Mod(slot, 4) + "
+        "32*xor(Mod(floor(1/32*xor(32, item)) + 2*Mod(slot, 4), 32), "
+        "Mod(xor(32, item), 32)) <= 0"
+    )
+
+    assert ctx.check_predicate(query, facts) is True
+
+
 def test_ordered_equivalence_uses_full_tree_congruence() -> None:
     ctx = ixsimpl.Context()
     base = ctx.sym("python_ordered_base")

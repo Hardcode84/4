@@ -1725,8 +1725,23 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   child is false; `NOT` inverts true and false. Predicate-valued `Piecewise`
   nodes that do not collapse during fact-backed simplification remain
   unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
-  diagnostic rather than interpreted as boolean trees. The evaluator uses a
-  1024-frame stack and an 8192-node visit budget.
+  diagnostic rather than interpreted as boolean trees. The evaluator is
+  iterative and memoized over the predicate DAG using query-arena storage;
+  allocation failure returns unknown.
+
+  An otherwise unknown binary `OR` also admits one bounded implication step.
+  An explicit `NOT(A)` disjunct supplies `A`; a comparison disjunct supplies
+  its complementary comparison, covering the canonical form of `NOT(CMP)`
+  for all six comparison operators. The query first proves the complete `OR`
+  defined and integer-valued because the operators are eager. It then forks
+  the current facts, ingests the antecedent without publishing its local
+  closure, and evaluates the other disjunct once without recursively invoking
+  implication. A binary `OR` therefore creates at most two local forks. Each
+  fork is linear in the retained fact state, shares the enclosing query guard
+  and failure transport, and is discarded before returning. Unsupported or
+  partial antecedents, insufficient facts, a contradictory public fact set,
+  allocation failure, and proof-limit exhaustion return `UNKNOWN`; local
+  assumption diagnostics do not escape the query.
 - **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
   `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
   defined over every valuation admitted by the incoming facts before pointer
