@@ -6690,6 +6690,61 @@ static void test_public_predicate_tree_query(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_predicate_comparison_implications(void) {
+  static const ixs_cmp_op operations[] = {
+      IXS_CMP_GT, IXS_CMP_GE, IXS_CMP_LT, IXS_CMP_LE, IXS_CMP_EQ, IXS_CMP_NE,
+  };
+  static const char folded_address_query[] =
+      "-1 + Mod(slot, 4) >= 0 | "
+      "-2016 + 1024*floor(1/32*xor(32, item)) + 2048*Mod(slot, 4) + "
+      "32*xor(Mod(floor(1/32*xor(32, item)) + 2*Mod(slot, 4), 32), "
+      "Mod(xor(32, item), 32)) <= 0";
+  static const char *folded_address_facts[] = {
+      "item == floor(item)", "item >= 0", "item < 64",
+      "slot == floor(slot)", "slot >= 0", "slot < 4",
+  };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "comparison_implication_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *truth = ixs_true(ctx);
+  ixs_facts *empty = ixs_facts_create(ctx);
+  ixs_node
+      *facts[sizeof(folded_address_facts) / sizeof(folded_address_facts[0])];
+  ixs_facts *folded;
+  size_t i;
+
+  CHECK(ctx && x && zero && one && two && truth && empty);
+  for (i = 0; i < sizeof(operations) / sizeof(operations[0]); i++) {
+    ixs_node *disjunct = ixs_cmp(ctx, x, operations[i], zero);
+    ixs_node *values[2] = {one, two};
+    ixs_node *conditions[2] = {disjunct, truth};
+    ixs_node *selected = ixs_pw(ctx, 2, values, conditions);
+    ixs_node *consequent = ixs_cmp(ctx, selected, IXS_CMP_EQ, two);
+    ixs_node *query = ixs_or(ctx, disjunct, consequent);
+
+    CHECK(ixs_node_tag(query) == IXS_OR);
+    CHECK(ixs_node_assoc_nargs(query) == 2);
+    CHECK(test_ixs_check_predicate_facts(empty, query) == IXS_CHECK_TRUE);
+  }
+
+  for (i = 0;
+       i < sizeof(folded_address_facts) / sizeof(folded_address_facts[0]); i++)
+    facts[i] = ixs_parse_pred(ctx, folded_address_facts[i],
+                              strlen(folded_address_facts[i]));
+  folded = ixs_facts_create_preds(IXS_TEST_SESSION(ctx), facts,
+                                  sizeof(folded_address_facts) /
+                                      sizeof(folded_address_facts[0]));
+  CHECK(folded);
+  CHECK(test_ixs_check_predicate_facts(
+            folded, ixs_parse_pred(ctx, folded_address_query,
+                                   strlen(folded_address_query))) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static ixs_node *signed_i32_offset_cmp(ixs_ctx *ctx, ixs_node *value,
                                        ixs_node *limit, int64_t offset,
                                        ixs_cmp_op op) {
@@ -9777,6 +9832,7 @@ int main(void) {
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();
+  test_public_predicate_comparison_implications();
   test_public_equivalence_congruent_signed_no_wrap();
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();

@@ -14406,15 +14406,13 @@ cleanup:
   return bounds->oom ? IXS_CHECK_UNKNOWN : answer;
 }
 
-/* Prove A => B by checking B in a private copy of the current facts extended
- * with A.  The source predicate must remain total: AND/OR are eager integer
- * operators, so a true branch does not hide an undefined sibling. */
-static ixs_check_result predicate_query_implication(ixs_bounds *bounds,
-                                                    ixs_node *predicate,
-                                                    bool *limited) {
+/* Check one implication in a private copy of the current facts extended with
+ * its antecedent. */
+static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
+                                                           ixs_node *antecedent,
+                                                           ixs_node *consequent,
+                                                           bool *limited) {
   ixs_ctx *ctx;
-  ixs_node *antecedent;
-  ixs_node *consequent;
   ixs_node *predicate_array[1];
   ixs_bounds branch;
   ixs_bounds_build_status status;
@@ -14428,21 +14426,8 @@ static ixs_check_result predicate_query_implication(ixs_bounds *bounds,
   bool branch_limited = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
 
-  if (!bounds || !predicate || predicate->tag != IXS_OR ||
-      predicate->u.assoc.nargs != 2u)
-    return IXS_CHECK_UNKNOWN;
-  if (predicate->u.assoc.args[0]->tag == IXS_NOT) {
-    antecedent = predicate->u.assoc.args[0]->u.unary_bool.arg;
-    consequent = predicate->u.assoc.args[1];
-  } else if (predicate->u.assoc.args[1]->tag == IXS_NOT) {
-    antecedent = predicate->u.assoc.args[1]->u.unary_bool.arg;
-    consequent = predicate->u.assoc.args[0];
-  } else {
-    return IXS_CHECK_UNKNOWN;
-  }
-  if (!antecedent ||
-      (antecedent->tag != IXS_AND && antecedent->tag != IXS_CMP) ||
-      !predicate_query_assoc_domain_proven(bounds, predicate))
+  if (!bounds || !antecedent || !consequent ||
+      (antecedent->tag != IXS_AND && antecedent->tag != IXS_CMP))
     return IXS_CHECK_UNKNOWN;
 
   ctx = bounds->ctx;
@@ -14495,6 +14480,56 @@ cleanup:
       (branch_limited || bounds_query_limited_since(bounds, limit_blocks)))
     *limited = true;
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
+}
+
+/* A | B is equivalent to !A => B and !B => A.  Check every implication form
+ * whose antecedent can be ingested.  Explicit NOT nodes retain their child as
+ * the antecedent; a comparison disjunct has already absorbed NOT during
+ * canonicalization, so reconstruct its complementary comparison.  The source
+ * predicate must remain total: AND/OR are eager integer operators, so a true
+ * branch does not hide an undefined sibling. */
+static ixs_check_result predicate_query_implication(ixs_bounds *bounds,
+                                                    ixs_node *predicate,
+                                                    bool *limited) {
+  unsigned pass;
+  uint32_t i;
+
+  if (!bounds || !predicate || predicate->tag != IXS_OR ||
+      predicate->u.assoc.nargs != 2u ||
+      !predicate_query_assoc_domain_proven(bounds, predicate))
+    return IXS_CHECK_UNKNOWN;
+
+  /* Preserve the established explicit-NOT path before trying comparisons. */
+  for (pass = 0u; pass < 2u; pass++) {
+    for (i = 0u; i < 2u; i++) {
+      ixs_node *disjunct = predicate->u.assoc.args[i];
+      ixs_node *antecedent;
+      bool branch_limited = false;
+      ixs_check_result result;
+
+      if (pass == 0u && disjunct->tag == IXS_NOT) {
+        antecedent = disjunct->u.unary_bool.arg;
+      } else if (pass == 1u && disjunct->tag == IXS_CMP) {
+        antecedent = simp_not(bounds->ctx, disjunct);
+        if (!antecedent) {
+          bounds->oom = true;
+          return IXS_CHECK_UNKNOWN;
+        }
+      } else {
+        continue;
+      }
+      result = predicate_query_implication_branch(
+          bounds, antecedent, predicate->u.assoc.args[1u - i], &branch_limited);
+      if (branch_limited) {
+        if (limited)
+          *limited = true;
+        return IXS_CHECK_UNKNOWN;
+      }
+      if (result == IXS_CHECK_TRUE || bounds->oom)
+        return result;
+    }
+  }
+  return IXS_CHECK_UNKNOWN;
 }
 
 #define PREDICATE_FINITE_MAX_SYMBOLS 8u

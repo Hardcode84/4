@@ -1637,11 +1637,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   nodes that do not collapse during fact-backed simplification remain
   unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
   diagnostic rather than interpreted as boolean trees. An otherwise unknown
-  `OR(NOT(A), B)` with an ingestible `AND` or comparison antecedent is also
-  checked as an implication: the query first proves the original predicate
-  total, then forks the bounds state, ingests `A`, and proves `B` in that local
-  state. The fork shares the enclosing query guard and resource budget and is
-  discarded after this single implication level.
+  binary `OR` with either an explicit `NOT(A)` disjunct or a comparison
+  disjunct is also checked as an implication. For a comparison disjunct, its
+  complementary comparison is the local antecedent; this covers the canonical
+  form produced when `NOT(CMP)` is folded. The query first proves the original
+  predicate total, then forks the bounds state, ingests the antecedent, and
+  proves the other disjunct locally. The fork shares the enclosing query guard
+  and resource budget and is discarded after this single implication level.
 - **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
   `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
   defined over every valuation admitted by the incoming facts before pointer
