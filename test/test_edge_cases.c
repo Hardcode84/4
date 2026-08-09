@@ -262,6 +262,7 @@ static void test_sentinel_propagation(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x;
   ixs_node *err;
+  ixs_node *parse_err;
   ixs_node *r;
   ixs_node *vals[1];
   ixs_node *conds[1];
@@ -271,6 +272,8 @@ static void test_sentinel_propagation(void) {
   x = ixs_sym(ctx, "x");
   err = ixs_mod(ctx, x, ixs_int(ctx, 0));
   CHECK(err && ixs_is_domain_error(err));
+  parse_err = ixs_parse_expr(ctx, "(", 1);
+  CHECK(parse_err && ixs_is_parse_error(parse_err));
   ixs_ctx_clear_errors(ctx);
 
   /* add */
@@ -308,6 +311,21 @@ static void test_sentinel_propagation(void) {
   /* cmp */
   r = ixs_cmp(ctx, err, IXS_CMP_GT, x);
   CHECK(r && ixs_is_error(r));
+
+  ixs_ctx_clear_errors(ctx);
+  r = ixs_cmp(ctx, NULL, (ixs_cmp_op)99, x);
+  CHECK(r == NULL);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  r = ixs_cmp(ctx, err, (ixs_cmp_op)99, x);
+  CHECK(r == err);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  r = ixs_cmp(ctx, parse_err, (ixs_cmp_op)99, x);
+  CHECK(r == parse_err);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  r = ixs_cmp(ctx, x, (ixs_cmp_op)99, x);
+  CHECK(r && ixs_is_domain_error(r));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "invalid comparison operator") != NULL);
 
   /* and */
   r = ixs_and(ctx, err, x);

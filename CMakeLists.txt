@@ -23,6 +23,7 @@ else()
         src/parser.c
         src/print.c
         src/quotient_algebra.c
+        src/radix_algebra.c
         src/rational.c
         src/serialize.c
         src/simplify.c

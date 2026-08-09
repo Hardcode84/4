@@ -172,6 +172,8 @@ const ixs_node *ixs_pw(ixs_session *s, uint32_t n,
                        const ixs_node *const *values,
                        const ixs_node *const *conds);
 
+/* After NULL and error-sentinel propagation, returns ERROR when op is not one
+ * of the six ixs_cmp_op enumerators. */
 const ixs_node *ixs_cmp(ixs_session *s, const ixs_node *a, ixs_cmp_op op,
                         const ixs_node *b);
 const ixs_node *ixs_and(ixs_session *s, const ixs_node *a, const ixs_node *b);

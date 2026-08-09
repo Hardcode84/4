@@ -11,6 +11,7 @@
 #include "bounds.h"
 #include "interval.h"
 #include "node.h"
+#include "radix_algebra.h"
 #include "simplify.h"
 
 #include "test_check.h"
@@ -2250,6 +2251,34 @@ static void test_bounds_check_wave_radix_floor_sums(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_check_radix_mod_split_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "radix_mod_split_oom_x");
+  ixs_node *split = ixs_sub(ctx, x, ixs_mod(ctx, x, ixs_int(ctx, 64)));
+  ixs_node *query = ixs_cmp(ctx, split, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *domain = ixs_and(ctx, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+                             ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 255)));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && split && query && domain && facts);
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  ixs_ctx_clear_errors(ctx);
+  /* The first allocation is the dynamic Mod domain query inside the row
+   * reducer. Its OOM must abort this proof generation and permit a clean retry.
+   */
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(test_ixs_check_facts(facts, query) == IXS_CHECK_UNKNOWN);
+  CHECK(!facts->bounds.oom);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "out of memory") != NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_check_facts(facts, query) == IXS_CHECK_TRUE);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_check_radix_certificate_guards(void) {
   static const char domain_text[] = "wi >= 0 & wi <= 255";
   static const char four_symbol_domain_text[] =
@@ -2312,11 +2341,13 @@ static void test_bounds_check_radix_certificate_guards(void) {
   ixs_node *addition_overflow = ixs_parse_expr(
       ctx, "4611686018427387903*wi + 2*floor(wi/2) - floor(wi/4)",
       strlen("4611686018427387903*wi + 2*floor(wi/2) - floor(wi/4)"));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_radix_algebra_result algebra;
 
   CHECK(ctx && domain && small_domain && four_symbol_domain &&
         five_symbol_domain && nonintegral && negative_divisor && slot_limit &&
         slot_overflow && slot_storage_limit && step_limit && step_overflow &&
-        multiply_overflow && addition_overflow);
+        multiply_overflow && addition_overflow && facts);
   check_radix_certificate_case(ctx, nonintegral, domain, IXS_CHECK_UNKNOWN);
   check_radix_certificate_case(ctx, negative_divisor, domain,
                                IXS_CHECK_UNKNOWN);
@@ -2324,7 +2355,7 @@ static void test_bounds_check_radix_certificate_guards(void) {
                                IXS_CHECK_TRUE);
   check_radix_certificate_case(ctx, slot_overflow, five_symbol_domain,
                                IXS_CHECK_UNKNOWN);
-  /* Eight absent floor bases fill all 16 stack slots. */
+  /* Eight absent floor bases fill all 16 proof-row slots. */
   check_radix_certificate_case(ctx, slot_storage_limit, ixs_true(ctx),
                                IXS_CHECK_UNKNOWN);
   check_radix_certificate_case(ctx, step_limit, domain, IXS_CHECK_TRUE);
@@ -2333,6 +2364,19 @@ static void test_bounds_check_radix_certificate_guards(void) {
                                IXS_CHECK_UNKNOWN);
   check_radix_certificate_case(ctx, addition_overflow, small_domain,
                                IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(facts, domain));
+  /* Exhausted algebra is distinct from an unrepresentable coefficient. */
+  algebra = ixs_radix_algebra_facts_probe(facts, step_overflow);
+  CHECK(algebra.check == IXS_CHECK_UNKNOWN && algebra.limited && !algebra.oom);
+  algebra = ixs_radix_algebra_facts_probe(facts, multiply_overflow);
+  CHECK(algebra.check == IXS_CHECK_UNKNOWN && !algebra.limited && !algebra.oom);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  algebra = ixs_radix_algebra_facts_probe(facts, slot_overflow);
+  CHECK(algebra.check == IXS_CHECK_UNKNOWN && !algebra.limited && !algebra.oom);
+  algebra = ixs_radix_algebra_facts_probe(facts, step_limit);
+  CHECK(algebra.check == IXS_CHECK_TRUE && !algebra.limited && !algebra.oom);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
 
   ixs_ctx_destroy(ctx);
 }
@@ -11393,6 +11437,7 @@ int main(void) {
   test_bounds_check_mod_congruence();
   test_bounds_check_mod_remainder();
   test_bounds_check_wave_radix_floor_sums();
+  test_bounds_check_radix_mod_split_oom();
   test_bounds_check_radix_certificate_guards();
   test_bounds_check_composite_divisibility();
   test_bounds_check_pow2_fact();

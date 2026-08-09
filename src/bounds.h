@@ -230,6 +230,9 @@ IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
                                             bool *entered);
 IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b);
 
+/* True while nested proof queries have not reported a transport failure. */
+IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b);
+
 /* Release bounds-owned contextless query workspace; arena-backed bounds
  * storage remains owned by the caller. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b);

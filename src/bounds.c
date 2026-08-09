@@ -4,6 +4,7 @@
 #include "bounds.h"
 #include "expand.h"
 #include "quotient_algebra.h"
+#include "radix_algebra.h"
 #include "simplify.h"
 #include <assert.h>
 #include <limits.h>
@@ -471,6 +472,12 @@ static void bounds_query_refresh_owner(ixs_bounds *b) {
 
 static bool bounds_query_is_tracking(const ixs_bounds *b) {
   return b && (b->query_tracking_depth != 0 || b->query_state_borrowed);
+}
+
+IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b) {
+  return b && !b->oom && !b->contradiction &&
+         (!bounds_query_is_tracking(b) || !b->query_state ||
+          b->query_state->transport_outcome == BOUNDS_QUERY_OUTCOME_PENDING);
 }
 
 static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
@@ -8638,226 +8645,6 @@ bounds_note_truncating_range_status(ixs_bounds *b,
     bounds_query_note_limit(b->query_state);
 }
 
-/* Preserve the queried expression while recovering correlations lost by
- * interval addition. Each transfer uses
- * x = m*floor(x/m) + Mod(x,m), discarding only a nonnegative remainder.
- * Work is bounded by fixed stack storage and fixed transfer/search limits. */
-#define BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS 16u
-#define BOUNDS_RADIX_CERTIFICATE_MAX_STEPS 16u
-
-typedef struct {
-  ixs_node *node;
-  ixs_node *floor_base;
-  int64_t coefficient;
-  int64_t floor_divisor;
-} bounds_radix_certificate_slot;
-
-static bool bounds_radix_certificate_transport_complete(const ixs_bounds *b) {
-  /* A complete algebraic cancellation must not hide an earlier failed range
-   * probe from the query owner. */
-  return b && !b->oom && !b->contradiction &&
-         (!bounds_query_is_tracking(b) || !b->query_state ||
-          b->query_state->transport_outcome == BOUNDS_QUERY_OUTCOME_PENDING);
-}
-
-static bool bounds_floor_radix_parts(ixs_node *node, ixs_node **base,
-                                     int64_t *divisor) {
-  ixs_node *argument;
-  int64_t numerator;
-  int64_t denominator;
-
-  if (!node || node->tag != IXS_FLOOR)
-    return false;
-  argument = node->u.unary.arg;
-  if (!argument || argument->tag != IXS_MUL || argument->u.mul.nfactors != 1u ||
-      argument->u.mul.factors[0].exp != 1)
-    return false;
-  ixs_node_get_rat(argument->u.mul.coeff, &numerator, &denominator);
-  if (numerator != 1 || denominator <= 1)
-    return false;
-  *base = argument->u.mul.factors[0].base;
-  *divisor = denominator;
-  return true;
-}
-
-static bool bounds_radix_certificate_init(
-    ixs_node *expr,
-    bounds_radix_certificate_slot slots[BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS],
-    size_t *nslots) {
-  uint32_t i;
-  int64_t constant_p;
-  int64_t constant_q;
-  bool has_negative_floor = false;
-
-  if (!expr || expr->tag != IXS_ADD || expr->u.add.nterms == 0u ||
-      expr->u.add.nterms > BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS / 2u)
-    return false;
-  ixs_node_get_rat(expr->u.add.coeff, &constant_p, &constant_q);
-  if (constant_q <= 0 || constant_p < 0)
-    return false;
-
-  memset(slots, 0, BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS * sizeof(*slots));
-  *nslots = expr->u.add.nterms;
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    int64_t coefficient;
-    int64_t coefficient_q;
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &coefficient, &coefficient_q);
-    if (coefficient_q != 1)
-      return false;
-    slots[i].node = expr->u.add.terms[i].term;
-    slots[i].coefficient = coefficient;
-  }
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    size_t base_slot;
-    if (!bounds_floor_radix_parts(slots[i].node, &slots[i].floor_base,
-                                  &slots[i].floor_divisor))
-      continue;
-    has_negative_floor |= slots[i].coefficient < 0;
-    for (base_slot = 0; base_slot < *nslots; base_slot++)
-      if (slots[base_slot].node == slots[i].floor_base)
-        break;
-    if (base_slot == *nslots)
-      slots[(*nslots)++].node = slots[i].floor_base;
-  }
-  return has_negative_floor;
-}
-
-static int64_t bounds_radix_certificate_edge_radix(
-    const bounds_radix_certificate_slot *parent,
-    const bounds_radix_certificate_slot *child) {
-  if (child->floor_divisor == 0)
-    return 0;
-  if (child->floor_base == parent->node)
-    return child->floor_divisor;
-  /* floor(floor(x/d1)/r) == floor(x/(d1*r)) for positive integers d1, r. */
-  if (parent->floor_divisor <= 0 || child->floor_base != parent->floor_base ||
-      child->floor_divisor <= parent->floor_divisor ||
-      child->floor_divisor % parent->floor_divisor != 0)
-    return 0;
-  return child->floor_divisor / parent->floor_divisor;
-}
-
-static bool bounds_radix_certificate_find_transfer(
-    const bounds_radix_certificate_slot *slots, size_t nslots,
-    size_t *parent_index, size_t *child_index, int64_t *child_radix) {
-  size_t parent;
-  for (parent = 0; parent < nslots; parent++) {
-    size_t child;
-    size_t best_child = nslots;
-    int64_t best_radix = 0;
-    if (slots[parent].coefficient <= 0)
-      continue;
-    for (child = 0; child < nslots; child++) {
-      int64_t radix =
-          bounds_radix_certificate_edge_radix(&slots[parent], &slots[child]);
-      if (radix > 1 && (best_child == nslots || radix < best_radix)) {
-        best_child = child;
-        best_radix = radix;
-      }
-    }
-    if (best_child == nslots)
-      continue;
-    *parent_index = parent;
-    *child_index = best_child;
-    *child_radix = best_radix;
-    return true;
-  }
-  return false;
-}
-
-/* Mod(parent, radix) >= Mod(parent, d) when positive d divides radix. Keep
- * only the largest matching residual already present in the ADD. */
-static size_t
-bounds_radix_certificate_residual(const bounds_radix_certificate_slot *slots,
-                                  size_t nslots, size_t parent_index,
-                                  int64_t child_radix) {
-  size_t residual_index = nslots;
-  int64_t residual_modulus = 0;
-  size_t candidate;
-  for (candidate = 0; candidate < nslots; candidate++) {
-    ixs_node *node = slots[candidate].node;
-    int64_t modulus;
-    if (node->tag != IXS_MOD ||
-        node->u.binary.lhs != slots[parent_index].node ||
-        node->u.binary.rhs->tag != IXS_INT)
-      continue;
-    modulus = node->u.binary.rhs->u.ival;
-    if (modulus > residual_modulus && modulus > 0 &&
-        child_radix % modulus == 0) {
-      residual_index = candidate;
-      residual_modulus = modulus;
-    }
-  }
-  return residual_index;
-}
-
-static bool
-bounds_radix_certificate_transfer(bounds_radix_certificate_slot *slots,
-                                  size_t nslots, size_t parent_index,
-                                  size_t child_index, int64_t child_radix) {
-  size_t residual_index = bounds_radix_certificate_residual(
-      slots, nslots, parent_index, child_radix);
-  int64_t coefficient = slots[parent_index].coefficient;
-  int64_t transferred;
-  int64_t child_combined;
-  int64_t residual_combined = 0;
-
-  if (!ixs_safe_mul(coefficient, child_radix, &transferred) ||
-      !ixs_safe_add(slots[child_index].coefficient, transferred,
-                    &child_combined) ||
-      (residual_index != nslots &&
-       !ixs_safe_add(slots[residual_index].coefficient, coefficient,
-                     &residual_combined)))
-    return false;
-  slots[parent_index].coefficient = 0;
-  slots[child_index].coefficient = child_combined;
-  if (residual_index != nslots)
-    slots[residual_index].coefficient = residual_combined;
-  return true;
-}
-
-static bool bounds_radix_certificate_residuals_nonnegative(
-    ixs_bounds *b, const bounds_radix_certificate_slot *slots, size_t nslots) {
-  size_t slot;
-  for (slot = 0; slot < nslots; slot++) {
-    ixs_interval range;
-    if (slots[slot].coefficient < 0)
-      return false;
-    if (slots[slot].coefficient == 0)
-      continue;
-    range = ixs_bounds_get(b, slots[slot].node);
-    if (!bounds_radix_certificate_transport_complete(b) ||
-        !interval_lower_at_least(&range, 0, 1))
-      return false;
-  }
-  return bounds_radix_certificate_transport_complete(b);
-}
-
-static bool bounds_add_has_nonnegative_radix_certificate(ixs_bounds *b,
-                                                         ixs_node *expr) {
-  bounds_radix_certificate_slot slots[BOUNDS_RADIX_CERTIFICATE_MAX_SLOTS];
-  size_t nslots;
-  size_t step;
-
-  if (!bounds_radix_certificate_transport_complete(b) ||
-      !bounds_radix_certificate_init(expr, slots, &nslots))
-    return false;
-  for (step = 0; step < BOUNDS_RADIX_CERTIFICATE_MAX_STEPS; step++) {
-    size_t parent_index;
-    size_t child_index;
-    int64_t child_radix;
-    if (!bounds_radix_certificate_find_transfer(slots, nslots, &parent_index,
-                                                &child_index, &child_radix))
-      break;
-    if (!bounds_radix_certificate_transfer(slots, nslots, parent_index,
-                                           child_index, child_radix))
-      return false;
-  }
-  if (step == BOUNDS_RADIX_CERTIFICATE_MAX_STEPS)
-    return false;
-  return bounds_radix_certificate_residuals_nonnegative(b, slots, nslots);
-}
-
 typedef struct {
   ixs_node *representative;
   ixs_interval interval;
@@ -10540,90 +10327,6 @@ static ixs_check_result bounds_check_bit_query(ixs_bounds *b, ixs_node *cmp) {
   return bounds_check_and_mask_query(b, cmp, expr, value);
 }
 
-/* Recognize +/- (x - Mod(x,m)).  For integer x >= 0 and positive m this is
- * +/- m*floor(x/m), so its sign follows directly without losing correlation
- * between x and its remainder to independent interval arithmetic. */
-typedef struct {
-  ixs_node *mod;
-  ixs_node *dividend;
-  int64_t mod_coefficient;
-} bounds_mod_quotient_match;
-
-static bool bounds_extract_mod_quotient(ixs_node *expr,
-                                        bounds_mod_quotient_match *match) {
-  int64_t constant_p;
-  int64_t constant_q;
-  int64_t dividend_coefficient = 0;
-  uint32_t i;
-
-  memset(match, 0, sizeof(*match));
-  if (expr->tag != IXS_ADD || expr->u.add.nterms != 2u)
-    return false;
-  ixs_node_get_rat(expr->u.add.coeff, &constant_p, &constant_q);
-  if (constant_p != 0 || constant_q != 1)
-    return false;
-  for (i = 0; i < 2u; i++) {
-    ixs_node *term = expr->u.add.terms[i].term;
-    int64_t p;
-    int64_t q;
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q != 1)
-      return false;
-    if (term->tag == IXS_MOD) {
-      if (match->mod)
-        return false;
-      match->mod = term;
-      match->mod_coefficient = p;
-    } else {
-      if (match->dividend)
-        return false;
-      match->dividend = term;
-      dividend_coefficient = p;
-    }
-  }
-  return match->mod && match->dividend &&
-         match->mod->u.binary.lhs == match->dividend &&
-         ((match->mod_coefficient == -1 && dividend_coefficient == 1) ||
-          (match->mod_coefficient == 1 && dividend_coefficient == -1));
-}
-
-static bool bounds_mod_quotient_domain(ixs_bounds *b,
-                                       const bounds_mod_quotient_match *match) {
-  ixs_interval dividend_range;
-  ixs_interval modulus_range;
-
-  if (ixs_bounds_check_integer_valued(b, match->dividend) != IXS_CHECK_TRUE)
-    return false;
-  modulus_range = ixs_bounds_get(b, match->mod->u.binary.rhs);
-  dividend_range = ixs_bounds_get(b, match->dividend);
-  return interval_lower_at_least(&modulus_range, 1, 1) &&
-         interval_lower_at_least(&dividend_range, 0, 1);
-}
-
-static ixs_check_result bounds_check_mod_quotient_order(ixs_bounds *b,
-                                                        ixs_node *cmp) {
-  bounds_mod_quotient_match match;
-
-  if (!cmp || cmp->tag != IXS_CMP || !ixs_node_is_zero(cmp->u.binary.rhs))
-    return IXS_CHECK_UNKNOWN;
-  if (!bounds_extract_mod_quotient(cmp->u.binary.lhs, &match) ||
-      !bounds_mod_quotient_domain(b, &match))
-    return IXS_CHECK_UNKNOWN;
-
-  if (match.mod_coefficient == -1) {
-    if (cmp->u.binary.cmp_op == IXS_CMP_GE)
-      return IXS_CHECK_TRUE;
-    if (cmp->u.binary.cmp_op == IXS_CMP_LT)
-      return IXS_CHECK_FALSE;
-  } else {
-    if (cmp->u.binary.cmp_op == IXS_CMP_LE)
-      return IXS_CHECK_TRUE;
-    if (cmp->u.binary.cmp_op == IXS_CMP_GT)
-      return IXS_CHECK_FALSE;
-  }
-  return IXS_CHECK_UNKNOWN;
-}
-
 static ixs_check_result bounds_check_zero_congruence_query(ixs_bounds *b,
                                                            ixs_node *cmp) {
   uint64_t stride;
@@ -10785,8 +10488,9 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   ixs_interval iv;
   ixs_interval rhs_iv;
   ixs_interval truncating_remainder;
+  ixs_radix_algebra_result radix_result;
   ixs_check_result interval_result;
-  ixs_check_result mod_result, quotient_result, congruence_result, bit_result;
+  ixs_check_result mod_result, congruence_result, bit_result;
   bounds_truncating_range_status truncating_status;
 
   if (!cmp)
@@ -10815,9 +10519,12 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   if (mod_result != IXS_CHECK_UNKNOWN)
     return mod_result;
 
-  quotient_result = bounds_check_mod_quotient_order(b, cmp);
-  if (quotient_result != IXS_CHECK_UNKNOWN)
-    return quotient_result;
+  radix_result =
+      ixs_radix_algebra_order(b, cmp->u.binary.lhs, cmp->u.binary.cmp_op);
+  if (radix_result.oom)
+    b->oom = true;
+  if (radix_result.check != IXS_CHECK_UNKNOWN)
+    return radix_result.check;
 
   congruence_result = bounds_check_zero_congruence_query(b, cmp);
   if (congruence_result != IXS_CHECK_UNKNOWN)
@@ -10839,9 +10546,13 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
     if (interval_result != IXS_CHECK_UNKNOWN)
       return interval_result;
   }
-  if (cmp->u.binary.cmp_op == IXS_CMP_GE && cmp->u.binary.lhs->tag == IXS_ADD &&
-      bounds_add_has_nonnegative_radix_certificate(b, cmp->u.binary.lhs))
-    return IXS_CHECK_TRUE;
+  if (cmp->u.binary.cmp_op == IXS_CMP_GE && cmp->u.binary.lhs->tag == IXS_ADD) {
+    radix_result = ixs_radix_algebra_nonnegative(b, cmp->u.binary.lhs);
+    if (radix_result.oom)
+      b->oom = true;
+    if (radix_result.check != IXS_CHECK_UNKNOWN)
+      return radix_result.check;
+  }
   return IXS_CHECK_UNKNOWN;
 }
 
@@ -12510,6 +12221,20 @@ static bool facts_bind(ixs_facts *facts, ixs_session_binding *binding,
   facts->bounds.scratch = &(*ctx)->scratch;
   return true;
 }
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC ixs_radix_algebra_result
+ixs_radix_algebra_facts_probe(ixs_facts *facts, const ixs_node *expr) {
+  ixs_radix_algebra_result result = {IXS_CHECK_UNKNOWN, false, false};
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  if (!expr || !facts_bind(facts, &binding, &ctx))
+    return result;
+  result = ixs_radix_algebra_nonnegative(&facts->bounds, expr);
+  ixs_session_unbind(&binding);
+  return result;
+}
+#endif
 
 typedef struct {
   ixs_bounds *bounds;

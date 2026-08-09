@@ -4729,6 +4729,8 @@ static ixs_node *simp_cmp_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
     if (prop)
       return prop;
   }
+  if (op < IXS_CMP_GT || op > IXS_CMP_NE)
+    return simp_err(ctx, "ixs_cmp: invalid comparison operator");
   node = ixs_node_binary(ctx, IXS_CMP, a, b, op);
   if (!node)
     return NULL;

@@ -1276,26 +1276,49 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   prove even a constant predicate. Both entry points run the same scalar proof
   contract: one query generation spans the fast interval, congruence, and bit
   checks plus the exact fallback for an unresolved `EQ` or `NE` and the
-  bounded radix fallback for an unresolved zero-RHS `GE`. Exact proofs require
-  total operands. Cycles,
+  early ordered Euclidean-split check for an unresolved zero-RHS ordered
+  comparison, plus the bounded radix fallback for an unresolved zero-RHS
+  `GE`. Exact proofs require total operands. Cycles,
   bounded subproof exhaustion, and allocation failure return unknown without
   poisoning the reusable session or fact set.
 
-  The radix fallback accepts only a canonical `ADD` with a nonnegative
-  constant, integral term coefficients, and literal positive divisors in
-  admitted `floor(base / divisor)` terms. It repeatedly substitutes
+  The radix fallback is the private `src/radix_algebra.c` component. It borrows
+  one canonical `ADD` row with integral term coefficients and views its
+  coefficients in the comparison's orientation; orientation rejects
+  `INT64_MIN` instead of constructing a negated expression. The early ordered
+  path has a bounded syntactic admission requiring a positive dividend
+  coefficient and a negative `Mod` coefficient for that same dividend, so pure
+  floor certificates and their range queries remain on the late `GE` path. The
+  proof first handles literal positive divisors in admitted
+  `floor(base / divisor)` terms. It repeatedly substitutes
   `base = divisor*floor(base/divisor) + Mod(base, divisor)` into a positive
   parent coefficient. The omitted remainder is nonnegative. When an existing
   `Mod(base, d)` term has positive `d` dividing the transferred radix, the
   proof may retain that tighter lower bound because
   `Mod(base, radix) >= Mod(base, d)`. A certificate succeeds only when every
   residual coefficient is nonnegative and an ordinary range query proves each
-  remaining positive term nonnegative. The proof stack has 16 slots, admits at
-  most eight initial terms, and rejects a certificate that reaches the
-  16-transfer ceiling. Bookkeeping is therefore O(1), with at most 16 ordinary
-  range queries and no context-wide scan. Checked coefficient overflow, an
-  unsupported shape, missing bounds, contradiction, query transport failure,
-  or either fixed ceiling yields `UNKNOWN`.
+  remaining positive term nonnegative. After all literal floor transfers, the
+  same row may cancel `k = min(c, -r)` from a positive `c*x` term and a
+  negative `r*Mod(x,m)` term. This drops the nonnegative Euclidean split
+  `k*(x - Mod(x,m))` when `x` is integer and nonnegative and the possibly
+  dynamic modulus `m` is strictly positive; it never materializes a symbolic
+  floor or coefficient. One fixed stack proof row has 16 slots, admits at most
+  eight initial terms, and rejects a certificate that reaches the 16-transfer
+  ceiling. For `T <= 8` input terms, `N <= 16` slots, and `K < 16` transfers,
+  intrinsic row bookkeeping is `O(T*N + K*N^2 + N^2)` in a fixed 16-slot row.
+  Mod cancellation makes at most `3*N` inherited domain-oracle calls, followed
+  by at most `N` ordinary range-oracle calls; there is no context-wide scan.
+  The transfer ceiling is an explicit local limit and does not poison other
+  proof strategies. Checked coefficient overflow, an unsupported shape,
+  missing bounds, contradiction, or dirty nested-query transport is an
+  ordinary `UNKNOWN`; nested range-query allocation failure is reported as
+  OOM.
+
+  This is the ordered Euclidean split/merge part of mixed-radix layout algebra,
+  not a general layout-composition engine. Direct Euclidean `Mod` splits accept
+  a dynamic positive modulus. Dynamic floor-radix chains, XOR and mask
+  projections, products, Piecewise, and general digit reconstruction retain
+  their existing proof domains.
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 
@@ -2165,6 +2188,7 @@ Each string includes the error kind and location, e.g.:
 - `"Mod: divisor is zero"`
 - `"Mod: divisor is negative"`
 - `"Mod: divisor is not positive under assumptions"`
+- `"ixs_cmp: invalid comparison operator"`
 - `"rational overflow in multiply"`
 - `"integer literal overflow at offset 42"`
 
@@ -2855,6 +2879,8 @@ ixsimpl/
 │   ├── bounds.h
 │   ├── quotient_algebra.c  # bounded Euclidean sparse-row equality
 │   ├── quotient_algebra.h
+│   ├── radix_algebra.c     # bounded mixed-radix nonnegativity proof
+│   ├── radix_algebra.h
 │   ├── interval.c           # interval arithmetic
 │   ├── interval.h
 │   ├── print.c              # output formatters

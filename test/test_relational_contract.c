@@ -418,23 +418,171 @@ static void test_relational_signed_u32_recurrence(void) {
 }
 
 static void test_relational_mod_quotient_order(void) {
+  static const ixs_cmp_op operations[] = {
+      IXS_CMP_GT, IXS_CMP_GE, IXS_CMP_LT, IXS_CMP_LE, IXS_CMP_EQ, IXS_CMP_NE,
+  };
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "relation_mod_order_item");
-  ixs_node *multiple = ixs_sub(ctx, item, ixs_mod(ctx, item, ixs_int(ctx, 64)));
+  ixs_node *other = ixs_sym(ctx, "relation_mod_order_other");
+  ixs_node *modulus = ixs_sym(ctx, "relation_mod_order_modulus");
+  ixs_node *literal_mod = ixs_mod(ctx, item, ixs_int(ctx, 64));
+  ixs_node *dynamic_mod = ixs_mod(ctx, item, modulus);
+  ixs_node *multiple = ixs_sub(ctx, item, literal_mod);
+  ixs_node *negative = ixs_sub(ctx, literal_mod, item);
+  ixs_node *dynamic_multiple = ixs_sub(ctx, item, dynamic_mod);
+  ixs_node *mismatched = ixs_sub(ctx, item, ixs_mod(ctx, other, modulus));
+  ixs_node *partial_scaled =
+      ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 2), item), dynamic_mod);
+  ixs_node *scaled = ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 2), item),
+                             ixs_mul(ctx, ixs_int(ctx, 2), dynamic_mod));
+  ixs_node *overdrawn =
+      ixs_sub(ctx, item, ixs_mul(ctx, ixs_int(ctx, 2), dynamic_mod));
+  ixs_node *mixed =
+      ixs_add(ctx, scaled,
+              ixs_sub(ctx, other,
+                      ixs_floor(ctx, ixs_div(ctx, other, ixs_int(ctx, 2)))));
+  ixs_node *floor_first =
+      ixs_sub(ctx, ixs_sub(ctx, item, ixs_mod(ctx, item, ixs_int(ctx, 2))),
+              ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 2))));
+  ixs_node *minimum_coefficient = ixs_mul(ctx, ixs_int(ctx, INT64_MIN), item);
+  ixs_node *minimum_positive_orientation =
+      ixs_sub(ctx, minimum_coefficient, literal_mod);
+  ixs_node *minimum_negative_orientation =
+      ixs_add(ctx, minimum_coefficient, literal_mod);
+  ixs_node *half = ixs_div(ctx, item, ixs_int(ctx, 2));
+  ixs_node *nonintegral_multiple =
+      ixs_sub(ctx, half, ixs_mod(ctx, half, modulus));
   ixs_node *nonnegative = ixs_cmp(ctx, multiple, IXS_CMP_GE, ixs_int(ctx, 0));
   ixs_facts *bounded = ixs_facts_create(ctx);
   ixs_facts *upper_only = ixs_facts_create(ctx);
+  ixs_facts *dynamic = ixs_facts_create(ctx);
+  ixs_facts *crosses_zero = ixs_facts_create(ctx);
+  ixs_facts *missing_dividend = ixs_facts_create(ctx);
+  ixs_facts *missing_modulus = ixs_facts_create(ctx);
+  ixs_facts *partial_modulus = ixs_facts_create(ctx);
+  ixs_facts *nonpositive_modulus = ixs_facts_create(ctx);
+  size_t operation;
 
-  CHECK(ctx && item && multiple && nonnegative && bounded && upper_only);
+  CHECK(ctx && item && other && modulus && literal_mod && dynamic_mod &&
+        multiple && negative && dynamic_multiple && mismatched &&
+        partial_scaled && scaled && overdrawn && mixed && floor_first &&
+        minimum_coefficient && minimum_positive_orientation &&
+        minimum_negative_orientation && half && nonintegral_multiple &&
+        nonnegative && bounded && upper_only && dynamic && crosses_zero &&
+        missing_dividend && missing_modulus && partial_modulus &&
+        nonpositive_modulus);
   CHECK(ixs_facts_assume_pred(bounded,
                               ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
   CHECK(ixs_facts_assume_pred(
       bounded, ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 255))));
   CHECK(test_ixs_check_predicate_facts(bounded, nonnegative) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, multiple, IXS_CMP_LT, ixs_int(ctx, 0))) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, negative, IXS_CMP_LE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, negative, IXS_CMP_GT, ixs_int(ctx, 0))) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, ixs_int(ctx, 0), IXS_CMP_LE, multiple)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, ixs_int(ctx, 0), IXS_CMP_GT, multiple)) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, multiple, IXS_CMP_GT, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, multiple, IXS_CMP_LE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, multiple, IXS_CMP_EQ, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, multiple, IXS_CMP_NE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, minimum_positive_orientation, IXS_CMP_GE,
+                             ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            bounded, ixs_cmp(ctx, minimum_negative_orientation, IXS_CMP_LE,
+                             ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_facts_assume_pred(
       upper_only, ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 255))));
-  CHECK(test_ixs_check_predicate_facts(upper_only, nonnegative) ==
+  for (operation = 0; operation < sizeof(operations) / sizeof(operations[0]);
+       operation++)
+    CHECK(test_ixs_check_predicate_facts(
+              upper_only, ixs_cmp(ctx, multiple, operations[operation],
+                                  ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(dynamic,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      dynamic, ixs_cmp(ctx, other, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      dynamic, ixs_cmp(ctx, modulus, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE,
+                             ixs_int(ctx, 0))) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, partial_scaled, IXS_CMP_GE,
+                             ixs_int(ctx, 0))) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, scaled, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, mixed, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, floor_first, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, overdrawn, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, nonintegral_multiple, IXS_CMP_GE,
+                             ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_predicate_facts(
+            dynamic, ixs_cmp(ctx, mismatched, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      crosses_zero, ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, -1))));
+  CHECK(ixs_facts_assume_pred(crosses_zero,
+                              ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(
+      crosses_zero, ixs_cmp(ctx, modulus, IXS_CMP_EQ, ixs_int(ctx, 2))));
+  CHECK(test_ixs_check_predicate_facts(
+            crosses_zero, ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE,
+                                  ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(
+      missing_dividend, ixs_cmp(ctx, modulus, IXS_CMP_GE, ixs_int(ctx, 1))));
+  CHECK(test_ixs_check_predicate_facts(
+            missing_dividend, ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE,
+                                      ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(missing_modulus,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_predicate_facts(
+            missing_modulus, ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE,
+                                     ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(partial_modulus,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      partial_modulus, ixs_cmp(ctx, modulus, IXS_CMP_LE, ixs_int(ctx, 64))));
+  CHECK(test_ixs_check_predicate_facts(
+            partial_modulus, ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE,
+                                     ixs_int(ctx, 0))) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(nonpositive_modulus,
+                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      nonpositive_modulus, ixs_cmp(ctx, modulus, IXS_CMP_LE, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_predicate_facts(
+            nonpositive_modulus,
+            ixs_cmp(ctx, dynamic_multiple, IXS_CMP_GE, ixs_int(ctx, 0))) ==
         IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
