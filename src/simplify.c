@@ -4146,6 +4146,30 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
   bool changed = false;
   (void)bnds;
 
+  if (dividend->tag == IXS_MUL && dividend->u.mul.nfactors == 1u &&
+      dividend->u.mul.factors[0].exp == 1 &&
+      dividend->u.mul.factors[0].base->tag == IXS_MOD) {
+    ixs_node *term = dividend->u.mul.factors[0].base;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    int64_t required;
+    bool congruent;
+    ixs_node_get_rat(dividend->u.mul.coeff, &coefficient_p, &coefficient_q);
+    if (coefficient_q != 1)
+      return n;
+    congruent = term->u.binary.rhs == denominator;
+    if (!congruent && term->u.binary.rhs->tag == IXS_INT &&
+        denominator->tag == IXS_INT && term->u.binary.rhs->u.ival > 0 &&
+        denominator->u.ival > 0) {
+      required = denominator->u.ival /
+                 ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
+      congruent = coefficient_p % required == 0;
+    }
+    if (!congruent)
+      return n;
+    flattened = simp_mul(ctx, dividend->u.mul.coeff, term->u.binary.lhs);
+    return flattened ? simp_mod(ctx, flattened, denominator) : NULL;
+  }
   if (dividend->tag != IXS_ADD)
     return n;
   mark = ixs_arena_save(&ctx->scratch);

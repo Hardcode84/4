@@ -2729,6 +2729,46 @@ static void test_mod_floor_regression(void) {
   CHECK(ixs_node_tag(nested) == IXS_MOD);
   CHECK(ixs_node_tag(ixs_node_binary_lhs(nested)) == IXS_MOD);
 
+  /* The documented nested-Mod flattening also covers a canonical single
+   * scaled term when the outer modulus divides coefficient*inner modulus. */
+  {
+    ixs_node *inner = ixs_mod(ctx, x, ixs_int(ctx, 32));
+    ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 2), inner);
+    ixs_node *flattened =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 32));
+    ixs_node *symbolic_modulus = ixs_sym(ctx, "flatten_modulus");
+    ixs_node *symbolic_inner = ixs_mod(ctx, x, symbolic_modulus);
+    ixs_node *symbolic_scaled =
+        ixs_mul(ctx, ixs_int(ctx, 3), symbolic_inner);
+    ixs_node *distinct_inner = ixs_mod(ctx, x, ixs_int(ctx, 12));
+    ixs_node *distinct_scaled =
+        ixs_mul(ctx, ixs_int(ctx, 2), distinct_inner);
+    ixs_node *wrong_modulus = ixs_mod(ctx, scaled, ixs_int(ctx, 24));
+    ixs_node *fractional =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), inner),
+                ixs_int(ctx, 32));
+    ixs_node *extra_factor =
+        ixs_mod(ctx,
+                ixs_mul(ctx, scaled, y),
+                ixs_int(ctx, 32));
+    ixs_node *powered =
+        ixs_mod(ctx, ixs_mul(ctx, inner, inner), ixs_int(ctx, 32));
+
+    CHECK(ixs_mod(ctx, scaled, ixs_int(ctx, 32)) == flattened);
+    CHECK(ixs_mod(ctx, symbolic_scaled, symbolic_modulus) ==
+          ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 3), x), symbolic_modulus));
+    CHECK(ixs_mod(ctx, distinct_scaled, ixs_int(ctx, 8)) ==
+          ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 8)));
+    CHECK(ixs_node_tag(wrong_modulus) == IXS_MOD);
+    CHECK(ixs_node_tag(ixs_node_binary_lhs(wrong_modulus)) == IXS_MUL);
+    CHECK(ixs_node_tag(fractional) == IXS_MOD);
+    CHECK(ixs_node_tag(ixs_node_binary_lhs(fractional)) == IXS_MUL);
+    CHECK(ixs_node_tag(extra_factor) == IXS_MOD);
+    CHECK(ixs_node_tag(ixs_node_binary_lhs(extra_factor)) == IXS_MUL);
+    CHECK(ixs_node_tag(powered) == IXS_MOD);
+    CHECK(ixs_node_tag(ixs_node_binary_lhs(powered)) == IXS_MUL);
+  }
+
   /* Parity maps integer addition to n-ary xor. */
   {
     ixs_node *item = ixs_sym(ctx, "parity_x");

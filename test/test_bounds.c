@@ -7232,6 +7232,9 @@ static void test_public_total_equivalence(void) {
   {
     ixs_node *a = ixs_sym(ctx, "equiv_mod_shift_a");
     ixs_node *d = ixs_sym(ctx, "equiv_mod_shift_d");
+    ixs_node *r = ixs_sym(ctx, "equiv_mod_shift_r");
+    ixs_node *u = ixs_sym(ctx, "equiv_mod_shift_u");
+    ixs_node *v = ixs_sym(ctx, "equiv_mod_shift_v");
     ixs_node *next = ixs_mod(ctx, ixs_add(ctx, a, ixs_int(ctx, 1)), d);
     ixs_node *next_sum = ixs_add(ctx, ixs_mod(ctx, a, d), ixs_int(ctx, 1));
     ixs_node *previous = ixs_mod(ctx, ixs_sub(ctx, a, ixs_int(ctx, 2)), d);
@@ -7243,12 +7246,38 @@ static void test_public_total_equivalence(void) {
     ixs_node *half_next = ixs_mod(ctx, ixs_add(ctx, half, ixs_int(ctx, 1)), d);
     ixs_node *half_next_sum =
         ixs_add(ctx, ixs_mod(ctx, half, d), ixs_int(ctx, 1));
+    ixs_node *bounded_next = ixs_mod(ctx, ixs_add(ctx, a, r), d);
+    ixs_node *bounded_next_sum = ixs_add(ctx, ixs_mod(ctx, a, d), r);
+    ixs_node *twice_r = ixs_mul(ctx, ixs_int(ctx, 2), r);
+    ixs_node *odd_twice_r = ixs_add(ctx, twice_r, ixs_int(ctx, 1));
+    ixs_node *fact_backed_base =
+        ixs_add(ctx, ixs_mul(ctx, a, u),
+                ixs_mul(ctx, ixs_int(ctx, 16), v));
+    ixs_node *scaled_shifted =
+        ixs_mod(ctx, ixs_add(ctx, fact_backed_base, twice_r), d);
+    ixs_node *scaled_shifted_sum =
+        ixs_add(ctx, ixs_mod(ctx, fact_backed_base, d), twice_r);
+    ixs_node *odd_scaled_shifted =
+        ixs_mod(ctx, ixs_add(ctx, fact_backed_base, odd_twice_r), d);
+    ixs_node *odd_scaled_shifted_sum =
+        ixs_add(ctx, ixs_mod(ctx, fact_backed_base, d), odd_twice_r);
+    ixs_node *scaled_bounded_next =
+        ixs_mul(ctx, ixs_int(ctx, 8), bounded_next);
+    ixs_node *scaled_bounded_next_sum =
+        ixs_mul(ctx, ixs_int(ctx, 8), bounded_next_sum);
     ixs_facts *safe = ixs_facts_create(ctx);
     ixs_facts *boundary = ixs_facts_create(ctx);
     ixs_facts *no_positive = ixs_facts_create(ctx);
     ixs_facts *negative_divisor = ixs_facts_create(ctx);
     ixs_facts *no_divisibility = ixs_facts_create(ctx);
     ixs_facts *noninteger = ixs_facts_create(ctx);
+    ixs_facts *bounded_shift = ixs_facts_create(ctx);
+    ixs_facts *may_cross = ixs_facts_create(ctx);
+    ixs_facts *missing_alignment = ixs_facts_create(ctx);
+    ixs_facts *scaled_shift = ixs_facts_create(ctx);
+    ixs_facts *scaled_may_cross = ixs_facts_create(ctx);
+    ixs_facts *scaled_missing_base = ixs_facts_create(ctx);
+    ixs_facts *scaled_missing_denominator = ixs_facts_create(ctx);
     ixs_node *d_divisible = ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, 16)),
                                     IXS_CMP_EQ, ixs_int(ctx, 0));
     ixs_node *d_positive = ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0));
@@ -7293,6 +7322,93 @@ static void test_public_total_equivalence(void) {
     CHECK(ixs_facts_assume_pred(noninteger, d_positive));
     CHECK(test_ixs_equivalent_facts(noninteger, half_next, half_next_sum) ==
           IXS_CHECK_UNKNOWN);
+
+    CHECK(ixs_facts_assume_pred(
+        bounded_shift, ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)),
+                               IXS_CMP_EQ, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(bounded_shift, d_divisible));
+    CHECK(ixs_facts_assume_pred(bounded_shift, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        bounded_shift, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        bounded_shift, ixs_cmp(ctx, r, IXS_CMP_LT, ixs_int(ctx, 16))));
+    CHECK(test_ixs_equivalent_facts(bounded_shift, bounded_next,
+                                    bounded_next_sum) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(bounded_shift, scaled_bounded_next,
+                                    scaled_bounded_next_sum) == IXS_CHECK_TRUE);
+
+    CHECK(ixs_facts_assume_pred(
+        may_cross, ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                           ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(may_cross, d_divisible));
+    CHECK(ixs_facts_assume_pred(may_cross, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        may_cross, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        may_cross, ixs_cmp(ctx, r, IXS_CMP_LE, ixs_int(ctx, 16))));
+    CHECK(test_ixs_equivalent_facts(may_cross, bounded_next,
+                                    bounded_next_sum) == IXS_CHECK_UNKNOWN);
+
+    CHECK(ixs_facts_assume_pred(missing_alignment, d_divisible));
+    CHECK(ixs_facts_assume_pred(missing_alignment, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        missing_alignment, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        missing_alignment, ixs_cmp(ctx, r, IXS_CMP_LT, ixs_int(ctx, 16))));
+    CHECK(test_ixs_equivalent_facts(missing_alignment, bounded_next,
+                                    bounded_next_sum) == IXS_CHECK_UNKNOWN);
+
+    /* The primary structural stride deliberately loses fact-backed product
+     * alignment here.  The next delta-lattice point is 14 + 2 = 16, and the
+     * full fact domain must prove both required divisibilities. */
+    CHECK(ixs_facts_assume_pred(
+        scaled_shift, ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)),
+                              IXS_CMP_EQ, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(scaled_shift, d_divisible));
+    CHECK(ixs_facts_assume_pred(scaled_shift, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        scaled_shift, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        scaled_shift, ixs_cmp(ctx, r, IXS_CMP_LT, ixs_int(ctx, 8))));
+    CHECK(test_ixs_equivalent_facts(scaled_shift, scaled_shifted,
+                                    scaled_shifted_sum) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(scaled_shift, odd_scaled_shifted,
+                                    odd_scaled_shifted_sum) == IXS_CHECK_TRUE);
+
+    CHECK(ixs_facts_assume_pred(
+        scaled_may_cross, ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)),
+                                  IXS_CMP_EQ, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(scaled_may_cross, d_divisible));
+    CHECK(ixs_facts_assume_pred(scaled_may_cross, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        scaled_may_cross, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        scaled_may_cross, ixs_cmp(ctx, r, IXS_CMP_LE, ixs_int(ctx, 8))));
+    CHECK(test_ixs_equivalent_facts(scaled_may_cross, scaled_shifted,
+                                    scaled_shifted_sum) == IXS_CHECK_UNKNOWN);
+
+    CHECK(ixs_facts_assume_pred(scaled_missing_base, d_divisible));
+    CHECK(ixs_facts_assume_pred(scaled_missing_base, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        scaled_missing_base, ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        scaled_missing_base, ixs_cmp(ctx, r, IXS_CMP_LT, ixs_int(ctx, 8))));
+    CHECK(test_ixs_equivalent_facts(scaled_missing_base, scaled_shifted,
+                                    scaled_shifted_sum) == IXS_CHECK_UNKNOWN);
+
+    CHECK(ixs_facts_assume_pred(
+        scaled_missing_denominator,
+        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)), IXS_CMP_EQ,
+                ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(scaled_missing_denominator, d_positive));
+    CHECK(ixs_facts_assume_pred(
+        scaled_missing_denominator,
+        ixs_cmp(ctx, r, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        scaled_missing_denominator,
+        ixs_cmp(ctx, r, IXS_CMP_LT, ixs_int(ctx, 8))));
+    CHECK(test_ixs_equivalent_facts(scaled_missing_denominator, scaled_shifted,
+                                    scaled_shifted_sum) == IXS_CHECK_UNKNOWN);
   }
 
   CHECK(ixs_facts_assume_pred(contradictory,
@@ -7351,6 +7467,125 @@ static void test_generic_bounded_scaled_mod_equivalence(void) {
                               ixs_cmp(ctx, r, IXS_CMP_EQ, ixs_int(ctx, 4))));
   CHECK(test_ixs_check_facts(outside, equality) == IXS_CHECK_FALSE);
 
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_generic_enclosed_radix_chain(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "enclosed_radix_x");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *six = ixs_int(ctx, 6);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *sixty_four = ixs_int(ctx, 64);
+  ixs_node *low = ixs_mod(ctx, x, two);
+  ixs_node *bit1 = ixs_mod(
+      ctx,
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, sixty_four), two)), two);
+  ixs_node *bit2 = ixs_mod(
+      ctx,
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, sixty_four), four)), two);
+  ixs_node *partition =
+      ixs_add(ctx, low,
+              ixs_add(ctx, ixs_mul(ctx, two, bit1),
+                      ixs_mul(ctx, four, bit2)));
+  ixs_node *direct = ixs_mod(ctx, x, eight);
+  ixs_node *bad_bit1 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, six), two)), two);
+  ixs_node *bad_partition =
+      ixs_add(ctx, low, ixs_mul(ctx, two, bad_bit1));
+  ixs_node *bad_direct = ixs_mod(ctx, x, four);
+  ixs_node *fractional = ixs_div(ctx, x, two);
+  ixs_node *fractional_low = ixs_mod(ctx, fractional, two);
+  ixs_node *fractional_high = ixs_mod(
+      ctx,
+      ixs_floor(ctx,
+                ixs_div(ctx, ixs_mod(ctx, fractional, eight), two)),
+      two);
+  ixs_node *fractional_partition =
+      ixs_add(ctx, fractional_low, ixs_mul(ctx, two, fractional_high));
+  ixs_node *fractional_direct = ixs_mod(ctx, fractional, four);
+  ixs_node *scaled_partition =
+      ixs_mul(ctx, ixs_int(ctx, 1056), partition);
+  ixs_node *digit_64 = ixs_mod(
+      ctx,
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, sixty_four), eight)), two);
+  ixs_node *compact_digit =
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)), eight));
+  ixs_node *other = ixs_sym(ctx, "enclosed_radix_other");
+  ixs_node *full_partition = ixs_add(
+      ctx, partition, ixs_mul(ctx, eight, digit_64));
+  ixs_node *compact_partition =
+      ixs_add(ctx, direct, ixs_mul(ctx, eight, compact_digit));
+  ixs_node *other_direct =
+      ixs_mod(ctx, other, ixs_int(ctx, 16));
+  ixs_node *wrong_scaled_partition =
+      ixs_mul(ctx, two, full_partition);
+  ixs_node *extra_partition =
+      ixs_add(ctx, full_partition,
+              ixs_mul(ctx, ixs_int(ctx, 16), low));
+  ixs_node *missing_partition = ixs_add(
+      ctx, low,
+      ixs_add(ctx, ixs_mul(ctx, two, bit1),
+              ixs_mul(ctx, eight, digit_64)));
+  ixs_node *duplicate_partition = ixs_add(
+      ctx, full_partition,
+      ixs_mul(ctx, two, ixs_mod(ctx, other, two)));
+  ixs_facts *integer = ixs_facts_create(ctx);
+  ixs_facts *no_integer = ixs_facts_create(ctx);
+  ixs_facts *at_one = ixs_facts_create(ctx);
+  ixs_facts *at_six = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && two && four && six && eight && sixty_four && low && bit1 &&
+        bit2 && partition && direct && bad_bit1 && bad_partition && bad_direct &&
+        fractional && fractional_low && fractional_high &&
+        fractional_partition && fractional_direct && scaled_partition &&
+        digit_64 && compact_digit && other && full_partition &&
+        compact_partition && other_direct && wrong_scaled_partition &&
+        extra_partition && missing_partition && duplicate_partition &&
+        integer && no_integer && at_one && at_six);
+  CHECK(ixs_facts_assume_pred(
+      integer, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+  CHECK(ixs_facts_assume_pred(
+      at_one, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(ixs_facts_assume_pred(
+      at_six, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 6))));
+
+  CHECK(test_ixs_equivalent_facts(integer, direct, partition) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            integer, ixs_cmp(ctx, direct, IXS_CMP_EQ, partition)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(integer, bit1) == bit1);
+
+  /* The relation is unavailable without an integer carrier, and an enclosing
+   * modulus must contain the complete requested field. */
+  CHECK(test_ixs_equivalent_facts(no_integer, fractional_direct,
+                                  fractional_partition) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(at_six, bad_direct, bad_partition) ==
+        IXS_CHECK_FALSE);
+
+  /* Reconstructing a residue does not license an unrelated output scale. */
+  CHECK(test_ixs_equivalent_facts(at_one, scaled_partition, direct) ==
+        IXS_CHECK_FALSE);
+
+  CHECK(test_ixs_equivalent_facts(integer, full_partition,
+                                  compact_partition) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(integer, full_partition,
+                                  ixs_mod(ctx, x, ixs_int(ctx, 16))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(integer, full_partition, other_direct) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(integer, full_partition, direct) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(at_one, wrong_scaled_partition,
+                                  full_partition) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(at_one, extra_partition, full_partition) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(at_six, missing_partition,
+                                  full_partition) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(integer, duplicate_partition,
+                                  full_partition) == IXS_CHECK_UNKNOWN);
   ixs_ctx_destroy(ctx);
 }
 
@@ -9472,6 +9707,7 @@ int main(void) {
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
   test_generic_bounded_scaled_mod_equivalence();
+  test_generic_enclosed_radix_chain();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();

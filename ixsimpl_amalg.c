@@ -17338,18 +17338,52 @@ IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(ixs_bounds *bounds,
                                                       ixs_node *denominator,
                                                       ixs_node *delta) {
   ixs_integer_range_result range;
+  uint64_t delta_stride;
+  uint64_t increment;
   uint64_t modulus;
   uint64_t residue;
-  if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
-      modulus > (uint64_t)INT64_MAX ||
-      !bounds_known_residue(bounds, dividend, modulus, &residue) ||
-      ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
-          IXS_CHECK_TRUE ||
-      !bounds_get_integer_range(bounds, delta, &range) || !range.has_lower ||
+  if (!bounds_get_integer_range(bounds, delta, &range) || !range.has_lower ||
       !range.has_upper)
     return false;
-  return bounds_residue_shift_in_range(residue, modulus, range.lower,
-                                       range.upper);
+  if (bounds_known_stride(bounds, dividend, &modulus) && modulus > 1u &&
+      modulus <= (uint64_t)INT64_MAX &&
+      bounds_known_residue(bounds, dividend, modulus, &residue) &&
+      ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) ==
+          IXS_CHECK_TRUE &&
+      bounds_residue_shift_in_range(residue, modulus, range.lower,
+                                    range.upper))
+    return true;
+  if (bounds->oom || range.lower < 0 || range.upper == INT64_MAX)
+    return false;
+
+  /* The smallest positive stride multiple above delta's finite range is
+   * merely an expression-derived candidate bucket.
+   * Structural stride analysis can conservatively lose fact-backed alignment
+   * in products, so the full fact domain must still prove that both the base
+   * and denominator are divisible by that candidate. */
+  if (!bounds_known_stride(bounds, delta, &delta_stride)) {
+    if (bounds->oom)
+      return false;
+    delta_stride = 1u;
+  }
+  if (delta_stride == 0)
+    delta_stride = 1u;
+  if (delta_stride > (uint64_t)INT64_MAX ||
+      (uint64_t)range.upper == (uint64_t)INT64_MAX)
+    return false;
+  modulus = (uint64_t)range.upper + 1u;
+  increment = modulus % delta_stride;
+  if (increment != 0) {
+    increment = delta_stride - increment;
+    if (modulus > (uint64_t)INT64_MAX - increment)
+      return false;
+    modulus += increment;
+  }
+  return modulus > 1u && modulus <= (uint64_t)INT64_MAX &&
+         ixs_bounds_check_divisible(bounds, dividend, (int64_t)modulus) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) ==
+             IXS_CHECK_TRUE;
 }
 
 static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
@@ -18286,25 +18320,6 @@ static bool equivalence_mod_sum_in_range(equivalence_state *state,
          equivalence_proves_zero_cmp(state, upper, IXS_CMP_LT);
 }
 
-static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
-                                                ixs_node *dividend,
-                                                ixs_node *denominator,
-                                                int64_t shift) {
-  ixs_node *delta = ixs_node_int(state->ctx, shift);
-  if (!delta) {
-    state->oom = true;
-    return false;
-  }
-  if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
-      !ixs_bounds_mod_shift_stays_in_residue(state->bounds, dividend,
-                                             denominator, delta)) {
-    if (state->bounds->oom)
-      state->oom = true;
-    return false;
-  }
-  return true;
-}
-
 static ixs_check_result
 equivalence_mod_shift_structural(equivalence_state *state,
                                  ixs_node *shifted_dividend,
@@ -18313,8 +18328,6 @@ equivalence_mod_shift_structural(equivalence_state *state,
   ixs_node *shift;
   ixs_node *expected_dividend;
   int64_t delta;
-  int64_t shift_value;
-  int64_t shift_q;
 
   if (equivalence_extract_mod_sum(state, sum, shifted_denominator,
                                   &base_dividend, &shift) &&
@@ -18332,13 +18345,12 @@ equivalence_mod_shift_structural(equivalence_state *state,
           IXS_CHECK_TRUE) {
     if (equivalence_mod_sum_in_range(state, sum, shifted_denominator))
       return IXS_CHECK_TRUE;
-    if (ixs_node_is_const(shift)) {
-      ixs_node_get_rat(shift, &shift_value, &shift_q);
-      if (shift_q == 1 &&
-          equivalence_mod_shift_by_congruence(state, base_dividend,
-                                              shifted_denominator, shift_value))
-        return IXS_CHECK_TRUE;
-    }
+    if (equivalence_proves_zero_cmp(state, shifted_denominator, IXS_CMP_GT) &&
+        ixs_bounds_mod_shift_stays_in_residue(
+            state->bounds, base_dividend, shifted_denominator, shift))
+      return IXS_CHECK_TRUE;
+    if (state->bounds->oom)
+      state->oom = true;
   }
   return IXS_CHECK_UNKNOWN;
 }
@@ -19269,83 +19281,120 @@ static bool equivalence_positive_mod(ixs_node *node, ixs_node *base,
          equivalence_positive_int_node(node->u.binary.rhs, modulus);
 }
 
-static ixs_check_result
-equivalence_enclosed_radix_terms(equivalence_state *state, ixs_node *base,
-                                 int64_t total, const ixs_addterm *low_term,
-                                 const ixs_addterm *high_term) {
-  ixs_node *low = low_term->term;
-  ixs_node *high = high_term->term;
-  ixs_node *numerator;
-  ixs_node *denominator;
-  ixs_quotient_parts_status quotient_status;
-  int64_t radix;
-  int64_t digit_count;
-  int64_t enclosing;
-  int64_t product;
-
-  if (!node_coeff_is(low_term->coeff, 1) ||
-      !equivalence_positive_mod(low, base, &radix))
-    return IXS_CHECK_UNKNOWN;
-  if (!high || high->tag != IXS_MOD || high->u.binary.lhs->tag != IXS_FLOOR ||
-      !equivalence_positive_int_node(high->u.binary.rhs, &digit_count) ||
-      !node_coeff_is(high_term->coeff, radix))
-    return IXS_CHECK_UNKNOWN;
-  if (!ixs_safe_mul(radix, digit_count, &product) || product != total)
-    return IXS_CHECK_UNKNOWN;
-
-  quotient_status = simp_decompose_exact_quotient(
-      state->ctx, high->u.binary.lhs->u.unary.arg, &numerator, &denominator);
-  if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
-    state->oom = true;
-    return IXS_CHECK_UNKNOWN;
-  }
-  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
-      !equivalence_positive_int_node(denominator, &product) ||
-      product != radix ||
-      !equivalence_positive_mod(numerator, base, &enclosing))
-    return IXS_CHECK_UNKNOWN;
-  return enclosing % total == 0 ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
-}
-
-static ixs_check_result equivalence_enclosed_radix_partition_direction(
-    equivalence_state *state, ixs_node *direct, ixs_node *partition) {
-  ixs_node *base;
-  int64_t total;
+static bool equivalence_extract_enclosed_radix_partition(
+    equivalence_state *state, ixs_node *expr, ixs_node **base_out,
+    int64_t *total_out) {
+  ixs_node *base = NULL;
   int64_t constant_p;
   int64_t constant_q;
-  uint32_t low_index;
+  int64_t place = 1;
+  uint32_t matched = 0;
 
-  if (!direct || !partition || direct->tag != IXS_MOD ||
-      !equivalence_positive_int_node(direct->u.binary.rhs, &total) ||
-      partition->tag != IXS_ADD || partition->u.add.nterms != 2u)
-    return IXS_CHECK_UNKNOWN;
-  ixs_node_get_rat(partition->u.add.coeff, &constant_p, &constant_q);
-  if (constant_p != 0 || constant_q != 1)
-    return IXS_CHECK_UNKNOWN;
-
-  base = direct->u.binary.lhs;
-  if (ixs_bounds_check_integer_valued(state->bounds, base) != IXS_CHECK_TRUE)
-    return IXS_CHECK_UNKNOWN;
-
-  for (low_index = 0; low_index < 2u; low_index++) {
-    const ixs_addterm *low_term = &partition->u.add.terms[low_index];
-    const ixs_addterm *high_term = &partition->u.add.terms[1u - low_index];
-    ixs_check_result result = equivalence_enclosed_radix_terms(
-        state, base, total, low_term, high_term);
-    if (result != IXS_CHECK_UNKNOWN || state->oom)
-      return result;
+  if (!expr || !base_out || !total_out)
+    return false;
+  if (expr->tag == IXS_MOD &&
+      equivalence_positive_int_node(expr->u.binary.rhs, total_out)) {
+    base = expr->u.binary.lhs;
+    if (ixs_bounds_check_integer_valued(state->bounds, base) !=
+            IXS_CHECK_TRUE ||
+        ixs_bounds_check_defined(state->bounds, base) != IXS_CHECK_TRUE)
+      return false;
+    *base_out = base;
+    return true;
   }
-  return IXS_CHECK_UNKNOWN;
+  if (expr->tag != IXS_ADD || expr->u.add.nterms < 2u)
+    return false;
+  ixs_node_get_rat(expr->u.add.coeff, &constant_p, &constant_q);
+  if (constant_p != 0 || constant_q != 1)
+    return false;
+
+  while (matched < expr->u.add.nterms) {
+    const ixs_addterm *digit_term = NULL;
+    ixs_node *digit;
+    ixs_node *numerator;
+    ixs_node *denominator;
+    ixs_quotient_parts_status quotient_status;
+    bool terminal_digit = false;
+    int64_t digit_count;
+    int64_t enclosing = 0;
+    int64_t next;
+    uint32_t i;
+
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      if (!node_coeff_is(expr->u.add.terms[i].coeff, place))
+        continue;
+      if (digit_term)
+        return false;
+      digit_term = &expr->u.add.terms[i];
+    }
+    if (!digit_term)
+      return false;
+    digit = digit_term->term;
+
+    if (place == 1) {
+      if (!digit || digit->tag != IXS_MOD ||
+          !equivalence_positive_int_node(digit->u.binary.rhs, &digit_count))
+        return false;
+      base = digit->u.binary.lhs;
+    } else {
+      ixs_node *rounded = digit;
+      if (digit && digit->tag == IXS_MOD &&
+          equivalence_positive_int_node(digit->u.binary.rhs, &digit_count)) {
+        rounded = digit->u.binary.lhs;
+      } else {
+        terminal_digit = true;
+      }
+      if (!rounded || rounded->tag != IXS_FLOOR)
+        return false;
+      quotient_status = simp_decompose_exact_quotient(
+          state->ctx, rounded->u.unary.arg, &numerator, &denominator);
+      if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
+        state->oom = true;
+        return false;
+      }
+      if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
+          !equivalence_positive_int_node(denominator, &next) ||
+          next != place ||
+          !equivalence_positive_mod(numerator, base, &enclosing))
+        return false;
+      if (terminal_digit) {
+        if (enclosing % place != 0)
+          return false;
+        digit_count = enclosing / place;
+      }
+    }
+
+    if (digit_count <= 1 || !ixs_safe_mul(place, digit_count, &next) ||
+        (place != 1 && enclosing % next != 0) ||
+        (terminal_digit &&
+         (enclosing != next || matched + 1u != expr->u.add.nterms)))
+      return false;
+    place = next;
+    matched++;
+  }
+  if (!base || place <= 1 ||
+      ixs_bounds_check_integer_valued(state->bounds, base) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_defined(state->bounds, base) != IXS_CHECK_TRUE)
+    return false;
+  *base_out = base;
+  *total_out = place;
+  return true;
 }
 
 static ixs_check_result
 equivalence_enclosed_radix_partition(equivalence_state *state, ixs_node *lhs,
                                      ixs_node *rhs) {
-  ixs_check_result result =
-      equivalence_enclosed_radix_partition_direction(state, lhs, rhs);
-  if (result != IXS_CHECK_UNKNOWN)
-    return result;
-  return equivalence_enclosed_radix_partition_direction(state, rhs, lhs);
+  ixs_node *lhs_base;
+  ixs_node *rhs_base;
+  int64_t lhs_total;
+  int64_t rhs_total;
+  if (!equivalence_extract_enclosed_radix_partition(
+          state, lhs, &lhs_base, &lhs_total) ||
+      !equivalence_extract_enclosed_radix_partition(
+          state, rhs, &rhs_base, &rhs_total))
+    return IXS_CHECK_UNKNOWN;
+  return lhs_base == rhs_base && lhs_total == rhs_total ? IXS_CHECK_TRUE
+                                                        : IXS_CHECK_UNKNOWN;
 }
 
 /* Removing a Euclidean residue modulo M rounds an integer down to an M
@@ -33771,6 +33820,30 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
   bool changed = false;
   (void)bnds;
 
+  if (dividend->tag == IXS_MUL && dividend->u.mul.nfactors == 1u &&
+      dividend->u.mul.factors[0].exp == 1 &&
+      dividend->u.mul.factors[0].base->tag == IXS_MOD) {
+    ixs_node *term = dividend->u.mul.factors[0].base;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    int64_t required;
+    bool congruent;
+    ixs_node_get_rat(dividend->u.mul.coeff, &coefficient_p, &coefficient_q);
+    if (coefficient_q != 1)
+      return n;
+    congruent = term->u.binary.rhs == denominator;
+    if (!congruent && term->u.binary.rhs->tag == IXS_INT &&
+        denominator->tag == IXS_INT && term->u.binary.rhs->u.ival > 0 &&
+        denominator->u.ival > 0) {
+      required = denominator->u.ival /
+                 ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
+      congruent = coefficient_p % required == 0;
+    }
+    if (!congruent)
+      return n;
+    flattened = simp_mul(ctx, dividend->u.mul.coeff, term->u.binary.lhs);
+    return flattened ? simp_mod(ctx, flattened, denominator) : NULL;
+  }
   if (dividend->tag != IXS_ADD)
     return n;
   mark = ixs_arena_save(&ctx->scratch);

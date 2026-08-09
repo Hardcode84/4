@@ -1731,6 +1731,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   interval. The congruence proof requires a known `A == r (mod m)`, `m > 1`,
   `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
   `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
+  When structural stride discovery loses a fact-backed product alignment, a
+  finite nonnegative `delta` supplies only a candidate grid: the smallest
+  positive multiple of `stride(delta)` above its upper bound. The proof still
+  requires the full fact domain to establish both `A == 0 (mod grid)` and
+  `grid | D`; the candidate itself carries no assumption.
   More generally, `Mod(A,D)` equals any integer expression `B` proven
   equivalent to `A` and bounded by `0 <= B < D`. Conversely,
   `floor(N/d) == Q` follows for integer `N` and `Q` and a positive literal
@@ -1738,11 +1743,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `[0,d)`. The same equivalence query proves the generic radix identity
   `floor(Mod(A,M)/D) == Mod(floor(A/D),M/D)` for integer `A` and positive
   literal `D | M`; this is deliberately a relation proof rather than a global
-  canonical rewrite. It likewise proves
-  `Mod(A,a*b) == Mod(A,a) + a*Mod(floor(Mod(A,M)/a),b)` for integer `A` and
-  positive literals `a`, `b`, and `M` when `a*b | M`. Keeping the enclosing
-  radix partition query-directed avoids destabilizing either useful global
-  representation.
+  canonical rewrite. Enclosed radix partitions are also query-local. A direct
+  `Mod(A,R)` and a complete adjacent digit chain share the canonical proof
+  representative `(A,R)`: the chain begins with `Mod(A,r0)`, every later term
+  has the exact growing place coefficient and extracts a positive digit field
+  from an enclosing modulus containing that complete field, and every term is
+  consumed. The terminal high digit may omit its redundant outer `Mod` only
+  as the exact `floor(Mod(A,R)/place)` form. Two direct or partitioned forms
+  compare equal only when their validated carrier node and total radix are
+  identical. This covers arbitrary complete mixed-radix chains without a
+  global rewrite, recursive transitivity search, or workload vocabulary.
 
   A normalized zero-sum equality may contain several `Mod` terms. The query
   isolates each term in turn and launches at most one bounded subproof for
