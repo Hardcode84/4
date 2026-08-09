@@ -322,9 +322,6 @@ typedef struct {
 #define BOUNDS_VAR_INDEX_INIT_CAP 8u
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_DIFFERENCE_INDEX_INIT_CAP 8u
-#define BOUNDS_EXACT_INDEX_INIT_CAP 8u
-#define BOUNDS_EQUALITY_ENDPOINT_INDEX_INIT_CAP 8u
-#define BOUNDS_EQUALITY_INDEX_INIT_CAP 8u
 #define BOUNDS_EQUALITY_WALK_INIT_CAP 16u
 #define BOUNDS_EQUALITY_PROJECTION_CACHE_INIT_CAP 64u
 #define BOUNDS_CACHE_CAP 32u
@@ -346,19 +343,7 @@ struct ixs_difference_constraint {
   int64_t offset;
 };
 
-/* Immutable exact relation lhs == rhs + offset. Endpoint indices survive
- * append-only growth and order-preserving bounds forks. */
-struct ixs_equality_edge {
-  ixs_node *lhs;
-  ixs_node *rhs;
-  ixs_equality_edge *next_lhs;
-  ixs_equality_edge *next_rhs;
-  size_t lhs_endpoint;
-  size_t rhs_endpoint;
-  int64_t offset;
-};
-
-typedef ixs_wide_offset bounds_wide_offset;
+typedef ixs_relation_offset bounds_wide_offset;
 
 typedef struct {
   ixs_node *node;
@@ -411,13 +396,6 @@ typedef enum {
   BOUNDS_EQUALITY_RECORD_INVALID,
   BOUNDS_EQUALITY_RECORD_OOM
 } bounds_equality_record_status;
-
-typedef enum {
-  BOUNDS_EQUALITY_UNION_MERGED,
-  BOUNDS_EQUALITY_UNION_MATCHED,
-  BOUNDS_EQUALITY_UNION_CONFLICT,
-  BOUNDS_EQUALITY_UNION_INVALID
-} bounds_equality_union_status;
 
 typedef enum {
   BOUNDS_QUERY_EMPTY,
@@ -553,15 +531,6 @@ bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
 static bounds_equality_walk_status
 bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
                        bounds_wide_offset *offset, bool require_defined);
-static bounds_wide_offset bounds_wide_offset_from_int64(int64_t value);
-static bounds_wide_offset bounds_wide_offset_negate(bounds_wide_offset value);
-static bool bounds_wide_offset_add(bounds_wide_offset a, bounds_wide_offset b,
-                                   bounds_wide_offset *result);
-static bool bounds_wide_offset_equal(bounds_wide_offset a,
-                                     bounds_wide_offset b);
-static bounds_equality_union_status
-bounds_union_equality_endpoints(ixs_bounds *b, size_t lhs_endpoint,
-                                size_t rhs_endpoint, int64_t offset);
 static bounds_equality_walk_status
 bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
                                  int64_t *delta);
@@ -721,7 +690,8 @@ IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b) {
 static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
                                              const ixs_node *root) {
   return b && (bounds_query_is_tracking(b) ||
-               ixs_node_contains_nested_piecewise(root) || b->nequalities != 0);
+               ixs_node_contains_nested_piecewise(root) ||
+               ixs_relation_algebra_edge_count(&b->relations) != 0);
 }
 
 static const ixs_node *bounds_query_select_root(const ixs_bounds *b,
@@ -732,12 +702,12 @@ static const ixs_node *bounds_query_select_root(const ixs_bounds *b,
     return NULL;
   if (bounds_query_is_tracking(b))
     return nodes[0];
-  if (b && b->nequalities != 0)
+  if (b && ixs_relation_algebra_edge_count(&b->relations) != 0)
     return nodes[0];
   for (i = 0; i < nnodes; i++) {
     size_t endpoint_index;
     if (ixs_node_contains_nested_piecewise(nodes[i]) ||
-        (b && b->nequalities != 0 &&
+        (b && ixs_relation_algebra_edge_count(&b->relations) != 0 &&
          bounds_find_equality_endpoint(b, nodes[i], &endpoint_index)))
       return nodes[i];
   }
@@ -1391,19 +1361,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->difference_index_cap = 0;
   b->difference_var_cap = 0;
   b->difference_epoch = 0;
-  b->exact_vars = NULL;
-  b->exact_index = NULL;
-  b->nexact_vars = 0;
-  b->exact_var_cap = 0;
-  b->exact_index_cap = 0;
-  b->equality_endpoints = NULL;
-  b->equality_endpoint_index = NULL;
-  b->nequality_endpoints = 0;
-  b->equality_endpoint_cap = 0;
-  b->equality_endpoint_index_cap = 0;
-  b->equality_index = NULL;
-  b->nequalities = 0;
-  b->equality_index_cap = 0;
+  ixs_relation_algebra_init(&b->relations, scratch);
   b->nonzero = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
@@ -1567,101 +1525,6 @@ static bool bounds_fork_mod_inverse_state(ixs_bounds *dst,
   return true;
 }
 
-static bool bounds_fork_exact_state(ixs_bounds *dst, const ixs_bounds *src) {
-  if (src->exact_var_cap) {
-    if (!src->exact_vars ||
-        src->exact_var_cap > SIZE_MAX / sizeof(*dst->exact_vars))
-      return false;
-    dst->exact_vars = ixs_arena_alloc(
-        dst->scratch, src->exact_var_cap * sizeof(*dst->exact_vars),
-        sizeof(void *));
-    if (!dst->exact_vars)
-      return false;
-    memcpy(dst->exact_vars, src->exact_vars,
-           src->exact_var_cap * sizeof(*src->exact_vars));
-  }
-  if (src->exact_index_cap) {
-    if (!src->exact_index ||
-        src->exact_index_cap > SIZE_MAX / sizeof(*dst->exact_index))
-      return false;
-    dst->exact_index = ixs_arena_alloc(
-        dst->scratch, src->exact_index_cap * sizeof(*dst->exact_index),
-        sizeof(void *));
-    if (!dst->exact_index)
-      return false;
-    memcpy(dst->exact_index, src->exact_index,
-           src->exact_index_cap * sizeof(*src->exact_index));
-  }
-  return true;
-}
-
-static bool bounds_fork_equality_state(ixs_bounds *dst, const ixs_bounds *src) {
-  size_t i;
-  if (src->equality_endpoint_cap) {
-    if (!src->equality_endpoints ||
-        src->equality_endpoint_cap >
-            SIZE_MAX / sizeof(*dst->equality_endpoints))
-      return false;
-    dst->equality_endpoints = ixs_arena_alloc(
-        dst->scratch,
-        src->equality_endpoint_cap * sizeof(*dst->equality_endpoints),
-        sizeof(void *));
-    if (!dst->equality_endpoints)
-      return false;
-    memcpy(dst->equality_endpoints, src->equality_endpoints,
-           src->equality_endpoint_cap * sizeof(*src->equality_endpoints));
-    for (i = 0; i < src->nequality_endpoints; i++)
-      dst->equality_endpoints[i].edges = NULL;
-  }
-  if (src->equality_endpoint_index_cap) {
-    if (!src->equality_endpoint_index ||
-        src->equality_endpoint_index_cap >
-            SIZE_MAX / sizeof(*dst->equality_endpoint_index))
-      return false;
-    dst->equality_endpoint_index =
-        ixs_arena_alloc(dst->scratch,
-                        src->equality_endpoint_index_cap *
-                            sizeof(*dst->equality_endpoint_index),
-                        sizeof(void *));
-    if (!dst->equality_endpoint_index)
-      return false;
-    memcpy(dst->equality_endpoint_index, src->equality_endpoint_index,
-           src->equality_endpoint_index_cap *
-               sizeof(*src->equality_endpoint_index));
-  }
-  if (src->equality_index_cap) {
-    if (!src->equality_index ||
-        src->equality_index_cap > SIZE_MAX / sizeof(*dst->equality_index))
-      return false;
-    dst->equality_index = ixs_arena_alloc(
-        dst->scratch, src->equality_index_cap * sizeof(*dst->equality_index),
-        sizeof(void *));
-    if (!dst->equality_index)
-      return false;
-    memset(dst->equality_index, 0,
-           src->equality_index_cap * sizeof(*dst->equality_index));
-    for (i = 0; i < src->equality_index_cap; i++) {
-      const ixs_equality_edge *source_edge = src->equality_index[i];
-      ixs_equality_edge *edge;
-      if (!source_edge)
-        continue;
-      if (source_edge->lhs_endpoint >= src->nequality_endpoints ||
-          source_edge->rhs_endpoint >= src->nequality_endpoints)
-        return false;
-      edge = ixs_arena_alloc(dst->scratch, sizeof(*edge), sizeof(void *));
-      if (!edge)
-        return false;
-      *edge = *source_edge;
-      edge->next_lhs = dst->equality_endpoints[edge->lhs_endpoint].edges;
-      edge->next_rhs = dst->equality_endpoints[edge->rhs_endpoint].edges;
-      dst->equality_endpoints[edge->lhs_endpoint].edges = edge;
-      dst->equality_endpoints[edge->rhs_endpoint].edges = edge;
-      dst->equality_index[i] = edge;
-    }
-  }
-  return true;
-}
-
 static bool bounds_fork_expr_state(ixs_bounds *dst, const ixs_bounds *src) {
   if (!src->nexprs)
     return true;
@@ -1726,19 +1589,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->difference_index_cap = src->difference_index_cap;
   dst->difference_var_cap = src->difference_var_cap;
   dst->difference_epoch = src->difference_epoch;
-  dst->exact_vars = NULL;
-  dst->exact_index = NULL;
-  dst->nexact_vars = src->nexact_vars;
-  dst->exact_var_cap = src->exact_var_cap;
-  dst->exact_index_cap = src->exact_index_cap;
-  dst->equality_endpoints = NULL;
-  dst->equality_endpoint_index = NULL;
-  dst->nequality_endpoints = src->nequality_endpoints;
-  dst->equality_endpoint_cap = src->equality_endpoint_cap;
-  dst->equality_endpoint_index_cap = src->equality_endpoint_index_cap;
-  dst->equality_index = NULL;
-  dst->nequalities = src->nequalities;
-  dst->equality_index_cap = src->equality_index_cap;
+  ixs_relation_algebra_init(&dst->relations, dst->scratch);
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
@@ -1779,8 +1630,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->semantic_changed = NULL;
   if (!bounds_fork_index_state(dst, src) ||
       !bounds_fork_mod_inverse_state(dst, src) ||
-      !bounds_fork_exact_state(dst, src) ||
-      !bounds_fork_equality_state(dst, src) ||
+      ixs_relation_algebra_clone(&dst->relations, &src->relations,
+                                 dst->scratch) != IXS_RELATION_STATUS_OK ||
       !bounds_fork_expr_state(dst, src))
     goto failed;
   if (src->nnonzero) {
@@ -3306,433 +3157,45 @@ static void bounds_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_cache_clear(b);
 }
 
-static size_t
-bounds_equality_endpoint_slot(const size_t *index, size_t capacity,
-                              const ixs_equality_endpoint *endpoints,
-                              const ixs_node *expr) {
-  size_t slot = bounds_expr_hash_ptr(expr) & (capacity - 1u);
-  while (index[slot] && endpoints[index[slot] - 1u].expr != expr)
-    slot = (slot + 1u) & (capacity - 1u);
-  return slot;
-}
-
 static bool bounds_find_equality_endpoint(const ixs_bounds *b,
                                           const ixs_node *expr,
                                           size_t *endpoint_index) {
-  size_t slot;
-  if (!b || !expr || !endpoint_index || !b->equality_endpoint_index ||
-      !b->equality_endpoint_index_cap)
-    return false;
-  slot = bounds_equality_endpoint_slot(b->equality_endpoint_index,
-                                       b->equality_endpoint_index_cap,
-                                       b->equality_endpoints, expr);
-  if (!b->equality_endpoint_index[slot])
-    return false;
-  *endpoint_index = b->equality_endpoint_index[slot] - 1u;
-  return true;
-}
-
-/* Endpoint lookup is expected O(1); growth rehashes at 75% load. */
-static bool bounds_prepare_equality_endpoint_index(ixs_bounds *b, size_t count,
-                                                   size_t **prepared,
-                                                   size_t *prepared_capacity) {
-  size_t capacity = b->equality_endpoint_index_cap;
-  size_t *index;
-  size_t i;
-
-  if (capacity && count <= capacity - capacity / 4u) {
-    *prepared = b->equality_endpoint_index;
-    *prepared_capacity = capacity;
-    return true;
-  }
-  if (!capacity)
-    capacity = BOUNDS_EQUALITY_ENDPOINT_INDEX_INIT_CAP;
-  while (count > capacity - capacity / 4u) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (capacity > SIZE_MAX / sizeof(*index))
-    return false;
-  index =
-      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
-  if (!index)
-    return false;
-  memset(index, 0, capacity * sizeof(*index));
-  for (i = 0; i < b->nequality_endpoints; i++) {
-    size_t slot = bounds_equality_endpoint_slot(
-        index, capacity, b->equality_endpoints, b->equality_endpoints[i].expr);
-    index[slot] = i + 1u;
-  }
-  *prepared = index;
-  *prepared_capacity = capacity;
-  return true;
-}
-
-static bool bounds_get_or_create_equality_endpoint(ixs_bounds *b,
-                                                   ixs_node *expr,
-                                                   size_t *endpoint_index) {
-  ixs_equality_endpoint *endpoints;
-  size_t *index;
-  size_t endpoint_capacity;
-  size_t index_capacity;
-  size_t slot;
-
-  if (bounds_find_equality_endpoint(b, expr, endpoint_index))
-    return true;
-  if (b->nequality_endpoints == SIZE_MAX ||
-      !bounds_prepare_equality_endpoint_index(b, b->nequality_endpoints + 1u,
-                                              &index, &index_capacity))
-    return false;
-
-  endpoints = b->equality_endpoints;
-  endpoint_capacity = b->equality_endpoint_cap;
-  if (b->nequality_endpoints >= endpoint_capacity) {
-    if (endpoint_capacity > SIZE_MAX / 2u)
-      return false;
-    endpoint_capacity = endpoint_capacity ? endpoint_capacity * 2u : 4u;
-    if (endpoint_capacity > SIZE_MAX / sizeof(*endpoints))
-      return false;
-    endpoints = ixs_arena_alloc(
-        b->scratch, endpoint_capacity * sizeof(*endpoints), sizeof(void *));
-    if (!endpoints)
-      return false;
-    if (b->nequality_endpoints)
-      memcpy(endpoints, b->equality_endpoints,
-             b->nequality_endpoints * sizeof(*endpoints));
-  }
-
-  b->equality_endpoints = endpoints;
-  b->equality_endpoint_cap = endpoint_capacity;
-  b->equality_endpoint_index = index;
-  b->equality_endpoint_index_cap = index_capacity;
-  slot = bounds_equality_endpoint_slot(b->equality_endpoint_index,
-                                       b->equality_endpoint_index_cap,
-                                       b->equality_endpoints, expr);
-  b->equality_endpoints[b->nequality_endpoints].expr = expr;
-  b->equality_endpoints[b->nequality_endpoints].edges = NULL;
-  b->equality_endpoints[b->nequality_endpoints].parent = b->nequality_endpoints;
-  b->equality_endpoints[b->nequality_endpoints].rank = 0;
-  b->equality_endpoints[b->nequality_endpoints].offset =
-      bounds_wide_offset_from_int64(0);
-  b->equality_endpoint_index[slot] = b->nequality_endpoints + 1u;
-  *endpoint_index = b->nequality_endpoints;
-  b->nequality_endpoints++;
-  return true;
-}
-
-static size_t bounds_equality_hash(ixs_node *lhs, ixs_node *rhs,
-                                   int64_t offset) {
-  uint64_t x = (uint64_t)bounds_expr_hash_ptr(lhs);
-  x ^= (uint64_t)bounds_expr_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
-       (x << 6) + (x >> 2);
-  x ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (x << 6) + (x >> 2);
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
-static size_t bounds_equality_index_slot(ixs_equality_edge *const *index,
-                                         size_t capacity, ixs_node *lhs,
-                                         ixs_node *rhs, int64_t offset) {
-  size_t slot = bounds_equality_hash(lhs, rhs, offset) & (capacity - 1u);
-  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs ||
-                         index[slot]->offset != offset))
-    slot = (slot + 1u) & (capacity - 1u);
-  return slot;
-}
-
-/* Exact-relation edge lookup is expected O(1); growth rehashes at 75%. */
-static bool bounds_prepare_equality_index(ixs_bounds *b, size_t count,
-                                          ixs_equality_edge ***prepared,
-                                          size_t *prepared_capacity) {
-  size_t capacity = b->equality_index_cap;
-  ixs_equality_edge **index;
-  size_t i;
-
-  if (capacity && count <= capacity - capacity / 4u) {
-    *prepared = b->equality_index;
-    *prepared_capacity = capacity;
-    return true;
-  }
-  if (!capacity)
-    capacity = BOUNDS_EQUALITY_INDEX_INIT_CAP;
-  while (count > capacity - capacity / 4u) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (capacity > SIZE_MAX / sizeof(*index))
-    return false;
-  index =
-      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
-  if (!index)
-    return false;
-  memset(index, 0, capacity * sizeof(*index));
-  for (i = 0; i < b->equality_index_cap; i++) {
-    ixs_equality_edge *edge = b->equality_index[i];
-    size_t slot;
-    if (!edge)
-      continue;
-    slot = bounds_equality_index_slot(index, capacity, edge->lhs, edge->rhs,
-                                      edge->offset);
-    index[slot] = edge;
-  }
-  *prepared = index;
-  *prepared_capacity = capacity;
-  return true;
-}
-
-static bool bounds_has_exact_relation(const ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs, int64_t offset) {
-  int64_t reverse_offset;
-  size_t slot;
-  if (!b->equality_index || !b->equality_index_cap)
-    return false;
-  slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
-                                    lhs, rhs, offset);
-  if (b->equality_index[slot])
-    return true;
-  if (!ixs_safe_neg(offset, &reverse_offset))
-    return false;
-  slot = bounds_equality_index_slot(b->equality_index, b->equality_index_cap,
-                                    rhs, lhs, reverse_offset);
-  return b->equality_index[slot] != NULL;
+  return b && ixs_relation_algebra_find_endpoint(&b->relations, expr,
+                                                 endpoint_index);
 }
 
 static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                       ixs_node *rhs, int64_t offset) {
-  ixs_equality_edge **index;
-  ixs_equality_edge *edge;
-  bounds_equality_union_status union_status;
-  size_t lhs_endpoint;
-  size_t rhs_endpoint;
-  size_t index_capacity;
-  size_t slot;
-
+  ixs_relation_status status;
   if (!b || !lhs || !rhs || b->oom || b->contradiction)
     return;
-  if (lhs == rhs) {
-    if (offset != 0)
-      bounds_mark_contradiction(b);
+  status = ixs_relation_algebra_assert(&b->relations, lhs, rhs, offset);
+  switch (status) {
+  case IXS_RELATION_STATUS_ADDED:
+    bounds_mark_semantic_changed(b);
+    bounds_cache_clear(b);
     return;
-  }
-  if (bounds_has_exact_relation(b, lhs, rhs, offset))
+  case IXS_RELATION_STATUS_OK:
+  case IXS_RELATION_STATUS_UNCHANGED:
     return;
-  if (b->nequalities == SIZE_MAX) {
-    b->oom = true;
-    return;
-  }
-  if (!bounds_get_or_create_equality_endpoint(b, lhs, &lhs_endpoint) ||
-      !bounds_get_or_create_equality_endpoint(b, rhs, &rhs_endpoint)) {
-    b->oom = true;
-    return;
-  }
-  union_status =
-      bounds_union_equality_endpoints(b, lhs_endpoint, rhs_endpoint, offset);
-  if (union_status == BOUNDS_EQUALITY_UNION_CONFLICT) {
+  case IXS_RELATION_STATUS_CONFLICT:
     bounds_mark_contradiction(b);
     return;
-  }
-  if (union_status == BOUNDS_EQUALITY_UNION_INVALID) {
-    assert(!"invalid exact-relation component topology");
-    return;
-  }
-  if (!bounds_prepare_equality_index(b, b->nequalities + 1u, &index,
-                                     &index_capacity)) {
+  case IXS_RELATION_STATUS_OOM:
     b->oom = true;
     return;
+  case IXS_RELATION_STATUS_UNREPRESENTABLE:
+    assert(!"invalid exact-relation insertion result");
+    abort();
   }
-  edge = ixs_arena_alloc(b->scratch, sizeof(*edge), sizeof(void *));
-  if (!edge) {
-    b->oom = true;
-    return;
-  }
-  edge->lhs = lhs;
-  edge->rhs = rhs;
-  edge->lhs_endpoint = lhs_endpoint;
-  edge->rhs_endpoint = rhs_endpoint;
-  edge->offset = offset;
-  edge->next_lhs = b->equality_endpoints[lhs_endpoint].edges;
-  edge->next_rhs = b->equality_endpoints[rhs_endpoint].edges;
-  b->equality_endpoints[lhs_endpoint].edges = edge;
-  b->equality_endpoints[rhs_endpoint].edges = edge;
-  b->equality_index = index;
-  b->equality_index_cap = index_capacity;
-  slot = bounds_equality_index_slot(index, index_capacity, lhs, rhs, offset);
-  index[slot] = edge;
-  b->nequalities++;
-  bounds_mark_semantic_changed(b);
-  bounds_cache_clear(b);
+  assert(!"unknown exact-relation insertion result");
+  abort();
 }
 
 static uint64_t bounds_int64_magnitude(int64_t value) {
   if (value >= 0)
     return (uint64_t)value;
   return (uint64_t)(-(value + 1)) + 1u;
-}
-
-static bounds_wide_offset bounds_wide_offset_from_int64(int64_t value) {
-  bounds_wide_offset result;
-  result.lo = bounds_int64_magnitude(value);
-  result.hi = 0;
-  result.negative = value < 0;
-  return result;
-}
-
-static bounds_wide_offset bounds_wide_offset_negate(bounds_wide_offset value) {
-  if (value.lo != 0 || value.hi != 0)
-    value.negative = !value.negative;
-  return value;
-}
-
-static int bounds_wide_offset_magnitude_cmp(bounds_wide_offset a,
-                                            bounds_wide_offset b) {
-  if (a.hi != b.hi)
-    return a.hi < b.hi ? -1 : 1;
-  if (a.lo != b.lo)
-    return a.lo < b.lo ? -1 : 1;
-  return 0;
-}
-
-static bool bounds_wide_offset_add_magnitudes(bounds_wide_offset a,
-                                              bounds_wide_offset b,
-                                              bounds_wide_offset *result) {
-  uint64_t hi;
-  uint64_t lo = a.lo + b.lo;
-  bool carry = lo < a.lo;
-  hi = a.hi + b.hi;
-  if (hi < a.hi || (carry && hi == UINT64_MAX))
-    return false;
-  result->lo = lo;
-  result->hi = hi + (carry ? 1u : 0u);
-  return true;
-}
-
-static void bounds_wide_offset_subtract_magnitudes(bounds_wide_offset larger,
-                                                   bounds_wide_offset smaller,
-                                                   bounds_wide_offset *result) {
-  bool borrow = larger.lo < smaller.lo;
-  result->lo = larger.lo - smaller.lo;
-  result->hi = larger.hi - smaller.hi - (borrow ? 1u : 0u);
-}
-
-static bool bounds_wide_offset_add(bounds_wide_offset a, bounds_wide_offset b,
-                                   bounds_wide_offset *result) {
-  int magnitude_cmp;
-  if (a.negative == b.negative) {
-    if (!bounds_wide_offset_add_magnitudes(a, b, result))
-      return false;
-    result->negative = a.negative;
-  } else {
-    magnitude_cmp = bounds_wide_offset_magnitude_cmp(a, b);
-    if (magnitude_cmp >= 0) {
-      bounds_wide_offset_subtract_magnitudes(a, b, result);
-      result->negative = a.negative;
-    } else {
-      bounds_wide_offset_subtract_magnitudes(b, a, result);
-      result->negative = b.negative;
-    }
-  }
-  if (result->lo == 0 && result->hi == 0)
-    result->negative = false;
-  return true;
-}
-
-static bool bounds_wide_offset_equal(bounds_wide_offset a,
-                                     bounds_wide_offset b) {
-  return a.lo == b.lo && a.hi == b.hi && a.negative == b.negative;
-}
-
-static bool bounds_equality_root_offset(const ixs_bounds *b,
-                                        size_t endpoint_index,
-                                        size_t *root_index,
-                                        bounds_wide_offset *offset) {
-  bounds_wide_offset total = {0, 0, false};
-  size_t current = endpoint_index;
-  size_t hops = 0;
-  if (!b || !root_index || !offset || endpoint_index >= b->nequality_endpoints)
-    return false;
-  while (b->equality_endpoints[current].parent != current) {
-    size_t parent = b->equality_endpoints[current].parent;
-    if (parent >= b->nequality_endpoints || hops++ >= b->nequality_endpoints ||
-        !bounds_wide_offset_add(total, b->equality_endpoints[current].offset,
-                                &total))
-      return false;
-    current = parent;
-  }
-  *root_index = current;
-  *offset = total;
-  return true;
-}
-
-static bounds_equality_union_status
-bounds_union_equality_endpoints(ixs_bounds *b, size_t lhs_endpoint,
-                                size_t rhs_endpoint, int64_t offset) {
-  bounds_wide_offset lhs_offset;
-  bounds_wide_offset rhs_offset;
-  bounds_wide_offset requested = bounds_wide_offset_from_int64(offset);
-  bounds_wide_offset implied;
-  bounds_wide_offset root_delta;
-  size_t lhs_root;
-  size_t rhs_root;
-  size_t lhs_rank;
-  size_t rhs_rank;
-  if (!bounds_equality_root_offset(b, lhs_endpoint, &lhs_root, &lhs_offset) ||
-      !bounds_equality_root_offset(b, rhs_endpoint, &rhs_root, &rhs_offset))
-    return BOUNDS_EQUALITY_UNION_INVALID;
-  if (lhs_root == rhs_root) {
-    if (!bounds_wide_offset_add(
-            lhs_offset, bounds_wide_offset_negate(rhs_offset), &implied))
-      return BOUNDS_EQUALITY_UNION_INVALID;
-    return bounds_wide_offset_equal(implied, requested)
-               ? BOUNDS_EQUALITY_UNION_MATCHED
-               : BOUNDS_EQUALITY_UNION_CONFLICT;
-  }
-
-  /* lhs = lhs_root + lhs_offset and rhs = rhs_root + rhs_offset, so
-   * lhs_root - rhs_root = rhs_offset + requested - lhs_offset. */
-  if (!bounds_wide_offset_add(rhs_offset, requested, &root_delta) ||
-      !bounds_wide_offset_add(root_delta, bounds_wide_offset_negate(lhs_offset),
-                              &root_delta))
-    return BOUNDS_EQUALITY_UNION_INVALID;
-  lhs_rank = b->equality_endpoints[lhs_root].rank;
-  rhs_rank = b->equality_endpoints[rhs_root].rank;
-  if (lhs_rank < rhs_rank) {
-    b->equality_endpoints[lhs_root].parent = rhs_root;
-    b->equality_endpoints[lhs_root].offset = root_delta;
-  } else {
-    if (lhs_rank == rhs_rank && lhs_rank == SIZE_MAX)
-      return BOUNDS_EQUALITY_UNION_INVALID;
-    b->equality_endpoints[rhs_root].parent = lhs_root;
-    b->equality_endpoints[rhs_root].offset =
-        bounds_wide_offset_negate(root_delta);
-    if (lhs_rank == rhs_rank)
-      b->equality_endpoints[lhs_root].rank++;
-  }
-  return BOUNDS_EQUALITY_UNION_MERGED;
-}
-
-static bool bounds_wide_offset_to_int64(bounds_wide_offset value,
-                                        int64_t *result) {
-  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
-  if (value.hi != 0)
-    return false;
-  if (!value.negative) {
-    if (value.lo > (uint64_t)INT64_MAX)
-      return false;
-    *result = (int64_t)value.lo;
-    return true;
-  }
-  if (value.lo > negative_limit)
-    return false;
-  if (value.lo == negative_limit) {
-    *result = INT64_MIN;
-    return true;
-  }
-  *result = -(int64_t)value.lo;
-  return true;
 }
 
 static void bounds_u64_mul_wide(uint64_t lhs, uint64_t rhs, uint64_t *lo,
@@ -3763,9 +3226,9 @@ static bool bounds_wide_offset_add_rational(bounds_wide_offset offset,
     return false;
   bounds_u64_mul_wide(offset.lo, (uint64_t)q, &scaled.lo, &scaled.hi);
   scaled.negative = offset.negative;
-  if (!bounds_wide_offset_add(scaled, bounds_wide_offset_from_int64(p), &sum))
+  if (!ixs_relation_offset_add(scaled, ixs_relation_offset_from_int64(p), &sum))
     return false;
-  return bounds_wide_offset_to_int64(sum, result_p);
+  return ixs_relation_offset_to_int64(sum, result_p);
 }
 
 /* Projection bounds remain attached to their original peer.  Comparing them
@@ -3928,8 +3391,8 @@ static bool bounds_projection_bound_cmp(int64_t lhs_p, int64_t lhs_q,
 static bool bounds_projection_delta(bounds_wide_offset endpoint_offset,
                                     bounds_wide_offset peer_offset,
                                     bounds_wide_offset *delta) {
-  return bounds_wide_offset_add(endpoint_offset,
-                                bounds_wide_offset_negate(peer_offset), delta);
+  return ixs_relation_offset_add(
+      endpoint_offset, ixs_relation_offset_negate(peer_offset), delta);
 }
 
 static ixs_interval bounds_projection_unbounded_interval(void) {
@@ -4015,8 +3478,8 @@ static bool bounds_equality_walk_grow(ixs_bounds *b,
       goto failed;
     capacity *= 2u;
   }
-  if (capacity > b->nequality_endpoints)
-    capacity = b->nequality_endpoints;
+  if (capacity > ixs_relation_algebra_endpoint_count(&b->relations))
+    capacity = ixs_relation_algebra_endpoint_count(&b->relations);
   if (capacity <= walk->capacity ||
       walk->capacity > SIZE_MAX / sizeof(*walk->entries) ||
       capacity > SIZE_MAX / sizeof(*walk->entries))
@@ -4121,19 +3584,20 @@ bounds_equality_walk_record(ixs_bounds *b, bounds_equality_walk *walk,
                             size_t endpoint_index, bounds_wide_offset offset) {
   size_t entry_index;
   size_t slot;
-  if (endpoint_index >= b->nequality_endpoints)
+  if (endpoint_index >= ixs_relation_algebra_endpoint_count(&b->relations))
     return BOUNDS_EQUALITY_RECORD_INVALID;
   if (bounds_equality_walk_find(walk, endpoint_index, &entry_index)) {
     if (entry_index >= walk->count)
       return BOUNDS_EQUALITY_RECORD_INVALID;
-    return bounds_wide_offset_equal(walk->entries[entry_index].offset, offset)
+    return ixs_relation_offset_equal(walk->entries[entry_index].offset, offset)
                ? BOUNDS_EQUALITY_RECORD_MATCHED
                : BOUNDS_EQUALITY_RECORD_CONFLICT;
   }
   if (!bounds_equality_walk_grow(b, walk) ||
       !bounds_equality_walk_prepare_seen(b, walk))
     return BOUNDS_EQUALITY_RECORD_OOM;
-  walk->entries[walk->count].node = b->equality_endpoints[endpoint_index].expr;
+  walk->entries[walk->count].node =
+      ixs_relation_algebra_endpoint_expr(&b->relations, endpoint_index);
   walk->entries[walk->count].endpoint_index = endpoint_index;
   walk->entries[walk->count].offset = offset;
   slot = bounds_equality_seen_slot(walk->seen, walk->seen_capacity,
@@ -4145,27 +3609,6 @@ bounds_equality_walk_record(ixs_bounds *b, bounds_equality_walk *walk,
   walk->seen_count++;
   walk->count++;
   return BOUNDS_EQUALITY_RECORD_INSERTED;
-}
-
-static bool bounds_equality_edge_neighbor(size_t endpoint_index,
-                                          ixs_equality_edge *edge,
-                                          size_t *neighbor_endpoint,
-                                          bounds_wide_offset *step,
-                                          ixs_equality_edge **next) {
-  if (edge->lhs_endpoint == endpoint_index) {
-    *neighbor_endpoint = edge->rhs_endpoint;
-    *step =
-        bounds_wide_offset_negate(bounds_wide_offset_from_int64(edge->offset));
-    *next = edge->next_lhs;
-    return true;
-  }
-  if (edge->rhs_endpoint == endpoint_index) {
-    *neighbor_endpoint = edge->lhs_endpoint;
-    *step = bounds_wide_offset_from_int64(edge->offset);
-    *next = edge->next_rhs;
-    return true;
-  }
-  return false;
 }
 
 static bounds_equality_walk_status
@@ -4187,9 +3630,10 @@ bounds_equality_require_defined(ixs_bounds *b, ixs_node *expr) {
 static bounds_equality_walk_status
 bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
                           const bounds_equality_walk_entry *current,
-                          ixs_equality_edge **edge_ptr, bool require_defined,
+                          const ixs_relation_edge **edge_ptr,
+                          bool require_defined,
                           ixs_bounds_query_state *query_state) {
-  ixs_equality_edge *next;
+  const ixs_relation_edge *next;
   ixs_node *neighbor;
   size_t neighbor_endpoint;
   size_t neighbor_entry;
@@ -4200,12 +3644,14 @@ bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
 
   if (query_state)
     bounds_query_counter_increment(&query_state->equality_edge_visits);
-  if (!bounds_equality_edge_neighbor(current->endpoint_index, *edge_ptr,
-                                     &neighbor_endpoint, &step, &next) ||
-      neighbor_endpoint >= b->nequality_endpoints)
+  if (ixs_relation_algebra_edge_neighbor(&b->relations, current->endpoint_index,
+                                         *edge_ptr, &neighbor_endpoint, &step,
+                                         &next) != IXS_RELATION_QUERY_FOUND ||
+      neighbor_endpoint >= ixs_relation_algebra_endpoint_count(&b->relations))
     return BOUNDS_EQUALITY_WALK_INVALID;
   *edge_ptr = next;
-  neighbor = b->equality_endpoints[neighbor_endpoint].expr;
+  neighbor =
+      ixs_relation_algebra_endpoint_expr(&b->relations, neighbor_endpoint);
   if (!neighbor)
     return BOUNDS_EQUALITY_WALK_INVALID;
   if (!bounds_equality_walk_find(walk, neighbor_endpoint, &neighbor_entry) &&
@@ -4214,7 +3660,7 @@ bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
     if (defined_status != BOUNDS_EQUALITY_WALK_VALID)
       return defined_status;
   }
-  if (!bounds_wide_offset_add(current->offset, step, &neighbor_offset)) {
+  if (!ixs_relation_offset_add(current->offset, step, &neighbor_offset)) {
     bounds_query_note_invalid(b->query_state);
     return BOUNDS_EQUALITY_WALK_INVALID;
   }
@@ -4245,7 +3691,7 @@ bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
   bounds_wide_offset zero = {0, 0, false};
 
   memset(walk, 0, sizeof(*walk));
-  if (!b || !expr || !b->nequalities ||
+  if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
       !bounds_find_equality_endpoint(b, expr, &root_endpoint))
     return BOUNDS_EQUALITY_WALK_NONE;
   if (bounds_query_is_tracking(b)) {
@@ -4268,8 +3714,8 @@ bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
 
   while (head < walk->count) {
     bounds_equality_walk_entry current = walk->entries[head++];
-    ixs_equality_edge *edge =
-        b->equality_endpoints[current.endpoint_index].edges;
+    const ixs_relation_edge *edge =
+        ixs_relation_algebra_first_edge(&b->relations, current.endpoint_index);
     if (query_state)
       bounds_query_counter_increment(&query_state->equality_endpoint_visits);
     while (edge) {
@@ -4319,7 +3765,7 @@ bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
   if (!b || !lhs || !rhs || !offset || b->oom || b->contradiction)
     return BOUNDS_EQUALITY_WALK_NONE;
   if (lhs == rhs) {
-    *offset = bounds_wide_offset_from_int64(0);
+    *offset = ixs_relation_offset_from_int64(0);
     return BOUNDS_EQUALITY_WALK_VALID;
   }
   if (!bounds_find_equality_endpoint(b, lhs, &lhs_endpoint))
@@ -4345,9 +3791,9 @@ bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
     if (!lhs_cached || !rhs_cached || !lhs_cached->defined_component_complete ||
         lhs_cached->defined_component != rhs_cached->defined_component)
       return BOUNDS_EQUALITY_WALK_NONE;
-    if (!bounds_wide_offset_add(
+    if (!ixs_relation_offset_add(
             lhs_cached->defined_offset,
-            bounds_wide_offset_negate(rhs_cached->defined_offset), offset)) {
+            ixs_relation_offset_negate(rhs_cached->defined_offset), offset)) {
       bounds_query_note_invalid(b->query_state);
       return BOUNDS_EQUALITY_WALK_INVALID;
     }
@@ -4384,7 +3830,7 @@ bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
   status = bounds_relation_offset(b, lhs, rhs, &offset, true);
   if (status != BOUNDS_EQUALITY_WALK_VALID)
     return status;
-  if (!bounds_wide_offset_to_int64(offset, delta))
+  if (!ixs_relation_offset_to_int64(offset, delta))
     return BOUNDS_EQUALITY_WALK_UNREPRESENTABLE;
   return BOUNDS_EQUALITY_WALK_VALID;
 }
@@ -4488,261 +3934,20 @@ static bool bounds_prepare_difference_vars(ixs_bounds *b, size_t count) {
   return true;
 }
 
-static size_t bounds_exact_hash(size_t var_index) {
-  uint64_t x = (uint64_t)var_index + UINT64_C(0x9e3779b97f4a7c15);
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
-static size_t bounds_exact_index_slot(const size_t *index, size_t capacity,
-                                      const ixs_exact_var *vars,
-                                      size_t var_index) {
-  size_t slot = bounds_exact_hash(var_index) & (capacity - 1u);
-  while (index[slot] && vars[index[slot] - 1u].var_index != var_index)
-    slot = (slot + 1u) & (capacity - 1u);
-  return slot;
-}
-
-static bool bounds_exact_lookup(const ixs_bounds *b, size_t var_index,
-                                size_t *exact_index) {
-  size_t slot;
-  if (!b->exact_index || !b->exact_index_cap)
-    return false;
-  slot = bounds_exact_index_slot(b->exact_index, b->exact_index_cap,
-                                 b->exact_vars, var_index);
-  if (!b->exact_index[slot])
-    return false;
-  *exact_index = b->exact_index[slot] - 1u;
-  return true;
-}
-
-/* Exact-index growth is amortized O(1) and touches only exact participants. */
-static bool bounds_prepare_exact_index(ixs_bounds *b, size_t count,
-                                       size_t **prepared,
-                                       size_t *prepared_capacity) {
-  size_t capacity = b->exact_index_cap;
-  size_t *index;
-  size_t i;
-
-  if (capacity && count <= capacity - capacity / 4u) {
-    *prepared = b->exact_index;
-    *prepared_capacity = capacity;
-    return true;
-  }
-  if (!capacity)
-    capacity = BOUNDS_EXACT_INDEX_INIT_CAP;
-  while (count > capacity - capacity / 4u) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (capacity > SIZE_MAX / sizeof(*index))
-    return false;
-  index =
-      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
-  if (!index)
-    return false;
-  memset(index, 0, capacity * sizeof(*index));
-  for (i = 0; i < b->nexact_vars; i++) {
-    size_t slot = bounds_exact_index_slot(index, capacity, b->exact_vars,
-                                          b->exact_vars[i].var_index);
-    index[slot] = i + 1u;
-  }
-  *prepared = index;
-  *prepared_capacity = capacity;
-  return true;
-}
-
-static bool bounds_prepare_exact_vars(ixs_bounds *b, size_t count,
-                                      ixs_exact_var **prepared,
-                                      size_t *prepared_capacity) {
-  ixs_exact_var *vars;
-  size_t capacity = b->exact_var_cap;
-  size_t old_bytes;
-  size_t new_bytes;
-
-  if (count <= capacity) {
-    *prepared = b->exact_vars;
-    *prepared_capacity = capacity;
-    return true;
-  }
-  if (!capacity)
-    capacity = 2u;
-  while (capacity < count) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (b->exact_var_cap > SIZE_MAX / sizeof(*vars) ||
-      capacity > SIZE_MAX / sizeof(*vars))
-    return false;
-  old_bytes = b->exact_var_cap * sizeof(*vars);
-  new_bytes = capacity * sizeof(*vars);
-  vars = ixs_arena_grow(b->scratch, b->exact_vars, old_bytes, new_bytes,
-                        sizeof(void *));
-  if (!vars)
-    return false;
-  memset(vars + b->exact_var_cap, 0,
-         (capacity - b->exact_var_cap) * sizeof(*vars));
-  *prepared = vars;
-  *prepared_capacity = capacity;
-  return true;
-}
-
-static void bounds_exact_init_var(ixs_bounds *b, size_t var_index,
-                                  size_t *exact_index) {
-  size_t slot;
-  size_t id = b->nexact_vars++;
-  b->exact_vars[id].var_index = var_index;
-  b->exact_vars[id].parent = id;
-  b->exact_vars[id].size = 1u;
-  b->exact_vars[id].offset = 0;
-  slot = bounds_exact_index_slot(b->exact_index, b->exact_index_cap,
-                                 b->exact_vars, var_index);
-  b->exact_index[slot] = id + 1u;
-  *exact_index = id;
-}
-
-static bool bounds_prepare_exact_pair(ixs_bounds *b, size_t lhs_var,
-                                      size_t rhs_var, size_t *lhs_exact,
-                                      size_t *rhs_exact) {
-  ixs_exact_var *vars;
-  size_t *index;
-  size_t var_capacity;
-  size_t index_capacity;
-  size_t missing = 0;
-  bool have_lhs = bounds_exact_lookup(b, lhs_var, lhs_exact);
-  bool have_rhs = bounds_exact_lookup(b, rhs_var, rhs_exact);
-
-  if (!have_lhs)
-    missing++;
-  if (!have_rhs)
-    missing++;
-  if (b->nexact_vars > SIZE_MAX - missing ||
-      !bounds_prepare_exact_index(b, b->nexact_vars + missing, &index,
-                                  &index_capacity) ||
-      !bounds_prepare_exact_vars(b, b->nexact_vars + missing, &vars,
-                                 &var_capacity))
-    return false;
-
-  b->exact_vars = vars;
-  b->exact_var_cap = var_capacity;
-  b->exact_index = index;
-  b->exact_index_cap = index_capacity;
-  if (!have_lhs)
-    bounds_exact_init_var(b, lhs_var, lhs_exact);
-  if (!have_rhs)
-    bounds_exact_init_var(b, rhs_var, rhs_exact);
-  return true;
-}
-
-/* Weighted parent links use value(node) - value(parent). Union by size and
- * path compression make representable exact queries amortized inverse-Ackermann
- * in the number of exact participants, independent of inequality fan-out. */
-static bool bounds_exact_find(ixs_bounds *b, size_t id, size_t *root,
-                              int64_t *offset) {
-  size_t current = id;
-  int64_t total = 0;
-
-  while (b->exact_vars[current].parent != current) {
-    if (!ixs_safe_add(total, b->exact_vars[current].offset, &total))
-      return false;
-    current = b->exact_vars[current].parent;
-  }
-  *root = current;
-  *offset = total;
-
-  current = id;
-  while (b->exact_vars[current].parent != current) {
-    size_t parent = b->exact_vars[current].parent;
-    int64_t edge = b->exact_vars[current].offset;
-    int64_t remaining;
-    if (!ixs_safe_sub(total, edge, &remaining))
-      break;
-    b->exact_vars[current].parent = *root;
-    b->exact_vars[current].offset = total;
-    current = parent;
-    total = remaining;
-  }
-  return true;
-}
-
-/* Record lhs - rhs == offset. Overflow leaves the exact forest unchanged;
- * the complete directed graph still owns and validates both inequalities. */
-static bool bounds_union_exact(ixs_bounds *b, size_t lhs_var, size_t rhs_var,
-                               int64_t offset) {
-  size_t lhs_exact;
-  size_t rhs_exact;
-  size_t lhs_root;
-  size_t rhs_root;
-  int64_t lhs_offset;
-  int64_t rhs_offset;
-  int64_t root_offset;
-  int64_t reverse_offset;
-
-  if (!bounds_prepare_exact_pair(b, lhs_var, rhs_var, &lhs_exact, &rhs_exact)) {
-    b->oom = true;
-    return false;
-  }
-  if (!bounds_exact_find(b, lhs_exact, &lhs_root, &lhs_offset) ||
-      !bounds_exact_find(b, rhs_exact, &rhs_root, &rhs_offset))
-    return true;
-  if (lhs_root == rhs_root) {
-    int64_t existing;
-    if (ixs_safe_sub(lhs_offset, rhs_offset, &existing) && existing != offset)
-      bounds_mark_contradiction(b);
-    return true;
-  }
-  if (!ixs_safe_sub(offset, lhs_offset, &root_offset) ||
-      !ixs_safe_add(root_offset, rhs_offset, &root_offset))
-    return true;
-
-  if (b->exact_vars[lhs_root].size <= b->exact_vars[rhs_root].size) {
-    b->exact_vars[lhs_root].parent = rhs_root;
-    b->exact_vars[lhs_root].offset = root_offset;
-    b->exact_vars[rhs_root].size += b->exact_vars[lhs_root].size;
-  } else {
-    if (!ixs_safe_neg(root_offset, &reverse_offset))
-      return true;
-    b->exact_vars[rhs_root].parent = lhs_root;
-    b->exact_vars[rhs_root].offset = reverse_offset;
-    b->exact_vars[lhs_root].size += b->exact_vars[rhs_root].size;
-  }
-  bounds_mark_semantic_changed(b);
-  bounds_cache_clear(b);
-  return true;
-}
-
 static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
                                            ixs_node *rhs, int64_t *delta) {
-  ixs_var_bound *lhs_var;
-  ixs_var_bound *rhs_var;
-  size_t lhs_exact;
-  size_t rhs_exact;
-  size_t lhs_root;
-  size_t rhs_root;
-  int64_t lhs_offset;
-  int64_t rhs_offset;
-
+  ixs_relation_query_status status;
   if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
       lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
     return false;
-  if (lhs == rhs) {
-    *delta = 0;
+  status = ixs_relation_algebra_total_offset(&b->relations, lhs, rhs, delta);
+  if (status == IXS_RELATION_QUERY_FOUND)
     return true;
-  }
-  lhs_var = find_var(b, lhs->u.name);
-  rhs_var = find_var(b, rhs->u.name);
-  if (!lhs_var || !rhs_var ||
-      !bounds_exact_lookup(b, (size_t)(lhs_var - b->vars), &lhs_exact) ||
-      !bounds_exact_lookup(b, (size_t)(rhs_var - b->vars), &rhs_exact) ||
-      !bounds_exact_find(b, lhs_exact, &lhs_root, &lhs_offset) ||
-      !bounds_exact_find(b, rhs_exact, &rhs_root, &rhs_offset) ||
-      lhs_root != rhs_root)
+  if (status == IXS_RELATION_QUERY_NONE ||
+      status == IXS_RELATION_QUERY_UNREPRESENTABLE)
     return false;
-  return ixs_safe_sub(lhs_offset, rhs_offset, delta);
+  assert(!"invalid certified exact-relation topology");
+  abort();
 }
 
 static bool bounds_difference_worklist_init(ixs_bounds *b,
@@ -5052,8 +4257,8 @@ static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
 
 static bool bounds_register_exact_reverse(
     ixs_bounds *b, ixs_difference_constraint *const *index,
-    size_t index_capacity, ixs_node *lhs, ixs_node *rhs, size_t lhs_var,
-    size_t rhs_var, int64_t offset) {
+    size_t index_capacity, ixs_node *lhs, ixs_node *rhs, int64_t offset) {
+  ixs_relation_status relation_status;
   int64_t reverse_offset;
   size_t slot;
   if (!ixs_safe_neg(offset, &reverse_offset))
@@ -5062,10 +4267,29 @@ static bool bounds_register_exact_reverse(
                                       reverse_offset);
   if (!index[slot])
     return true;
-  if (!bounds_union_exact(b, lhs_var, rhs_var, offset))
-    return false;
   bounds_add_exact_relation(b, lhs, rhs, offset);
-  return !b->oom;
+  if (b->oom || b->contradiction)
+    return false;
+  relation_status =
+      ixs_relation_algebra_certify_total(&b->relations, lhs, rhs, offset);
+  switch (relation_status) {
+  case IXS_RELATION_STATUS_ADDED:
+    bounds_mark_semantic_changed(b);
+    bounds_cache_clear(b);
+    return true;
+  case IXS_RELATION_STATUS_OK:
+  case IXS_RELATION_STATUS_UNCHANGED:
+  case IXS_RELATION_STATUS_UNREPRESENTABLE:
+    return true;
+  case IXS_RELATION_STATUS_CONFLICT:
+    bounds_mark_contradiction(b);
+    return false;
+  case IXS_RELATION_STATUS_OOM:
+    b->oom = true;
+    return false;
+  }
+  assert(!"unknown certified exact-relation insertion result");
+  abort();
 }
 
 static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
@@ -5130,7 +4354,7 @@ static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
       b->contradiction)
     return;
   if (!bounds_register_exact_reverse(b, index, index_capacity, lhs, rhs,
-                                     lhs_var, rhs_var, offset) ||
+                                     offset) ||
       b->contradiction)
     return;
   if (bounds_difference_edge_can_refine(b, edge))
@@ -7493,7 +6717,8 @@ IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
                                                             ixs_node *expr) {
   if (!b || !expr || b->oom || ixs_bounds_has_empty(b))
     return IXS_CHECK_UNKNOWN;
-  if (b->equality_disabled_depth != 0 || !b->nequalities)
+  if (b->equality_disabled_depth != 0 ||
+      ixs_relation_algebra_edge_count(&b->relations) == 0)
     return bounds_check_integer_valued_without_equality(b, expr);
   return bounds_project_equality_integer(b, expr);
 }
@@ -10087,7 +9312,8 @@ static ixs_interval bounds_get_query_impl(ixs_bounds *b, ixs_node *expr) {
   if (!b)
     return ixs_interval_unknown();
   result = bounds_get_intrinsic(b, expr);
-  if (!b->oom && b->nequalities && b->equality_disabled_depth == 0)
+  if (!b->oom && ixs_relation_algebra_edge_count(&b->relations) != 0 &&
+      b->equality_disabled_depth == 0)
     result = bounds_project_equality_range(b, expr, result);
   return result;
 }
@@ -13115,8 +12341,10 @@ ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
 static bool facts_bounds_is_empty_domain(const ixs_bounds *bounds) {
   return bounds && bounds->nvars == 0 && bounds->nexprs == 0 &&
          bounds->nmod_inverse_watchers == 0 && bounds->ndifferences == 0 &&
-         bounds->ndifference_vars == 0 && bounds->nexact_vars == 0 &&
-         bounds->nequality_endpoints == 0 && bounds->nequalities == 0 &&
+         bounds->ndifference_vars == 0 &&
+         ixs_relation_algebra_endpoint_count(&bounds->relations) == 0 &&
+         ixs_relation_algebra_edge_count(&bounds->relations) == 0 &&
+         ixs_relation_algebra_total_count(&bounds->relations) == 0 &&
          bounds->nnonzero == 0 && !bounds->has_modrem &&
          !bounds->contradiction && !bounds->oom;
 }
@@ -13876,17 +13104,20 @@ static bool bounds_transfer_substituted_equalities(
     ixs_bounds *dst, const ixs_bounds *src, ixs_ctx *ctx, uint32_t nsubs,
     ixs_node *const *targets, ixs_node *const *replacements) {
   size_t i;
-  for (i = 0; i < src->equality_index_cap; i++) {
-    ixs_equality_edge *edge = src->equality_index[i];
+  for (i = 0; i < ixs_relation_algebra_edge_slot_count(&src->relations); i++) {
+    const ixs_relation_edge *edge =
+        ixs_relation_algebra_edge_at_slot(&src->relations, i);
     ixs_node *lhs;
     ixs_node *rhs;
     if (!edge)
       continue;
-    lhs = simp_subs_multi(ctx, edge->lhs, nsubs, targets, replacements);
-    rhs = simp_subs_multi(ctx, edge->rhs, nsubs, targets, replacements);
+    lhs = simp_subs_multi(ctx, ixs_relation_edge_lhs(edge), nsubs, targets,
+                          replacements);
+    rhs = simp_subs_multi(ctx, ixs_relation_edge_rhs(edge), nsubs, targets,
+                          replacements);
     if (!lhs || !rhs || ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
       return false;
-    bounds_add_exact_relation(dst, lhs, rhs, edge->offset);
+    bounds_add_exact_relation(dst, lhs, rhs, ixs_relation_edge_offset(edge));
     if (dst->oom)
       return false;
   }
@@ -28470,6 +27701,829 @@ IXS_STATIC int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 
     return lhs_sign > 0 ? mag_cmp : -mag_cmp;
   }
+}
+
+/* ==================================================================== */
+/* relation_algebra.c                                                 */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "relation_algebra.h"
+
+#include "rational.h"
+
+#include <assert.h>
+#include <limits.h>
+#include <string.h>
+
+#define RELATION_ENDPOINT_INDEX_INIT_CAP 8u
+#define RELATION_EDGE_INDEX_INIT_CAP 8u
+
+typedef enum {
+  RELATION_CLOSURE_ASSERTED,
+  RELATION_CLOSURE_TOTAL
+} relation_closure_kind;
+
+struct ixs_relation_endpoint {
+  ixs_node *expr;
+  ixs_relation_edge *edges;
+  size_t asserted_parent, asserted_size, total_plus_one;
+  ixs_relation_offset asserted_offset;
+};
+
+struct ixs_relation_total_node {
+  size_t endpoint_index, parent, size;
+  int64_t offset;
+};
+
+/* Immutable asserted edge lhs - rhs == offset. */
+struct ixs_relation_edge {
+  ixs_node *lhs, *rhs;
+  ixs_relation_edge *next_lhs, *next_rhs;
+  size_t lhs_endpoint, rhs_endpoint;
+  int64_t offset;
+};
+
+IXS_STATIC ixs_relation_offset ixs_relation_offset_from_int64(int64_t value) {
+  ixs_relation_offset result;
+  result.lo = value >= 0 ? (uint64_t)value : (uint64_t)(-(value + 1)) + 1u;
+  result.hi = 0;
+  result.negative = value < 0;
+  return result;
+}
+
+IXS_STATIC ixs_relation_offset
+ixs_relation_offset_negate(ixs_relation_offset value) {
+  if (value.lo || value.hi)
+    value.negative = !value.negative;
+  return value;
+}
+
+static int relation_offset_cmp(ixs_relation_offset lhs,
+                               ixs_relation_offset rhs) {
+  if (lhs.hi != rhs.hi)
+    return lhs.hi < rhs.hi ? -1 : 1;
+  if (lhs.lo != rhs.lo)
+    return lhs.lo < rhs.lo ? -1 : 1;
+  return 0;
+}
+
+IXS_STATIC bool ixs_relation_offset_add(ixs_relation_offset lhs,
+                                        ixs_relation_offset rhs,
+                                        ixs_relation_offset *result) {
+  int cmp;
+  bool carry, borrow;
+  if (lhs.negative == rhs.negative) {
+    result->lo = lhs.lo + rhs.lo;
+    carry = result->lo < lhs.lo;
+    result->hi = lhs.hi + rhs.hi;
+    if (result->hi < lhs.hi || (carry && result->hi == UINT64_MAX))
+      return false;
+    result->hi += carry ? 1u : 0u;
+    result->negative = lhs.negative;
+  } else {
+    cmp = relation_offset_cmp(lhs, rhs);
+    if (cmp < 0) {
+      ixs_relation_offset swap = lhs;
+      lhs = rhs;
+      rhs = swap;
+    }
+    borrow = lhs.lo < rhs.lo;
+    result->lo = lhs.lo - rhs.lo;
+    result->hi = lhs.hi - rhs.hi - (borrow ? 1u : 0u);
+    result->negative = lhs.negative;
+  }
+  if (!result->lo && !result->hi)
+    result->negative = false;
+  return true;
+}
+
+IXS_STATIC bool ixs_relation_offset_equal(ixs_relation_offset lhs,
+                                          ixs_relation_offset rhs) {
+  return lhs.lo == rhs.lo && lhs.hi == rhs.hi && lhs.negative == rhs.negative;
+}
+
+IXS_STATIC bool ixs_relation_offset_to_int64(ixs_relation_offset value,
+                                             int64_t *result) {
+  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
+  if (value.hi || (!value.negative && value.lo > (uint64_t)INT64_MAX) ||
+      (value.negative && value.lo > negative_limit))
+    return false;
+  if (!value.negative)
+    *result = (int64_t)value.lo;
+  else if (value.lo == negative_limit)
+    *result = INT64_MIN;
+  else
+    *result = -(int64_t)value.lo;
+  return true;
+}
+
+IXS_STATIC void ixs_relation_algebra_init(ixs_relation_algebra *algebra,
+                                          ixs_arena *arena) {
+  memset(algebra, 0, sizeof(*algebra));
+  algebra->arena = arena;
+}
+
+static size_t relation_hash_pointer(const void *pointer) {
+  uint64_t value = (uint64_t)(uintptr_t)pointer;
+  value ^= value >> 33;
+  value *= UINT64_C(0xff51afd7ed558ccd);
+  value ^= value >> 33;
+  return (size_t)value;
+}
+
+static size_t relation_endpoint_slot(const size_t *index, size_t capacity,
+                                     const ixs_relation_endpoint *endpoints,
+                                     const ixs_node *expr) {
+  size_t slot = relation_hash_pointer(expr) & (capacity - 1u);
+  while (index[slot] && endpoints[index[slot] - 1u].expr != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+/* Endpoint lookup is expected O(1). */
+IXS_STATIC bool
+ixs_relation_algebra_find_endpoint(const ixs_relation_algebra *algebra,
+                                   const ixs_node *expr,
+                                   size_t *endpoint_index) {
+  size_t slot;
+  if (!algebra->endpoint_index_capacity)
+    return false;
+  slot = relation_endpoint_slot(algebra->endpoint_index,
+                                algebra->endpoint_index_capacity,
+                                algebra->endpoints, expr);
+  if (!algebra->endpoint_index[slot])
+    return false;
+  *endpoint_index = algebra->endpoint_index[slot] - 1u;
+  return true;
+}
+
+static size_t relation_edge_hash(ixs_node *lhs, ixs_node *rhs, int64_t offset) {
+  uint64_t value = (uint64_t)relation_hash_pointer(lhs);
+  value ^= (uint64_t)relation_hash_pointer(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
+           (value << 6) + (value >> 2);
+  value ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (value << 6) +
+           (value >> 2);
+  value ^= value >> 33;
+  value *= UINT64_C(0xff51afd7ed558ccd);
+  return (size_t)(value ^ (value >> 33));
+}
+
+static size_t relation_edge_slot(ixs_relation_edge *const *index,
+                                 size_t capacity, ixs_node *lhs, ixs_node *rhs,
+                                 int64_t offset) {
+  size_t slot = relation_edge_hash(lhs, rhs, offset) & (capacity - 1u);
+  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs ||
+                         index[slot]->offset != offset))
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static ixs_relation_edge *
+relation_find_edge(const ixs_relation_algebra *algebra, ixs_node *lhs,
+                   ixs_node *rhs, int64_t offset) {
+  int64_t reverse;
+  size_t slot;
+  if (!algebra->edge_index_capacity)
+    return NULL;
+  slot = relation_edge_slot(algebra->edge_index, algebra->edge_index_capacity,
+                            lhs, rhs, offset);
+  if (algebra->edge_index[slot])
+    return algebra->edge_index[slot];
+  if (!ixs_safe_neg(offset, &reverse))
+    return NULL;
+  slot = relation_edge_slot(algebra->edge_index, algebra->edge_index_capacity,
+                            rhs, lhs, reverse);
+  return algebra->edge_index[slot];
+}
+
+static void *relation_grow(ixs_arena *arena, void *old, size_t old_capacity,
+                           size_t needed, size_t initial, size_t element_size,
+                           size_t *capacity) {
+  size_t grown = old_capacity;
+  if (needed <= old_capacity) {
+    *capacity = old_capacity;
+    return old;
+  }
+  if (!grown)
+    grown = initial;
+  while (grown < needed) {
+    if (grown > SIZE_MAX / 2u)
+      return NULL;
+    grown *= 2u;
+  }
+  if (old_capacity > SIZE_MAX / element_size || grown > SIZE_MAX / element_size)
+    return NULL;
+  old = ixs_arena_grow(arena, old, old_capacity * element_size,
+                       grown * element_size, sizeof(void *));
+  if (old)
+    *capacity = grown;
+  return old;
+}
+
+static void *relation_prepare_index(const ixs_relation_algebra *algebra,
+                                    const ixs_relation_endpoint *endpoints,
+                                    size_t count, bool endpoint_index,
+                                    size_t *capacity) {
+  size_t current = endpoint_index ? algebra->endpoint_index_capacity
+                                  : algebra->edge_index_capacity;
+  size_t grown = current ? current
+                         : (endpoint_index ? RELATION_ENDPOINT_INDEX_INIT_CAP
+                                           : RELATION_EDGE_INDEX_INIT_CAP);
+  size_t element_size =
+      endpoint_index ? sizeof(size_t) : sizeof(ixs_relation_edge *);
+  void *storage;
+  size_t i;
+  while (count > grown - grown / 4u) {
+    if (grown > SIZE_MAX / 2u)
+      return NULL;
+    grown *= 2u;
+  }
+  *capacity = grown;
+  if (grown == current)
+    return endpoint_index ? (void *)algebra->endpoint_index
+                          : (void *)algebra->edge_index;
+  if (grown > SIZE_MAX / element_size)
+    return NULL;
+  storage =
+      ixs_arena_alloc(algebra->arena, grown * element_size, sizeof(void *));
+  if (!storage)
+    return NULL;
+  memset(storage, 0, grown * element_size);
+  if (endpoint_index) {
+    size_t *index = storage;
+    for (i = 0; i < algebra->endpoint_count; i++) {
+      size_t slot =
+          relation_endpoint_slot(index, grown, endpoints, endpoints[i].expr);
+      index[slot] = i + 1u;
+    }
+  } else {
+    ixs_relation_edge **index = storage;
+    for (i = 0; i < current; i++) {
+      ixs_relation_edge *edge = algebra->edge_index[i];
+      size_t slot;
+      if (!edge)
+        continue;
+      slot =
+          relation_edge_slot(index, grown, edge->lhs, edge->rhs, edge->offset);
+      index[slot] = edge;
+    }
+  }
+  return storage;
+}
+
+static void relation_forest_node(const ixs_relation_algebra *algebra,
+                                 relation_closure_kind kind, size_t id,
+                                 size_t *parent, ixs_relation_offset *offset) {
+  if (kind == RELATION_CLOSURE_ASSERTED) {
+    assert(id < algebra->endpoint_count);
+    *parent = algebra->endpoints[id].asserted_parent;
+    *offset = algebra->endpoints[id].asserted_offset;
+  } else {
+    assert(id < algebra->total_count);
+    *parent = algebra->total_nodes[id].parent;
+    *offset = ixs_relation_offset_from_int64(algebra->total_nodes[id].offset);
+  }
+}
+
+static bool relation_forest_arithmetic(relation_closure_kind kind,
+                                       ixs_relation_offset lhs,
+                                       ixs_relation_offset rhs, bool subtract,
+                                       ixs_relation_offset *result) {
+  int64_t lhs_value, rhs_value, value;
+  if (kind == RELATION_CLOSURE_ASSERTED)
+    return ixs_relation_offset_add(
+        lhs, subtract ? ixs_relation_offset_negate(rhs) : rhs, result);
+  if (!ixs_relation_offset_to_int64(lhs, &lhs_value) ||
+      !ixs_relation_offset_to_int64(rhs, &rhs_value))
+    return false;
+  if (subtract ? !ixs_safe_sub(lhs_value, rhs_value, &value)
+               : !ixs_safe_add(lhs_value, rhs_value, &value))
+    return false;
+  *result = ixs_relation_offset_from_int64(value);
+  return true;
+}
+
+static void relation_forest_link(ixs_relation_algebra *algebra,
+                                 relation_closure_kind kind, size_t id,
+                                 size_t parent, ixs_relation_offset offset) {
+  if (kind == RELATION_CLOSURE_ASSERTED) {
+    algebra->endpoints[id].asserted_parent = parent;
+    algebra->endpoints[id].asserted_offset = offset;
+  } else {
+    int64_t narrow = 0;
+    bool representable = ixs_relation_offset_to_int64(offset, &narrow);
+    assert(representable);
+    (void)representable;
+    algebra->total_nodes[id].parent = parent;
+    algebra->total_nodes[id].offset = narrow;
+  }
+}
+
+/* Checked total arithmetic preserves the former forest's int64 admission.
+ * Successful operations are inverse-Ackermann amortized by size and path
+ * compression. */
+static bool relation_forest_find(ixs_relation_algebra *algebra,
+                                 relation_closure_kind kind, size_t id,
+                                 size_t *root, ixs_relation_offset *offset,
+                                 bool compress) {
+  ixs_relation_offset total = {0, 0, false};
+  size_t count = kind == RELATION_CLOSURE_ASSERTED ? algebra->endpoint_count
+                                                   : algebra->total_count;
+  size_t current = id;
+  size_t hops = 0;
+  assert(id < count && root != NULL && offset != NULL);
+  (void)count;
+  for (;;) {
+    ixs_relation_offset edge;
+    size_t parent;
+    relation_forest_node(algebra, kind, current, &parent, &edge);
+    hops++;
+    assert(parent < count && hops <= count);
+    (void)hops;
+    if (parent == current)
+      break;
+    if (!relation_forest_arithmetic(kind, total, edge, false, &total))
+      return false;
+    current = parent;
+  }
+  *root = current;
+  *offset = total;
+  if (!compress)
+    return true;
+  current = id;
+  while (current != *root) {
+    ixs_relation_offset edge;
+    ixs_relation_offset remaining;
+    size_t parent;
+    relation_forest_node(algebra, kind, current, &parent, &edge);
+    if (!relation_forest_arithmetic(kind, total, edge, true, &remaining))
+      break;
+    /* Compression changes links, not root cardinality. Union-by-size owns the
+     * only component-size updates. */
+    relation_forest_link(algebra, kind, current, *root, total);
+    current = parent;
+    total = remaining;
+  }
+  return true;
+}
+
+static ixs_relation_status relation_forest_union(ixs_relation_algebra *algebra,
+                                                 relation_closure_kind kind,
+                                                 size_t lhs, size_t rhs,
+                                                 int64_t offset) {
+  ixs_relation_offset lhs_offset, rhs_offset, implied, delta, reverse;
+  ixs_relation_offset requested = ixs_relation_offset_from_int64(offset);
+  size_t lhs_root, rhs_root, lhs_size, rhs_size;
+  bool found;
+
+  /* Total first runs without compression: UNREPRESENTABLE is transactional. */
+  found = relation_forest_find(algebra, kind, lhs, &lhs_root, &lhs_offset,
+                               kind == RELATION_CLOSURE_ASSERTED);
+  if (found)
+    found = relation_forest_find(algebra, kind, rhs, &rhs_root, &rhs_offset,
+                                 kind == RELATION_CLOSURE_ASSERTED);
+  if (!found) {
+    assert(kind == RELATION_CLOSURE_TOTAL);
+    return IXS_RELATION_STATUS_UNREPRESENTABLE;
+  }
+  if (lhs_root == rhs_root) {
+    if (!relation_forest_arithmetic(kind, lhs_offset, rhs_offset, true,
+                                    &implied))
+      return IXS_RELATION_STATUS_UNREPRESENTABLE;
+    if (kind == RELATION_CLOSURE_TOTAL) {
+      found = relation_forest_find(algebra, kind, lhs, &lhs_root, &lhs_offset,
+                                   true) &&
+              relation_forest_find(algebra, kind, rhs, &rhs_root, &rhs_offset,
+                                   true);
+      assert(found);
+      (void)found;
+    }
+    return ixs_relation_offset_equal(implied, requested)
+               ? IXS_RELATION_STATUS_UNCHANGED
+               : IXS_RELATION_STATUS_CONFLICT;
+  }
+
+  if (kind == RELATION_CLOSURE_ASSERTED) {
+    lhs_size = algebra->endpoints[lhs_root].asserted_size;
+    rhs_size = algebra->endpoints[rhs_root].asserted_size;
+  } else {
+    lhs_size = algebra->total_nodes[lhs_root].size;
+    rhs_size = algebra->total_nodes[rhs_root].size;
+  }
+  assert(lhs_size && rhs_size && lhs_size <= SIZE_MAX - rhs_size);
+  /* Preserve offset - lhs_offset + rhs_offset evaluation order. */
+  if (!relation_forest_arithmetic(kind, requested, lhs_offset, true, &delta) ||
+      !relation_forest_arithmetic(kind, delta, rhs_offset, false, &delta) ||
+      (lhs_size > rhs_size &&
+       !relation_forest_arithmetic(kind, ixs_relation_offset_from_int64(0),
+                                   delta, true, &reverse))) {
+    assert(kind == RELATION_CLOSURE_TOTAL);
+    return IXS_RELATION_STATUS_UNREPRESENTABLE;
+  }
+  if (kind == RELATION_CLOSURE_TOTAL) {
+    found =
+        relation_forest_find(algebra, kind, lhs, &lhs_root, &lhs_offset,
+                             true) &&
+        relation_forest_find(algebra, kind, rhs, &rhs_root, &rhs_offset, true);
+    assert(found);
+    (void)found;
+  }
+  if (lhs_size <= rhs_size) {
+    relation_forest_link(algebra, kind, lhs_root, rhs_root, delta);
+    if (kind == RELATION_CLOSURE_ASSERTED)
+      algebra->endpoints[rhs_root].asserted_size += lhs_size;
+    else
+      algebra->total_nodes[rhs_root].size += lhs_size;
+  } else {
+    relation_forest_link(algebra, kind, rhs_root, lhs_root, reverse);
+    if (kind == RELATION_CLOSURE_ASSERTED)
+      algebra->endpoints[lhs_root].asserted_size += rhs_size;
+    else
+      algebra->total_nodes[lhs_root].size += rhs_size;
+  }
+  return IXS_RELATION_STATUS_ADDED;
+}
+
+static void relation_endpoint_init(ixs_relation_algebra *algebra,
+                                   ixs_node *expr, size_t *endpoint_index) {
+  size_t id = algebra->endpoint_count++;
+  algebra->endpoints[id].expr = expr;
+  algebra->endpoints[id].edges = NULL;
+  algebra->endpoints[id].asserted_parent = id;
+  algebra->endpoints[id].asserted_size = 1u;
+  algebra->endpoints[id].asserted_offset = ixs_relation_offset_from_int64(0);
+  algebra->endpoints[id].total_plus_one = 0;
+  *endpoint_index = id;
+}
+
+IXS_STATIC ixs_relation_status
+ixs_relation_algebra_assert(ixs_relation_algebra *algebra, ixs_node *lhs,
+                            ixs_node *rhs, int64_t offset) {
+  ixs_relation_algebra staged;
+  ixs_relation_endpoint *endpoints;
+  ixs_relation_edge **edge_index;
+  ixs_relation_edge *edge;
+  ixs_arena_mark mark;
+  ixs_relation_status status;
+  size_t lhs_endpoint = 0, rhs_endpoint = 0;
+  size_t endpoint_capacity, endpoint_index_capacity, edge_index_capacity;
+  size_t *endpoint_index;
+  size_t missing, slot;
+  bool new_lhs, new_rhs;
+
+  assert(algebra != NULL && algebra->arena != NULL && lhs != NULL &&
+         rhs != NULL);
+  if (lhs == rhs)
+    return offset ? IXS_RELATION_STATUS_CONFLICT
+                  : IXS_RELATION_STATUS_UNCHANGED;
+  if (relation_find_edge(algebra, lhs, rhs, offset))
+    return IXS_RELATION_STATUS_UNCHANGED;
+  if (algebra->edge_count == SIZE_MAX)
+    return IXS_RELATION_STATUS_OOM;
+
+  mark = ixs_arena_save(algebra->arena);
+  new_lhs = !ixs_relation_algebra_find_endpoint(algebra, lhs, &lhs_endpoint);
+  new_rhs = !ixs_relation_algebra_find_endpoint(algebra, rhs, &rhs_endpoint);
+  missing = (new_lhs ? 1u : 0u) + (new_rhs ? 1u : 0u);
+  if (algebra->endpoint_count > SIZE_MAX - missing)
+    goto oom;
+  endpoints = relation_grow(algebra->arena, algebra->endpoints,
+                            algebra->endpoint_capacity,
+                            algebra->endpoint_count + missing, 4u,
+                            sizeof(*endpoints), &endpoint_capacity);
+  if (!endpoints)
+    goto oom;
+  endpoint_index = relation_prepare_index(algebra, endpoints,
+                                          algebra->endpoint_count + missing,
+                                          true, &endpoint_index_capacity);
+  edge_index = relation_prepare_index(algebra, NULL, algebra->edge_count + 1u,
+                                      false, &edge_index_capacity);
+  if (!endpoint_index || !edge_index)
+    goto oom;
+  edge = ixs_arena_alloc(algebra->arena, sizeof(*edge), sizeof(void *));
+  if (!edge)
+    goto oom;
+
+  staged = *algebra;
+  staged.endpoints = endpoints;
+  staged.endpoint_capacity = endpoint_capacity;
+  staged.endpoint_index = endpoint_index;
+  staged.endpoint_index_capacity = endpoint_index_capacity;
+  staged.edge_index = edge_index;
+  staged.edge_index_capacity = edge_index_capacity;
+  if (new_lhs)
+    relation_endpoint_init(&staged, lhs, &lhs_endpoint);
+  if (new_rhs)
+    relation_endpoint_init(&staged, rhs, &rhs_endpoint);
+  status = relation_forest_union(&staged, RELATION_CLOSURE_ASSERTED,
+                                 lhs_endpoint, rhs_endpoint, offset);
+  if (status == IXS_RELATION_STATUS_CONFLICT) {
+    ixs_arena_restore(algebra->arena, mark);
+    return status;
+  }
+  assert(status == IXS_RELATION_STATUS_ADDED ||
+         status == IXS_RELATION_STATUS_UNCHANGED);
+  if (new_lhs) {
+    slot = relation_endpoint_slot(staged.endpoint_index,
+                                  staged.endpoint_index_capacity,
+                                  staged.endpoints, lhs);
+    staged.endpoint_index[slot] = lhs_endpoint + 1u;
+  }
+  if (new_rhs) {
+    slot = relation_endpoint_slot(staged.endpoint_index,
+                                  staged.endpoint_index_capacity,
+                                  staged.endpoints, rhs);
+    staged.endpoint_index[slot] = rhs_endpoint + 1u;
+  }
+  edge->lhs = lhs;
+  edge->rhs = rhs;
+  edge->lhs_endpoint = lhs_endpoint;
+  edge->rhs_endpoint = rhs_endpoint;
+  edge->offset = offset;
+  edge->next_lhs = staged.endpoints[lhs_endpoint].edges;
+  edge->next_rhs = staged.endpoints[rhs_endpoint].edges;
+  staged.endpoints[lhs_endpoint].edges = edge;
+  staged.endpoints[rhs_endpoint].edges = edge;
+  slot = relation_edge_slot(staged.edge_index, staged.edge_index_capacity, lhs,
+                            rhs, offset);
+  staged.edge_index[slot] = edge;
+  staged.edge_count++;
+  *algebra = staged;
+  return IXS_RELATION_STATUS_ADDED;
+
+oom:
+  ixs_arena_restore(algebra->arena, mark);
+  return IXS_RELATION_STATUS_OOM;
+}
+
+static bool relation_total_lookup(const ixs_relation_algebra *algebra,
+                                  size_t endpoint, size_t *total) {
+  size_t plus_one = algebra->endpoints[endpoint].total_plus_one;
+  if (!plus_one)
+    return false;
+  *total = plus_one - 1u;
+  assert(*total < algebra->total_count &&
+         algebra->total_nodes[*total].endpoint_index == endpoint);
+  return true;
+}
+
+static void relation_total_init(ixs_relation_algebra *algebra, size_t endpoint,
+                                size_t *total) {
+  size_t id = algebra->total_count++;
+  algebra->total_nodes[id].endpoint_index = endpoint;
+  algebra->total_nodes[id].parent = id;
+  algebra->total_nodes[id].size = 1u;
+  algebra->total_nodes[id].offset = 0;
+  algebra->endpoints[endpoint].total_plus_one = id + 1u;
+  *total = id;
+}
+
+IXS_STATIC ixs_relation_status
+ixs_relation_algebra_certify_total(ixs_relation_algebra *algebra, ixs_node *lhs,
+                                   ixs_node *rhs, int64_t offset) {
+  ixs_relation_algebra staged;
+  ixs_relation_total_node *nodes;
+  ixs_relation_edge *edge;
+  ixs_relation_status status;
+  ixs_arena_mark mark;
+  size_t lhs_endpoint, rhs_endpoint, lhs_total = 0, rhs_total = 0;
+  size_t total_capacity, missing;
+  bool new_lhs, new_rhs;
+
+  assert(algebra != NULL && lhs != NULL && rhs != NULL);
+  if (lhs == rhs)
+    return offset ? IXS_RELATION_STATUS_CONFLICT
+                  : IXS_RELATION_STATUS_UNCHANGED;
+  edge = relation_find_edge(algebra, lhs, rhs, offset);
+  assert(edge != NULL);
+  if (edge->lhs == lhs) {
+    lhs_endpoint = edge->lhs_endpoint;
+    rhs_endpoint = edge->rhs_endpoint;
+  } else {
+    assert(edge->rhs == lhs);
+    lhs_endpoint = edge->rhs_endpoint;
+    rhs_endpoint = edge->lhs_endpoint;
+  }
+
+  new_lhs = !relation_total_lookup(algebra, lhs_endpoint, &lhs_total);
+  new_rhs = !relation_total_lookup(algebra, rhs_endpoint, &rhs_total);
+  missing = (new_lhs ? 1u : 0u) + (new_rhs ? 1u : 0u);
+  if (algebra->total_count > SIZE_MAX - missing)
+    return IXS_RELATION_STATUS_OOM;
+  mark = ixs_arena_save(algebra->arena);
+  nodes = relation_grow(algebra->arena, algebra->total_nodes,
+                        algebra->total_capacity, algebra->total_count + missing,
+                        2u, sizeof(*nodes), &total_capacity);
+  if (!nodes) {
+    ixs_arena_restore(algebra->arena, mark);
+    return IXS_RELATION_STATUS_OOM;
+  }
+  staged = *algebra;
+  staged.total_nodes = nodes;
+  staged.total_capacity = total_capacity;
+  if (new_lhs)
+    relation_total_init(&staged, lhs_endpoint, &lhs_total);
+  if (new_rhs)
+    relation_total_init(&staged, rhs_endpoint, &rhs_total);
+  status = relation_forest_union(&staged, RELATION_CLOSURE_TOTAL, lhs_total,
+                                 rhs_total, offset);
+  if (status == IXS_RELATION_STATUS_UNREPRESENTABLE) {
+    if (new_lhs)
+      staged.endpoints[lhs_endpoint].total_plus_one = 0;
+    if (new_rhs)
+      staged.endpoints[rhs_endpoint].total_plus_one = 0;
+    ixs_arena_restore(algebra->arena, mark);
+    return status;
+  }
+  assert(status == IXS_RELATION_STATUS_ADDED ||
+         status == IXS_RELATION_STATUS_UNCHANGED ||
+         status == IXS_RELATION_STATUS_CONFLICT);
+  *algebra = staged;
+  return status;
+}
+
+IXS_STATIC ixs_relation_query_status ixs_relation_algebra_total_offset(
+    ixs_relation_algebra *algebra, const ixs_node *lhs, const ixs_node *rhs,
+    int64_t *offset) {
+  ixs_relation_offset lhs_offset, rhs_offset, difference;
+  size_t lhs_endpoint, rhs_endpoint, lhs_total, rhs_total;
+  size_t lhs_root, rhs_root;
+  assert(algebra != NULL && lhs != NULL && rhs != NULL && offset != NULL);
+  if (lhs == rhs) {
+    *offset = 0;
+    return IXS_RELATION_QUERY_FOUND;
+  }
+  if (!ixs_relation_algebra_find_endpoint(algebra, lhs, &lhs_endpoint) ||
+      !ixs_relation_algebra_find_endpoint(algebra, rhs, &rhs_endpoint) ||
+      !relation_total_lookup(algebra, lhs_endpoint, &lhs_total) ||
+      !relation_total_lookup(algebra, rhs_endpoint, &rhs_total))
+    return IXS_RELATION_QUERY_NONE;
+  if (!relation_forest_find(algebra, RELATION_CLOSURE_TOTAL, lhs_total,
+                            &lhs_root, &lhs_offset, true) ||
+      !relation_forest_find(algebra, RELATION_CLOSURE_TOTAL, rhs_total,
+                            &rhs_root, &rhs_offset, true) ||
+      (lhs_root == rhs_root &&
+       !relation_forest_arithmetic(RELATION_CLOSURE_TOTAL, lhs_offset,
+                                   rhs_offset, true, &difference)))
+    return IXS_RELATION_QUERY_UNREPRESENTABLE;
+  if (lhs_root != rhs_root)
+    return IXS_RELATION_QUERY_NONE;
+  if (!ixs_relation_offset_to_int64(difference, offset)) {
+    assert(!"certified total offset did not narrow");
+    return IXS_RELATION_QUERY_UNREPRESENTABLE;
+  }
+  return IXS_RELATION_QUERY_FOUND;
+}
+
+IXS_STATIC size_t
+ixs_relation_algebra_endpoint_count(const ixs_relation_algebra *algebra) {
+  return algebra->endpoint_count;
+}
+
+IXS_STATIC ixs_node *
+ixs_relation_algebra_endpoint_expr(const ixs_relation_algebra *algebra,
+                                   size_t endpoint_index) {
+  return algebra->endpoints[endpoint_index].expr;
+}
+
+IXS_STATIC const ixs_relation_edge *
+ixs_relation_algebra_first_edge(const ixs_relation_algebra *algebra,
+                                size_t endpoint_index) {
+  return algebra->endpoints[endpoint_index].edges;
+}
+
+IXS_STATIC ixs_relation_query_status ixs_relation_algebra_edge_neighbor(
+    const ixs_relation_algebra *algebra, size_t endpoint_index,
+    const ixs_relation_edge *edge, size_t *neighbor_endpoint,
+    ixs_relation_offset *step, const ixs_relation_edge **next) {
+  (void)algebra;
+  if (edge->lhs_endpoint == endpoint_index) {
+    *neighbor_endpoint = edge->rhs_endpoint;
+    *step = ixs_relation_offset_negate(
+        ixs_relation_offset_from_int64(edge->offset));
+    *next = edge->next_lhs;
+    return IXS_RELATION_QUERY_FOUND;
+  }
+  if (edge->rhs_endpoint == endpoint_index) {
+    *neighbor_endpoint = edge->lhs_endpoint;
+    *step = ixs_relation_offset_from_int64(edge->offset);
+    *next = edge->next_rhs;
+    return IXS_RELATION_QUERY_FOUND;
+  }
+  return IXS_RELATION_QUERY_INVALID;
+}
+
+IXS_STATIC size_t
+ixs_relation_algebra_edge_slot_count(const ixs_relation_algebra *algebra) {
+  return algebra->edge_index_capacity;
+}
+
+IXS_STATIC const ixs_relation_edge *
+ixs_relation_algebra_edge_at_slot(const ixs_relation_algebra *algebra,
+                                  size_t slot) {
+  return algebra->edge_index[slot];
+}
+
+IXS_STATIC size_t
+ixs_relation_algebra_edge_count(const ixs_relation_algebra *algebra) {
+  return algebra->edge_count;
+}
+
+IXS_STATIC size_t
+ixs_relation_algebra_total_count(const ixs_relation_algebra *algebra) {
+  return algebra->total_count;
+}
+
+IXS_STATIC ixs_node *ixs_relation_edge_lhs(const ixs_relation_edge *edge) {
+  return edge->lhs;
+}
+
+IXS_STATIC ixs_node *ixs_relation_edge_rhs(const ixs_relation_edge *edge) {
+  return edge->rhs;
+}
+
+IXS_STATIC int64_t ixs_relation_edge_offset(const ixs_relation_edge *edge) {
+  return edge->offset;
+}
+
+static void *relation_clone_array(ixs_arena *arena, size_t capacity,
+                                  size_t used, size_t element_size,
+                                  const void *source) {
+  void *copy;
+  if (!capacity)
+    return NULL;
+  if (capacity > SIZE_MAX / element_size)
+    return NULL;
+  copy = ixs_arena_alloc(arena, capacity * element_size, sizeof(void *));
+  if (!copy)
+    return NULL;
+  memset(copy, 0, capacity * element_size);
+  if (used)
+    memcpy(copy, source, used * element_size);
+  return copy;
+}
+
+/* Clone is O(V + E) and never borrows source-arena storage. */
+IXS_STATIC ixs_relation_status
+ixs_relation_algebra_clone(ixs_relation_algebra *dst,
+                           const ixs_relation_algebra *src, ixs_arena *arena) {
+  ixs_relation_algebra staged = *src;
+  ixs_relation_edge *edge_storage;
+  ixs_arena_mark mark;
+  size_t edge_count = 0;
+  size_t i;
+  assert(dst != NULL && src != NULL && arena != NULL && dst != src);
+  ixs_relation_algebra_init(dst, arena);
+  mark = ixs_arena_save(arena);
+  staged.arena = arena;
+  staged.endpoints =
+      relation_clone_array(arena, src->endpoint_capacity, src->endpoint_count,
+                           sizeof(*staged.endpoints), src->endpoints);
+  staged.endpoint_index = relation_clone_array(
+      arena, src->endpoint_index_capacity, src->endpoint_index_capacity,
+      sizeof(*staged.endpoint_index), src->endpoint_index);
+  staged.total_nodes =
+      relation_clone_array(arena, src->total_capacity, src->total_count,
+                           sizeof(*staged.total_nodes), src->total_nodes);
+  staged.edge_index = relation_clone_array(arena, src->edge_index_capacity, 0,
+                                           sizeof(*staged.edge_index), NULL);
+  edge_storage = relation_clone_array(arena, src->edge_count, 0,
+                                      sizeof(*edge_storage), NULL);
+  if ((src->endpoint_capacity && !staged.endpoints) ||
+      (src->endpoint_index_capacity && !staged.endpoint_index) ||
+      (src->total_capacity && !staged.total_nodes) ||
+      (src->edge_index_capacity && !staged.edge_index) ||
+      (src->edge_count && !edge_storage))
+    goto oom;
+  for (i = 0; i < src->endpoint_count; i++)
+    staged.endpoints[i].edges = NULL;
+  for (i = 0; i < src->edge_index_capacity; i++) {
+    const ixs_relation_edge *source = src->edge_index[i];
+    ixs_relation_edge *edge;
+    if (!source)
+      continue;
+    assert(edge_count < src->edge_count &&
+           source->lhs_endpoint < src->endpoint_count &&
+           source->rhs_endpoint < src->endpoint_count);
+    edge = &edge_storage[edge_count++];
+    *edge = *source;
+    edge->next_lhs = staged.endpoints[edge->lhs_endpoint].edges;
+    edge->next_rhs = staged.endpoints[edge->rhs_endpoint].edges;
+    staged.endpoints[edge->lhs_endpoint].edges = edge;
+    staged.endpoints[edge->rhs_endpoint].edges = edge;
+    staged.edge_index[i] = edge;
+  }
+  assert(edge_count == src->edge_count);
+  *dst = staged;
+  return IXS_RELATION_STATUS_OK;
+
+oom:
+  ixs_arena_restore(arena, mark);
+  ixs_relation_algebra_init(dst, arena);
+  return IXS_RELATION_STATUS_OOM;
 }
 
 /* ==================================================================== */

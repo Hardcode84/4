@@ -8,6 +8,7 @@
 
 #include "interval.h"
 #include "node.h"
+#include "relation_algebra.h"
 #include <ixsimpl.h>
 
 /*
@@ -26,7 +27,6 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
-typedef struct ixs_equality_edge ixs_equality_edge;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
 typedef struct {
@@ -36,13 +36,6 @@ typedef struct {
   size_t queue_epoch;
   size_t hops;
 } ixs_difference_var;
-
-typedef struct {
-  size_t var_index;
-  size_t parent;
-  size_t size;
-  int64_t offset;
-} ixs_exact_var;
 
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
@@ -61,20 +54,6 @@ typedef struct {
   size_t expr_index; /* stable dense index, never an exprs-array pointer */
   size_t next;       /* one-based watcher index, zero ends the list */
 } ixs_mod_inverse_watcher;
-
-typedef struct {
-  uint64_t lo;
-  uint64_t hi;
-  bool negative;
-} ixs_wide_offset;
-
-typedef struct {
-  ixs_node *expr;
-  ixs_equality_edge *edges;
-  size_t parent;
-  size_t rank;
-  ixs_wide_offset offset;
-} ixs_equality_endpoint;
 
 typedef struct {
   ixs_node *expr;
@@ -111,19 +90,7 @@ typedef struct {
   size_t difference_index_cap;
   size_t difference_var_cap;
   size_t difference_epoch;
-  ixs_exact_var *exact_vars;
-  size_t *exact_index;
-  size_t nexact_vars;
-  size_t exact_var_cap;
-  size_t exact_index_cap;
-  ixs_equality_endpoint *equality_endpoints;
-  size_t *equality_endpoint_index;
-  size_t nequality_endpoints;
-  size_t equality_endpoint_cap;
-  size_t equality_endpoint_index_cap;
-  ixs_equality_edge **equality_index;
-  size_t nequalities;
-  size_t equality_index_cap;
+  ixs_relation_algebra relations;
   ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
   size_t nnonzero;
   size_t nonzero_cap;

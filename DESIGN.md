@@ -1500,30 +1500,55 @@ expressions cannot overflow their target address width. The 300-edge chain,
 the three-edge negative cycle, and exact equality hidden behind 300 one-sided
 edges are adversarial contract witnesses, not substitutes for this loop case.
 
-The accepted representation keeps two structures. A directed difference graph
-stores one-sided constraints and an expected-O(1) exact-edge index. A weighted
-equality forest stores only complementary exact pairs; exact queries do not
-walk inequality adjacency. Exact equalities are also present as two directed
-graph edges so feasibility has one authority. Both structures are fact-local,
-arena-owned, and copied transactionally. Incremental graph processing visits
-only the affected relation component, never the context or arena.
+Exact additive relations are owned by the private
+`src/relation_algebra.c` component. One pointer-keyed endpoint registry and
+one direct-edge index serve two deliberately different weighted closures:
 
-The equality forest has its own open-addressed map from stable graph-variable
-indices to a compact array containing only exact participants. Each weighted
-parent link stores `value(node) - value(parent)`. Complementary edges are found
-through the directed graph's edge index in expected O(1), then union by size
-merges their roots. Iterative path compression makes representable exact
-queries amortized inverse-Ackermann in the number of exact participants and
-independent of one-sided fan-out. A checked offset overflow leaves the roots
-unmerged and that composed query unknown; it cannot manufacture an equality.
-The two directed edges remain in the complete feasibility graph, so this loss
-of exact-query precision does not weaken contradiction detection.
+- The **asserted closure** contains every accepted `lhs - rhs == offset`
+  relation. Its immutable incident-edge lists let bounds queries validate a
+  complete path before projecting range, integrality, or definedness. Union
+  connectivity alone is insufficient: a path through `floor(x/d)` remains
+  conditional until that intermediate expression is proven defined.
+- The **total closure** contains only relations certified between total symbol
+  endpoints by complementary unit-difference constraints. It is a compact,
+  path-compressed forest keyed through the shared endpoint registry, so exact
+  symbol differences remain independent of one-sided inequality fan-out.
+
+Both closures use the same iterative weighted-union/find implementation but
+retain separate offset policies. Asserted links use two-limb signed magnitude
+so reversing an `INT64_MIN` edge and composing representable graph-sized
+chains cannot overflow. Total links preserve the previous checked `int64_t`
+admission contract: an unrepresentable composition leaves that closure
+unchanged and makes only the exact-symbol query unavailable. Adding an
+asserted edge and certifying it total are separate operations because a later
+reverse inequality may promote an edge that the asserted index already owns.
+
+Endpoint and direct-edge lookup are expected O(1), insertion and table growth
+are amortized O(1), and weighted operations are amortized inverse-Ackermann in
+their participating endpoints. Defined asserted-component projection and
+arena cloning are O(V+E). A clone deep-copies and relinks every retained edge;
+no fact generation refers to edge storage owned by another arena. The
+component reports added, unchanged, conflict, representability miss, invalid
+topology, and allocation failure distinctly. Bounds alone maps mutation
+outcomes to contradiction and allocation state; a topology failure while
+traversing trusted retained state poisons the active query. The component scans
+no context or arena state, uses no callbacks, and has no recursive call edge.
+
+The accepted representation keeps the directed difference graph and the exact
+relation algebra separate. The graph stores one-sided constraints and its own
+expected-O(1) directed-edge index. Complementary symbol constraints remain in
+that graph for feasibility and also certify the relation algebra's total
+closure; exact queries therefore do not walk inequality adjacency. Arbitrary
+asserted equalities live only in the relation algebra because their endpoints
+are not graph variables. Both owners are fact-local, arena-owned, and copied
+transactionally. Incremental graph processing visits only the affected
+difference component, never the context or arena.
 
 The directed graph uses immutable arena-owned edge records, separate incoming
 and outgoing adjacency heads, and append-stable variable indices. Adjacency,
 feasibility, and worklist state live in a lazily allocated parallel table, so a
 fact set without relational constraints retains no graph-variable payload.
-Forks copy the variable and graph-variable tables plus the exact-edge hash
+Forks copy the variable and graph-variable tables plus the directed-edge hash
 index while sharing only the immutable edge records; a new edge changes heads
 and feasibility potentials in the candidate generation alone. Substitution
 rebuilds graph constraints from the substituted expression facts, then
@@ -2881,6 +2906,8 @@ ixsimpl/
 │   ├── quotient_algebra.h
 │   ├── radix_algebra.c     # bounded mixed-radix nonnegativity proof
 │   ├── radix_algebra.h
+│   ├── relation_algebra.c  # indexed exact additive relations
+│   ├── relation_algebra.h
 │   ├── interval.c           # interval arithmetic
 │   ├── interval.h
 │   ├── print.c              # output formatters

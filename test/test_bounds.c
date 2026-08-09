@@ -27,6 +27,23 @@
 #define INT64_MAX 9223372036854775807LL
 #endif
 
+static void
+check_relation_payload_unchanged(const ixs_relation_algebra *actual,
+                                 const ixs_relation_algebra *before) {
+  CHECK(actual->arena == before->arena);
+  CHECK(actual->endpoints == before->endpoints &&
+        actual->endpoint_count == before->endpoint_count &&
+        actual->endpoint_capacity == before->endpoint_capacity);
+  CHECK(actual->endpoint_index == before->endpoint_index &&
+        actual->endpoint_index_capacity == before->endpoint_index_capacity);
+  CHECK(actual->edge_index == before->edge_index &&
+        actual->edge_count == before->edge_count &&
+        actual->edge_index_capacity == before->edge_index_capacity);
+  CHECK(actual->total_nodes == before->total_nodes &&
+        actual->total_count == before->total_count &&
+        actual->total_capacity == before->total_capacity);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Interval arithmetic                                               */
 /* ------------------------------------------------------------------ */
@@ -721,15 +738,17 @@ static void test_bounds_exact_fork(void) {
   CHECK(ixs_bounds_add_assumption(
       &parent, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_add(ctx, y, ixs_int(ctx, 3)))));
   CHECK(!parent.oom && !parent.contradiction);
-  CHECK(parent.nexact_vars == 2);
-  CHECK(parent.exact_vars != NULL && parent.exact_index != NULL);
+  CHECK(ixs_relation_algebra_total_count(&parent.relations) == 2);
+  CHECK(parent.relations.total_nodes != NULL &&
+        parent.relations.endpoint_index != NULL);
 
   CHECK(ixs_bounds_fork(&child, &parent));
-  CHECK(child.exact_vars != parent.exact_vars);
-  CHECK(child.exact_index != parent.exact_index);
-  CHECK(child.nexact_vars == parent.nexact_vars);
-  CHECK(child.exact_var_cap == parent.exact_var_cap);
-  CHECK(child.exact_index_cap == parent.exact_index_cap);
+  CHECK(child.relations.total_nodes != parent.relations.total_nodes);
+  CHECK(child.relations.endpoint_index != parent.relations.endpoint_index);
+  CHECK(child.relations.total_count == parent.relations.total_count);
+  CHECK(child.relations.total_capacity == parent.relations.total_capacity);
+  CHECK(child.relations.endpoint_index_capacity ==
+        parent.relations.endpoint_index_capacity);
 
   CHECK(ixs_bounds_add_assumption(
       &child, ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 4)))));
@@ -737,7 +756,7 @@ static void test_bounds_exact_fork(void) {
   CHECK(range.valid && !range.lo_inf && !range.hi_inf);
   CHECK(range.lo_p == 7 && range.lo_q == 1);
   CHECK(range.hi_p == 7 && range.hi_q == 1);
-  CHECK(parent.nexact_vars == 2);
+  CHECK(ixs_relation_algebra_total_count(&parent.relations) == 2);
   CHECK(!ixs_bounds_get(&parent, z).valid);
 
   ixs_bounds_destroy(&child);
@@ -1451,7 +1470,7 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
   CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
   CHECK(ixs_bounds_add_assumption(&bounds, congruence));
   CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
-  CHECK(bounds.nequalities != 0);
+  CHECK(ixs_relation_algebra_edge_count(&bounds.relations) != 0);
   /* Contextless ownership keeps the query cache in query_arena.  The
    * expression context is needed only by structural congruence queries and
    * is installed after assumption ingestion so their scratch storage stays
@@ -3781,9 +3800,11 @@ static void test_public_exact_equality_range_projection(void) {
       ixs_cmp(ctx, second, IXS_CMP_EQ, ixs_mod(ctx, second, sixteen))};
   ixs_node *reverse_transitive[2] = {transitive[1], transitive[0]};
   ixs_node *partial = ixs_floor(ctx, ixs_div(ctx, x, d));
+  ixs_node *partial_wrap = ixs_mod(ctx, y, eight);
   ixs_node *partial_predicates[2] = {
       ixs_cmp(ctx, s, IXS_CMP_EQ, partial),
-      ixs_cmp(ctx, partial, IXS_CMP_EQ, ixs_mod(ctx, y, eight))};
+      ixs_cmp(ctx, partial, IXS_CMP_EQ, partial_wrap)};
+  ixs_node *partial_direct = ixs_cmp(ctx, s, IXS_CMP_EQ, partial_wrap);
   ixs_node *d_nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0));
   ixs_node *ratio = ixs_div(ctx, x, d);
   ixs_node *ratio_equality = ixs_cmp(ctx, ratio, IXS_CMP_EQ, z);
@@ -3802,12 +3823,14 @@ static void test_public_exact_equality_range_projection(void) {
   ixs_facts *transitive_facts = ixs_facts_create(ctx);
   ixs_facts *reverse_transitive_facts = ixs_facts_create(ctx);
   ixs_facts *partial_facts = ixs_facts_create(ctx);
+  ixs_facts *partial_direct_facts = ixs_facts_create(ctx);
   ixs_facts *integer_facts = ixs_facts_create(ctx);
   ixs_facts *integer_conflict = ixs_facts_create(ctx);
   ixs_facts *range_conflict = ixs_facts_create(ctx);
   ixs_facts *substitution_source = ixs_facts_create(ctx);
   ixs_facts *substitution_result = ixs_facts_create(ctx);
   ixs_range_result range;
+  int64_t delta = 0;
 
   CHECK(ixs_facts_assume_pred(wrap32, wrap32_equality));
   check_public_range(wrap32, s, 0, INT64_C(4294967295));
@@ -3846,8 +3869,32 @@ static void test_public_exact_equality_range_projection(void) {
   CHECK(test_ixs_check_defined_facts(partial_facts, partial) ==
         IXS_CHECK_UNKNOWN);
   CHECK(!test_ixs_range_facts(partial_facts, s, &range));
+  CHECK(!test_ixs_constant_difference_facts(partial_facts, s, partial_wrap,
+                                            &delta));
+  CHECK(delta == 0);
+  CHECK(test_ixs_equivalent_facts(partial_facts, s, partial_wrap) ==
+        IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_pred(partial_direct_facts, partial_predicates[0]));
+  CHECK(ixs_facts_assume_pred(partial_direct_facts, partial_predicates[1]));
+  /* The weighted closure already implies this equation, but the explicit
+   * edge is still required: it supplies a path that avoids partial. */
+  CHECK(ixs_facts_assume_pred(partial_direct_facts, partial_direct));
+  CHECK(test_ixs_check_defined_facts(partial_direct_facts, partial) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_constant_difference_facts(partial_direct_facts, s,
+                                           partial_wrap, &delta));
+  CHECK(delta == 0);
+  CHECK(test_ixs_equivalent_facts(partial_direct_facts, s, partial_wrap) ==
+        IXS_CHECK_TRUE);
+
   CHECK(ixs_facts_assume_pred(partial_facts, d_nonzero));
   CHECK(test_ixs_check_defined_facts(partial_facts, partial) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_constant_difference_facts(partial_facts, s, partial_wrap,
+                                           &delta));
+  CHECK(delta == 0);
+  CHECK(test_ixs_equivalent_facts(partial_facts, s, partial_wrap) ==
+        IXS_CHECK_TRUE);
   check_public_range(partial_facts, s, 0, 7);
 
   CHECK(ixs_facts_assume_pred(integer_facts, ratio_equality));
@@ -3921,18 +3968,23 @@ static void test_bounds_exact_relation_fork_owns_graph(void) {
       &source,
       ixs_cmp(ctx, lhs, IXS_CMP_EQ, ixs_add(ctx, rhs, ixs_int(ctx, 3)))));
   ixs_bounds_add_expr(&source, rhs, rhs_range);
-  CHECK(!source.oom && source.nequalities == 1);
+  CHECK(!source.oom && ixs_relation_algebra_edge_count(&source.relations) == 1);
   CHECK(ixs_bounds_fork(&forked, &source));
-  CHECK(forked.nequalities == source.nequalities);
-  CHECK(forked.equality_endpoints != source.equality_endpoints);
-  CHECK(forked.equality_endpoint_index != source.equality_endpoint_index);
-  CHECK(forked.equality_index != source.equality_index);
-  for (i = 0; i < source.equality_index_cap; i++) {
-    if (!source.equality_index[i])
+  CHECK(forked.relations.edge_count == source.relations.edge_count);
+  CHECK(forked.relations.endpoints != source.relations.endpoints);
+  CHECK(forked.relations.endpoint_index != source.relations.endpoint_index);
+  CHECK(forked.relations.edge_index != source.relations.edge_index);
+  for (i = 0; i < ixs_relation_algebra_edge_slot_count(&source.relations);
+       i++) {
+    const ixs_relation_edge *source_edge =
+        ixs_relation_algebra_edge_at_slot(&source.relations, i);
+    const ixs_relation_edge *forked_edge;
+    if (!source_edge)
       continue;
     saw_edge = true;
-    CHECK(forked.equality_index[i] != NULL);
-    CHECK(forked.equality_index[i] != source.equality_index[i]);
+    forked_edge = ixs_relation_algebra_edge_at_slot(&forked.relations, i);
+    CHECK(forked_edge != NULL);
+    CHECK(forked_edge != source_edge);
   }
   CHECK(saw_edge);
 
@@ -4470,7 +4522,7 @@ static void test_public_exact_equality_ignores_inequality_fanout(void) {
                 ixs_add(ctx, neighbors[i], ixs_int(ctx, (int64_t)i + 1)));
   }
   CHECK(ixs_facts_assume_preds(facts, predicates, FANOUT));
-  CHECK(facts->bounds.nexact_vars == 3);
+  CHECK(ixs_relation_algebra_total_count(&facts->bounds.relations) == 3);
   check_public_exact_range(facts, ixs_sub(ctx, x, z), 0);
   CHECK(test_ixs_equivalent_facts(facts, x, z) == IXS_CHECK_TRUE);
   CHECK(test_ixs_constant_difference_facts(facts, x, z, &delta));
@@ -5897,11 +5949,8 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
   CHECK(failed->bounds.difference_index_cap == before.difference_index_cap);
   CHECK(failed->bounds.difference_var_cap == before.difference_var_cap);
   CHECK(failed->bounds.difference_epoch == before.difference_epoch);
-  CHECK(failed->bounds.exact_vars == before.exact_vars);
-  CHECK(failed->bounds.exact_index == before.exact_index);
-  CHECK(failed->bounds.nexact_vars == before.nexact_vars);
-  CHECK(failed->bounds.exact_var_cap == before.exact_var_cap);
-  CHECK(failed->bounds.exact_index_cap == before.exact_index_cap);
+  check_relation_payload_unchanged(&failed->bounds.relations,
+                                   &before.relations);
   CHECK(failed->bounds.nonzero == before.nonzero);
   CHECK(failed->bounds.nnonzero == before.nnonzero);
   CHECK(failed->bounds.nonzero_cap == before.nonzero_cap);
@@ -5988,11 +6037,8 @@ static void test_public_difference_constraint_oom_is_atomic(void) {
     CHECK(facts->bounds.difference_index_cap == before.difference_index_cap);
     CHECK(facts->bounds.difference_var_cap == before.difference_var_cap);
     CHECK(facts->bounds.difference_epoch == before.difference_epoch);
-    CHECK(facts->bounds.exact_vars == before.exact_vars);
-    CHECK(facts->bounds.exact_index == before.exact_index);
-    CHECK(facts->bounds.nexact_vars == before.nexact_vars);
-    CHECK(facts->bounds.exact_var_cap == before.exact_var_cap);
-    CHECK(facts->bounds.exact_index_cap == before.exact_index_cap);
+    check_relation_payload_unchanged(&facts->bounds.relations,
+                                     &before.relations);
     CHECK(facts->bounds.contradiction == before.contradiction);
     CHECK(facts->bounds.difference_vars[0].incoming ==
           before_difference_vars[0].incoming);
@@ -6040,8 +6086,8 @@ static void test_public_exact_equality_oom_is_atomic(void) {
   allocations = allowance - ixs_test_scratch(ctx)->fail_after;
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   CHECK(allocations > 0 && allocations < allowance);
-  CHECK(probe->bounds.nexact_vars == 2);
-  CHECK(probe->bounds.nequalities == 1);
+  CHECK(ixs_relation_algebra_total_count(&probe->bounds.relations) == 2);
+  CHECK(ixs_relation_algebra_edge_count(&probe->bounds.relations) == 1);
 
   for (budget = 0; budget < allocations; budget++) {
     ixs_facts *facts = ixs_facts_create(ctx);
@@ -6049,14 +6095,14 @@ static void test_public_exact_equality_oom_is_atomic(void) {
     bool ok;
 
     CHECK(ixs_facts_assume_pred(facts, first));
-    CHECK(facts->bounds.nexact_vars == 0);
+    CHECK(ixs_relation_algebra_total_count(&facts->bounds.relations) == 0);
     before = facts->bounds;
     ixs_arena_set_fail_after(ixs_test_scratch(ctx), budget);
     ok = ixs_facts_assume_pred(facts, second);
     ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
     if (ok) {
-      CHECK(facts->bounds.nexact_vars == 2);
-      CHECK(facts->bounds.nequalities == 1);
+      CHECK(ixs_relation_algebra_total_count(&facts->bounds.relations) == 2);
+      CHECK(ixs_relation_algebra_edge_count(&facts->bounds.relations) == 1);
       continue;
     }
     failures++;
@@ -6068,21 +6114,8 @@ static void test_public_exact_equality_oom_is_atomic(void) {
     CHECK(facts->bounds.difference_index == before.difference_index);
     CHECK(facts->bounds.difference_vars == before.difference_vars);
     CHECK(facts->bounds.ndifferences == before.ndifferences);
-    CHECK(facts->bounds.exact_vars == before.exact_vars);
-    CHECK(facts->bounds.exact_index == before.exact_index);
-    CHECK(facts->bounds.nexact_vars == before.nexact_vars);
-    CHECK(facts->bounds.exact_var_cap == before.exact_var_cap);
-    CHECK(facts->bounds.exact_index_cap == before.exact_index_cap);
-    CHECK(facts->bounds.equality_endpoints == before.equality_endpoints);
-    CHECK(facts->bounds.equality_endpoint_index ==
-          before.equality_endpoint_index);
-    CHECK(facts->bounds.nequality_endpoints == before.nequality_endpoints);
-    CHECK(facts->bounds.equality_endpoint_cap == before.equality_endpoint_cap);
-    CHECK(facts->bounds.equality_endpoint_index_cap ==
-          before.equality_endpoint_index_cap);
-    CHECK(facts->bounds.equality_index == before.equality_index);
-    CHECK(facts->bounds.nequalities == before.nequalities);
-    CHECK(facts->bounds.equality_index_cap == before.equality_index_cap);
+    check_relation_payload_unchanged(&facts->bounds.relations,
+                                     &before.relations);
     CHECK(facts->bounds.contradiction == before.contradiction);
   }
   CHECK(failures > 0);
@@ -6126,11 +6159,7 @@ static void test_public_difference_potential_overflow_is_atomic(void) {
   CHECK(facts->bounds.difference_index_cap == before.difference_index_cap);
   CHECK(facts->bounds.difference_var_cap == before.difference_var_cap);
   CHECK(facts->bounds.difference_epoch == before.difference_epoch);
-  CHECK(facts->bounds.exact_vars == before.exact_vars);
-  CHECK(facts->bounds.exact_index == before.exact_index);
-  CHECK(facts->bounds.nexact_vars == before.nexact_vars);
-  CHECK(facts->bounds.exact_var_cap == before.exact_var_cap);
-  CHECK(facts->bounds.exact_index_cap == before.exact_index_cap);
+  check_relation_payload_unchanged(&facts->bounds.relations, &before.relations);
   CHECK(facts->bounds.difference_vars[0].potential == before_x.potential);
   CHECK(facts->bounds.difference_vars[0].queue_epoch == before_x.queue_epoch);
   CHECK(facts->bounds.difference_vars[0].hops == before_x.hops);
@@ -10714,9 +10743,7 @@ static void check_bounds_payload_unchanged(const ixs_bounds *actual,
         actual->ndifference_vars == before->ndifference_vars &&
         actual->difference_index == before->difference_index &&
         actual->ndifferences == before->ndifferences);
-  CHECK(actual->exact_vars == before->exact_vars &&
-        actual->nexact_vars == before->nexact_vars &&
-        actual->exact_index == before->exact_index);
+  check_relation_payload_unchanged(&actual->relations, &before->relations);
   CHECK(actual->nonzero == before->nonzero &&
         actual->nnonzero == before->nnonzero);
   CHECK(actual->contradiction == before->contradiction &&

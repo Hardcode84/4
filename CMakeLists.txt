@@ -25,6 +25,7 @@ else()
         src/quotient_algebra.c
         src/radix_algebra.c
         src/rational.c
+        src/relation_algebra.c
         src/serialize.c
         src/simplify.c
         src/walk.c
