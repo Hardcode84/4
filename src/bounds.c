@@ -14655,6 +14655,118 @@ static ixs_check_result equivalence_bounded_core(equivalence_state *state,
   return result;
 }
 
+/* A first-match Piecewise is equal to a scalar when every reachable branch is
+ * equal to that scalar under the facts selecting the branch.  Keep each
+ * branch proof in its own equivalence query: the parent memo is valid only for
+ * the parent's bounds, while each branch has stronger bounds.  For C cases
+ * this performs O(C) forks and C bounded equivalence queries; it never scans
+ * unrelated context state. */
+static ixs_check_result
+equivalence_piecewise_partitions(equivalence_state *state, ixs_node *piecewise,
+                                 ixs_node *scalar) {
+  ixs_arena_mark outer_mark;
+  ixs_bounds remaining;
+  bool remaining_ready = false;
+  bool covered = false;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+  uint32_t i;
+
+  if (!piecewise || piecewise->tag != IXS_PIECEWISE || !scalar ||
+      piecewise->u.pw.ncases == 0u || !piecewise->u.pw.cases ||
+      state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
+    return IXS_CHECK_UNKNOWN;
+
+  outer_mark = ixs_arena_save(state->bounds->scratch);
+  if (!ixs_bounds_fork(&remaining, state->bounds)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  remaining_ready = true;
+
+  for (i = 0; i < piecewise->u.pw.ncases; i++) {
+    ixs_node *condition = piecewise->u.pw.cases[i].cond;
+    ixs_node *value = piecewise->u.pw.cases[i].value;
+    ixs_check_result truth;
+    ixs_arena_mark branch_mark;
+    ixs_bounds active;
+    bool active_ready = false;
+    bool branch_proved = false;
+
+    if (!condition || !value) {
+      state->invalid = true;
+      goto cleanup;
+    }
+    if (ixs_bounds_has_empty(&remaining)) {
+      covered = true;
+      break;
+    }
+    if (ixs_bounds_check_defined(&remaining, condition) != IXS_CHECK_TRUE)
+      goto cleanup;
+    truth = bounds_condition_truth(&remaining, condition);
+    if (truth == IXS_CHECK_FALSE)
+      continue;
+
+    branch_mark = ixs_arena_save(state->bounds->scratch);
+    memset(&active, 0, sizeof(active));
+    if (!ixs_bounds_fork(&active, &remaining)) {
+      state->oom = true;
+      ixs_arena_restore(state->bounds->scratch, branch_mark);
+      goto cleanup;
+    }
+    active_ready = true;
+    if (!bounds_add_condition_truth(&active, condition, true)) {
+      if (active.oom)
+        state->oom = true;
+      goto branch_cleanup;
+    }
+    if (!ixs_bounds_has_empty(&active)) {
+      equivalence_query_status status;
+      ixs_check_result branch_result = IXS_CHECK_UNKNOWN;
+      status = equivalence_query_bounds_detail_at_depth(
+          &active, state->ctx, value, scalar,
+          state->bounded_subproof_depth + 1u, &branch_result);
+      if (status == EQUIVALENCE_QUERY_OOM)
+        state->oom = true;
+      else if (status == EQUIVALENCE_QUERY_INVALID)
+        state->invalid = true;
+      else if (status == EQUIVALENCE_QUERY_LIMITED)
+        state->limited = true;
+      if (status != EQUIVALENCE_QUERY_COMPLETE ||
+          branch_result != IXS_CHECK_TRUE)
+        goto branch_cleanup;
+    }
+
+    if (truth == IXS_CHECK_TRUE)
+      covered = true;
+    branch_proved = true;
+
+  branch_cleanup:
+    if (active_ready)
+      ixs_bounds_destroy(&active);
+    ixs_arena_restore(state->bounds->scratch, branch_mark);
+    if (!branch_proved || state->limited || state->invalid || state->oom)
+      goto cleanup;
+    if (!covered &&
+        !bounds_add_condition_truth(&remaining, condition, false)) {
+      if (remaining.oom)
+        state->oom = true;
+      goto cleanup;
+    }
+    if (covered)
+      break;
+  }
+
+  if (!covered && ixs_bounds_has_empty(&remaining))
+    covered = true;
+  result = covered ? IXS_CHECK_TRUE : IXS_CHECK_UNKNOWN;
+
+cleanup:
+  bounds_destroy_if_initialized(&remaining, remaining_ready);
+  ixs_arena_restore(state->bounds->scratch, outer_mark);
+  return state->limited || state->invalid || state->oom ? IXS_CHECK_UNKNOWN
+                                                        : result;
+}
+
 static bool equivalence_same_context_shape(ixs_node *lhs, ixs_node *rhs,
                                            uint32_t *child_count) {
   uint32_t lhs_children;
@@ -15813,10 +15925,9 @@ static bool bounds_residue_shift_in_range(uint64_t residue, uint64_t modulus,
 
 /* If the dividend and positive divisor share a stride class, a shift which
  * stays within one stride bucket cannot cross a divisor boundary. */
-static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
-                                           ixs_node *dividend,
-                                           ixs_node *denominator,
-                                           int64_t shift) {
+IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(
+    ixs_bounds *bounds, ixs_node *dividend, ixs_node *denominator,
+    int64_t shift) {
   uint64_t modulus;
   uint64_t residue;
   if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
@@ -16222,8 +16333,9 @@ static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
       return false;
   } else {
     if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
-        !bounds_mod_shift_by_congruence(query->bounds, rhs_representative,
-                                        denominator, query->child_delta))
+        !ixs_bounds_mod_shift_stays_in_residue(
+            query->bounds, rhs_representative, denominator,
+            query->child_delta))
       return false;
     modular_delta = query->child_delta;
   }
@@ -16584,87 +16696,6 @@ cleanup:
   return result;
 }
 
-static ixs_check_result
-equivalence_mod_shift_structural(equivalence_state *state,
-                                 ixs_node *shifted_dividend,
-                                 ixs_node *shifted_denominator, ixs_node *sum);
-
-/* Recover the exact displacement in
- *
- *   Mod(base + displacement, modulus) - Mod(base, modulus)
- *
- * when the shifted residue is proven not to wrap.  Independent interval
- * bounds lose the correlation between the two residues and admit a spurious
- * displacement almost one modulus wide.  The existing Mod-shift theorem
- * proves the equality before this helper exposes the displacement to the
- * ordered-comparison range proof. */
-static ixs_node *equivalence_nonwrapping_mod_delta(equivalence_state *state,
-                                                   ixs_node *difference) {
-  ixs_node *positive = NULL;
-  ixs_node *negative = NULL;
-  uint32_t i;
-
-  if (!difference || difference->tag != IXS_ADD ||
-      !ixs_node_is_zero(difference->u.add.coeff))
-    return NULL;
-  for (i = 0; i < difference->u.add.nterms; i++) {
-    ixs_node *term = difference->u.add.terms[i].term;
-    ixs_integer_range_result range;
-    int64_t p;
-    int64_t q;
-    ixs_node_get_rat(difference->u.add.terms[i].coeff, &p, &q);
-    if (q != 1)
-      return NULL;
-    if (p == 1 && term->tag == IXS_MOD && !positive) {
-      positive = term;
-      continue;
-    }
-    if (p == -1 && term->tag == IXS_MOD && !negative) {
-      negative = term;
-      continue;
-    }
-    /* Bounds-conditioned normalization may have removed an additive term from
-     * one representative.  Ignore only terms already proved exactly zero; all
-     * nonzero residual structure still rejects this theorem. */
-    if (!bounds_get_integer_range(state->bounds, term, &range) ||
-        !range.has_lower || !range.has_upper || range.lower != 0 ||
-        range.upper != 0)
-      return NULL;
-  }
-  if (!positive || !negative ||
-      positive->u.binary.rhs != negative->u.binary.rhs)
-    return NULL;
-
-  /* Equivalence canonicalization may present either residue first.  Try the
-   * forward Mod(base + shift) - Mod(base) form in both directions, then give
-   * the recovered displacement the sign of the original difference. */
-  for (i = 0; i < 2u; i++) {
-    ixs_node *shifted = i == 0u ? positive : negative;
-    ixs_node *base = i == 0u ? negative : positive;
-    ixs_node *shift;
-    ixs_node *sum;
-    if (equivalence_build_sub(state, shifted->u.binary.lhs,
-                              base->u.binary.lhs,
-                              &shift) != EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(shift) ||
-        equivalence_build_add(state, base, shift, &sum) !=
-            EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(sum) ||
-        equivalence_mod_shift_structural(state, shifted->u.binary.lhs,
-                                         shifted->u.binary.rhs,
-                                         sum) != IXS_CHECK_TRUE)
-      continue;
-    if (i == 0u)
-      return shift;
-    if (equivalence_build_scale_rat(state, shift, -1, 1, &shift) !=
-            EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(shift))
-      return NULL;
-    return shift;
-  }
-  return NULL;
-}
-
 /* For an integer comparison, threshold is the inclusive edge of its true
  * half-line. If anchor - moving is in [delta_lower, delta_upper], the moving
  * edge in anchor coordinates is in
@@ -16708,11 +16739,6 @@ static ixs_check_result equivalence_ordered_bounded_delta(
     if (state->bounds->oom)
       state->oom = true;
     return IXS_CHECK_UNKNOWN;
-  }
-  {
-    ixs_node *exact = equivalence_nonwrapping_mod_delta(state, difference);
-    if (exact)
-      difference = exact;
   }
   if (state->oom ||
       !bounds_get_integer_range(state->bounds, difference, &range) ||
@@ -16847,8 +16873,8 @@ static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
                                                 ixs_node *denominator,
                                                 int64_t shift) {
   if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
-      !bounds_mod_shift_by_congruence(state->bounds, dividend, denominator,
-                                      shift)) {
+      !ixs_bounds_mod_shift_stays_in_residue(state->bounds, dividend,
+                                             denominator, shift)) {
     if (state->bounds->oom)
       state->oom = true;
     return false;
@@ -18057,6 +18083,20 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
     result =
         equivalence_same_context(state, simplified_lhs, simplified_rhs, depth);
     if (result != IXS_CHECK_UNKNOWN)
+      return result;
+  }
+  if (simplified_lhs->tag == IXS_PIECEWISE) {
+    result = equivalence_piecewise_partitions(state, simplified_lhs,
+                                              simplified_rhs);
+    if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+        state->oom)
+      return result;
+  }
+  if (simplified_rhs->tag == IXS_PIECEWISE) {
+    result = equivalence_piecewise_partitions(state, simplified_rhs,
+                                              simplified_lhs);
+    if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+        state->oom)
       return result;
   }
   result = equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);

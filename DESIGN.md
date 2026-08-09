@@ -1713,6 +1713,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   semantic pairing. Only complete child proofs yield `TRUE`; a failed child
   proof stays `UNKNOWN` because these contexts need not be injective.
 
+  A normalized two-term residual `c*A - c*B == 0` removes any common nonzero
+  exact rational scale `c` and proves `A == B`; this is not restricted to unit
+  coefficients. For `Piecewise((v1,c1), ..., (vn,cn)) == s`, equivalence
+  follows first-match semantics: each reachable branch is checked against `s`
+  in a fork containing its condition and the negations of all earlier
+  conditions. Every feasible input must be covered and every branch subproof
+  must succeed. Branch equivalence uses the existing bounded algebraic
+  subproof depth, so nested Piecewise expressions cannot introduce unbounded
+  recursion.
+
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,
   so progress is structural and there is no separate 32-level, 4096-visit, or

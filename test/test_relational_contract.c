@@ -345,7 +345,6 @@ static void test_relational_cyclic_xor_recurrence(void) {
   ixs_ctx_destroy(ctx);
 }
 
-
 static void test_relational_mod_quotient_order(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "relation_mod_order_item");
@@ -368,7 +367,6 @@ static void test_relational_mod_quotient_order(void) {
 
   ixs_ctx_destroy(ctx);
 }
-
 
 static void test_relational_equivalence_probe_guards(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -891,6 +889,84 @@ static void test_relational_modular_floor_partition_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_relational_modular_product_reduction_contract(void) {
+  static const struct {
+    int64_t inner_modulus;
+    int64_t outer_modulus;
+    int64_t radix;
+    int64_t increment;
+  } cases[] = {
+      {INT64_C(4294967296), INT64_C(4294967296), 2, 1},
+      {17, 17, 3, 5},
+      {97, 97, 7, 11},
+      {35, 7, 4, 3},
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_node *x = ixs_sym(ctx, "relation_ring_x");
+    ixs_node *slot = ixs_sym(ctx, "relation_ring_slot");
+    ixs_node *inner_modulus = ixs_int(ctx, cases[i].inner_modulus);
+    ixs_node *outer_modulus = ixs_int(ctx, cases[i].outer_modulus);
+    ixs_node *selector = ixs_mod(ctx, slot, ixs_int(ctx, cases[i].radix));
+    ixs_node *difference =
+        ixs_sub(ctx,
+                ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, cases[i].increment)),
+                        inner_modulus),
+                ixs_mod(ctx, x, inner_modulus));
+    ixs_node *actual =
+        ixs_mod(ctx, ixs_mul(ctx, selector, difference), outer_modulus);
+    ixs_node *expected =
+        ixs_mod(ctx, ixs_mul(ctx, selector, ixs_int(ctx, cases[i].increment)),
+                outer_modulus);
+    ixs_node *equality = ixs_cmp(ctx, actual, IXS_CMP_EQ, expected);
+    ixs_node *x_integer = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x));
+    ixs_node *slot_integer =
+        ixs_cmp(ctx, slot, IXS_CMP_EQ, ixs_floor(ctx, slot));
+    ixs_range_result x_domain = closed_integer_range(-1000, 1000);
+    ixs_range_result slot_domain = closed_integer_range(0, cases[i].radix - 1);
+    ixs_facts *facts = ixs_facts_create(ctx);
+    size_t errors = ixs_ctx_nerrors(ctx);
+
+    CHECK(ctx && x && slot && inner_modulus && outer_modulus && selector &&
+          difference && actual && expected && equality && x_integer &&
+          slot_integer && facts);
+    CHECK(ixs_facts_assume_range(facts, x, &x_domain));
+    CHECK(ixs_facts_assume_range(facts, slot, &slot_domain));
+    CHECK(ixs_facts_assume_pred(facts, x_integer));
+    CHECK(ixs_facts_assume_pred(facts, slot_integer));
+    CHECK(test_ixs_equivalent_facts(facts, actual, expected) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_check_predicate_facts(facts, equality) == IXS_CHECK_TRUE);
+    CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+    ixs_ctx_destroy(ctx);
+  }
+
+  /* Multiplication preserves a residue only through integer multipliers.
+   * At x=4 the inner difference is -4 modulo 5, so replacing it by 1 before
+   * multiplying by one half would be unsound modulo 5. */
+  {
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_node *x = ixs_sym(ctx, "relation_ring_fractional_x");
+    ixs_node *five = ixs_int(ctx, 5);
+    ixs_node *difference =
+        ixs_sub(ctx, ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), five),
+                ixs_mod(ctx, x, five));
+    ixs_node *actual =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), difference), five);
+    ixs_node *expected = ixs_rat(ctx, 1, 2);
+    ixs_facts *facts = ixs_facts_create(ctx);
+
+    CHECK(ctx && x && difference && actual && expected && facts);
+    CHECK(ixs_facts_assume_pred(facts,
+                                ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 4))));
+    CHECK(test_ixs_equivalent_facts(facts, actual, expected) ==
+          IXS_CHECK_FALSE);
+    ixs_ctx_destroy(ctx);
+  }
+}
+
 static void test_relational_scaled_mod_depth_guard(void) {
   enum { DEPTH = 128 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -933,6 +1009,7 @@ int main(void) {
   test_relational_numeric_boolean_equality_contract();
   test_relational_finite_symbol_domain_contract();
   test_relational_modular_floor_partition_contract();
+  test_relational_modular_product_reduction_contract();
   test_relational_scaled_mod_depth_guard();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);

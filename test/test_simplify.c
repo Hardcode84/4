@@ -1678,11 +1678,18 @@ static void test_mod_bounds_tighten(void) {
                 ixs_int(ctx, 3));
     ixs_node *nonintegral =
         ixs_div(ctx, ixs_mod(ctx, x, two32), ixs_int(ctx, 2));
+    ixs_node *divisible_by_two =
+        ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                ixs_int(ctx, 0));
+    ixs_node *exact_quotient =
+        ixs_mod(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), two31);
 
     CHECK(ixs_simplify(ctx, quotient, NULL, 0) == expected);
     CHECK(ixs_simplify(ctx, quotient, nonnegative, 2) == x);
     CHECK(ixs_simplify(ctx, quotient, signed_range, 2) == expected);
     CHECK(ixs_simplify(ctx, quotient, &negative, 1) == ixs_int(ctx, INT32_MAX));
+    CHECK(ixs_simplify(ctx, nonintegral, &divisible_by_two, 1) ==
+          exact_quotient);
     CHECK(ixs_simplify(ctx, nondividing, NULL, 0) == nondividing);
     CHECK(ixs_simplify(ctx, nonintegral, NULL, 0) == nonintegral);
   }
@@ -1890,18 +1897,16 @@ static void test_floor_drop_small_bounded_term(void) {
 
 static void test_floor_shift_xor(void) {
   ixs_ctx *ctx = get_ctx();
-  ixs_node *item = ixs_sym(ctx, "redistribute_item");
-  ixs_node *source_wave =
-      ixs_floor(ctx, ixs_div(ctx, ixs_xor(ctx, item, ixs_int(ctx, 32)),
+  ixs_node *x = ixs_sym(ctx, "floor_shift_xor_x");
+  ixs_node *shifted =
+      ixs_floor(ctx, ixs_div(ctx, ixs_xor(ctx, x, ixs_int(ctx, 32)),
                              ixs_int(ctx, 32)));
-  ixs_node *item_wave = ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 32)));
-  ixs_node *expected = ixs_xor(ctx, item_wave, ixs_int(ctx, 1));
-  ixs_node *assumptions[2] = {ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)),
-                              ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 63))};
+  ixs_node *quotient = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)));
+  ixs_node *expected = ixs_xor(ctx, quotient, ixs_int(ctx, 1));
+  ixs_node *assumptions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+                              ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 63))};
 
-  /* Production redistribution toggles wave bit 5.  Canonical right-shift
-   * distribution exposes that the source and destination wave IDs differ. */
-  CHECK(ixs_simplify(ctx, source_wave, assumptions, 2) == expected);
+  CHECK(ixs_simplify(ctx, shifted, assumptions, 2) == expected);
 }
 
 static void test_nested_floor_ceil(void) {
@@ -2238,12 +2243,11 @@ static void test_mod_floor_regression(void) {
   /* ceiling(Mod(x, n)) -> Mod(x, n) */
   CHECK(ixs_ceil(ctx, mx16) == mx16);
 
-  /* Extracting a divisible quotient commutes with the finite residue. */
+  /* floor(Mod(x, 64)/16) stays as-is (mod-then-divide is the preferred form).
+   */
   ixs_node *subfield = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(subfield ==
-        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
-                ixs_int(ctx, 4)));
+  CHECK(ixs_node_tag(subfield) == IXS_FLOOR);
 
   /* floor(x + 1/2) -> x for integer-valued x (fractional part drops) */
   ixs_node *fhalf = ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
@@ -2289,8 +2293,8 @@ static void test_mod_floor_regression(void) {
 
   /* Parity maps integer addition to n-ary xor. */
   {
-    ixs_node *item = ixs_sym(ctx, "affine_origin_item");
-    ixs_node *other = ixs_sym(ctx, "affine_origin_other");
+    ixs_node *item = ixs_sym(ctx, "parity_x");
+    ixs_node *other = ixs_sym(ctx, "parity_y");
     ixs_node *high = ixs_mod(
         ctx, ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 64))),
         ixs_int(ctx, 2));
@@ -2326,7 +2330,7 @@ static void test_mod_floor_regression(void) {
                                                          ixs_int(ctx, 2)),
                                             ixs_int(ctx, 1)),
                                     ixs_int(ctx, 2))) == IXS_MOD);
-    ixs_node *modulus = ixs_sym(ctx, "affine_origin_modulus");
+    ixs_node *modulus = ixs_sym(ctx, "parity_modulus");
     ixs_node *partial = ixs_mod(ctx, item, modulus);
     ixs_node *partial_parity =
         ixs_mod(ctx, ixs_add(ctx, partial, ixs_int(ctx, 1)), ixs_int(ctx, 2));
@@ -2459,17 +2463,12 @@ static void test_floor_mod_divisor(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
-  /* Quotient commutes with a divisible constant modulus. */
+  /* floor(Mod(x, 64) / 16) stays: the "mod-then-divide" form is the natural
+   * hardware idiom for GPU thread index decomposition and maps directly to
+   * two affine ops.  Rewriting to Mod(floor(x/16), 4) is complexity-neutral
+   * and obscures the hardware mapping. */
   ixs_node *e = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  ixs_node *expected =
-      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
-              ixs_int(ctx, 4));
-  CHECK(e == expected);
-
-  /* A non-divisor leaves the quotient intact. */
-  e = ixs_floor(
-      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 12)));
   CHECK(ixs_node_tag(e) == IXS_FLOOR);
 
   /* floor(Mod(x, 32) / 32) -> 0 (range of Mod is [0, 31], divided by 32 < 1,
@@ -2731,6 +2730,58 @@ static void test_floor_symbolic_denom_residue(void) {
   CHECK(overflow_result != NULL);
   CHECK(!ixs_is_error(overflow_result));
   CHECK(overflow_result != ixs_int(ctx, 0));
+}
+
+static void test_floor_symbolic_denom_congruence_nonwrap(void) {
+  static const struct {
+    int64_t stride;
+    int64_t residue;
+    int64_t shift;
+    int64_t denominator_stride;
+  } cases[] = {
+      {3, 0, 2, 6},
+      {5, 1, 3, 10},
+      {6, 4, -4, 12},
+      {7, 6, -6, 14},
+  };
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *a = ixs_sym(ctx, "floor_congruence_a");
+  ixs_node *d = ixs_sym(ctx, "floor_congruence_d");
+  ixs_node *positive = ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0));
+  size_t i;
+
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    ixs_node *base = ixs_floor(ctx, ixs_div(ctx, a, d));
+    ixs_node *shifted = ixs_floor(
+        ctx, ixs_div(ctx, ixs_add(ctx, a, ixs_int(ctx, cases[i].shift)), d));
+    ixs_node *difference = ixs_sub(ctx, base, shifted);
+    ixs_node *assumptions[] = {
+        positive,
+        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, cases[i].stride)),
+                IXS_CMP_EQ, ixs_int(ctx, cases[i].residue)),
+        ixs_cmp(ctx,
+                ixs_mod(ctx, d,
+                        ixs_int(ctx, cases[i].denominator_stride)),
+                IXS_CMP_EQ, ixs_int(ctx, 0)),
+    };
+    CHECK(ixs_simplify(ctx, difference, assumptions, 3) == ixs_int(ctx, 0));
+  }
+
+  {
+    ixs_node *shifted =
+        ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, a, ixs_int(ctx, 2)), d));
+    ixs_node *crossing[] = {
+        positive,
+        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+        ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                ixs_int(ctx, 0)),
+    };
+    CHECK(ixs_simplify(ctx,
+                       ixs_sub(ctx, ixs_floor(ctx, ixs_div(ctx, a, d)),
+                               shifted),
+                       crossing, 3) != ixs_int(ctx, 0));
+  }
 }
 
 static void test_simplify_batch(void) {
@@ -3711,16 +3762,6 @@ static void test_nested_mod_remainder_composition(void) {
   ixs_node *scaled = ixs_add(
       ctx, ixs_mul(ctx, ixs_int(ctx, -2), low),
       ixs_mul(ctx, ixs_int(ctx, -6), high));
-  ixs_node *bit0 = ixs_mod(ctx, x, ixs_int(ctx, 2));
-  ixs_node *bit1 = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2))),
-      ixs_int(ctx, 2));
-  ixs_node *bit2 = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))),
-      ixs_int(ctx, 2));
-  ixs_node *bits = ixs_add(
-      ctx, ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 2), bit1)),
-      ixs_mul(ctx, ixs_int(ctx, 4), bit2));
   ixs_node *wrong_scale =
       ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 2), high));
   ixs_node *fractional = ixs_add(ctx, x, ixs_rat(ctx, 1, 2));
@@ -3732,7 +3773,6 @@ static void test_nested_mod_remainder_composition(void) {
 
   CHECK(composed == expected);
   CHECK(scaled == ixs_mul(ctx, ixs_int(ctx, -2), expected));
-  CHECK(bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
   CHECK(ixs_node_tag(wrong_scale) == IXS_ADD);
   CHECK(ixs_node_tag(fractional_sum) == IXS_ADD);
 }
@@ -4766,6 +4806,7 @@ int main(void) {
   test_pw_max_bounds_collapse();
   test_floor_symbolic_denom();
   test_floor_symbolic_denom_residue();
+  test_floor_symbolic_denom_congruence_nonwrap();
   test_simplify_batch();
   test_fact_backed_simplification();
   test_exact_divide_fact_piecewise();

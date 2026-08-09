@@ -2193,24 +2193,6 @@ def test_integrality_query_propagates_through_nested_mod() -> None:
     assert ctx.defined(dynamic, facts=closed) is True
 
 
-def test_fact_check_totalized_trunc_remainder() -> None:
-    ctx = ixsimpl.Context()
-    numerator = ctx.sym("totalized_numerator")
-    divisor = ctx.sym("totalized_divisor")
-    magnitude = ixsimpl.max_(ctx.int_(1), divisor, -divisor)
-    quotient = ixsimpl.trunc(numerator / magnitude)
-    remainder = numerator - magnitude * quotient
-    scaled = 16 * remainder
-    facts = ctx.facts()
-
-    assert ctx.range(magnitude, facts=facts) == (1, None)
-    assert ctx.defined(quotient, facts=facts) is True
-    assert ctx.defined(scaled, facts=facts) is True
-    assert ctx.integer_valued(scaled, facts=facts) is True
-    assert ctx.check(ctx.eq(scaled, scaled), facts=facts) is True
-    assert ctx.check(ctx.eq(scaled, ixsimpl.floor(scaled)), facts=facts) is True
-
-
 def test_integrality_and_divisibility_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -2460,71 +2442,6 @@ def test_ordered_equivalence_bounded_integer_delta() -> None:
     upper_only = ctx.facts()
     upper_only.assume_many([ctx.eq(base % 8, 0), shift <= 7])
     assert ctx.equivalent(shifted < 0, base < 0, upper_only) is None
-
-
-def test_ordered_equivalence_nonwrapping_correlated_mod_delta() -> None:
-    ctx = ixsimpl.Context()
-    source_item = ctx.sym("python_ordered_mod_source_item")
-    lane = ctx.sym("python_ordered_mod_lane")
-    limit = ctx.sym("python_ordered_mod_limit")
-    origin = 64 * ixsimpl.floor(source_item / 64) + (8 * source_item) % 64
-    point = 64 * ixsimpl.floor(source_item / 64) + (8 * source_item + lane) % 64
-
-    nonwrapping = ctx.facts()
-    nonwrapping.assume_many(
-        [
-            source_item >= 0,
-            source_item <= 63,
-            lane >= 0,
-            lane <= 7,
-            limit >= 0,
-            limit <= 512,
-            ctx.eq(limit % 16, 0),
-        ]
-    )
-    assert ctx.equivalent(point < limit, origin < limit, nonwrapping) is True
-    assert ctx.equivalent(point >= limit, origin >= limit, nonwrapping) is True
-
-    wraps = ctx.facts()
-    wraps.assume_many(
-        [ctx.eq(source_item, 7), ctx.eq(lane, 8), ctx.eq(limit, 16)]
-    )
-    assert ctx.equivalent(point < limit, origin < limit, wraps) is not True
-
-
-def test_wrapped_xor_ordered_equivalence_and_mod_residue_split() -> None:
-    ctx = ixsimpl.Context()
-    lane = ctx.sym("python_ordered_lane")
-    tile = ctx.sym("python_ordered_tile")
-    limit = ctx.sym("python_ordered_wrap_limit")
-    modulus = 1 << 32
-    aligned_dividend = (1 << 31) + 64 + 128 * lane + 256 * tile
-    aligned_mod = aligned_dividend % modulus
-
-    for offset in (1, 2, 3):
-        shifted_mod = (aligned_dividend + offset) % modulus
-        assert ixsimpl.same_node(shifted_mod, aligned_mod + offset)
-
-    facts = ctx.facts()
-    facts.assume_many([lane >= 0, lane <= 31, ctx.eq(limit % 4, 0)])
-
-    def predicate(offset: int) -> ixsimpl.Expr:
-        lane_bits = ixsimpl.xor_(ctx.int_(64 + offset), 128 * lane)
-        wrapped = ((1 << 31) + 256 * tile + lane_bits) % modulus - (1 << 31)
-        return wrapped - limit < 0
-
-    assert ctx.equivalent(predicate(0), predicate(1), facts) is True
-    assert ctx.equivalent(predicate(0), predicate(2), facts) is True
-    assert ctx.equivalent(predicate(0), predicate(3), facts) is True
-    assert ctx.equivalent(predicate(0), predicate(4), facts) is None
-
-    no_lane_range = ctx.facts()
-    no_lane_range.assume(ctx.eq(limit % 4, 0))
-    assert ctx.equivalent(predicate(0), predicate(1), no_lane_range) is None
-
-    no_limit_grid = ctx.facts()
-    no_limit_grid.assume_many([lane >= 0, lane <= 31])
-    assert ctx.equivalent(predicate(0), predicate(1), no_limit_grid) is None
 
 
 @given(

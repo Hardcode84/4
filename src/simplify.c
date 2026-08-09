@@ -3101,30 +3101,6 @@ static ixs_node *floor_mod_div_zero(ixs_ctx *ctx, ixs_node *x) {
   return x;
 }
 
-/* floor(Mod(X,M)/D) -> Mod(floor(X/D),M/D) when D divides M. */
-static ixs_node *floor_mod_div_quotient(ixs_ctx *ctx, ixs_node *x) {
-  ixs_node *mod;
-  ixs_node *divided;
-  ixs_node *quotient;
-  ixs_node *modulus;
-  int64_t cp, cq, m;
-
-  if (x->tag != IXS_MUL || x->u.mul.nfactors != 1 ||
-      x->u.mul.factors[0].exp != 1 || x->u.mul.factors[0].base->tag != IXS_MOD)
-    return x;
-  ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
-  mod = x->u.mul.factors[0].base;
-  if (cp != 1 || cq <= 1 || mod->u.binary.rhs->tag != IXS_INT)
-    return x;
-  m = mod->u.binary.rhs->u.ival;
-  if (m <= 0 || m % cq != 0)
-    return x;
-  divided = simp_div(ctx, mod->u.binary.lhs, ixs_node_int(ctx, cq));
-  quotient = divided ? simp_floor(ctx, divided) : NULL;
-  modulus = ixs_node_int(ctx, m / cq);
-  return quotient && modulus ? simp_mod(ctx, quotient, modulus) : NULL;
-}
-
 /* ---- Floor/ceil rule wrappers ------------------------------------ */
 
 static ixs_node *rule_floor_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -3222,17 +3198,6 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
   ixs_node *r;
   (void)bnds;
   r = floor_mod_div_zero(ctx, x);
-  if (!r)
-    return NULL;
-  return (r == x) ? n : r;
-}
-
-static ixs_node *rule_floor_mod_div_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
-                                              ixs_node *n) {
-  ixs_node *x = n->u.unary.arg;
-  ixs_node *r;
-  (void)bnds;
-  r = floor_mod_div_quotient(ctx, x);
   if (!r)
     return NULL;
   return (r == x) ? n : r;
@@ -3381,7 +3346,6 @@ static const ixs_rule floor_rules[] = {
     {rule_floor_drop_small_bounded_term, "floor_drop_small_bounded_term", true},
     {rule_floor_drop_const_sym, "floor_drop_const_sym", false},
     {rule_floor_mod_div_zero, "floor_mod_div_zero", false},
-    {rule_floor_mod_div_quotient, "floor_mod_div_quotient", false},
     {rule_floor_shift_xor, "floor_shift_xor", true},
     {NULL, NULL, false},
 };
@@ -4038,7 +4002,7 @@ static ixs_node *rule_mod_nested_divisor(ixs_ctx *ctx, ixs_bounds *bnds,
   return simp_mod(ctx, inner->u.binary.lhs, outerModulus);
 }
 
-/* Mod(c + k*Mod(x, m), m) -> Mod(c + k*x, m) for integer k. */
+/* Replace k*Mod(x, m) by k*x under Mod(..., d) whenever d divides k*m. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
   ixs_node *dividend = n->u.binary.lhs;
@@ -4047,6 +4011,8 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
   ixs_addterm *terms;
   ixs_node *flattened;
   ixs_node *result;
+  int64_t constant_p;
+  int64_t constant_q;
   uint32_t i;
   bool changed = false;
   (void)bnds;
@@ -4064,10 +4030,19 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     ixs_node *term = dividend->u.add.terms[i].term;
     int64_t coefficient_p;
     int64_t coefficient_q;
+    bool congruent;
     terms[i] = dividend->u.add.terms[i];
     ixs_node_get_rat(terms[i].coeff, &coefficient_p, &coefficient_q);
-    if (coefficient_q == 1 && term->tag == IXS_MOD &&
-        term->u.binary.rhs == denominator) {
+    congruent = term->tag == IXS_MOD && term->u.binary.rhs == denominator;
+    if (!congruent && coefficient_q == 1 && term->tag == IXS_MOD &&
+        term->u.binary.rhs->tag == IXS_INT && denominator->tag == IXS_INT &&
+        term->u.binary.rhs->u.ival > 0 && denominator->u.ival > 0) {
+      int64_t required =
+          denominator->u.ival /
+          ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
+      congruent = coefficient_p % required == 0;
+    }
+    if (coefficient_q == 1 && congruent) {
       terms[i].term = term->u.binary.lhs;
       changed = true;
     }
@@ -4076,9 +4051,98 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     ixs_arena_restore(&ctx->scratch, mark);
     return n;
   }
-  flattened =
-      ixs_node_add(ctx, dividend->u.add.coeff, dividend->u.add.nterms, terms);
+  ixs_node_get_rat(dividend->u.add.coeff, &constant_p, &constant_q);
+  flattened = rebuild_add_from_terms(ctx, terms, dividend->u.add.nterms,
+                                     constant_p, constant_q);
   result = flattened ? simp_mod(ctx, flattened, denominator) : NULL;
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+/* Modular reduction is a ring homomorphism over integer products.  Reduce
+ * each factor independently, but only after proving that the coefficient and
+ * every remaining factor are integers: replacing f by Mod(f, m) changes the
+ * product by m*k*rest, which is a multiple of m exactly under that contract.
+ *
+ * Keeping this fact-backed also avoids changing construction-time canonical
+ * forms merely because the modulus is a constant. */
+static ixs_node *rule_mod_reduce_product_factors(ixs_ctx *ctx, ixs_bounds *bnds,
+                                                 ixs_node *n) {
+  ixs_node *product = n->u.binary.lhs;
+  ixs_node *modulus = n->u.binary.rhs;
+  ixs_mulfactor *factors;
+  ixs_node *rebuilt;
+  ixs_node *result;
+  ixs_arena_mark mark;
+  int64_t coefficient_p;
+  int64_t coefficient_q;
+  uint32_t i;
+  bool changed = false;
+
+  if (!bnds || product->tag != IXS_MUL || modulus->tag != IXS_INT ||
+      modulus->u.ival <= 0)
+    return n;
+  ixs_node_get_rat(product->u.mul.coeff, &coefficient_p, &coefficient_q);
+  if (coefficient_q != 1 || coefficient_p == 0)
+    return n;
+
+  for (i = 0; i < product->u.mul.nfactors; ++i) {
+    ixs_mulfactor factor = product->u.mul.factors[i];
+    if (factor.exp <= 0 ||
+        !ixs_bounds_is_integer_with_divinfo(bnds, factor.base) ||
+        !node_is_proven_defined(bnds, factor.base))
+      return n;
+  }
+
+  mark = ixs_arena_save(&ctx->scratch);
+  factors =
+      ixs_arena_alloc(&ctx->scratch, product->u.mul.nfactors * sizeof(*factors),
+                      sizeof(void *));
+  if (!factors && product->u.mul.nfactors != 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  memcpy(factors, product->u.mul.factors,
+         product->u.mul.nfactors * sizeof(*factors));
+
+  for (i = 0; i < product->u.mul.nfactors; ++i) {
+    ixs_node *raw_residue =
+        ixs_node_binary(ctx, IXS_MOD, factors[i].base, modulus, (ixs_cmp_op)0);
+    ixs_node *residue;
+    if (!raw_residue) {
+      result = NULL;
+      goto cleanup;
+    }
+    residue = simp_mod_bnds(ctx, bnds, factors[i].base, modulus);
+    if (!residue) {
+      result = NULL;
+      goto cleanup;
+    }
+    if (residue != raw_residue && residue != factors[i].base) {
+      factors[i].base = residue;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    result = n;
+    goto cleanup;
+  }
+
+  rebuilt = product->u.mul.coeff;
+  for (i = 0; i < product->u.mul.nfactors; ++i) {
+    rebuilt = apply_pow(ctx, rebuilt, factors[i].base, factors[i].exp);
+    if (!rebuilt) {
+      result = NULL;
+      goto cleanup;
+    }
+    if (ixs_node_is_sentinel(rebuilt)) {
+      result = rebuilt;
+      goto cleanup;
+    }
+  }
+  result = simp_mod_bnds(ctx, bnds, rebuilt, modulus);
+
+cleanup:
   ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
@@ -4188,6 +4252,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_idempotent, "mod_idempotent", false},
     {rule_mod_nested_divisor, "mod_nested_divisor", false},
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
+    {rule_mod_reduce_product_factors, "mod_reduce_product_factors", true},
     {rule_mod_add_parity, "mod_add_parity", false},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
@@ -6631,6 +6696,8 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
   ixs_node *upper_difference;
   bool lower_safe;
   bool upper_safe;
+  int64_t shift_value;
+  int64_t shift_q;
   if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
       ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
       ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
@@ -6655,6 +6722,14 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
                bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
   upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
                bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
+  if ((!lower_safe || !upper_safe) && ixs_node_is_const(shift)) {
+    ixs_node_get_rat(shift, &shift_value, &shift_q);
+    if (shift_q == 1 && ixs_bounds_mod_shift_stays_in_residue(
+                            bnds, numerator, denominator, shift_value)) {
+      lower_safe = true;
+      upper_safe = true;
+    }
+  }
   if (bnds->oom)
     return FLOOR_SHIFT_ERROR;
   return lower_safe && upper_safe ? FLOOR_SHIFT_PROVEN : FLOOR_SHIFT_UNPROVEN;
@@ -7265,8 +7340,7 @@ static bool same_add_terms_with_constant_delta(ixs_node *a, ixs_node *b,
 }
 
 /* If Y = X + 2^k and bit k of X is zero, adding the offset neither carries
- * nor changes any other bit, so xor(X, Y) = 2^k.  This assumption-aware form
- * complements structural xor cancellation for aligned symbolic addresses. */
+ * nor changes any other bit, so xor(X, Y) = 2^k. */
 static ixs_node *simplify_aligned_xor_delta(ixs_ctx *ctx, ixs_bounds *bnds,
                                             ixs_node *expr) {
   ixs_bitfacts bits;

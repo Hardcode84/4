@@ -78,15 +78,56 @@ int main() {
 
   ixs::ExactDivideResult exact = facts.try_exact_divide(twice_x, 2);
   if (exact.status != IXS_EXACT_DIVIDE_PROVEN || exact.quotient.is_null())
-    return 6;
+    return 7;
 
   ixs::Facts transferred = ctx.facts();
   if (!transferred.substitute(facts, x, y))
-    return 7;
+    return 8;
   std::vector<ixs::Expr> targets = {x, y};
   std::vector<ixs::Expr> replacements = {y, x};
   if (!transferred.substitute_multi(facts, targets, replacements))
-    return 8;
+    return 9;
+
+  std::vector<ixs::Expr> assoc_values = {x, y, one};
+  ixs::Expr assoc_nodes[] = {
+      ixs::max(assoc_values), ixs::min({x, y, one}),  ixs::xor_(assoc_values),
+      ixs::and_({x, y, one}), ixs::or_(assoc_values),
+  };
+  ixs::Expr canonical_nodes[] = {
+      ixs::max(ixs::max(one, y), x),   ixs::min(ixs::min(one, y), x),
+      ixs::xor_(ixs::xor_(one, y), x), ixs::and_(ixs::and_(one, y), x),
+      ixs::or_(ixs::or_(one, y), x),
+  };
+  const ixs_tag assoc_tags[] = {IXS_MAX, IXS_MIN, IXS_XOR, IXS_AND, IXS_OR};
+  for (std::size_t i = 0; i < 5; ++i) {
+    const ixs::Expr &expr = assoc_nodes[i];
+    if (ixs_node_tag(expr.raw()) != assoc_tags[i])
+      return 10;
+    if (ixs_node_assoc_nargs(expr.raw()) != 3)
+      return 11;
+    if (expr.raw() != canonical_nodes[i].raw())
+      return 12;
+  }
+  bool rejected_empty = false;
+  try {
+    std::vector<ixs::Expr> empty;
+    (void)ixs::max(empty);
+  } catch (const std::invalid_argument &) {
+    rejected_empty = true;
+  }
+  if (!rejected_empty)
+    return 13;
+
+  bool rejected_foreign = false;
+  try {
+    ixs::Context other_ctx;
+    std::vector<ixs::Expr> mixed = {x, ixs::Expr::sym(other_ctx, "z")};
+    (void)ixs::or_(mixed);
+  } catch (const std::invalid_argument &) {
+    rejected_foreign = true;
+  }
+  if (!rejected_foreign)
+    return 14;
 
   return 0;
 }
