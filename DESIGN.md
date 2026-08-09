@@ -989,6 +989,9 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
 
+(consecutive radix composition, in simp_add)
+Mod(x,a) + a*Mod(floor(x/a),b)           → Mod(x,a*b)
+
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
@@ -1130,7 +1133,14 @@ xor(..., xor(args...), ...) → xor(..., args..., ...)
 xor(..., 0, ...)            → xor(...)
 xor(..., constants, ...)    → fold constants with ^
 xor(..., a repeated n, ...) → keep a iff n is odd
-xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
+xor(..., c*xor(b...), ...)  → xor(..., c*b, ...)
+                  when c is a non-negative integer literal and every b is a
+                  defined integer proven in [0,1]
+xor(..., c1*b, c2*b, ...)   → xor(..., (c1 xor c2)*b, ...)
+                  under the same coefficient and binary-factor conditions
+xor(args...)    → sum(xor(component...))
+                  where components are the connected components of possible
+                  bit overlap and at least two components exist
 k*xor(a, b + 2^n) - k*xor(a, b)
                 → k*(2^n - 2*(a & 2^n))
                   when bit n of the pre-toggle operand is known zero
@@ -1141,13 +1151,28 @@ whole flat list in one pass. The strict-domain guard in the representation
 section applies when an even run would disappear.
 
 The known-bit query merges exact interval facts and propagates low 64-bit
-facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
-non-negative `x`, and `Mod(x, 2^n)`. `MUL` and `Mod` only produce bitfacts
-for integer-valued expressions. The XOR-to-ADD rule is deliberately
-bounds-aware: both operands must be proven non-negative with finite int64
-bounds, because the known-bit lattice tracks only the low 64 bits. The
-XOR-delta rule leaves the largest int64 power-of-two delta untouched to avoid
-overflowing temporary arithmetic.
+facts through `ADD`, positive power-of-two `MUL`, positive constant `MUL` of a
+one-bit integer, `floor(x/2^n)` for non-negative `x`, and `Mod(x, 2^n)`. `MUL`
+and `Mod` only produce bitfacts for integer-valued expressions. A constant
+times a one-bit integer is either zero or that constant, so its possible-one
+mask preserves the constant's sparse bits. XOR operands whose possible-one
+masks overlap form a connected component. Distinct components cannot carry
+into each other, so the simplifier preserves XOR within each component and
+adds the components.
+Multiplication by a non-negative integer mask is linear over XOR only for
+factors proven to be defined integers in `[0,1]`. The local binary-factor pass
+uses that GF(2) module law to distribute one scaled XOR level and XOR-combine
+the mask coefficients of identical factors. It visits only the current XOR
+and its directly scaled XOR children, caps the prospective form at 256 terms,
+and leaves the expression unchanged for unsupported factors, budget
+exhaustion, or optional scratch OOM. It never enumerates the factor domain.
+This partial factorization still applies when one group contains intentional
+overlapping high bits and another contains an independent low radix field.
+The rule is deliberately bounds-aware: every operand must be proven
+non-negative with finite int64 bounds, because the known-bit lattice tracks
+only the low 64 bits. The overlap graph costs O(n^2) in the local XOR arity and
+does not inspect context-wide state. The XOR-delta rule leaves the largest
+int64 power-of-two delta untouched to avoid overflowing temporary arithmetic.
 
 `ADD` preserves sparse bitfacts when every normalized addend is a non-negative
 integer scaled by a positive power of two and their possible-one masks are
@@ -1627,8 +1652,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   contradictory facts, or OOM returns false and initializes the output to that
   same no-information value. The query first proves the expression integer-
   valued, so a rational interval cannot be misread as integer bits. Interval,
-  `ADD`, positive power-of-two `MUL`, floor division, `Mod`, and bitwise
-  propagation never infer anything about source bits above bit 63.
+  `ADD`, positive power-of-two `MUL`, positive constant `MUL` of a one-bit
+  integer, floor division, `Mod`, and bitwise propagation never infer anything
+  about source bits above bit 63.
 - **Public congruence queries** (`ixs_get_symbol_congruence_facts`,
   `ixs_check_congruent_facts`, Python `Context.symbol_congruence` and
   `Context.congruent`, C++ `Facts::get_symbol_congruence` and
@@ -1693,7 +1719,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `[0,d)`. The same equivalence query proves the generic radix identity
   `floor(Mod(A,M)/D) == Mod(floor(A/D),M/D)` for integer `A` and positive
   literal `D | M`; this is deliberately a relation proof rather than a global
-  canonical rewrite.
+  canonical rewrite. It likewise proves
+  `Mod(A,a*b) == Mod(A,a) + a*Mod(floor(Mod(A,M)/a),b)` for integer `A` and
+  positive literals `a`, `b`, and `M` when `a*b | M`. Keeping the enclosing
+  radix partition query-directed avoids destabilizing either useful global
+  representation.
 
   A normalized zero-sum equality may contain several `Mod` terms. The query
   isolates each term in turn and launches at most one bounded subproof for

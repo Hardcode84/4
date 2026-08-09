@@ -1175,6 +1175,250 @@ static void test_xor_known_bit_simplification(void) {
   }
 }
 
+static void test_xor_disjoint_component_factorization(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *item = ixs_sym(ctx, "xor_component_item");
+  ixs_node *group = ixs_sym(ctx, "xor_component_group");
+  ixs_node *within = ixs_sym(ctx, "xor_component_within");
+  ixs_node *item64 = ixs_mod(ctx, item, ixs_int(ctx, 64));
+  ixs_node *bits[6];
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, item, IXS_CMP_LT, ixs_int(ctx, 256)),
+      ixs_cmp(ctx, item, IXS_CMP_EQ, ixs_floor(ctx, item)),
+      ixs_cmp(ctx, group, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, group, IXS_CMP_LT, ixs_int(ctx, 2)),
+      ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_floor(ctx, group)),
+      ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, within, IXS_CMP_LT, ixs_int(ctx, 4)),
+      ixs_cmp(ctx, within, IXS_CMP_EQ, ixs_floor(ctx, within)),
+  };
+  ixs_node *ordinary_args[9];
+  ixs_node *ordinary_common;
+  ixs_node *ordinary;
+  ixs_node *ordinary_expected;
+  ixs_node *transpose_args[9];
+  ixs_node *transpose_common;
+  ixs_node *transpose;
+  ixs_node *transpose_expected;
+  ixs_node *overlap_args[2];
+  ixs_node *overlap;
+  ixs_facts *facts;
+  uint32_t bit;
+
+  facts = ixs_facts_create(ctx);
+  CHECK(facts != NULL);
+  CHECK(ixs_facts_assume_preds(facts, assumes, 9));
+
+  bits[0] = ixs_mod(ctx, item64, ixs_int(ctx, 2));
+  for (bit = 1; bit < 6; bit++) {
+    bits[bit] = ixs_mod(
+        ctx,
+        ixs_floor(ctx, ixs_div(ctx, item64, ixs_int(ctx, (int64_t)1 << bit))),
+        ixs_int(ctx, 2));
+  }
+
+  /* A carry-free low radix field remains additive even when the high XOR
+   * operands overlap each other. */
+  ordinary_args[0] = ixs_mul(ctx, ixs_int(ctx, 4), bits[5]);
+  ordinary_args[1] = ixs_mul(ctx, ixs_int(ctx, 8), group);
+  ordinary_args[2] = ixs_mul(ctx, ixs_int(ctx, 32), bits[0]);
+  ordinary_args[3] = ixs_mul(ctx, ixs_int(ctx, 64), bits[1]);
+  ordinary_args[4] = ixs_mul(ctx, ixs_int(ctx, 136), bits[2]);
+  ordinary_args[5] = ixs_mul(ctx, ixs_int(ctx, 272), bits[3]);
+  ordinary_args[6] = ixs_mul(ctx, ixs_int(ctx, 512), bits[4]);
+  ordinary_common = ixs_xor_many(ctx, 7, ordinary_args);
+  ordinary_args[7] =
+      ixs_mul(ctx, ixs_int(ctx, 2),
+              ixs_floor(ctx, ixs_div(ctx, within, ixs_int(ctx, 2))));
+  ordinary_args[8] = ixs_mod(ctx, within, ixs_int(ctx, 2));
+  ordinary = ixs_xor_many(ctx, 9, ordinary_args);
+  ordinary_expected = ixs_add(ctx, ordinary_common, within);
+  {
+    ixs_node *actual = ixs_simplify(ctx, ordinary, assumes, 9);
+    ixs_node *expected = ixs_simplify(ctx, ordinary_expected, assumes, 9);
+    CHECK(actual == expected);
+  }
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, ordinary, IXS_CMP_EQ, ordinary_expected)) ==
+        IXS_CHECK_TRUE);
+
+  /* The same partition exposes a low item field after a lane permutation. */
+  transpose_args[0] = ixs_mul(ctx, ixs_int(ctx, 4), bits[2]);
+  transpose_args[1] = ixs_mul(ctx, ixs_int(ctx, 8), bits[3]);
+  transpose_args[2] = ixs_mul(ctx, ixs_int(ctx, 16), bits[4]);
+  transpose_args[3] =
+      ixs_mul(ctx, ixs_int(ctx, 32), ixs_mod(ctx, within, ixs_int(ctx, 2)));
+  transpose_args[4] =
+      ixs_mul(ctx, ixs_int(ctx, 64),
+              ixs_floor(ctx, ixs_div(ctx, within, ixs_int(ctx, 2))));
+  transpose_args[5] = ixs_mul(ctx, ixs_int(ctx, 136), bits[5]);
+  transpose_args[6] = ixs_mul(ctx, ixs_int(ctx, 272), group);
+  transpose_common = ixs_xor_many(ctx, 7, transpose_args);
+  transpose_args[7] = ixs_mul(ctx, ixs_int(ctx, 2), bits[1]);
+  transpose_args[8] = bits[0];
+  transpose = ixs_xor_many(ctx, 9, transpose_args);
+  transpose_expected =
+      ixs_add(ctx, transpose_common, ixs_mod(ctx, item, ixs_int(ctx, 4)));
+  {
+    ixs_node *actual = ixs_simplify(ctx, transpose, assumes, 9);
+    ixs_node *expected = ixs_simplify(ctx, transpose_expected, assumes, 9);
+    CHECK(actual != NULL && expected != NULL);
+  }
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, transpose, IXS_CMP_EQ, transpose_expected)) ==
+        IXS_CHECK_TRUE);
+
+  /* The enclosing residue must contain the complete radix field. */
+  {
+    ixs_node *bad_partition = ixs_add(
+        ctx, ixs_mod(ctx, item, ixs_int(ctx, 2)),
+        ixs_mul(
+            ctx, ixs_int(ctx, 2),
+            ixs_mod(
+                ctx,
+                ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, ixs_int(ctx, 6)),
+                                       ixs_int(ctx, 2))),
+                ixs_int(ctx, 2))));
+    ixs_node *direct = ixs_mod(ctx, item, ixs_int(ctx, 4));
+    CHECK(test_ixs_check_predicate_facts(
+              facts, ixs_cmp(ctx, direct, IXS_CMP_EQ, bad_partition)) !=
+          IXS_CHECK_TRUE);
+  }
+
+  /* Euclidean quotient and residue semantics make the radix identity valid
+   * for negative integers as well. */
+  {
+    ixs_node *negative_item = ixs_sym(ctx, "xor_component_negative_item");
+    ixs_node *negative_assumes[] = {
+        ixs_cmp(ctx, negative_item, IXS_CMP_GE, ixs_int(ctx, -256)),
+        ixs_cmp(ctx, negative_item, IXS_CMP_LT, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, negative_item, IXS_CMP_EQ, ixs_floor(ctx, negative_item)),
+    };
+    ixs_facts *negative_facts = ixs_facts_create(ctx);
+    ixs_node *negative_partition = ixs_add(
+        ctx, ixs_mod(ctx, negative_item, ixs_int(ctx, 2)),
+        ixs_mul(ctx, ixs_int(ctx, 2),
+                ixs_mod(ctx,
+                        ixs_floor(ctx, ixs_div(ctx,
+                                               ixs_mod(ctx, negative_item,
+                                                       ixs_int(ctx, 64)),
+                                               ixs_int(ctx, 2))),
+                        ixs_int(ctx, 2))));
+    ixs_node *negative_direct = ixs_mod(ctx, negative_item, ixs_int(ctx, 4));
+    CHECK(negative_facts != NULL);
+    CHECK(ixs_facts_assume_preds(negative_facts, negative_assumes, 3));
+    CHECK(test_ixs_check_predicate_facts(
+              negative_facts, ixs_cmp(ctx, negative_direct, IXS_CMP_EQ,
+                                      negative_partition)) == IXS_CHECK_TRUE);
+  }
+
+  /* Overlapping possible bits remain in one XOR component. */
+  overlap_args[0] = ixs_mul(ctx, ixs_int(ctx, 8), group);
+  overlap_args[1] = ixs_mul(ctx, ixs_int(ctx, 136), bits[2]);
+  overlap = ixs_simplify(ctx, ixs_xor_many(ctx, 2, overlap_args), assumes, 9);
+  CHECK(ixs_node_tag(overlap) == IXS_XOR);
+
+  /* Sparse coefficient facts apply only to a proven zero-or-one child.  A
+   * wider integer factor can overlap the constant's bit and must stay XOR. */
+  {
+    ixs_node *wide = ixs_sym(ctx, "xor_component_wide");
+    ixs_node *wide_assumes[] = {
+        ixs_cmp(ctx, wide, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, wide, IXS_CMP_LT, ixs_int(ctx, 3)),
+        ixs_cmp(ctx, wide, IXS_CMP_EQ, ixs_floor(ctx, wide)),
+    };
+    ixs_node *wide_product = ixs_mul(ctx, ixs_int(ctx, 3), wide);
+    ixs_node *wide_xor = ixs_simplify(
+        ctx, ixs_xor(ctx, ixs_int(ctx, 4), wide_product), wide_assumes, 3);
+    CHECK(ixs_node_tag(wide_xor) == IXS_XOR);
+  }
+}
+
+static void test_xor_binary_linear_form(void) {
+  ixs_ctx *ctx = get_ctx();
+
+  /* An invertible three-bit GF(2) basis must compose without enumerating the
+   * eight values of the source coordinate. */
+  {
+    ixs_node *axis = ixs_sym(ctx, "xor_linear_axis");
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, axis, IXS_CMP_EQ, ixs_floor(ctx, axis)),
+        ixs_cmp(ctx, axis, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, axis, IXS_CMP_LE, ixs_int(ctx, 7)),
+    };
+    ixs_node *b0 = ixs_mod(ctx, axis, ixs_int(ctx, 2));
+    ixs_node *b1 =
+        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 2))),
+                ixs_int(ctx, 2));
+    ixs_node *b2 = ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 4)));
+    ixs_node *inner01 = ixs_xor(ctx, b0, b1);
+    ixs_node *inner20 = ixs_xor(ctx, b2, b0);
+    ixs_node *outer_args[] = {
+        ixs_mul(ctx, ixs_int(ctx, 2), inner01),
+        ixs_mul(ctx, ixs_int(ctx, 3), inner20),
+        ixs_mul(ctx, ixs_int(ctx, 7), b2),
+    };
+    ixs_node *layout = ixs_xor_many(ctx, 3, outer_args);
+    ixs_facts *facts = ixs_facts_create(ctx);
+
+    CHECK(ixs_simplify(ctx, layout, assumes, 3) == axis);
+    CHECK(ixs_simplify(ctx, ixs_xor(ctx, b0, ixs_mul(ctx, ixs_int(ctx, 3), b0)),
+                       assumes, 3) == ixs_mul(ctx, ixs_int(ctx, 2), b0));
+    CHECK(facts != NULL);
+    CHECK(ixs_facts_assume_preds(facts, assumes, 3));
+    CHECK(test_ixs_check_predicate_facts(
+              facts, ixs_cmp(ctx, layout, IXS_CMP_EQ, axis)) == IXS_CHECK_TRUE);
+  }
+
+  /* A finite integer factor with range {0,1,2} is not a GF(2) scalar. */
+  {
+    ixs_node *wide = ixs_sym(ctx, "xor_linear_wide");
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, wide, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, wide, IXS_CMP_LE, ixs_int(ctx, 2)),
+        ixs_cmp(ctx, wide, IXS_CMP_EQ, ixs_floor(ctx, wide)),
+    };
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), wide),
+                             ixs_mul(ctx, ixs_int(ctx, 3), wide));
+    CHECK(ixs_simplify(ctx, expr, assumes, 3) == expr);
+  }
+
+  /* Bounds inside [0,1] do not imply a binary value without integrality. */
+  {
+    ixs_node *source = ixs_sym(ctx, "xor_linear_fractional_source");
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, source, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, source, IXS_CMP_LE, ixs_int(ctx, 2)),
+    };
+    ixs_node *fractional = ixs_div(ctx, source, ixs_int(ctx, 2));
+    ixs_node *bit = ixs_mod(ctx, source, ixs_int(ctx, 2));
+    ixs_node *inner = ixs_xor(ctx, fractional, bit);
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 3), inner),
+                             ixs_mul(ctx, ixs_int(ctx, 3), bit));
+    CHECK(ixs_simplify(ctx, expr, assumes, 2) == expr);
+  }
+
+  /* Multiplication does not distribute through XOR for general integer
+   * operands, even when all values are non-negative and finite. */
+  {
+    ixs_node *x = ixs_sym(ctx, "xor_linear_nonbinary_x");
+    ixs_node *y = ixs_sym(ctx, "xor_linear_nonbinary_y");
+    ixs_node *assumes[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 3)),
+        ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x)),
+        ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 3)),
+        ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_floor(ctx, y)),
+    };
+    ixs_node *inner = ixs_xor(ctx, x, y);
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 3), inner),
+                             ixs_mul(ctx, ixs_int(ctx, 3), x));
+    CHECK(ixs_simplify(ctx, expr, assumes, 6) == expr);
+  }
+}
+
 static void test_xor_nested_cancellation(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "xor_cancel_x");
@@ -1678,9 +1922,8 @@ static void test_mod_bounds_tighten(void) {
                 ixs_int(ctx, 3));
     ixs_node *nonintegral =
         ixs_div(ctx, ixs_mod(ctx, x, two32), ixs_int(ctx, 2));
-    ixs_node *divisible_by_two =
-        ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), IXS_CMP_EQ,
-                ixs_int(ctx, 0));
+    ixs_node *divisible_by_two = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)),
+                                         IXS_CMP_EQ, ixs_int(ctx, 0));
     ixs_node *exact_quotient =
         ixs_mod(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), two31);
 
@@ -1898,9 +2141,8 @@ static void test_floor_drop_small_bounded_term(void) {
 static void test_floor_shift_xor(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "floor_shift_xor_x");
-  ixs_node *shifted =
-      ixs_floor(ctx, ixs_div(ctx, ixs_xor(ctx, x, ixs_int(ctx, 32)),
-                             ixs_int(ctx, 32)));
+  ixs_node *shifted = ixs_floor(
+      ctx, ixs_div(ctx, ixs_xor(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 32)));
   ixs_node *quotient = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 32)));
   ixs_node *expected = ixs_xor(ctx, quotient, ixs_int(ctx, 1));
   ixs_node *assumptions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
@@ -1923,8 +2165,7 @@ static void test_mod_bitwise_projection(void) {
   };
   ixs_node *projected_x = ixs_mod(ctx, x, modulus);
   ixs_node *projected_y = ixs_mod(ctx, y, modulus);
-  ixs_node *and_projection =
-      ixs_mod(ctx, ixs_and(ctx, x, y), modulus);
+  ixs_node *and_projection = ixs_mod(ctx, ixs_and(ctx, x, y), modulus);
   ixs_node *or_projection = ixs_mod(ctx, ixs_or(ctx, x, y), modulus);
   ixs_node *expected_and = ixs_and(ctx, projected_x, projected_y);
   ixs_node *expected_or = ixs_or(ctx, projected_x, projected_y);
@@ -1941,8 +2182,7 @@ static void test_mod_bitwise_projection(void) {
 
   {
     ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
-    ixs_node *nonintegral =
-        ixs_mod(ctx, ixs_and(ctx, half, y), modulus);
+    ixs_node *nonintegral = ixs_mod(ctx, ixs_and(ctx, half, y), modulus);
     CHECK(ixs_simplify(ctx, nonintegral, assumptions, 4) == nonintegral);
   }
 
@@ -2341,27 +2581,24 @@ static void test_mod_floor_regression(void) {
   {
     ixs_node *item = ixs_sym(ctx, "parity_x");
     ixs_node *other = ixs_sym(ctx, "parity_y");
-    ixs_node *high = ixs_mod(
-        ctx, ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 64))),
-        ixs_int(ctx, 2));
+    ixs_node *high =
+        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 64))),
+                ixs_int(ctx, 2));
     ixs_node *xor_args[] = {ixs_int(ctx, 1), high};
     ixs_node *toggled = ixs_xor_many(ctx, 2, xor_args);
-    ixs_node *parity = ixs_mod(
-        ctx, ixs_add(ctx, ixs_int(ctx, 1),
-                     ixs_floor(ctx,
-                               ixs_div(ctx, item, ixs_int(ctx, 64)))),
-        ixs_int(ctx, 2));
+    ixs_node *parity =
+        ixs_mod(ctx,
+                ixs_add(ctx, ixs_int(ctx, 1),
+                        ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 64)))),
+                ixs_int(ctx, 2));
     CHECK(parity == toggled);
-    CHECK(ixs_check(ctx,
-                    ixs_cmp(ctx, parity, IXS_CMP_EQ, toggled), NULL, 0) ==
+    CHECK(ixs_check(ctx, ixs_cmp(ctx, parity, IXS_CMP_EQ, toggled), NULL, 0) ==
           IXS_CHECK_TRUE);
 
-    ixs_node *sum =
-        ixs_add(ctx,
-                ixs_add(ctx, ixs_int(ctx, 3),
-                        ixs_mul(ctx, ixs_int(ctx, 5), item)),
-                ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), other),
-                        ixs_mul(ctx, ixs_int(ctx, -7), high)));
+    ixs_node *sum = ixs_add(
+        ctx, ixs_add(ctx, ixs_int(ctx, 3), ixs_mul(ctx, ixs_int(ctx, 5), item)),
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), other),
+                ixs_mul(ctx, ixs_int(ctx, -7), high)));
     ixs_node *sum_parities[] = {ixs_int(ctx, 1),
                                 ixs_mod(ctx, item, ixs_int(ctx, 2)), high};
     CHECK(ixs_mod(ctx, sum, ixs_int(ctx, 2)) ==
@@ -2370,12 +2607,11 @@ static void test_mod_floor_regression(void) {
     /* Other moduli, non-integer addends, and possibly-undefined operands do
      * not enter the GF(2) projection. */
     CHECK(ixs_node_tag(ixs_mod(ctx, ixs_add(ctx, item, ixs_int(ctx, 1)),
-                                    ixs_int(ctx, 3))) == IXS_MOD);
+                               ixs_int(ctx, 3))) == IXS_MOD);
     CHECK(ixs_node_tag(ixs_mod(ctx,
-                                    ixs_add(ctx, ixs_div(ctx, item,
-                                                         ixs_int(ctx, 2)),
-                                            ixs_int(ctx, 1)),
-                                    ixs_int(ctx, 2))) == IXS_MOD);
+                               ixs_add(ctx, ixs_div(ctx, item, ixs_int(ctx, 2)),
+                                       ixs_int(ctx, 1)),
+                               ixs_int(ctx, 2))) == IXS_MOD);
     ixs_node *modulus = ixs_sym(ctx, "parity_modulus");
     ixs_node *partial = ixs_mod(ctx, item, modulus);
     ixs_node *partial_parity =
@@ -2803,11 +3039,9 @@ static void test_floor_symbolic_denom_congruence_nonwrap(void) {
     ixs_node *difference = ixs_sub(ctx, base, shifted);
     ixs_node *assumptions[] = {
         positive,
-        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, cases[i].stride)),
-                IXS_CMP_EQ, ixs_int(ctx, cases[i].residue)),
-        ixs_cmp(ctx,
-                ixs_mod(ctx, d,
-                        ixs_int(ctx, cases[i].denominator_stride)),
+        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, cases[i].stride)), IXS_CMP_EQ,
+                ixs_int(ctx, cases[i].residue)),
+        ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, cases[i].denominator_stride)),
                 IXS_CMP_EQ, ixs_int(ctx, 0)),
     };
     CHECK(ixs_simplify(ctx, difference, assumptions, 3) == ixs_int(ctx, 0));
@@ -2823,10 +3057,9 @@ static void test_floor_symbolic_denom_congruence_nonwrap(void) {
         ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, 2)), IXS_CMP_EQ,
                 ixs_int(ctx, 0)),
     };
-    CHECK(ixs_simplify(ctx,
-                       ixs_sub(ctx, ixs_floor(ctx, ixs_div(ctx, a, d)),
-                               shifted),
-                       crossing, 3) != ixs_int(ctx, 0));
+    CHECK(ixs_simplify(
+              ctx, ixs_sub(ctx, ixs_floor(ctx, ixs_div(ctx, a, d)), shifted),
+              crossing, 3) != ixs_int(ctx, 0));
   }
 }
 
@@ -3126,8 +3359,8 @@ static void test_fact_equality_definition_normalization(void) {
       ixs_cmp(ctx, source_y, IXS_CMP_EQ,
               ixs_add(ctx, fresh_y, ixs_int(ctx, 3))),
   };
-  ixs_node *expr = ixs_add(
-      ctx, source_x, ixs_mul(ctx, ixs_int(ctx, 2), source_y));
+  ixs_node *expr =
+      ixs_add(ctx, source_x, ixs_mul(ctx, ixs_int(ctx, 2), source_y));
   ixs_node *expected = ixs_add(
       ctx, fresh_x,
       ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fresh_y), ixs_int(ctx, 6)));
@@ -3145,8 +3378,8 @@ static void test_fact_equality_definition_normalization(void) {
     ixs_node *cycle_y = ixs_sym(ctx, "definition_cycle_y");
     ixs_node *cycle_expr = ixs_add(ctx, cycle_x, cycle_y);
     ixs_facts *cycle = ixs_facts_create(ctx);
-    CHECK(ixs_facts_assume_pred(
-        cycle, ixs_cmp(ctx, cycle_x, IXS_CMP_EQ, cycle_y)));
+    CHECK(ixs_facts_assume_pred(cycle,
+                                ixs_cmp(ctx, cycle_x, IXS_CMP_EQ, cycle_y)));
     CHECK(test_ixs_simplify_facts(cycle, cycle_x) == cycle_y);
     CHECK(test_ixs_simplify_facts(cycle, cycle_expr) == cycle_expr);
   }
@@ -3155,8 +3388,8 @@ static void test_fact_equality_definition_normalization(void) {
     ixs_node *self = ixs_sym(ctx, "definition_self");
     ixs_node *self_mod = ixs_mod(ctx, self, ixs_int(ctx, 8));
     ixs_facts *recursive = ixs_facts_create(ctx);
-    CHECK(ixs_facts_assume_pred(
-        recursive, ixs_cmp(ctx, self, IXS_CMP_EQ, self_mod)));
+    CHECK(ixs_facts_assume_pred(recursive,
+                                ixs_cmp(ctx, self, IXS_CMP_EQ, self_mod)));
     CHECK(test_ixs_simplify_facts(recursive, self) == self);
   }
 
@@ -3165,8 +3398,8 @@ static void test_fact_equality_definition_normalization(void) {
     ixs_node *divisor = ixs_sym(ctx, "definition_divisor");
     ixs_node *quotient = ixs_div(ctx, ixs_int(ctx, 1), divisor);
     ixs_facts *open = ixs_facts_create(ctx);
-    CHECK(ixs_facts_assume_pred(
-        open, ixs_cmp(ctx, partial, IXS_CMP_EQ, quotient)));
+    CHECK(ixs_facts_assume_pred(open,
+                                ixs_cmp(ctx, partial, IXS_CMP_EQ, quotient)));
     CHECK(test_ixs_simplify_facts(open, partial) == partial);
   }
 }
@@ -3193,103 +3426,91 @@ static void test_mod_representative_definition_proof(void) {
   ixs_node *packed = ixs_add(
       ctx,
       ixs_mul(ctx, ixs_int(ctx, 8),
-              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), block),
-                      mapped_item)),
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), block), mapped_item)),
       mapped_slot);
-  ixs_node *unpacked = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, packed, ixs_int(ctx, 8))),
-      ixs_int(ctx, 64));
+  ixs_node *unpacked =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, packed, ixs_int(ctx, 8))),
+              ixs_int(ctx, 64));
   ixs_node *goal = ixs_cmp(ctx, unpacked, IXS_CMP_EQ, mapped_item);
-  ixs_node *false_goal = ixs_cmp(
-      ctx, unpacked, IXS_CMP_EQ,
-      ixs_add(ctx, mapped_item, ixs_int(ctx, 1)));
+  ixs_node *false_goal = ixs_cmp(ctx, unpacked, IXS_CMP_EQ,
+                                 ixs_add(ctx, mapped_item, ixs_int(ctx, 1)));
   ixs_node *other = ixs_sym(ctx, "definition_unpack_other");
   ixs_node *unknown_goal = ixs_cmp(ctx, unpacked, IXS_CMP_EQ, other);
-  ixs_node *difference = ixs_mul(
-      ctx, ixs_int(ctx, 32),
-      ixs_sub(ctx, slot, ixs_mod(ctx, slot, ixs_int(ctx, 8))));
-  ixs_node *weak_difference = ixs_mul(
-      ctx, ixs_int(ctx, 16),
-      ixs_sub(ctx, slot, ixs_mod(ctx, slot, ixs_int(ctx, 8))));
+  ixs_node *difference =
+      ixs_mul(ctx, ixs_int(ctx, 32),
+              ixs_sub(ctx, slot, ixs_mod(ctx, slot, ixs_int(ctx, 8))));
+  ixs_node *weak_difference =
+      ixs_mul(ctx, ixs_int(ctx, 16),
+              ixs_sub(ctx, slot, ixs_mod(ctx, slot, ixs_int(ctx, 8))));
   ixs_node *item_mod_64 = ixs_mod(ctx, item, ixs_int(ctx, 64));
   ixs_node *item_q2 =
       ixs_floor(ctx, ixs_div(ctx, item_mod_64, ixs_int(ctx, 2)));
   ixs_node *slot_tail = ixs_add(
       ctx,
       ixs_mul(ctx, ixs_int(ctx, 4),
-              ixs_mod(ctx,
-                      ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 16))),
+              ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 16))),
                       ixs_int(ctx, 2))),
-      ixs_add(ctx,
-              ixs_mul(ctx, ixs_int(ctx, 2),
-                      ixs_mod(ctx,
-                              ixs_floor(ctx, ixs_div(ctx, slot,
-                                                     ixs_int(ctx, 8))),
-                              ixs_int(ctx, 2))),
-              ixs_mod(ctx,
-                      ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 4))),
-                      ixs_int(ctx, 2))));
-  ixs_node *packed_item = ixs_add(
-      ctx, ixs_mul(ctx, ixs_int(ctx, 16), item_q2),
-      ixs_add(ctx,
-              ixs_mul(ctx, ixs_int(ctx, 8),
-                      ixs_mod(ctx, item, ixs_int(ctx, 2))),
-              slot_tail));
+      ixs_add(
+          ctx,
+          ixs_mul(ctx, ixs_int(ctx, 2),
+                  ixs_mod(ctx,
+                          ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 8))),
+                          ixs_int(ctx, 2))),
+          ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 4))),
+                  ixs_int(ctx, 2))));
+  ixs_node *packed_item =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 16), item_q2),
+              ixs_add(ctx,
+                      ixs_mul(ctx, ixs_int(ctx, 8),
+                              ixs_mod(ctx, item, ixs_int(ctx, 2))),
+                      slot_tail));
   ixs_node *unpacked_item = ixs_add(
-      ctx,
-      ixs_mul(ctx, ixs_int(ctx, 8), ixs_mod(ctx, item, ixs_int(ctx, 2))),
+      ctx, ixs_mul(ctx, ixs_int(ctx, 8), ixs_mod(ctx, item, ixs_int(ctx, 2))),
       ixs_add(
           ctx,
           ixs_mul(ctx, ixs_int(ctx, 16),
                   ixs_mod(ctx, item_q2, ixs_int(ctx, 2))),
           ixs_add(
               ctx,
-              ixs_mul(
-                  ctx, ixs_int(ctx, 32),
-                  ixs_mod(ctx,
-                          ixs_floor(ctx, ixs_div(ctx, item_mod_64,
-                                                 ixs_int(ctx, 4))),
-                          ixs_int(ctx, 2))),
-              ixs_add(
-                  ctx,
-                  ixs_mul(
-                      ctx, ixs_int(ctx, 64),
+              ixs_mul(ctx, ixs_int(ctx, 32),
                       ixs_mod(ctx,
                               ixs_floor(ctx, ixs_div(ctx, item_mod_64,
-                                                     ixs_int(ctx, 8))),
+                                                     ixs_int(ctx, 4))),
                               ixs_int(ctx, 2))),
+              ixs_add(
+                  ctx,
+                  ixs_mul(ctx, ixs_int(ctx, 64),
+                          ixs_mod(ctx,
+                                  ixs_floor(ctx, ixs_div(ctx, item_mod_64,
+                                                         ixs_int(ctx, 8))),
+                                  ixs_int(ctx, 2))),
                   ixs_add(
                       ctx,
-                      ixs_mul(
-                          ctx, ixs_int(ctx, 128),
-                          ixs_mod(
-                              ctx,
-                              ixs_floor(ctx, ixs_div(ctx, item_mod_64,
-                                                     ixs_int(ctx, 16))),
-                              ixs_int(ctx, 2))),
+                      ixs_mul(ctx, ixs_int(ctx, 128),
+                              ixs_mod(ctx,
+                                      ixs_floor(ctx, ixs_div(ctx, item_mod_64,
+                                                             ixs_int(ctx, 16))),
+                                      ixs_int(ctx, 2))),
                       slot_tail)))));
-  ixs_node *radix_goal = ixs_cmp(
-      ctx, ixs_mod(ctx, packed_item, ixs_int(ctx, 256)), IXS_CMP_EQ,
-      unpacked_item);
+  ixs_node *radix_goal =
+      ixs_cmp(ctx, ixs_mod(ctx, packed_item, ixs_int(ctx, 256)), IXS_CMP_EQ,
+              unpacked_item);
   ixs_node *digit = ixs_floor(
-      ctx, ixs_div(ctx, ixs_mod(ctx, slot, ixs_int(ctx, 4)),
-                   ixs_int(ctx, 2)));
-  ixs_node *expected_digit = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 2))),
-      ixs_int(ctx, 2));
+      ctx, ixs_div(ctx, ixs_mod(ctx, slot, ixs_int(ctx, 4)), ixs_int(ctx, 2)));
+  ixs_node *expected_digit =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 2))),
+              ixs_int(ctx, 2));
   ixs_node *radix_digit = ixs_floor(
-      ctx, ixs_div(ctx, ixs_mod(ctx, slot, ixs_int(ctx, 8)),
-                   ixs_int(ctx, 2)));
+      ctx, ixs_div(ctx, ixs_mod(ctx, slot, ixs_int(ctx, 8)), ixs_int(ctx, 2)));
   ixs_node *radix_digit_sum = ixs_add(
       ctx,
       ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 2))),
               ixs_int(ctx, 2)),
       ixs_mul(ctx, ixs_int(ctx, 2),
-              ixs_mod(ctx,
-                      ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 4))),
+              ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, slot, ixs_int(ctx, 4))),
                       ixs_int(ctx, 2))));
-  ixs_node *projected_xor = ixs_mod(
-      ctx, ixs_xor(ctx, item, ixs_int(ctx, 4)), ixs_int(ctx, 2));
+  ixs_node *projected_xor =
+      ixs_mod(ctx, ixs_xor(ctx, item, ixs_int(ctx, 4)), ixs_int(ctx, 2));
   ixs_facts *facts = ixs_facts_create(ctx);
 
   CHECK(ixs_facts_assume_preds(facts, predicates, 8));
@@ -3301,22 +3522,19 @@ static void test_mod_representative_definition_proof(void) {
   CHECK(test_ixs_check_divisible_facts(facts, weak_difference, 256) ==
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_check_facts(facts, radix_goal) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_facts(
-            facts, ixs_cmp(ctx, digit, IXS_CMP_EQ, expected_digit)) ==
-        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, digit, IXS_CMP_EQ,
+                                            expected_digit)) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(
             facts, ixs_cmp(ctx, radix_digit, IXS_CMP_EQ, radix_digit_sum)) ==
         IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(
             facts,
-            ixs_cmp(ctx, ixs_mul(ctx, ixs_int(ctx, 4), radix_digit),
-                    IXS_CMP_EQ,
+            ixs_cmp(ctx, ixs_mul(ctx, ixs_int(ctx, 4), radix_digit), IXS_CMP_EQ,
                     ixs_mul(ctx, ixs_int(ctx, 4), radix_digit_sum))) ==
         IXS_CHECK_TRUE);
   CHECK(test_ixs_simplify_facts(facts, projected_xor) ==
         ixs_mod(ctx, item, ixs_int(ctx, 2)));
 }
-
 
 static void test_exact_divide_fact_piecewise(void) {
   ixs_ctx *ctx = get_ctx();
@@ -3904,8 +4122,7 @@ static void test_try_subs_arithmetic_contract(void) {
   ixs_session_binding binding;
   ixs_node *target = ixs_sym(ctx, "try_subs_overflow_target");
   ixs_node *replacement = ixs_sym(ctx, "try_subs_overflow_replacement");
-  ixs_node *scaled =
-      ixs_mul(ctx, ixs_int(ctx, INT64_MAX), target);
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, INT64_MAX), target);
   ixs_node *expr = ixs_add(ctx, scaled, replacement);
   ixs_node *power = ixs_mul(ctx, target, target);
   ixs_node *result;
@@ -3919,15 +4136,14 @@ static void test_try_subs_arithmetic_contract(void) {
   CHECK(unrepresentable);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
-  result = simp_try_subs(ctx, power, target, ixs_node_int(ctx, 3),
-                         &unrepresentable);
+  result =
+      simp_try_subs(ctx, power, target, ixs_node_int(ctx, 3), &unrepresentable);
   CHECK(result == ixs_node_int(ctx, 9));
   CHECK(!unrepresentable);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
   result = simp_try_subs(ctx, power, target,
-                         ixs_node_int(ctx, INT64_C(1) << 40),
-                         &unrepresentable);
+                         ixs_node_int(ctx, INT64_C(1) << 40), &unrepresentable);
   ixs_session_unbind(&binding);
   CHECK(result == NULL);
   CHECK(unrepresentable);
@@ -4003,21 +4219,19 @@ static void test_nested_mod_remainder_composition(void) {
   ixs_node *three = ixs_int(ctx, 3);
   ixs_node *five = ixs_int(ctx, 5);
   ixs_node *low = ixs_mod(ctx, x, three);
-  ixs_node *high = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, x, three)), five);
+  ixs_node *high = ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, three)), five);
   ixs_node *composed = ixs_add(ctx, low, ixs_mul(ctx, three, high));
   ixs_node *expected = ixs_mod(ctx, x, ixs_int(ctx, 15));
-  ixs_node *scaled = ixs_add(
-      ctx, ixs_mul(ctx, ixs_int(ctx, -2), low),
-      ixs_mul(ctx, ixs_int(ctx, -6), high));
+  ixs_node *scaled = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), low),
+                             ixs_mul(ctx, ixs_int(ctx, -6), high));
   ixs_node *wrong_scale =
       ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 2), high));
   ixs_node *fractional = ixs_add(ctx, x, ixs_rat(ctx, 1, 2));
   ixs_node *fractional_low = ixs_mod(ctx, fractional, three);
-  ixs_node *fractional_high = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, fractional, three)), five);
-  ixs_node *fractional_sum = ixs_add(
-      ctx, fractional_low, ixs_mul(ctx, three, fractional_high));
+  ixs_node *fractional_high =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, fractional, three)), five);
+  ixs_node *fractional_sum =
+      ixs_add(ctx, fractional_low, ixs_mul(ctx, three, fractional_high));
 
   CHECK(composed == expected);
   CHECK(scaled == ixs_mul(ctx, ixs_int(ctx, -2), expected));
@@ -4549,19 +4763,15 @@ static void test_complement_annihilation(void) {
   {
     ixs_node *p = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
     ixs_node *q = ixs_cmp(ctx, y, IXS_CMP_GT, zero);
-    CHECK(ixs_or(ctx, p, ixs_not(ctx, ixs_and(ctx, p, q))) ==
-          ixs_true(ctx));
-    CHECK(ixs_and(ctx, p, ixs_not(ctx, ixs_or(ctx, p, q))) ==
-          ixs_false(ctx));
-    CHECK(ixs_or(ctx, p, ixs_not(ctx, ixs_and(ctx, q, q))) !=
-          ixs_true(ctx));
+    CHECK(ixs_or(ctx, p, ixs_not(ctx, ixs_and(ctx, p, q))) == ixs_true(ctx));
+    CHECK(ixs_and(ctx, p, ixs_not(ctx, ixs_or(ctx, p, q))) == ixs_false(ctx));
+    CHECK(ixs_or(ctx, p, ixs_not(ctx, ixs_and(ctx, q, q))) != ixs_true(ctx));
   }
 
   /* AND/OR are eager: a partial nested operand must not be eliminated. */
   {
     ixs_node *p = ixs_cmp(ctx, x, IXS_CMP_GT, zero);
-    ixs_node *partial = ixs_cmp(
-        ctx, ixs_mod(ctx, x, y), IXS_CMP_GT, zero);
+    ixs_node *partial = ixs_cmp(ctx, ixs_mod(ctx, x, y), IXS_CMP_GT, zero);
     ixs_node *expr = ixs_or(ctx, p, ixs_not(ctx, ixs_and(ctx, p, partial)));
     CHECK(expr != ixs_true(ctx));
     CHECK(ixs_check_defined(ctx, expr, NULL, 0) == IXS_CHECK_UNKNOWN);
@@ -5022,6 +5232,8 @@ int main(void) {
   test_flat_associative_nodes();
   test_xor_nested_cancellation();
   test_xor_known_bit_simplification();
+  test_xor_disjoint_component_factorization();
+  test_xor_binary_linear_form();
   test_simplify_with_bounds();
   test_eq_substitution();
   test_pw_branch_eq_substitution();
