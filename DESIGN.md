@@ -862,6 +862,8 @@ floor(c + sum(ci*bi))  → floor(sum(ci*bi))
 floor(grid_terms + t)   → floor(grid_terms)
     when bounds prove 0 <= t < the grid spacing of grid_terms
 floor(Mod(X, M) / K)  → 0   when K >= M > 0
+floor(Mod(X, M) / K)  → Mod(floor(X / K), M / K)
+    when M,K are positive integers and K divides M
 round(round(A) / D)   → round(A / D)   when D is a positive integer
                                         (round = floor or ceiling)
 ```
@@ -962,8 +964,12 @@ Mod(x, 1)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
+Mod(Mod(x, m), d)    where d divides m   → Mod(x, d)
 Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
                      when all scaled coefficients are integral
+Mod(c + sum(ci*ti), 2)                   → xor(c mod 2,
+                                                   (ci mod 2)*Mod(ti, 2), ...)
+                     when every ti is a defined integer-valued expression
 Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
                      where g = gcd(m, |ci|), r = C mod g, 0 < r < g,
                      and every ti is integer-valued
@@ -1125,7 +1131,6 @@ xor(..., 0, ...)            → xor(...)
 xor(..., constants, ...)    → fold constants with ^
 xor(..., a repeated n, ...) → keep a iff n is odd
 xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
-
 k*xor(a, b + 2^n) - k*xor(a, b)
                 → k*(2^n - 2*(a & 2^n))
                   when bit n of the pre-toggle operand is known zero

@@ -2238,11 +2238,12 @@ static void test_mod_floor_regression(void) {
   /* ceiling(Mod(x, n)) -> Mod(x, n) */
   CHECK(ixs_ceil(ctx, mx16) == mx16);
 
-  /* floor(Mod(x, 64)/16) stays as-is (mod-then-divide is the preferred form).
-   */
+  /* Extracting a divisible quotient commutes with the finite residue. */
   ixs_node *subfield = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
-  CHECK(ixs_node_tag(subfield) == IXS_FLOOR);
+  CHECK(subfield ==
+        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
+                ixs_int(ctx, 4)));
 
   /* floor(x + 1/2) -> x for integer-valued x (fractional part drops) */
   ixs_node *fhalf = ixs_floor(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)));
@@ -2276,11 +2277,67 @@ static void test_mod_floor_regression(void) {
   CHECK(ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 8), fx4), ixs_int(ctx, 4)) ==
         ixs_int(ctx, 0));
 
-  /* Mod(Mod(x, 32), 16): nested Mod where inner > outer.
-   * Currently not collapsed; verify it doesn't crash or produce garbage. */
+  /* Nested modulus collapses when the outer modulus divides the inner. */
   ixs_node *nested =
       ixs_mod(ctx, ixs_mod(ctx, x, ixs_int(ctx, 32)), ixs_int(ctx, 16));
-  CHECK(nested != NULL && !ixs_is_error(nested));
+  CHECK(nested == ixs_mod(ctx, x, ixs_int(ctx, 16)));
+
+  /* Non-divisible moduli preserve both operations. */
+  nested = ixs_mod(ctx, ixs_mod(ctx, x, ixs_int(ctx, 30)), ixs_int(ctx, 16));
+  CHECK(ixs_node_tag(nested) == IXS_MOD);
+  CHECK(ixs_node_tag(ixs_node_binary_lhs(nested)) == IXS_MOD);
+
+  /* Parity maps integer addition to n-ary xor. */
+  {
+    ixs_node *item = ixs_sym(ctx, "affine_origin_item");
+    ixs_node *other = ixs_sym(ctx, "affine_origin_other");
+    ixs_node *high = ixs_mod(
+        ctx, ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 64))),
+        ixs_int(ctx, 2));
+    ixs_node *xor_args[] = {ixs_int(ctx, 1), high};
+    ixs_node *toggled = ixs_xor_many(ctx, 2, xor_args);
+    ixs_node *parity = ixs_mod(
+        ctx, ixs_add(ctx, ixs_int(ctx, 1),
+                     ixs_floor(ctx,
+                               ixs_div(ctx, item, ixs_int(ctx, 64)))),
+        ixs_int(ctx, 2));
+    CHECK(parity == toggled);
+    CHECK(ixs_check(ctx,
+                    ixs_cmp(ctx, parity, IXS_CMP_EQ, toggled), NULL, 0) ==
+          IXS_CHECK_TRUE);
+
+    ixs_node *sum =
+        ixs_add(ctx,
+                ixs_add(ctx, ixs_int(ctx, 3),
+                        ixs_mul(ctx, ixs_int(ctx, 5), item)),
+                ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), other),
+                        ixs_mul(ctx, ixs_int(ctx, -7), high)));
+    ixs_node *sum_parities[] = {ixs_int(ctx, 1),
+                                ixs_mod(ctx, item, ixs_int(ctx, 2)), high};
+    CHECK(ixs_mod(ctx, sum, ixs_int(ctx, 2)) ==
+          ixs_xor_many(ctx, 3, sum_parities));
+
+    /* Other moduli, non-integer addends, and possibly-undefined operands do
+     * not enter the GF(2) projection. */
+    CHECK(ixs_node_tag(ixs_mod(ctx, ixs_add(ctx, item, ixs_int(ctx, 1)),
+                                    ixs_int(ctx, 3))) == IXS_MOD);
+    CHECK(ixs_node_tag(ixs_mod(ctx,
+                                    ixs_add(ctx, ixs_div(ctx, item,
+                                                         ixs_int(ctx, 2)),
+                                            ixs_int(ctx, 1)),
+                                    ixs_int(ctx, 2))) == IXS_MOD);
+    ixs_node *modulus = ixs_sym(ctx, "affine_origin_modulus");
+    ixs_node *partial = ixs_mod(ctx, item, modulus);
+    ixs_node *partial_parity =
+        ixs_mod(ctx, ixs_add(ctx, partial, ixs_int(ctx, 1)), ixs_int(ctx, 2));
+    CHECK(ixs_node_tag(partial_parity) == IXS_MOD);
+    ixs_node *positive_modulus =
+        ixs_cmp(ctx, modulus, IXS_CMP_GT, ixs_int(ctx, 0));
+    ixs_node *partial_xor_args[] = {ixs_int(ctx, 1),
+                                    ixs_mod(ctx, partial, ixs_int(ctx, 2))};
+    CHECK(ixs_simplify(ctx, partial_parity, &positive_modulus, 1) ==
+          ixs_xor_many(ctx, 2, partial_xor_args));
+  }
 }
 
 static void test_mod_recognition(void) {
@@ -2402,12 +2459,17 @@ static void test_floor_mod_divisor(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
 
-  /* floor(Mod(x, 64) / 16) stays: the "mod-then-divide" form is the natural
-   * hardware idiom for GPU thread index decomposition and maps directly to
-   * two affine ops.  Rewriting to Mod(floor(x/16), 4) is complexity-neutral
-   * and obscures the hardware mapping. */
+  /* Quotient commutes with a divisible constant modulus. */
   ixs_node *e = ixs_floor(
       ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 16)));
+  ixs_node *expected =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 16))),
+              ixs_int(ctx, 4));
+  CHECK(e == expected);
+
+  /* A non-divisor leaves the quotient intact. */
+  e = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)), ixs_int(ctx, 12)));
   CHECK(ixs_node_tag(e) == IXS_FLOOR);
 
   /* floor(Mod(x, 32) / 32) -> 0 (range of Mod is [0, 31], divided by 32 < 1,

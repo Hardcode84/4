@@ -50,6 +50,8 @@ static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
 static ixs_node *simp_floor_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_trunc_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
+static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
+                               ixs_node *b);
 static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
                                     ixs_node *const *args);
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
@@ -57,6 +59,7 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
                                     ixs_node *n);
 static bool node_is_known_total_integer(const ixs_node *node);
+static bool node_is_proven_defined(ixs_bounds *bnds, const ixs_node *node);
 static inline ixs_node *apply_pow(ixs_ctx *ctx, ixs_node *acc, ixs_node *base,
                                   int32_t exp);
 IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
@@ -3098,6 +3101,30 @@ static ixs_node *floor_mod_div_zero(ixs_ctx *ctx, ixs_node *x) {
   return x;
 }
 
+/* floor(Mod(X,M)/D) -> Mod(floor(X/D),M/D) when D divides M. */
+static ixs_node *floor_mod_div_quotient(ixs_ctx *ctx, ixs_node *x) {
+  ixs_node *mod;
+  ixs_node *divided;
+  ixs_node *quotient;
+  ixs_node *modulus;
+  int64_t cp, cq, m;
+
+  if (x->tag != IXS_MUL || x->u.mul.nfactors != 1 ||
+      x->u.mul.factors[0].exp != 1 || x->u.mul.factors[0].base->tag != IXS_MOD)
+    return x;
+  ixs_node_get_rat(x->u.mul.coeff, &cp, &cq);
+  mod = x->u.mul.factors[0].base;
+  if (cp != 1 || cq <= 1 || mod->u.binary.rhs->tag != IXS_INT)
+    return x;
+  m = mod->u.binary.rhs->u.ival;
+  if (m <= 0 || m % cq != 0)
+    return x;
+  divided = simp_div(ctx, mod->u.binary.lhs, ixs_node_int(ctx, cq));
+  quotient = divided ? simp_floor(ctx, divided) : NULL;
+  modulus = ixs_node_int(ctx, m / cq);
+  return quotient && modulus ? simp_mod(ctx, quotient, modulus) : NULL;
+}
+
 /* ---- Floor/ceil rule wrappers ------------------------------------ */
 
 static ixs_node *rule_floor_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -3195,6 +3222,17 @@ static ixs_node *rule_floor_mod_div_zero(ixs_ctx *ctx, ixs_bounds *bnds,
   ixs_node *r;
   (void)bnds;
   r = floor_mod_div_zero(ctx, x);
+  if (!r)
+    return NULL;
+  return (r == x) ? n : r;
+}
+
+static ixs_node *rule_floor_mod_div_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
+                                              ixs_node *n) {
+  ixs_node *x = n->u.unary.arg;
+  ixs_node *r;
+  (void)bnds;
+  r = floor_mod_div_quotient(ctx, x);
   if (!r)
     return NULL;
   return (r == x) ? n : r;
@@ -3343,6 +3381,7 @@ static const ixs_rule floor_rules[] = {
     {rule_floor_drop_small_bounded_term, "floor_drop_small_bounded_term", true},
     {rule_floor_drop_const_sym, "floor_drop_const_sym", false},
     {rule_floor_mod_div_zero, "floor_mod_div_zero", false},
+    {rule_floor_mod_div_quotient, "floor_mod_div_quotient", false},
     {rule_floor_shift_xor, "floor_shift_xor", true},
     {NULL, NULL, false},
 };
@@ -3979,6 +4018,26 @@ static ixs_node *rule_mod_idempotent(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
+/* Mod(Mod(X,M),D) -> Mod(X,D) when D divides M. */
+static ixs_node *rule_mod_nested_divisor(ixs_ctx *ctx, ixs_bounds *bnds,
+                                         ixs_node *n) {
+  ixs_node *inner = n->u.binary.lhs;
+  ixs_node *outerModulus = n->u.binary.rhs;
+  ixs_node *innerModulus;
+  int64_t m, d;
+  (void)bnds;
+
+  if (inner->tag != IXS_MOD || inner->u.binary.rhs->tag != IXS_INT ||
+      outerModulus->tag != IXS_INT)
+    return n;
+  innerModulus = inner->u.binary.rhs;
+  m = innerModulus->u.ival;
+  d = outerModulus->u.ival;
+  if (m <= 0 || d <= 0 || m % d != 0)
+    return n;
+  return simp_mod(ctx, inner->u.binary.lhs, outerModulus);
+}
+
 /* Mod(c + k*Mod(x, m), m) -> Mod(c + k*x, m) for integer k. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
@@ -4024,6 +4083,73 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
   return result;
 }
 
+/* Reduction modulo two is the homomorphism from integer addition to GF(2):
+ *
+ *   Mod(c + sum(ci*ti), 2)
+ *     = xor(Mod(c, 2), Mod(ci, 2)*Mod(ti, 2), ...)
+ *
+ * Verify every operand before dropping even coefficients so the rewrite does
+ * not erase an undefined subexpression. */
+static ixs_node *rule_mod_add_parity(ixs_ctx *ctx, ixs_bounds *bnds,
+                                     ixs_node *n) {
+  ixs_node *dividend = n->u.binary.lhs;
+  ixs_node **parities;
+  ixs_node *result;
+  ixs_arena_mark mark;
+  int64_t constant_p;
+  int64_t constant_q;
+  uint32_t count = 0;
+  uint32_t i;
+
+  if (n->u.binary.rhs->tag != IXS_INT ||
+      n->u.binary.rhs->u.ival != 2 || dividend->tag != IXS_ADD)
+    return n;
+  ixs_node_get_rat(dividend->u.add.coeff, &constant_p, &constant_q);
+  if (constant_q != 1)
+    return n;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  parities = ixs_arena_alloc(
+      &ctx->scratch, ((size_t)dividend->u.add.nterms + 1u) * sizeof(*parities),
+      sizeof(void *));
+  if (!parities) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  if (constant_p % 2 != 0) {
+    parities[count++] = ixs_node_int(ctx, 1);
+    if (!parities[count - 1u]) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+  }
+  for (i = 0; i < dividend->u.add.nterms; ++i) {
+    ixs_node *term = dividend->u.add.terms[i].term;
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    ixs_node_get_rat(dividend->u.add.terms[i].coeff, &coefficient_p,
+                     &coefficient_q);
+    if (coefficient_q != 1 || !ixs_node_is_integer_valued(term) ||
+        !node_is_proven_defined(bnds, term)) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return n;
+    }
+    if (coefficient_p % 2 == 0)
+      continue;
+    parities[count] =
+        simp_mod_bnds(ctx, bnds, term, n->u.binary.rhs);
+    if (!parities[count]) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+    ++count;
+  }
+  result = count == 0 ? ixs_node_int(ctx, 0)
+                      : simp_xor_many_bnds(ctx, bnds, count, parities);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 static ixs_node *rule_mod_strip_multiples(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
   (void)bnds;
@@ -4060,7 +4186,9 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_one, "mod_one", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},
     {rule_mod_idempotent, "mod_idempotent", false},
+    {rule_mod_nested_divisor, "mod_nested_divisor", false},
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
+    {rule_mod_add_parity, "mod_add_parity", false},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
     {rule_mod_extract_small_const, "mod_extract_small_const", false},
