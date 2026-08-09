@@ -54,6 +54,10 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
                                ixs_node *b);
 static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
                                     ixs_node *const *args);
+IXS_STATIC ixs_node *simp_and_many(ixs_ctx *ctx, uint32_t n,
+                                   ixs_node *const *args);
+IXS_STATIC ixs_node *simp_or_many(ixs_ctx *ctx, uint32_t n,
+                                  ixs_node *const *args);
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -4214,6 +4218,60 @@ static ixs_node *rule_mod_add_parity(ixs_ctx *ctx, ixs_bounds *bnds,
   return result;
 }
 
+/* Reduction modulo 2^k is exactly projection onto the low k bits, and bitwise
+ * operations commute with that projection. Keeping the definedness checks
+ * before reduction prevents a zero low projection from erasing a partial
+ * operand.
+ *
+ *   Mod(bitop(a0, ...), 2^k) = bitop(Mod(a0, 2^k), ...)
+ */
+static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
+                                             ixs_node *n) {
+  ixs_node *dividend = n->u.binary.lhs;
+  ixs_node *modulus = n->u.binary.rhs;
+  ixs_node **projected;
+  ixs_node *result;
+  ixs_arena_mark mark;
+  uint32_t i;
+
+  if (modulus->tag != IXS_INT || modulus->u.ival <= 0 ||
+      !uint64_pow2((uint64_t)modulus->u.ival) ||
+      (dividend->tag != IXS_XOR && dividend->tag != IXS_AND &&
+       dividend->tag != IXS_OR) ||
+      dividend->u.assoc.nargs == 0 || !dividend->u.assoc.args)
+    return n;
+  for (i = 0; i < dividend->u.assoc.nargs; i++) {
+    if (!ixs_node_is_integer_valued(dividend->u.assoc.args[i]) ||
+        !node_is_proven_defined(bnds, dividend->u.assoc.args[i]))
+      return n;
+  }
+
+  mark = ixs_arena_save(&ctx->scratch);
+  projected = ixs_arena_alloc(
+      &ctx->scratch, dividend->u.assoc.nargs * sizeof(*projected),
+      sizeof(void *));
+  if (!projected) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  for (i = 0; i < dividend->u.assoc.nargs; i++) {
+    projected[i] =
+        simp_mod_bnds(ctx, bnds, dividend->u.assoc.args[i], modulus);
+    if (!projected[i]) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
+    }
+  }
+  if (dividend->tag == IXS_XOR)
+    result = simp_xor_many_bnds(ctx, bnds, dividend->u.assoc.nargs, projected);
+  else if (dividend->tag == IXS_AND)
+    result = simp_and_many(ctx, dividend->u.assoc.nargs, projected);
+  else
+    result = simp_or_many(ctx, dividend->u.assoc.nargs, projected);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
 static ixs_node *rule_mod_strip_multiples(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
   (void)bnds;
@@ -4254,6 +4312,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
     {rule_mod_reduce_product_factors, "mod_reduce_product_factors", true},
     {rule_mod_add_parity, "mod_add_parity", false},
+    {rule_mod_bitwise_projection, "mod_bitwise_projection", true},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
     {rule_mod_extract_small_const, "mod_extract_small_const", false},

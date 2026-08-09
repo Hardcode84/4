@@ -862,8 +862,6 @@ floor(c + sum(ci*bi))  → floor(sum(ci*bi))
 floor(grid_terms + t)   → floor(grid_terms)
     when bounds prove 0 <= t < the grid spacing of grid_terms
 floor(Mod(X, M) / K)  → 0   when K >= M > 0
-floor(Mod(X, M) / K)  → Mod(floor(X / K), M / K)
-    when M,K are positive integers and K divides M
 round(round(A) / D)   → round(A / D)   when D is a positive integer
                                         (round = floor or ceiling)
 ```
@@ -970,6 +968,8 @@ Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
 Mod(c + sum(ci*ti), 2)                   → xor(c mod 2,
                                                    (ci mod 2)*Mod(ti, 2), ...)
                      when every ti is a defined integer-valued expression
+Mod(bitop(a1, ...), 2^k)                 → bitop(Mod(a1, 2^k), ...)
+                     for defined integer operands and bitop in {xor, and, or}
 Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
                      where g = gcd(m, |ci|), r = C mod g, 0 < r < g,
                      and every ti is integer-valued
@@ -1485,6 +1485,15 @@ This enables rules like:
   rational is not representable, simplification keeps the structural power
   without emitting an error. A zero base with negative exponent remains a
   domain error.
+- **Query-directed equality definitions**: fact-backed simplify and check may
+  replace a queried symbol through an exact equality component when the other
+  endpoint is an independently defined expression outside the selected query
+  symbols. All selected replacements are applied simultaneously and are not
+  traversed recursively. Cycles, self-reference, partial replacements, and
+  unrepresentable offsets therefore leave the expression unchanged or the
+  proof unknown instead of selecting an order-dependent rewrite. Discovery
+  walks only the query DAG and equality components incident to its symbols;
+  it never scans unrelated context state.
 - `Mod(x, 32)` where `0 <= x < 32` → `x`
 - `floor(x/64)` where `0 <= x < 64` → `0`
 - `floor(x)` → constant when `floor(lo) == floor(hi)` (same for ceiling)
@@ -1681,7 +1690,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   equivalent to `A` and bounded by `0 <= B < D`. Conversely,
   `floor(N/d) == Q` follows for integer `N` and `Q` and a positive literal
   denominator `d` when the exact remainder `N - d*Q` is proven inside
-  `[0,d)`.
+  `[0,d)`. The same equivalence query proves the generic radix identity
+  `floor(Mod(A,M)/D) == Mod(floor(A/D),M/D)` for integer `A` and positive
+  literal `D | M`; this is deliberately a relation proof rather than a global
+  canonical rewrite.
 
   A normalized zero-sum equality may contain several `Mod` terms. The query
   isolates each term in turn and launches at most one bounded subproof for
@@ -1689,6 +1701,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `Mod(k*x+r,k*m) == k*Mod(x,m)+r` for positive integer literals `k,m`,
   integer-valued `x,r`, and `0 <= r < k`; other `Mod` terms may remain inside
   the residual. Missing integrality or range proofs leave the result unknown.
+
+  Exact divisibility of a normalized sum repeatedly applies the Euclidean
+  pair identity `c*A - c*Mod(A,D) = c*D*floor(A/D)`. Each iterative proof
+  frame removes one explicit `Mod`, so nested radix reconstruction composes
+  without recursive C calls, layout-specific patterns, or finite-domain
+  enumeration.
 
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
@@ -1715,7 +1733,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 
   A normalized two-term residual `c*A - c*B == 0` removes any common nonzero
   exact rational scale `c` and proves `A == B`; this is not restricted to unit
-  coefficients. For `Piecewise((v1,c1), ..., (vn,cn)) == s`, equivalence
+  coefficients. More generally, a shared positive integer content in the
+  canonical top-level coefficients is divided from both sides, expanded, and
+  handed back to the bounded equivalence engine. Global simplification keeps
+  the original scaled normal form. For
+  `Piecewise((v1,c1), ..., (vn,cn)) == s`, equivalence
   follows first-match semantics: each reachable branch is checked against `s`
   in a fork containing its condition and the negations of all earlier
   conditions. Every feasible input must be covered and every branch subproof
