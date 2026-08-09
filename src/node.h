@@ -58,9 +58,8 @@ typedef struct {
 #define IXS_NODE_PROPERTY_INTEGER 2u
 #define IXS_NODE_PROPERTY_BOOL 4u
 #define IXS_NODE_PROPERTY_TOTAL 8u
-#define IXS_NODE_PROPERTY_ROUNDING 16u
-#define IXS_NODE_PROPERTY_PIECEWISE 32u
-#define IXS_NODE_PROPERTY_NESTED_PIECEWISE 64u
+#define IXS_NODE_PROPERTY_PIECEWISE 16u
+#define IXS_NODE_PROPERTY_NESTED_PIECEWISE 32u
 
 /* Only pre-intern builders and unpublished stack probes spell this tag. */
 struct ixs_node_impl {
@@ -105,11 +104,6 @@ struct ixs_node_impl {
     } unary_bool;
   } u;
 };
-
-static inline bool ixs_node_contains_rounding(const ixs_node *node) {
-  return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&
-         (node->properties & IXS_NODE_PROPERTY_ROUNDING) != 0;
-}
 
 static inline bool ixs_node_contains_piecewise(const ixs_node *node) {
   return node && (node->properties & IXS_NODE_PROPERTY_VALID) != 0 &&

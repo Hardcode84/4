@@ -103,6 +103,13 @@ IXS_STATIC bool simp_range(ixs_ctx *ctx, ixs_node *expr,
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement);
 
+/* Speculative substitution.  A representability failure returns NULL and sets
+ * unrepresentable without appending a diagnostic; NULL with false still means
+ * allocation failure. */
+IXS_STATIC ixs_node *simp_try_subs(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *target, ixs_node *replacement,
+                                   bool *unrepresentable);
+
 /* Simultaneous multi-target substitution. */
 IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,

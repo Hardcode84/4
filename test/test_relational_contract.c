@@ -345,68 +345,6 @@ static void test_relational_cyclic_xor_recurrence(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_relational_signed_u32_recurrence(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *x = ixs_sym(ctx, "relation_signed_u32_x");
-  ixs_node *two31 = ixs_int(ctx, INT64_C(2147483648));
-  ixs_node *two32 = ixs_int(ctx, INT64_C(4294967296));
-  ixs_node *unsigned_x = ixs_mod(ctx, x, two32);
-  ixs_node *unsigned_next =
-      ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), two32);
-  ixs_node *truncating_remainder =
-      ixs_sub(ctx, x,
-              ixs_mul(ctx, ixs_int(ctx, 3),
-                      ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)))));
-  ixs_node *remainder =
-      ixs_add(ctx, ixs_int(ctx, INT64_C(-2147483648)),
-              ixs_mod(ctx, ixs_add(ctx, two31, truncating_remainder), two32));
-  ixs_node *next =
-      (ixs_node *)ixs_subs(ctx, remainder, x, ixs_add(ctx, x, ixs_int(ctx, 1)));
-  ixs_node *expected =
-      ixs_mod(ctx, ixs_add(ctx, remainder, ixs_int(ctx, 1)), ixs_int(ctx, 3));
-  ixs_node *equality = ixs_cmp(ctx, next, IXS_CMP_EQ, expected);
-  ixs_node *signed_lower =
-      ixs_cmp(ctx, ixs_add(ctx, two31, x), IXS_CMP_GE, ixs_int(ctx, 0));
-  ixs_node *signed_upper =
-      ixs_cmp(ctx, ixs_add(ctx, ixs_int(ctx, INT64_C(-2147483647)), x),
-              IXS_CMP_LE, ixs_int(ctx, 0));
-  ixs_node *successor = ixs_cmp(ctx, unsigned_next, IXS_CMP_EQ,
-                                ixs_add(ctx, unsigned_x, ixs_int(ctx, 1)));
-  ixs_facts *low = ixs_facts_create(ctx);
-  ixs_facts *high = ixs_facts_create(ctx);
-
-  CHECK(ctx && x && two31 && two32 && unsigned_x && unsigned_next &&
-        truncating_remainder && remainder && next && expected && equality &&
-        signed_lower && signed_upper && successor && low && high);
-  CHECK(ixs_facts_assume_pred(low, signed_lower));
-  CHECK(ixs_facts_assume_pred(low, signed_upper));
-  CHECK(ixs_facts_assume_pred(
-      low, ixs_cmp(ctx, unsigned_x, IXS_CMP_GE, ixs_int(ctx, 0))));
-  CHECK(ixs_facts_assume_pred(
-      low, ixs_cmp(ctx, unsigned_x, IXS_CMP_LT, ixs_int(ctx, 42))));
-  CHECK(ixs_facts_assume_pred(low, successor));
-  CHECK(test_ixs_check_predicate_facts(
-            low, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))) ==
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(low, next, expected) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(low, equality) == IXS_CHECK_TRUE);
-
-  CHECK(ixs_facts_assume_pred(high, signed_lower));
-  CHECK(ixs_facts_assume_pred(high, signed_upper));
-  CHECK(
-      ixs_facts_assume_pred(high, ixs_cmp(ctx, unsigned_x, IXS_CMP_GE,
-                                          ixs_int(ctx, INT64_C(4294967254)))));
-  CHECK(
-      ixs_facts_assume_pred(high, ixs_cmp(ctx, unsigned_x, IXS_CMP_LT,
-                                          ixs_int(ctx, INT64_C(4294967295)))));
-  CHECK(ixs_facts_assume_pred(high, successor));
-  CHECK(test_ixs_check_predicate_facts(
-            high, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))) !=
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(high, next, expected) != IXS_CHECK_TRUE);
-
-  ixs_ctx_destroy(ctx);
-}
 
 static void test_relational_mod_quotient_order(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -431,91 +369,6 @@ static void test_relational_mod_quotient_order(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_relational_dma_bit_reconstruction(void) {
-  ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *item = ixs_sym(ctx, "relation_dma_item");
-  ixs_node *flat = ixs_mul(ctx, ixs_int(ctx, 8), item);
-  ixs_node *value = ixs_mod(ctx, flat, ixs_int(ctx, 64));
-  ixs_node *bits[6];
-  ixs_node *reconstructed;
-  ixs_node *observed;
-  ixs_node *expected;
-  ixs_node *equality;
-  ixs_facts *facts = ixs_facts_create(ctx);
-  size_t bit;
-
-  bits[0] = ixs_mod(ctx, value, ixs_int(ctx, 2));
-  for (bit = 1; bit < 6; bit++) {
-    int64_t scale = INT64_C(1) << bit;
-    bits[bit] = ixs_mul(
-        ctx, ixs_int(ctx, scale),
-        ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, value, ixs_int(ctx, scale))),
-                ixs_int(ctx, 2)));
-  }
-  reconstructed = bits[0];
-  for (bit = 1; bit < 6; bit++)
-    reconstructed = ixs_xor(ctx, reconstructed, bits[bit]);
-  observed = ixs_mul(ctx, ixs_int(ctx, 16), reconstructed);
-  expected = ixs_mul(ctx, ixs_int(ctx, 128), item);
-  equality = ixs_cmp(ctx, observed, IXS_CMP_EQ, expected);
-
-  CHECK(ctx && item && flat && value && bits[0] && bits[1] && bits[2] &&
-        bits[3] && bits[4] && bits[5] && reconstructed && observed &&
-        expected && equality && facts);
-  CHECK(ixs_facts_assume_pred(facts,
-                              ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))));
-  CHECK(ixs_facts_assume_pred(
-      facts, ixs_cmp(ctx, item, IXS_CMP_LE, ixs_int(ctx, 63))));
-  CHECK(ixs_facts_assume_pred(
-      facts, ixs_cmp(ctx, ixs_floor(ctx, ixs_div(ctx, item, ixs_int(ctx, 8))),
-                     IXS_CMP_EQ, ixs_int(ctx, 0))));
-  CHECK(test_ixs_equivalent_facts(facts, value, flat) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(facts, reconstructed, value) ==
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(facts, observed,
-                                  ixs_mul(ctx, ixs_int(ctx, 16), value)) ==
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(facts, ixs_mul(ctx, ixs_int(ctx, 16), value),
-                                  expected) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_equivalent_facts(facts, observed, expected) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(facts, equality) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_cmp(ctx, observed, IXS_CMP_NE, expected)) ==
-        IXS_CHECK_FALSE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_and(ctx, equality,
-                           ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)))) ==
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_or(ctx, equality,
-                          ixs_cmp(ctx, item, IXS_CMP_LT, ixs_int(ctx, 0)))) ==
-        IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_and(ctx, ixs_cmp(ctx, observed, IXS_CMP_NE, expected),
-                           ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)))) ==
-        IXS_CHECK_FALSE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_not(ctx, ixs_cmp(ctx, observed, IXS_CMP_NE,
-                                        expected))) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts, ixs_not(ctx, ixs_cmp(ctx, observed, IXS_CMP_EQ,
-                                        expected))) == IXS_CHECK_FALSE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts,
-            ixs_or(ctx,
-                   ixs_and(ctx, equality,
-                           ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0))),
-                   ixs_not(ctx, equality))) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(
-            facts,
-            ixs_and(ctx,
-                    ixs_not(ctx, ixs_cmp(ctx, observed, IXS_CMP_NE, expected)),
-                    ixs_or(ctx, ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)),
-                           ixs_cmp(ctx, observed, IXS_CMP_NE, expected)))) ==
-        IXS_CHECK_TRUE);
-
-  ixs_ctx_destroy(ctx);
-}
 
 static void test_relational_equivalence_probe_guards(void) {
   ixs_ctx *ctx = ixs_ctx_create();
@@ -1069,9 +922,7 @@ int main(void) {
   test_relational_loop_bound_production_witness();
   test_relational_mod_quotient_identity();
   test_relational_cyclic_xor_recurrence();
-  test_relational_signed_u32_recurrence();
   test_relational_mod_quotient_order();
-  test_relational_dma_bit_reconstruction();
   test_relational_equivalence_probe_guards();
   test_relational_totality_predicate_contract();
   test_relational_optional_proof_extrema();

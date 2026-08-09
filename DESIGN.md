@@ -1249,11 +1249,12 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   symbol remainders when the stored modulus is a multiple of the query
   modulus, and proves zero remainders for composite expressions through
   the same sufficient divisibility predicate used by simplification rules.
-- **Atomic predicate checks**: `ixs_check` and `ixs_check_facts` accept a
-  normalized comparison or the canonical integer `1`/`0` produced when a
-  smart constructor resolves a comparison. Other non-comparison expressions
-  remain unknown. Contradictory fact domains never prove even a constant
-  predicate.
+- **Atomic predicate checks**: `ixs_check` accepts a normalized comparison;
+  `ixs_check_facts` also accepts comparisons whose operands must remain
+  separate to preserve domain semantics, such as reflexive equality. Both
+  accept the canonical integer `1`/`0` produced when a smart constructor
+  resolves a comparison. Other non-comparison expressions remain unknown.
+  Contradictory fact domains never prove even a constant predicate.
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 
@@ -1299,6 +1300,13 @@ contributes no fact; false marks the bounds as contradictory. Supporting these
 constants preserves predicates that simplify before ingestion, such as
 `(x & 0) == 0`. The walker visits at most 1024 nodes per root and therefore does
 not consume one C call frame per nested conjunction.
+
+A CMP leaf that proves a Boolean-valued CMP or AND root exactly equal to one is
+canonicalized to the supported predicate it entails. The redundant outer
+relation is not stored. This normalization is recursive, so an outer Boolean
+identity cannot hide an inner range, equality, or conjunction from batch
+closure. OR and NOT operands remain opaque inside a CMP leaf and retain the
+direct-OR/direct-NOT rejection contract.
 
 OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
@@ -1665,9 +1673,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
   `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
   More generally, `Mod(A,D)` equals any integer expression `B` proven
-  equivalent to `A` and bounded by `0 <= B < D`. Radix reconstruction uses
-  the same bounded composition: `m*floor(x/m) + Mod(y,m) == x` follows from a
-  positive literal `m` and a proof that `x == y (mod m)`.
+  equivalent to `A` and bounded by `0 <= B < D`. Conversely,
+  `floor(N/d) == Q` follows for integer `N` and `Q` and a positive literal
+  denominator `d` when the exact remainder `N - d*Q` is proven inside
+  `[0,d)`.
 
   A normalized zero-sum equality may contain several `Mod` terms. The query
   isolates each term in turn and launches at most one bounded subproof for
@@ -1698,18 +1707,6 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   into their arguments. XOR arguments match exact nodes first, then use bounded
   semantic pairing. Only complete child proofs yield `TRUE`; a failed child
   proof stays `UNKNOWN` because these contexts need not be injective.
-
-  As the final general proof, equivalence partitions one outermost
-  `Piecewise` by its first-match guards. A residual fact fork accumulates each
-  preceding guard as false; a branch fork adds the current guard as true and
-  substitutes that exact `Piecewise` node in both complete operands. Equality
-  is true only when every reachable branch proves true and the guards exhaust
-  the residual facts. Dead and shadowed branches are skipped. Branches use
-  fresh equivalence memos because memo results are specific to one fact
-  environment. Discovery and substitution are iterative, and nested branch
-  queries consume the fixed algebraic-subproof allowance, so arbitrary DAG
-  depth does not become C recursion. The rule assumes no affine arm shape and
-  does not enumerate selector values.
 
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,

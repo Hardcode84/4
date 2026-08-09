@@ -349,6 +349,11 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                uint32_t nterms, int64_t const_p,
                                int64_t const_q);
+static ixs_node *combine_nested_mod_remainders(ixs_ctx *ctx,
+                                               ixs_addterm *terms,
+                                               uint32_t nterms,
+                                               int64_t const_p,
+                                               int64_t const_q);
 static ixs_node *cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                         uint32_t nterms, int64_t const_p,
                                         int64_t const_q, bool allow_wide);
@@ -554,6 +559,10 @@ static ixs_node *add_try_rewrites(ixs_ctx *ctx, add_accum *acc) {
   ixs_node *result;
   result =
       recognize_mod(ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
+  if (result)
+    return result;
+  result = combine_nested_mod_remainders(
+      ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
   if (result)
     return result;
   result = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
@@ -1007,6 +1016,166 @@ rollback:
   return NULL;
 }
 
+/* Compose two consecutive Euclidean remainders:
+ *
+ *   Mod(x, a) + a*Mod(floor(x/a), b) = Mod(x, a*b)
+ *
+ * for integer x and positive integer a,b.  This is the quotient/remainder
+ * theorem applied twice.  A common rational coefficient on both sides is
+ * preserved.
+ *
+ * ADD terms are already coalesced.  Index their Mod bases once so a chain is
+ * reduced in linear expected time rather than probing every pair. */
+static size_t nested_mod_key_hash(const ixs_node *lhs, const ixs_node *rhs) {
+  uint64_t mixed = (uint64_t)((uintptr_t)lhs >> 3);
+  mixed ^= (uint64_t)((uintptr_t)rhs >> 3) +
+           UINT64_C(0x9e3779b97f4a7c15) + (mixed << 6) + (mixed >> 2);
+  mixed ^= mixed >> 33;
+  mixed *= UINT64_C(0xff51afd7ed558ccd);
+  mixed ^= mixed >> 33;
+  return (size_t)mixed;
+}
+
+static bool nested_mod_index_capacity(size_t count, size_t *capacity) {
+  size_t target;
+  size_t result = 16u;
+  if (count > SIZE_MAX / 2u)
+    return false;
+  target = count * 2u;
+  while (result < target) {
+    if (result > SIZE_MAX / 2u)
+      return false;
+    result *= 2u;
+  }
+  *capacity = result;
+  return true;
+}
+
+static size_t nested_mod_index_find(const size_t *slots, size_t capacity,
+                                    const ixs_addterm *terms, ixs_node *lhs,
+                                    ixs_node *rhs) {
+  size_t slot = nested_mod_key_hash(lhs, rhs) & (capacity - 1u);
+  while (slots[slot] != 0u) {
+    size_t term_index = slots[slot] - 1u;
+    ixs_node *mod = terms[term_index].term;
+    if (mod->u.binary.lhs == lhs && mod->u.binary.rhs == rhs)
+      return term_index;
+    slot = (slot + 1u) & (capacity - 1u);
+  }
+  return SIZE_MAX;
+}
+
+static ixs_node *combine_nested_mod_remainders(ixs_ctx *ctx,
+                                               ixs_addterm *terms,
+                                               uint32_t nterms,
+                                               int64_t const_p,
+                                               int64_t const_q) {
+  ixs_arena_mark mark;
+  size_t *slots;
+  size_t capacity;
+  size_t mod_count = 0;
+  uint32_t i;
+
+  for (i = 0; i < nterms; i++) {
+    if (terms[i].term && terms[i].term->tag == IXS_MOD)
+      mod_count++;
+  }
+  if (mod_count < 2u || !nested_mod_index_capacity(mod_count, &capacity) ||
+      capacity > SIZE_MAX / sizeof(*slots))
+    return NULL;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  slots = ixs_arena_alloc(&ctx->scratch, capacity * sizeof(*slots),
+                          sizeof(void *));
+  if (!slots) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  memset(slots, 0, capacity * sizeof(*slots));
+  for (i = 0; i < nterms; i++) {
+    ixs_node *mod = terms[i].term;
+    size_t slot;
+    if (!mod || mod->tag != IXS_MOD)
+      continue;
+    slot = nested_mod_key_hash(mod->u.binary.lhs, mod->u.binary.rhs) &
+           (capacity - 1u);
+    while (slots[slot] != 0u)
+      slot = (slot + 1u) & (capacity - 1u);
+    slots[slot] = (size_t)i + 1u;
+  }
+
+  for (i = 0; i < nterms; i++) {
+    ixs_node *high = terms[i].term;
+    ixs_node *numerator;
+    ixs_node *a_node;
+    ixs_node *combined;
+    ixs_node *replacement;
+    size_t low_index;
+    int64_t a;
+    int64_t b;
+    int64_t ab;
+    int64_t low_p;
+    int64_t low_q;
+    int64_t high_p;
+    int64_t high_q;
+    int64_t expected_p;
+    int64_t expected_q;
+    uint32_t j;
+
+    if (!high || high->tag != IXS_MOD ||
+        high->u.binary.lhs->tag != IXS_FLOOR ||
+        high->u.binary.rhs->tag != IXS_INT ||
+        high->u.binary.rhs->u.ival <= 0)
+      continue;
+    if (simp_decompose_exact_quotient(
+            ctx, high->u.binary.lhs->u.unary.arg, &numerator, &a_node) !=
+            IXS_QUOTIENT_PARTS_MATCH ||
+        a_node->tag != IXS_INT || a_node->u.ival <= 0 ||
+        !ixs_node_is_integer_valued(numerator))
+      continue;
+
+    low_index = nested_mod_index_find(slots, capacity, terms, numerator, a_node);
+    if (low_index == SIZE_MAX || low_index == i)
+      continue;
+    a = a_node->u.ival;
+    b = high->u.binary.rhs->u.ival;
+    if (!ixs_safe_mul(a, b, &ab))
+      continue;
+    ixs_node_get_rat(terms[low_index].coeff, &low_p, &low_q);
+    ixs_node_get_rat(terms[i].coeff, &high_p, &high_q);
+    if (!ixs_rat_mul(low_p, low_q, a, 1, &expected_p, &expected_q) ||
+        high_p != expected_p || high_q != expected_q)
+      continue;
+
+    combined = simp_mod(ctx, numerator, ixs_node_int(ctx, ab));
+    replacement = combined ? simp_mul(ctx, terms[low_index].coeff, combined)
+                           : NULL;
+    ixs_arena_restore(&ctx->scratch, mark);
+    if (!replacement)
+      return NULL;
+    if (ixs_node_is_sentinel(replacement))
+      return NULL;
+
+    IXS_STAT_HIT(ctx);
+    combined = make_const(ctx, const_p, const_q);
+    if (!combined)
+      return NULL;
+    for (j = 0; j < nterms; j++) {
+      ixs_node *term;
+      if (j == i || j == low_index || !terms[j].term)
+        continue;
+      term = simp_mul(ctx, terms[j].coeff, terms[j].term);
+      combined = term ? simp_add(ctx, combined, term) : NULL;
+      if (!combined)
+        return NULL;
+    }
+    return simp_add(ctx, combined, replacement);
+  }
+
+  ixs_arena_restore(&ctx->scratch, mark);
+  return NULL;
+}
+
 /*
  * simp_mul with compound-base decomposition for inverse factors:
  *   (c * g1^e1 * ...)^{-1}  ->  (1/c) * g1^{-e1} * ...
@@ -1428,9 +1597,9 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
     }
 
     /* A floor multiplier may be a larger positive rational multiple of the
-     * exact floor-Mod multiplier.  Consume one copy; this exposes radix-chain
-     * cancellation without turning a compact positive combination into a
-     * subtractive expansion. */
+     * exact floor-Mod multiplier.  Consume one copy; this exposes consecutive
+     * quotient/remainder cancellation without turning a compact positive
+     * combination into a subtractive expansion. */
     if (!allow_wide || mod.modulus->tag != IXS_INT || mod.modulus->u.ival <= 0)
       continue;
     inv = simp_div(ctx, ixs_node_int(ctx, 1), ci_outer_times_m);
@@ -4560,6 +4729,7 @@ static const ixs_rule cmp_rules[] = {
 /* Ad-hoc transforms tracked via IXS_STAT_HIT (not in rule tables). */
 static const char *extra_transforms[] = {
     "recognize_mod",
+    "combine_nested_mod_remainders",
     "cancel_floor_mod_pairs",
     "cancel_congruent_mod_difference",
     "cancel_equal_floor_difference",
@@ -4825,6 +4995,46 @@ static int logic_has_reducible_complement(ixs_ctx *ctx, ixs_node **items,
   return 0;
 }
 
+/* Boolean complement subsumption:
+ *
+ *   P | ~(P & R) = 1
+ *   P & ~(P | R) = 0
+ *
+ * AND/OR are eager, so eliminating the nested operand is sound only when the
+ * direct predicate and the complete negated expression are structurally
+ * total.  Context-dependent definedness remains the fact prover's job. */
+static int logic_has_total_nested_complement(ixs_ctx *ctx, ixs_tag tag,
+                                             ixs_node **items,
+                                             uint32_t count) {
+  ixs_tag nested_tag = tag == IXS_OR ? IXS_AND : IXS_OR;
+  uint32_t i;
+
+  for (i = 0; i < count; i++) {
+    ixs_node *negated = items[i];
+    ixs_node *nested;
+    uint32_t j;
+    if (negated->tag != IXS_NOT ||
+        !node_is_known_total_integer(negated))
+      continue;
+    nested = negated->u.unary_bool.arg;
+    if (nested->tag != nested_tag)
+      continue;
+    for (j = 0; j < count; j++) {
+      int contains;
+      if (j == i || !ixs_node_is_bool_valued(items[j]) ||
+          !node_is_known_total_integer(items[j]))
+        continue;
+      contains = assoc_contains(ctx, nested->u.assoc.args,
+                                nested->u.assoc.nargs, items[j]);
+      if (contains < 0)
+        return -1;
+      if (contains)
+        return 1;
+    }
+  }
+  return 0;
+}
+
 static void logic_drop_odd_and_constant(ixs_tag tag, ixs_node **items,
                                         uint32_t count, int64_t constant,
                                         bool *have_constant) {
@@ -4921,6 +5131,9 @@ static ixs_node *simp_logic_many(ixs_ctx *ctx, ixs_tag tag, uint32_t n,
   }
   complement = logic_has_reducible_complement(
       ctx, flat.items, write, sorted_prefix, sorted_prefix ? args[1] : NULL);
+  if (!complement)
+    complement =
+        logic_has_total_nested_complement(ctx, tag, flat.items, write);
   if (complement < 0) {
     ixs_arena_restore(&ctx->scratch, mark);
     return NULL;
@@ -5132,6 +5345,7 @@ typedef struct {
   uint32_t nsubs;
   ixs_node *const *targets;
   ixs_node *const *replacements;
+  bool *unrepresentable;
   subs_memo memo;
   subs_frame *frames;
   size_t depth;
@@ -5139,6 +5353,59 @@ typedef struct {
   ixs_node **children;
   size_t child_capacity;
 } subs_query;
+
+static ixs_node *subs_mul(subs_query *query, ixs_node *lhs, ixs_node *rhs) {
+  bool unrepresentable = false;
+  ixs_node *result;
+  if (!query->unrepresentable)
+    return simp_mul(query->ctx, lhs, rhs);
+  result = simp_try_mul(query->ctx, lhs, rhs, &unrepresentable);
+  if (unrepresentable)
+    *query->unrepresentable = true;
+  return result;
+}
+
+static ixs_node *subs_add(subs_query *query, ixs_node *lhs, ixs_node *rhs) {
+  bool unrepresentable = false;
+  ixs_node *result;
+  if (!query->unrepresentable)
+    return simp_add(query->ctx, lhs, rhs);
+  result = simp_try_add(query->ctx, lhs, rhs, &unrepresentable);
+  if (unrepresentable)
+    *query->unrepresentable = true;
+  return result;
+}
+
+static ixs_node *subs_positive_power(subs_query *query, ixs_node *base,
+                                     int32_t exponent) {
+  uint32_t magnitude;
+  ixs_node *acc;
+  ixs_node *power;
+
+  assert(exponent > 0);
+  if (!query->unrepresentable)
+    return apply_pow(query->ctx, ixs_node_int(query->ctx, 1), base, exponent);
+
+  acc = ixs_node_int(query->ctx, 1);
+  if (!acc)
+    return NULL;
+  magnitude = (uint32_t)exponent;
+  power = base;
+  while (magnitude != 0u) {
+    if ((magnitude & 1u) != 0u) {
+      acc = subs_mul(query, acc, power);
+      if (!acc)
+        return NULL;
+    }
+    magnitude >>= 1u;
+    if (magnitude != 0u) {
+      power = subs_mul(query, power, power);
+      if (!power)
+        return NULL;
+    }
+  }
+  return acc;
+}
 
 static size_t subs_memo_hash(const ixs_node *node) {
   uint32_t hash = node->hash;
@@ -5428,10 +5695,10 @@ static ixs_node *subs_rebuild_add(subs_query *query, ixs_node *expr) {
         subs_memo_value(&query->memo, expr->u.add.terms[i].coeff);
     if (!term || !coefficient)
       return NULL;
-    term = simp_mul(query->ctx, coefficient, term);
+    term = subs_mul(query, coefficient, term);
     if (!term)
       return NULL;
-    result = simp_add(query->ctx, result, term);
+    result = subs_add(query, result, term);
     if (!result)
       return NULL;
   }
@@ -5452,8 +5719,7 @@ static ixs_node *subs_rebuild_mul(subs_query *query, ixs_node *expr) {
     if (exponent == 1) {
       power = base;
     } else if ((base->tag == IXS_INT || base->tag == IXS_RAT) && exponent > 0) {
-      power =
-          apply_pow(query->ctx, ixs_node_int(query->ctx, 1), base, exponent);
+      power = subs_positive_power(query, base, exponent);
       if (power && ixs_node_is_sentinel(power)) {
         ixs_mulfactor factor;
         factor.base = base;
@@ -5469,7 +5735,7 @@ static ixs_node *subs_rebuild_mul(subs_query *query, ixs_node *expr) {
     }
     if (!power)
       return NULL;
-    result = simp_mul(query->ctx, result, power);
+    result = subs_mul(query, result, power);
     if (!result)
       return NULL;
   }
@@ -5647,7 +5913,8 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
 
 static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                              ixs_node *const *targets,
-                             ixs_node *const *replacements) {
+                             ixs_node *const *replacements,
+                             bool *unrepresentable) {
   uint32_t i;
   ixs_node *parse_error = NULL;
   ixs_node *domain_error = NULL;
@@ -5658,6 +5925,8 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   subs_frame initial_frames[SUBS_STACK_INITIAL_CAP];
   ixs_node *initial_children[SUBS_CHILD_INITIAL_CAP];
 
+  if (unrepresentable)
+    *unrepresentable = false;
   if (!expr)
     return NULL;
   if (nsubs > 0 && (!targets || !replacements))
@@ -5696,6 +5965,7 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   query.nsubs = nsubs;
   query.targets = targets;
   query.replacements = replacements;
+  query.unrepresentable = unrepresentable;
   query.memo.slots = initial_memo;
   query.memo.capacity = SUBS_MEMO_INITIAL_CAP;
   query.memo.arena = &ctx->scratch;
@@ -5710,13 +5980,19 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
 
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement) {
-  return subs_common(ctx, expr, 1, &target, &replacement);
+  return simp_try_subs(ctx, expr, target, replacement, NULL);
+}
+
+IXS_STATIC ixs_node *simp_try_subs(ixs_ctx *ctx, ixs_node *expr,
+                                   ixs_node *target, ixs_node *replacement,
+                                   bool *unrepresentable) {
+  return subs_common(ctx, expr, 1, &target, &replacement, unrepresentable);
 }
 
 IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,
                                      ixs_node *const *replacements) {
-  return subs_common(ctx, expr, nsubs, targets, replacements);
+  return subs_common(ctx, expr, nsubs, targets, replacements, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -6113,9 +6389,42 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
         quotient_product_parts(ctx, scaled, &term_numerator, &term_denominator);
     if (status != IXS_QUOTIENT_PARTS_MATCH)
       return status;
-    if (denom && term_denominator != denom)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
-    denom = term_denominator;
+    if (denom && term_denominator != denom) {
+      ixs_node *num_scale;
+      ixs_node *term_scale;
+      int64_t left;
+      int64_t right;
+      int64_t gcd;
+      int64_t common;
+      if (denom->tag != IXS_INT || term_denominator->tag != IXS_INT ||
+          denom->u.ival <= 0 || term_denominator->u.ival <= 0)
+        return IXS_QUOTIENT_PARTS_NO_MATCH;
+      left = denom->u.ival;
+      right = term_denominator->u.ival;
+      gcd = ixs_gcd(left, right);
+      if (!ixs_safe_mul(left / gcd, right, &common))
+        return IXS_QUOTIENT_PARTS_NO_MATCH;
+      num_scale = ixs_node_int(ctx, common / left);
+      term_scale = ixs_node_int(ctx, common / right);
+      if (!num_scale || !term_scale)
+        return IXS_QUOTIENT_PARTS_OOM;
+      num = simp_try_mul(ctx, num, num_scale, &unrepresentable);
+      if (unrepresentable)
+        return IXS_QUOTIENT_PARTS_NO_MATCH;
+      if (!num)
+        return IXS_QUOTIENT_PARTS_OOM;
+      term_numerator =
+          simp_try_mul(ctx, term_numerator, term_scale, &unrepresentable);
+      if (unrepresentable)
+        return IXS_QUOTIENT_PARTS_NO_MATCH;
+      if (!term_numerator)
+        return IXS_QUOTIENT_PARTS_OOM;
+      denom = ixs_node_int(ctx, common);
+      if (!denom)
+        return IXS_QUOTIENT_PARTS_OOM;
+    } else {
+      denom = term_denominator;
+    }
     num = simp_try_add(ctx, num, term_numerator, &unrepresentable);
     if (unrepresentable)
       return IXS_QUOTIENT_PARTS_NO_MATCH;
@@ -6808,6 +7117,58 @@ static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   return simp_trunc_bnds(ctx, bnds, arg);
 }
 
+static bool same_add_terms_with_constant_delta(ixs_node *a, ixs_node *b,
+                                               int64_t *delta) {
+  int64_t ap, aq, bp, bq;
+  uint32_t i;
+
+  if (a->tag != IXS_ADD || b->tag != IXS_ADD ||
+      a->u.add.nterms != b->u.add.nterms)
+    return false;
+  ixs_node_get_rat(a->u.add.coeff, &ap, &aq);
+  ixs_node_get_rat(b->u.add.coeff, &bp, &bq);
+  if (aq != 1 || bq != 1)
+    return false;
+  for (i = 0; i < a->u.add.nterms; i++)
+    if (a->u.add.terms[i].term != b->u.add.terms[i].term ||
+        a->u.add.terms[i].coeff != b->u.add.terms[i].coeff)
+      return false;
+  return ixs_safe_sub(bp, ap, delta);
+}
+
+/* If Y = X + 2^k and bit k of X is zero, adding the offset neither carries
+ * nor changes any other bit, so xor(X, Y) = 2^k.  This assumption-aware form
+ * complements structural xor cancellation for aligned symbolic addresses. */
+static ixs_node *simplify_aligned_xor_delta(ixs_ctx *ctx, ixs_bounds *bnds,
+                                            ixs_node *expr) {
+  ixs_bitfacts bits;
+  ixs_node *a;
+  ixs_node *b;
+  ixs_node *lower;
+  int64_t delta;
+  uint64_t magnitude;
+
+  if (!bnds || expr->tag != IXS_XOR || expr->u.assoc.nargs != 2u)
+    return expr;
+  a = expr->u.assoc.args[0];
+  b = expr->u.assoc.args[1];
+  if (!same_add_terms_with_constant_delta(a, b, &delta) || delta == 0 ||
+      delta == INT64_MIN)
+    return expr;
+  magnitude = (uint64_t)(delta < 0 ? -delta : delta);
+  if (!uint64_pow2(magnitude))
+    return expr;
+  lower = delta > 0 ? a : b;
+  if (!bounds_int_nonnegative_finite(bnds, a) ||
+      !bounds_int_nonnegative_finite(bnds, b) ||
+      !node_is_proven_defined(bnds, a) || !node_is_proven_defined(bnds, b) ||
+      !ixs_bounds_get_bitfacts(bnds, lower, &bits) ||
+      (bits.known_zero & magnitude) == 0)
+    return expr;
+  IXS_STAT_HIT(ctx);
+  return ixs_node_int(ctx, (int64_t)magnitude);
+}
+
 static ixs_node *rewrite_assoc_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                     rewrite_memo_slot *memo,
                                     rewrite_shared_cache *shared) {
@@ -6832,9 +7193,11 @@ static ixs_node *rewrite_assoc_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     result = simp_extrema_many_bnds(ctx, bnds, IXS_MAX, nargs, args);
   else if (n->tag == IXS_MIN)
     result = simp_extrema_many_bnds(ctx, bnds, IXS_MIN, nargs, args);
-  else if (n->tag == IXS_XOR)
+  else if (n->tag == IXS_XOR) {
     result = simp_xor_many_bnds(ctx, bnds, nargs, args);
-  else if (n->tag == IXS_AND)
+    if (result)
+      result = simplify_aligned_xor_delta(ctx, bnds, result);
+  } else if (n->tag == IXS_AND)
     result = simp_and_many(ctx, nargs, args);
   else
     result = simp_or_many(ctx, nargs, args);

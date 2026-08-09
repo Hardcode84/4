@@ -577,64 +577,7 @@ static void test_opposite_max_nonzero_range(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_truncating_remainder_excludes_signed_min(void) {
-  static const char remainder_text[] =
-      "x - d*Piecewise((floor(x/d), (x >= 0 & d > 0) | "
-      "(x <= 0 & d < 0)), (ceiling(x/d), True))";
-  ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *x = ixs_sym(ctx, "x");
-  ixs_node *d = ixs_sym(ctx, "d");
-  ixs_node *remainder =
-      ixs_parse_expr(ctx, remainder_text, strlen(remainder_text));
-  ixs_node *signed_min = ixs_int(ctx, INT32_MIN);
-  ixs_node *nonzero = ixs_cmp(ctx, d, IXS_CMP_NE, ixs_int(ctx, 0));
-  ixs_node *not_min = ixs_cmp(ctx, remainder, IXS_CMP_NE, signed_min);
-  ixs_node *is_min = ixs_cmp(ctx, remainder, IXS_CMP_EQ, signed_min);
-  ixs_range_result range = {true, true, INT32_MIN, 1, INT32_MAX, 1};
-  ixs_facts *facts = ixs_facts_create(ctx);
 
-  CHECK(ixs_facts_assume_range(facts, x, &range));
-  CHECK(ixs_facts_assume_range(facts, d, &range));
-  CHECK(ixs_facts_assume_pred(facts, nonzero));
-  CHECK(test_ixs_check_predicate_facts(facts, not_min) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_check_predicate_facts(facts, is_min) == IXS_CHECK_FALSE);
-
-  ixs_ctx_destroy(ctx);
-}
-
-static void test_truncating_remainder_intersects_explicit_range(void) {
-  static const char remainder_text[] =
-      "x - d*Piecewise((floor(x/d), (x >= 0 & d > 0) | "
-      "(x <= 0 & d < 0)), (ceiling(x/d), True))";
-  ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *d = ixs_sym(ctx, "d");
-  ixs_node *remainder =
-      ixs_parse_expr(ctx, remainder_text, strlen(remainder_text));
-  ixs_node *d_is_four = ixs_cmp(ctx, d, IXS_CMP_EQ, ixs_int(ctx, 4));
-  ixs_node *remainder_is_zero =
-      ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, 0));
-  ixs_node *remainder_is_four =
-      ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, 4));
-  ixs_range_result exact_zero = {true, true, 0, 1, 0, 1};
-  ixs_range_result exact_four = {true, true, 4, 1, 4, 1};
-  ixs_range_result range;
-  ixs_facts *refined = ixs_facts_create(ctx);
-  ixs_facts *disjoint = ixs_facts_create(ctx);
-
-  CHECK(ixs_facts_assume_pred(refined, d_is_four));
-  CHECK(ixs_facts_assume_range(refined, remainder, &exact_zero));
-  CHECK(test_ixs_check_facts(refined, remainder_is_zero) == IXS_CHECK_TRUE);
-  CHECK(test_ixs_range_facts(refined, remainder, &range));
-  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
-  CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
-
-  CHECK(ixs_facts_assume_pred(disjoint, d_is_four));
-  CHECK(ixs_facts_assume_range(disjoint, remainder, &exact_four));
-  CHECK(test_ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
-  CHECK(!test_ixs_range_facts(disjoint, remainder, &range));
-
-  ixs_ctx_destroy(ctx);
-}
 
 int main(void) {
   test_integer_overflow();
@@ -653,8 +596,6 @@ int main(void) {
   test_product_nonzero_factors();
   test_congruence_proves_nonzero();
   test_opposite_max_nonzero_range();
-  test_truncating_remainder_excludes_signed_min();
-  test_truncating_remainder_intersects_explicit_range();
 
   printf("test_edge_cases: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

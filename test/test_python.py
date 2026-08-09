@@ -2193,6 +2193,24 @@ def test_integrality_query_propagates_through_nested_mod() -> None:
     assert ctx.defined(dynamic, facts=closed) is True
 
 
+def test_fact_check_totalized_trunc_remainder() -> None:
+    ctx = ixsimpl.Context()
+    numerator = ctx.sym("totalized_numerator")
+    divisor = ctx.sym("totalized_divisor")
+    magnitude = ixsimpl.max_(ctx.int_(1), divisor, -divisor)
+    quotient = ixsimpl.trunc(numerator / magnitude)
+    remainder = numerator - magnitude * quotient
+    scaled = 16 * remainder
+    facts = ctx.facts()
+
+    assert ctx.range(magnitude, facts=facts) == (1, None)
+    assert ctx.defined(quotient, facts=facts) is True
+    assert ctx.defined(scaled, facts=facts) is True
+    assert ctx.integer_valued(scaled, facts=facts) is True
+    assert ctx.check(ctx.eq(scaled, scaled), facts=facts) is True
+    assert ctx.check(ctx.eq(scaled, ixsimpl.floor(scaled)), facts=facts) is True
+
+
 def test_integrality_and_divisibility_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -2412,6 +2430,68 @@ def test_ordered_equivalence_uses_full_tree_congruence() -> None:
     assert ctx.equivalent(residual < 0, residual + 8 < 0, wide_toggle) is None
 
 
+def test_ordered_equivalence_bounded_integer_delta() -> None:
+    ctx = ixsimpl.Context()
+    base = ctx.sym("python_ordered_delta_base")
+    shift = ctx.sym("python_ordered_delta_shift")
+    shifted = base + shift
+
+    grid = ctx.facts()
+    grid.assume_many([ctx.eq(base % 8, 0), shift >= 0, shift <= 7])
+    assert ctx.equivalent(shifted < 0, base < 0, grid) is True
+    assert ctx.equivalent(base < 0, shifted < 0, grid) is True
+    assert ctx.equivalent(shifted >= 0, base >= 0, grid) is True
+    assert ctx.equivalent(shifted <= 7, base <= 7, grid) is True
+    assert ctx.equivalent(shifted > 7, base > 7, grid) is True
+
+    crossing = ctx.facts()
+    crossing.assume_many([ctx.eq(base % 8, 0), shift >= 0, shift <= 8])
+    assert ctx.equivalent(shifted < 0, base < 0, crossing) is None
+
+    ungridded = ctx.facts()
+    ungridded.assume_many([shift >= 0, shift <= 7])
+    assert ctx.equivalent(shifted < 0, base < 0, ungridded) is None
+    assert ctx.equivalent(shifted <= 0, base <= 0, grid) is None
+
+    lower_only = ctx.facts()
+    lower_only.assume_many([ctx.eq(base % 8, 0), shift >= 0])
+    assert ctx.equivalent(shifted < 0, base < 0, lower_only) is None
+
+    upper_only = ctx.facts()
+    upper_only.assume_many([ctx.eq(base % 8, 0), shift <= 7])
+    assert ctx.equivalent(shifted < 0, base < 0, upper_only) is None
+
+
+def test_ordered_equivalence_nonwrapping_correlated_mod_delta() -> None:
+    ctx = ixsimpl.Context()
+    source_item = ctx.sym("python_ordered_mod_source_item")
+    lane = ctx.sym("python_ordered_mod_lane")
+    limit = ctx.sym("python_ordered_mod_limit")
+    origin = 64 * ixsimpl.floor(source_item / 64) + (8 * source_item) % 64
+    point = 64 * ixsimpl.floor(source_item / 64) + (8 * source_item + lane) % 64
+
+    nonwrapping = ctx.facts()
+    nonwrapping.assume_many(
+        [
+            source_item >= 0,
+            source_item <= 63,
+            lane >= 0,
+            lane <= 7,
+            limit >= 0,
+            limit <= 512,
+            ctx.eq(limit % 16, 0),
+        ]
+    )
+    assert ctx.equivalent(point < limit, origin < limit, nonwrapping) is True
+    assert ctx.equivalent(point >= limit, origin >= limit, nonwrapping) is True
+
+    wraps = ctx.facts()
+    wraps.assume_many(
+        [ctx.eq(source_item, 7), ctx.eq(lane, 8), ctx.eq(limit, 16)]
+    )
+    assert ctx.equivalent(point < limit, origin < limit, wraps) is not True
+
+
 def test_wrapped_xor_ordered_equivalence_and_mod_residue_split() -> None:
     ctx = ixsimpl.Context()
     lane = ctx.sym("python_ordered_lane")
@@ -2486,135 +2566,6 @@ def test_total_equivalence_discrete_cut_and_mod_shift_property(
     assert result is (True if 0 <= residue + shift < modulus else None)
 
 
-def test_truncating_remainder_equivalence_projection() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("x")
-    d = ctx.sym("d")
-    scaled_zero = ctx.parse_expr(
-        "16*x - 16*d*Piecewise((floor(x/d), "
-        "(x >= 0 & d > 0) | (x <= 0 & d < 0)), "
-        "(ceiling(x/d), True))"
-    )
-    scaled_next = ctx.parse_expr(
-        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
-        "((1 + x) >= 0 & d > 0) | ((1 + x) <= 0 & d < 0)), "
-        "(ceiling((1 + x)/d), True))"
-    )
-    wave_negative_zero = ctx.parse_expr(
-        "16*x - 16*d*Piecewise((floor(x/d), x <= 0 & d < 0), " "(ceiling(x/d), True))"
-    )
-    wave_negative_next = ctx.parse_expr(
-        "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
-        "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), True))"
-    )
-    floor_quotient = ctx.parse_expr("floor(x/d)")
-    ceiling_quotient = ctx.parse_expr("ceiling(x/d)")
-    positive_remainder_quotient = ctx.parse_expr("(x - Mod(x, 4))/d")
-    negative_remainder_quotient = ctx.parse_expr("(x + Mod(-x, 4))/d")
-
-    positive = ctx.facts()
-    positive.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, 4), ctx.eq(x % 2, 0)])
-    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive) is True
-    assert ctx.constant_difference(scaled_next, scaled_zero, positive) == 16
-    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, positive) is True
-    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, positive) is not True
-
-    dynamic_positive = ctx.facts()
-    dynamic_positive.assume_many(
-        [
-            x >= 0,
-            x <= 2**30 - 2,
-            ctx.eq(x % 2, 0),
-            d >= 4,
-            d <= 2**30,
-            ctx.eq(d % 4, 0),
-        ]
-    )
-    assert ctx.equivalent(scaled_next, scaled_zero + 16, dynamic_positive) is True
-    assert ctx.constant_difference(scaled_next, scaled_zero, dynamic_positive) == 16
-
-    negative_divisor = ctx.facts()
-    negative_divisor.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
-    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, negative_divisor) is True
-    assert ctx.constant_difference(wave_negative_next, wave_negative_zero, negative_divisor) == 16
-    assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, negative_divisor) is True
-    assert ctx.equivalent(floor_quotient, positive_remainder_quotient, negative_divisor) is not True
-
-    at_zero = ctx.facts()
-    at_zero.assume_many([ctx.eq(x, 0), ctx.eq(d, -4)])
-    assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, at_zero) is True
-
-    for divisor in (4, -4):
-        negative = ctx.facts()
-        negative.assume_many([x >= -100, x <= -2, ctx.eq(d, divisor), ctx.eq(x % 4, 2)])
-        assert ctx.equivalent(scaled_next, scaled_zero + 16, negative) is True
-        rounded = ceiling_quotient if divisor > 0 else floor_quotient
-        wrong_round = floor_quotient if divisor > 0 else ceiling_quotient
-        assert ctx.equivalent(rounded, negative_remainder_quotient, negative) is True
-        assert ctx.equivalent(wrong_round, negative_remainder_quotient, negative) is not True
-
-    positive_wrap = ctx.facts()
-    positive_wrap.assume_many([ctx.eq(x, 3), ctx.eq(d, 4)])
-    assert ctx.equivalent(scaled_next, scaled_zero + 16, positive_wrap) is not True
-    negative_wrap = ctx.facts()
-    negative_wrap.assume_many([ctx.eq(x, -4), ctx.eq(d, -4)])
-    assert ctx.equivalent(scaled_next, scaled_zero + 16, negative_wrap) is not True
-
-
-def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("x")
-    d = ctx.sym("d")
-
-    def pair(condition: str, fallback: str = "True") -> tuple[ixsimpl.Expr, ixsimpl.Expr]:
-        zero = ctx.parse_expr(
-            f"16*x - 16*d*Piecewise((floor(x/d), {condition}), " f"(ceiling(x/d), {fallback}))"
-        )
-        next_condition = condition.replace("x", "(1 + x)")
-        next_fallback = fallback.replace("x", "(1 + x)")
-        next_ = ctx.parse_expr(
-            "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
-            f"{next_condition}), (ceiling((1 + x)/d), {next_fallback}))"
-        )
-        return zero, next_
-
-    facts = ctx.facts()
-    facts.assume_many([x >= 0, x <= 100, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
-
-    wrong_zero, wrong_next = pair("x < 0 & d < 0")
-    assert ctx.equivalent(wrong_next, wrong_zero + 16, facts) is None
-    overlap_zero, overlap_next = pair("(x <= 0 & d < 0) | x == 1")
-    assert ctx.equivalent(overlap_next, overlap_zero + 16, facts) is None
-    uncovered_zero, uncovered_next = pair("x <= 0 & d < 0", "x >= 0")
-    assert ctx.equivalent(uncovered_next, uncovered_zero + 16, facts) is None
-
-    zero_divisor = ctx.facts()
-    zero_divisor.assume_many([x >= 0, ctx.eq(d, 0)])
-    assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is None
-    assert ctx.constant_difference(wrong_next, wrong_zero, zero_divisor) is None
-
-    unknown_divisor = ctx.facts()
-    unknown_divisor.assume_many([x >= 0, ctx.ne(d, 0), ctx.eq(x % 2, 0)])
-    exact_zero, exact_next = pair("(x >= 0 & d > 0) | (x <= 0 & d < 0)")
-    assert ctx.equivalent(exact_next, exact_zero + 16, unknown_divisor) is None
-
-    nonintegral_zero = ctx.parse_expr(
-        "16*Max(x/2, 0) - 16*d*Piecewise((floor(Max(x/2, 0)/d), "
-        "(Max(x/2, 0) >= 0 & d > 0) | (Max(x/2, 0) <= 0 & d < 0)), "
-        "(ceiling(Max(x/2, 0)/d), True))"
-    )
-    nonintegral_next = ctx.parse_expr(
-        "16 + 16*Max(x/2, 0) - 16*d*Piecewise("
-        "(floor((1 + Max(x/2, 0))/d), "
-        "((1 + Max(x/2, 0)) >= 0 & d > 0) | "
-        "((1 + Max(x/2, 0)) <= 0 & d < 0)), "
-        "(ceiling((1 + Max(x/2, 0))/d), True))"
-    )
-    nonintegral = ctx.facts()
-    nonintegral.assume_many([x >= 0, x <= 100, ctx.eq(d, -4)])
-    assert ctx.equivalent(nonintegral_next, nonintegral_zero + 16, nonintegral) is None
-
-
 def test_equivalence_binding_invalid_inputs() -> None:
     ctx = ixsimpl.Context()
     other = ixsimpl.Context()
@@ -2630,109 +2581,6 @@ def test_equivalence_binding_invalid_inputs() -> None:
         ctx.equivalent(sentinel, sentinel, facts)
     with pytest.raises(ValueError, match="sentinel"):
         ctx.check_predicate(sentinel, facts)
-
-
-def test_modular_projection_proves_wave_wrapping_xor_packet() -> None:
-    ctx = ixsimpl.Context()
-    tile, lane, limit = (
-        ctx.sym(name)
-        for name in (
-            "modular_projection_tile",
-            "modular_projection_lane",
-            "modular_projection_limit",
-        )
-    )
-    bias = 2**31
-    modulus = 2**32
-    inner = (bias + 256 * tile) % modulus
-    value0 = (inner + ixsimpl.xor_(ctx.int_(64), 128 * lane)) % modulus - bias
-    value1 = (inner + ixsimpl.xor_(ctx.int_(65), 128 * lane)) % modulus - bias
-    facts = ctx.facts()
-    facts.assume_range(tile, -(2**31), 2**31 - 1)
-    facts.assume_range(lane, 0, 31)
-    facts.assume_range(limit, -(2**31), 2**31 - 1)
-    facts.assume(ctx.eq(limit % 4, 0))
-
-    assert ctx.constant_difference(value1, value0, facts) == 1
-    assert ctx.equivalent(value0 - limit < 0, value1 - limit < 0, facts) is True
-
-
-def test_modular_projection_requires_one_representable_delta() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("modular_projection_boundary_x")
-    wrapped0 = (x + 8) % 16 - 8
-    wrapped1 = (x + 9) % 16 - 8
-    wrapped2 = (x + 10) % 16 - 8
-
-    negative = ctx.facts()
-    negative.assume(ctx.eq(x % 4, 0))
-    assert ctx.constant_difference(wrapped1, wrapped0, negative) == 1
-    assert ctx.constant_difference(16 * wrapped1, 16 * wrapped0, negative) == 16
-    assert ctx.constant_difference((2**63 - 1) * wrapped2, (2**63 - 1) * wrapped0, negative) is None
-    assert (
-        ctx.constant_difference(wrapped1 + 8 + (-(2**63)), wrapped0 + 8, negative) == -(2**63) + 1
-    )
-
-    ambiguous = ctx.facts()
-    assert ctx.constant_difference(wrapped1, wrapped0, ambiguous) is None
-    assert ctx.equivalent(wrapped0 < 0, wrapped1 < 0, ambiguous) is None
-
-    boundary = ctx.facts()
-    boundary.assume_range(x, 7, 8)
-    assert ctx.constant_difference(wrapped1, wrapped0, boundary) is None
-
-    partial = ctx.facts()
-    partial.assume_range(wrapped0 + 8, 8, 15)
-    assert ctx.constant_difference(wrapped1, wrapped0, partial) is None
-
-
-def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
-    ctx = ixsimpl.Context()
-    x = ctx.sym("dynamic_modular_projection_x")
-    d = ctx.sym("dynamic_modular_projection_d")
-    bias = 2**31
-    modulus = 2**32
-
-    def value(offset: int) -> ixsimpl.Expr:
-        remainder = ((x + offset) % modulus) % (d % modulus)
-        return (bias + remainder) % modulus - bias
-
-    pair = ctx.facts()
-    pair.assume_range(x, 0, 1073741822)
-    pair.assume_range(d, 4, 1073741824)
-    pair.assume(ctx.eq(x % 2, 0))
-    pair.assume(ctx.eq(d % 4, 0))
-    assert ctx.constant_difference(value(1), value(0), pair) == 1
-    assert ctx.equivalent(value(1), value(0) + 1, pair) is True
-
-    vector = ctx.facts()
-    vector.assume_range(x, 0, 1073741816)
-    vector.assume_range(d, 16, 1073741824)
-    vector.assume(ctx.eq(x % 8, 0))
-    vector.assume(ctx.eq(d % 16, 0))
-    for offset in range(1, 8):
-        assert ctx.constant_difference(value(offset), value(0), vector) == offset
-        assert ctx.equivalent(value(offset), value(0) + offset, vector) is True
-        assert ctx.constant_difference(value(0), value(offset), vector) == -offset
-        assert ctx.equivalent(value(0), value(offset) - offset, vector) is True
-    assert ctx.constant_difference(value(8), value(0), vector) is None
-    assert ctx.constant_difference(value(0), value(8), vector) is None
-    assert ctx.equivalent(value(8), value(0) + 8, vector) is None
-    assert ctx.equivalent(value(0), value(8) - 8, vector) is None
-
-    direct0 = x % d
-    direct1 = (x + 1) % d
-    zero_denominator = ctx.facts()
-    zero_denominator.assume_range(x, 0, 1073741822)
-    zero_denominator.assume_range(d, 0, 0)
-    assert ctx.constant_difference(direct1, direct0, zero_denominator) is None
-    assert ctx.equivalent(direct1, direct0 + 1, zero_denominator) is None
-
-    negative_denominator = ctx.facts()
-    negative_denominator.assume_range(x, 0, 1073741822)
-    negative_denominator.assume_range(d, -16, -4)
-    assert ctx.constant_difference(direct1, direct0, negative_denominator) is None
-    assert ctx.equivalent(direct1, direct0 + 1, negative_denominator) is None
 
 
 def test_fact_backed_algebra_helpers() -> None:
@@ -3421,7 +3269,7 @@ def test_range_basic() -> None:
     assert ctx.range(ctx.int_(int64_max)) == (int64_max, int64_max)
 
 
-def test_grouped_mod_congruence_and_wave_identity() -> None:
+def test_grouped_mod_congruence_ranges() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("grouped_mod_x")
     y = ctx.sym("grouped_mod_y")
@@ -3453,66 +3301,6 @@ def test_grouped_mod_congruence_and_wave_identity() -> None:
     nontotal = ixsimpl.floor(x + 1 / y)
     assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
 
-    expression = ctx.parse_expr(
-        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
-        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
-        "2048*floor(Mod(item,64)/16) - "
-        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
-        "128*Mod(item + floor(Mod(item,16)/4) - "
-        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
-    )
-    invalid = ctx.parse_expr(
-        "16384*floor(item/64 + floor(Mod(item,16)/4)/64 - "
-        "Mod(Mod(item,64),16)/64) - 16384*floor(item/64) - "
-        "2048*floor(Mod(item,64)/16) - "
-        "128*floor(Mod(Mod(item,64),16)/4) + 16*Mod(item,4) + "
-        "127*Mod(item + floor(Mod(item,16)/4) - "
-        "Mod(Mod(item,64),16),64) - 16*Mod(Mod(item,64),4)"
-    )
-    item = ctx.sym("item")
-    wave_facts = ctx.facts()
-    wave_facts.assume(item >= 0)
-    wave_facts.assume(item <= 255)
-    zero = ctx.int_(0)
-    shifted = ctx.parse_expr("Mod(item + floor(Mod(item,16)/4) - Mod(Mod(item,64),16),64)")
-    projected = ctx.parse_expr("16*floor(Mod(item,64)/16) + floor(Mod(Mod(item,64),16)/4)")
-    assert ctx.equivalent(shifted, projected, wave_facts) is True
-    assert ctx.equivalent(shifted, projected + 1, wave_facts) is not True
-    rational = ctx.rat(3, 2)
-    assert ctx.equivalent(rational * shifted, rational * projected, wave_facts) is True
-    assert (
-        ctx.equivalent(
-            rational * shifted,
-            rational * projected + ctx.rat(1, 2),
-            wave_facts,
-        )
-        is not True
-    )
-    assert ctx.check(ctx.eq(expression, zero), facts=wave_facts) is True
-    assert ctx.equivalent(expression, zero, wave_facts) is True
-    assert ctx.check(ctx.eq(invalid, zero), facts=wave_facts) is not True
-
-
-def test_bounded_radix_reconstruction_composes_equivalence() -> None:
-    ctx = ixsimpl.Context()
-    slot = ctx.sym("bounded_radix_slot")
-    facts = ctx.facts()
-    facts.assume(slot >= 0)
-    facts.assume(slot <= 3)
-    t = (slot % 2 + ixsimpl.floor(slot / 2) % 2) % 3
-    t_half = ixsimpl.floor(t / 2)
-    high = t_half % 2
-    low = t % 2
-    reconstructed = 2 * high + low
-    canonical = 2 * t_half + low
-    wrapped = reconstructed % 3
-    bad_reconstruction = 2 * t_half + (t + 1) % 2
-
-    assert ctx.equivalent(high, t_half, facts) is True
-    assert ctx.equivalent(t, canonical, facts) is True
-    assert ctx.equivalent(reconstructed, t, facts) is True
-    assert ctx.check(ctx.eq(wrapped, t), facts=facts) is True
-    assert ctx.equivalent(bad_reconstruction, t, facts) is not True
 
 
 def test_range_composite_predicate_fact() -> None:
@@ -3631,6 +3419,51 @@ def test_facts_assume_many_uses_prefix_closure() -> None:
 
     facts.assume_many([ctx.eq(x, 0), x + y >= 0])
     assert ctx.check(y >= 0, facts=facts) is True
+
+
+def test_facts_assume_many_closes_selected_conjunction_dependencies() -> None:
+    ctx = ixsimpl.Context()
+    group, lane, base, divisor = (
+        ctx.sym("selected_closure_group"),
+        ctx.sym("selected_closure_lane"),
+        ctx.sym("selected_closure_base"),
+        ctx.sym("selected_closure_divisor"),
+    )
+    quotient = ixsimpl.floor((lane % 8) / divisor)
+    group_one = ctx.eq(group, 1)
+    selected_group = ixsimpl.or_(group_one, ctx.eq(group, 2), ctx.eq(group, 3))
+
+    def mapping(selected: ixsimpl.Expr) -> ixsimpl.Expr:
+        return ctx.eq(
+            ixsimpl.pw(
+                (ctx.true_(), ctx.eq(group, 0)),
+                (selected, selected_group),
+                (ctx.true_(), ctx.true_()),
+            ),
+            ctx.true_(),
+        )
+
+    selected = ixsimpl.and_(
+        lane >= 0,
+        base + quotient >= 0,
+        lane <= 7,
+        ctx.eq(divisor, 8),
+    )
+    selected_fact = mapping(selected)
+    for predicates in ([group_one, selected_fact], [selected_fact, group_one]):
+        facts = ctx.facts()
+        facts.assume_many(predicates)
+        assert ctx.check(ctx.eq(divisor, 8), facts=facts) is True
+        assert ctx.check(base >= 0, facts=facts) is True
+        assert ctx.range(base, facts=facts) == (0, None)
+        assert quotient.simplify(facts=facts) == ctx.int_(0)
+
+    unresolved = ctx.facts()
+    with pytest.raises(ValueError, match="closed domain"):
+        unresolved.assume_many(
+            [group_one, mapping(ixsimpl.and_(lane >= 0, base + quotient >= 0, lane <= 7))]
+        )
+    assert ctx.check(group_one, facts=unresolved) is None
 
 
 def test_compound_assumption_ingestion_parity() -> None:

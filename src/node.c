@@ -821,8 +821,7 @@ static bool node_cmp_op_valid(ixs_cmp_op op) {
 }
 
 static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
-                                    bool rounding, bool piecewise,
-                                    bool nested_piecewise) {
+                                    bool piecewise, bool nested_piecewise) {
   uint8_t properties = IXS_NODE_PROPERTY_VALID;
 
   if (integer)
@@ -831,8 +830,6 @@ static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
     properties |= IXS_NODE_PROPERTY_BOOL;
   if (total)
     properties |= IXS_NODE_PROPERTY_TOTAL;
-  if (rounding)
-    properties |= IXS_NODE_PROPERTY_ROUNDING;
   if (piecewise)
     properties |= IXS_NODE_PROPERTY_PIECEWISE;
   if (nested_piecewise)
@@ -844,7 +841,6 @@ static uint8_t node_compute_add_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.add.coeff);
   bool total = node_property_total(node->u.add.coeff);
-  bool rounding = ixs_node_contains_rounding(node->u.add.coeff);
   bool piecewise = ixs_node_contains_piecewise(node->u.add.coeff);
   bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.add.coeff);
 
@@ -853,9 +849,6 @@ static uint8_t node_compute_add_properties(const ixs_node *node) {
               node_property_integer(node->u.add.terms[i].term);
     total = total && node_property_total(node->u.add.terms[i].coeff) &&
             node_property_total(node->u.add.terms[i].term);
-    rounding = rounding ||
-               ixs_node_contains_rounding(node->u.add.terms[i].coeff) ||
-               ixs_node_contains_rounding(node->u.add.terms[i].term);
     piecewise = piecewise ||
                 ixs_node_contains_piecewise(node->u.add.terms[i].coeff) ||
                 ixs_node_contains_piecewise(node->u.add.terms[i].term);
@@ -864,7 +857,7 @@ static uint8_t node_compute_add_properties(const ixs_node *node) {
         ixs_node_contains_nested_piecewise(node->u.add.terms[i].coeff) ||
         ixs_node_contains_nested_piecewise(node->u.add.terms[i].term);
   }
-  return node_pack_properties(integer, false, total, rounding, piecewise,
+  return node_pack_properties(integer, false, total, piecewise,
                               nested_piecewise);
 }
 
@@ -872,7 +865,6 @@ static uint8_t node_compute_mul_properties(const ixs_node *node) {
   uint32_t i;
   bool integer = node_property_integer(node->u.mul.coeff);
   bool total = node_property_total(node->u.mul.coeff);
-  bool rounding = ixs_node_contains_rounding(node->u.mul.coeff);
   bool piecewise = ixs_node_contains_piecewise(node->u.mul.coeff);
   bool nested_piecewise = ixs_node_contains_nested_piecewise(node->u.mul.coeff);
 
@@ -881,14 +873,12 @@ static uint8_t node_compute_mul_properties(const ixs_node *node) {
               node_property_integer(node->u.mul.factors[i].base);
     total = total && node->u.mul.factors[i].exp > 0 &&
             node_property_total(node->u.mul.factors[i].base);
-    rounding =
-        rounding || ixs_node_contains_rounding(node->u.mul.factors[i].base);
     piecewise =
         piecewise || ixs_node_contains_piecewise(node->u.mul.factors[i].base);
     nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
                                                node->u.mul.factors[i].base);
   }
-  return node_pack_properties(integer, false, total, rounding, piecewise,
+  return node_pack_properties(integer, false, total, piecewise,
                               nested_piecewise);
 }
 
@@ -898,7 +888,6 @@ static uint8_t node_compute_pw_properties(const ixs_node *node) {
   bool boolean = integer;
   bool total = integer && ixs_node_is_known_true(
                               node->u.pw.cases[node->u.pw.ncases - 1u].cond);
-  bool rounding = false;
   bool nested_piecewise = false;
 
   for (i = 0; i < node->u.pw.ncases; i++) {
@@ -906,15 +895,11 @@ static uint8_t node_compute_pw_properties(const ixs_node *node) {
     boolean = boolean && node_property_bool(node->u.pw.cases[i].value);
     total = total && node_property_total(node->u.pw.cases[i].value) &&
             node_property_total(node->u.pw.cases[i].cond);
-    rounding = rounding ||
-               ixs_node_contains_rounding(node->u.pw.cases[i].value) ||
-               ixs_node_contains_rounding(node->u.pw.cases[i].cond);
     nested_piecewise = nested_piecewise ||
                        ixs_node_contains_piecewise(node->u.pw.cases[i].value) ||
                        ixs_node_contains_piecewise(node->u.pw.cases[i].cond);
   }
-  return node_pack_properties(integer, boolean, total, rounding, true,
-                              nested_piecewise);
+  return node_pack_properties(integer, boolean, total, true, nested_piecewise);
 }
 
 static uint8_t node_compute_assoc_properties(const ixs_node *node) {
@@ -924,7 +909,6 @@ static uint8_t node_compute_assoc_properties(const ixs_node *node) {
   bool boolean =
       canonical_arity && (node->tag == IXS_AND || node->tag == IXS_OR);
   bool total = canonical_arity;
-  bool rounding = false;
   bool piecewise = false;
   bool nested_piecewise = false;
 
@@ -933,14 +917,13 @@ static uint8_t node_compute_assoc_properties(const ixs_node *node) {
     if (boolean)
       boolean = node_property_bool(node->u.assoc.args[i]);
     total = total && node_property_total(node->u.assoc.args[i]);
-    rounding = rounding || ixs_node_contains_rounding(node->u.assoc.args[i]);
     piecewise = piecewise || ixs_node_contains_piecewise(node->u.assoc.args[i]);
     nested_piecewise = nested_piecewise || ixs_node_contains_nested_piecewise(
                                                node->u.assoc.args[i]);
   }
   if (node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR)
     total = total && integer;
-  return node_pack_properties(integer, boolean, total, rounding, piecewise,
+  return node_pack_properties(integer, boolean, total, piecewise,
                               nested_piecewise);
 }
 
@@ -948,7 +931,6 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   bool integer = false;
   bool boolean = false;
   bool total = false;
-  bool rounding = false;
   bool piecewise = false;
   bool nested_piecewise = false;
 
@@ -971,7 +953,6 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   case IXS_TRUNC:
     integer = true;
     total = node_property_total(node->u.unary.arg);
-    rounding = true;
     piecewise = ixs_node_contains_piecewise(node->u.unary.arg);
     nested_piecewise = ixs_node_contains_nested_piecewise(node->u.unary.arg);
     break;
@@ -980,8 +961,6 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
     boolean = integer;
     total = integer && node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
-    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
-               ixs_node_contains_rounding(node->u.binary.rhs);
     piecewise = ixs_node_contains_piecewise(node->u.binary.lhs) ||
                 ixs_node_contains_piecewise(node->u.binary.rhs);
     nested_piecewise = ixs_node_contains_nested_piecewise(node->u.binary.lhs) ||
@@ -991,7 +970,6 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
     integer = true;
     boolean = true;
     total = node_property_total(node->u.unary_bool.arg);
-    rounding = ixs_node_contains_rounding(node->u.unary_bool.arg);
     piecewise = ixs_node_contains_piecewise(node->u.unary_bool.arg);
     nested_piecewise =
         ixs_node_contains_nested_piecewise(node->u.unary_bool.arg);
@@ -1003,8 +981,6 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
                 IXS_MOD_DIVISOR_POSITIVE &&
             node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);
-    rounding = ixs_node_contains_rounding(node->u.binary.lhs) ||
-               ixs_node_contains_rounding(node->u.binary.rhs);
     piecewise = ixs_node_contains_piecewise(node->u.binary.lhs) ||
                 ixs_node_contains_piecewise(node->u.binary.rhs);
     nested_piecewise = ixs_node_contains_nested_piecewise(node->u.binary.lhs) ||
@@ -1016,7 +992,7 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
   default:
     break;
   }
-  return node_pack_properties(integer, boolean, total, rounding, piecewise,
+  return node_pack_properties(integer, boolean, total, piecewise,
                               nested_piecewise);
 }
 

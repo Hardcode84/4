@@ -7,7 +7,6 @@
 #include <cstring>
 #include <exception>
 #include <initializer_list>
-#include <iterator>
 #include <ixsimpl.h>
 #include <new>
 #include <stdexcept>
@@ -499,71 +498,6 @@ inline Expr min(Expr a, Expr b) {
 inline Expr xor_(Expr a, Expr b) {
   return Expr(a.raw_ctx(), a.raw_session(),
               ixs_xor(a.raw_session(), a.raw(), b.raw()));
-}
-inline Expr and_(Expr a, Expr b) {
-  return Expr(a.raw_ctx(), a.raw_session(),
-              ixs_and(a.raw_session(), a.raw(), b.raw()));
-}
-inline Expr or_(Expr a, Expr b) {
-  return Expr(a.raw_ctx(), a.raw_session(),
-              ixs_or(a.raw_session(), a.raw(), b.raw()));
-}
-
-using AssocManyFn = const ixs_node *(*)(ixs_session *, uint32_t,
-                                        const ixs_node *const *);
-
-template <typename Range>
-inline Expr assoc_many(const Range &values, AssocManyFn fn,
-                       const char *empty_error) {
-  auto first = std::begin(values);
-  auto last = std::end(values);
-  if (first == last)
-    throw std::invalid_argument(empty_error);
-  ixs_ctx *ctx = first->raw_ctx();
-  ixs_session *session = first->raw_session();
-  std::vector<const ixs_node *> raw;
-  for (auto it = first; it != last; ++it) {
-    if (it->raw_ctx() != ctx)
-      throw std::invalid_argument(
-          "associative operands belong to different contexts");
-    if (raw.size() == UINT32_MAX)
-      throw std::length_error("too many associative operands");
-    raw.push_back(it->raw());
-  }
-  return Expr(ctx, session,
-              fn(session, static_cast<uint32_t>(raw.size()), raw.data()));
-}
-
-template <typename Range> inline Expr max(const Range &values) {
-  return assoc_many(values, ixs_max_many, "max requires an operand");
-}
-template <typename Range> inline Expr min(const Range &values) {
-  return assoc_many(values, ixs_min_many, "min requires an operand");
-}
-template <typename Range> inline Expr xor_(const Range &values) {
-  return assoc_many(values, ixs_xor_many, "xor requires an operand");
-}
-template <typename Range> inline Expr and_(const Range &values) {
-  return assoc_many(values, ixs_and_many, "and requires an operand");
-}
-template <typename Range> inline Expr or_(const Range &values) {
-  return assoc_many(values, ixs_or_many, "or requires an operand");
-}
-
-inline Expr max(std::initializer_list<Expr> values) {
-  return assoc_many(values, ixs_max_many, "max requires an operand");
-}
-inline Expr min(std::initializer_list<Expr> values) {
-  return assoc_many(values, ixs_min_many, "min requires an operand");
-}
-inline Expr xor_(std::initializer_list<Expr> values) {
-  return assoc_many(values, ixs_xor_many, "xor requires an operand");
-}
-inline Expr and_(std::initializer_list<Expr> values) {
-  return assoc_many(values, ixs_and_many, "and requires an operand");
-}
-inline Expr or_(std::initializer_list<Expr> values) {
-  return assoc_many(values, ixs_or_many, "or requires an operand");
 }
 
 inline Expr pw(std::initializer_list<std::pair<Expr, Expr>> branches) {
