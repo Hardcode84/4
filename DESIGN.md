@@ -1748,9 +1748,8 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   identity can prove equality. It then tries fact-backed simplification of the
   difference, expansion followed by simplification under the shared fact
   environment, flattened order-independent matching of predicate `AND`/`OR`
-  terms, and a query-specific congruence proof for otherwise identical
-  comparisons of `Mod` residuals. Aligned ordered comparisons normalize to
-  integer residual cuts against zero. Equal cut thresholds prove equality;
+  terms. Aligned ordered comparisons normalize to integer residual cuts
+  against zero. Equal cut thresholds prove equality;
   unequal thresholds prove equality only when the intervening integer gap is
   unreachable by the residual's range or congruence. This includes strict to
   non-strict normalization such as `x < 8` versus `x <= 7` without assuming a
@@ -1762,54 +1761,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   bounded union of reachable residue classes. The iterative walk visits each
   query node once and uses growable, expected-O(1) candidate and node sets; it
   has no semantic depth, visit, or candidate-count cutoff and never scans
-  unrelated context state.
+  unrelated context state. After those ordered proofs miss, comparisons with
+  the same canonical operator and right operand are equal when the existing
+  constant-difference engine proves their numeric residual delta is exactly
+  zero. Any nonzero or unproved delta remains unknown because unequal
+  residuals can still induce the same predicate over a restricted fact domain.
 
-  The same query proves `Mod(A + delta, D) == Mod(A, D) + delta` when both
-  sides are total, `A` and `D` are integer-valued, `D` is positive, and the
-  shifted remainder cannot cross zero or `D`. Direct bounds may prove that
-  interval. The congruence proof requires a known `A == r (mod m)`, `m > 1`,
-  `m | D`, and `0 <= r + delta < m`. Since every possible remainder is
-  `r + k*m` inside `[0,D)`, that last condition excludes both boundaries.
-
-  More generally, `Mod(A,D)` equals an integer expression `B` only after a
-  bounded child proof establishes `A == B` and the range engine establishes
-  `0 <= B < D`. For an exact `A+s` partition of an `ADD` dividend, the engine
-  may instead construct `Mod(A,D)+s`, prove that result cannot wrap, and pass
-  its equality with an additive other operand already proven integer-valued
-  and inside `[0,D)` to the same bounded proof engine. Each fallback
-  invocation scans the dividend once. A public query rebuilds at most four
-  candidate sums across all such invocations, avoiding the quadratic retry
-  pattern of rebuilding an n-term sum for every term. A
-  normalized linear residual `c*Mod(A,D)+r` may isolate the remainder as
-  `-r/c` for any nonzero rational `c`; the constructed candidate and the Mod
-  must both be total. Arbitrary `c` requires that this be the residual's only
-  Mod term; a residual with other scaled Mod terms retains the narrower rule
-  that isolates one unique coefficient `1` or `-1`. If every coefficient of a
-  normalized zero-sum ADD has integer content greater than one, the engine
-  divides that content once and retries the unique-unit rule. Several
-  remaining non-unit Mod terms are ambiguous and rejected rather than rebuilt
-  as a sequence of speculative candidates. Content discovery and primitive
-  reconstruction are O(T), and the path starts at most one bounded child
-  proof. Proof results share the query memo and cycle guard and no candidate
-  scan retains context state.
-
-  The scaled projection proves
-  `Mod(g*x+r,g*m) == g*Mod(x,m)+r` only for an exact positive integer literal
-  scale `g > 1`, a proven-positive wrapped divisor, integer-valued projected
-  dividend and divisor, and an integer residual proven inside `0 <= r < g`.
-  The wrapped dividend is partitioned structurally into its scaled quotient
-  and residual. A residual may itself contain unrelated Mod terms, but its
-  equality with the wrapped residual must be exact pointer identity or a
-  successful bounded child proof; a second positive scaled-Mod candidate is
-  ambiguous and rejected. Thus
-  `Mod(4*x+Mod(seed,4),32) == 4*Mod(x,8)+Mod(seed,4)` composes, while a missing
-  upper bound does not. Extraction and partitioning each scan the queried ADD
-  once and start at most two bounded child proofs, with no finite-domain or
-  context-wide scan. Equal outer MUL coefficients around the wrapped Mod and
-  projected ADD are canceled structurally before zero-sum reconstruction.
-  Distinct bare-symbol residuals use the direct arithmetic result as their
-  terminal proof result; they cannot enter compositional rules. A predicate
-  equality whose normalized zero-sum ADD
+  A predicate equality whose normalized zero-sum ADD
   contains a non-unit scaled Mod first partitions that ADD into exact positive
   and negative sides. One with a single unit Piecewise term instead isolates
   that term and rebuilds its peer once, without distributing into the arms.
@@ -1824,11 +1782,54 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   insertion and lookup work and O(N) query state; invoked child proof rules
   retain their own documented bounds. Canonical ADDs with different arity use
   exact relation partitioning only when removing common terms strictly reduces
-  the relation. Equal positive literal `Mod` contexts require both dividends
-  to be integer-valued and congruent at that modulus; a smaller exact-ADD
-  residual is only a bounded retry. Affine `floor` and `ceil` contexts may move
-  residuals into their arguments only when each residual is proven
-  integer-valued.
+  the relation. Affine `floor` and `ceil` contexts may move residuals into their
+  arguments only when each residual is proven integer-valued.
+
+  Positive-divisor quotient/remainder equality is implemented by the private
+  `src/quotient_algebra.c` component. It constructs and simplifies `lhs-rhs`
+  once, then borrows a canonical `ADD` as a sorted sparse row; a non-`ADD`
+  operand is a synthetic one-term row. An eligible row term contains exactly
+  one direct `Mod` or `floor(n/d)` factor with exponent one. Removing that
+  factor structurally produces its exact scale without dividing by the atom
+  and therefore without inventing a nonzero precondition. Rational pivot
+  scales divide the row by scaling its existing coefficients in one rebuild,
+  preserving sparse form without internal expansion.
+
+  Every admitted atom requires `n` and `d` to be defined and integer-valued
+  and `d > 0`. Isolating `Mod(n,d) = r` succeeds only when `r` is the unique
+  Euclidean remainder: `r` is defined and integer-valued, `0 <= r < d`, and
+  `n-r` is divisible by `d`. Isolating `floor(n/d) = q` instead requires `q`
+  integer-valued and `n-d*q` in `[0,d)`. Exact closure may replace all direct
+  floor atoms in one row by `(n-Mod(n,d))/d`. Congruence closure may replace a
+  direct `c*Mod(n,m)` by `c*n` modulo a target `d` only after proving
+  `(c*m)/d` integer-valued; unchecked nested occurrences remain opaque.
+
+  Canonical mixed-radix ranges use the same row. Each positive integer digit
+  `c*Mod(n,m)` contributes `[0,c*(m-1)]`; the ordinary interval engine bounds
+  the residual once, and the symbolic upper bound is simplified as
+  `upper-d < 0`. Thus the rule is not keyed to a particular radix, literal
+  divisor, or term count. A separate `floor(expr/d) == 0` fact may certify a
+  canonical remainder when interval correlation alone is insufficient. This
+  proves, for example,
+  `Mod(4*x+Mod(seed,4),32) == 4*Mod(x,8)+Mod(seed,4)` when the required domain
+  and range facts hold, while a missing upper bound remains unknown.
+
+  One solve invocation tries Mod pivots before floor pivots and admits at most
+  four isolated row equations. Projection, congruence reduction, and radix
+  transfer have independent four-item caps. Canonical order may therefore
+  return `UNKNOWN` when a useful atom is fifth; no cap can establish equality.
+  With `T` immediate row terms, the component's intrinsic row passes are O(T)
+  with a fixed pass count. It invokes no expansion, adds no recursive call
+  edge, scans no retained context state, and never solves a projected row.
+  Existing simplification, substitution, and bounds oracles retain their
+  documented reachable-DAG costs; the inherited rewrite follows expression
+  depth recursively. Combined scratch is O(N+T) for reachable DAG size `N`.
+  Exhausted work, proof-cycle or
+  nested-query limits, and unrepresentable optional arithmetic are a local
+  `UNKNOWN` and do not suppress independent context or low-bit proofs; invalid
+  input and OOM remain query failures. Truncation, Piecewise selection, context
+  composition, predicate logic, and power-of-two low-bit normalization remain
+  separate systems with their own contracts.
 
   Production-backed binary numeric XOR nodes pair pointer-identical arguments
   first, then use bounded semantic child proofs. The matcher is O(A^2) in its
@@ -1863,50 +1864,18 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   failure remain `UNKNOWN`. This is a local first-match proof, not generic
   finite-domain equivalence, and it adds no context-wide scan.
 
-  The representative and isolation rules accept only a `TRUE` child proof,
-  and any representative reached by that child still requires the canonical
-  remainder range. An exact no-wrap partition may also propagate a conclusive
-  `FALSE` for its candidate against the other operand. A composition attempt
-  blocked by a cycle, four nested child proofs, invalid arithmetic, or
-  incomplete integrality, positivity, definedness, or range evidence returns
-  `UNKNOWN`; that failed sufficient rule does not suppress an independent
-  exact strategy. Allocation failure remains a query failure.
-
-  Shift partitioning examines only the queried dividend's direct `ADD` terms.
-  With `T` terms it launches at most `T` bounded child proofs and rebuilds one
-  residual per unit-coefficient candidate, for O(T^2) worst-case construction
-  work and interned residual storage when those canonical nodes are new. Proof
-  memoization remains query-local. The rule never enumerates a finite value
-  domain or scans context-wide state.
-
-  A separate radix equality rule recognizes exactly the constant-free two-term
-  form `m*floor(x/m) + Mod(y,m)` for a shared positive integer literal `m > 1`.
-  The private quotient partitioner extracts `x` and the floor denominator; no
-  public quotient-decomposition API participates. Both `x` and `y` must be
-  total and integer-valued, and the congruence engine must prove
-  `y-x == 0 (mod m)`. The reconstruction then equals `x`; pointer identity
-  accepts the direct operand immediately, while any other representation
-  requires a bounded child proof of its equality with `x`. Unequal, symbolic,
-  or nonpositive divisors, a wrong coefficient or low digit, extra terms,
-  partial or nonintegral operands, unrepresentable intermediate arithmetic,
-  cycles, and child-proof exhaustion cannot establish equality. Allocation
-  failure remains a query failure. Matching is O(1) in the two outer terms and
-  O(Q) in the `Q` direct terms inspected by private quotient partitioning, with
-  no context-wide scan. This is an equality proof and is independent of the
-  bounded radix certificate above, which proves only nonnegativity.
-
   Constant-difference and equivalence queries also pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,
   each Mod result gets a finite integer enclosure tightened to its structural
   congruence; the projection succeeds only when the dividend difference's
   residue class has exactly one representable member in the result-difference
-  enclosure. For a shared dynamic `D`, positivity plus the stride-bucket
-  no-wrap proof above makes the Mod difference equal to the dividend
-  difference. The scaled Mod delta and the remaining residual are then
-  combined with checked `int64_t` arithmetic. This models mathematical Mod
-  composition used by fixed-width wrappers; it does not add machine-overflow
-  semantics.
+  enclosure. For a shared dynamic `D`, the existing stride-bucket proof makes
+  the Mod difference equal to the dividend difference when positivity and
+  no-wrap evidence are available. The scaled Mod delta and the remaining
+  residual are then combined with checked `int64_t` arithmetic. This models
+  mathematical Mod composition used by fixed-width wrappers; it does not add
+  machine-overflow semantics.
 
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,
@@ -2884,6 +2853,8 @@ ixsimpl/
 │   ├── expand.h
 │   ├── bounds.c             # bound storage, propagation, assumption extraction
 │   ├── bounds.h
+│   ├── quotient_algebra.c  # bounded Euclidean sparse-row equality
+│   ├── quotient_algebra.h
 │   ├── interval.c           # interval arithmetic
 │   ├── interval.h
 │   ├── print.c              # output formatters

@@ -6796,6 +6796,7 @@ static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,
 static ixs_node *cancel_scaled_mod_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
                                             ixs_node *mul) {
   ixs_node *mod, *inner, *modulus, *reduced;
+  bool unrepresentable;
   int64_t p, q;
   if (mul->tag != IXS_MUL || mul->u.mul.nfactors != 1 ||
       mul->u.mul.factors[0].exp != 1 ||
@@ -6806,12 +6807,15 @@ static ixs_node *cancel_scaled_mod_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
   if (q <= 1 || mod->u.binary.rhs->tag != IXS_INT ||
       mod->u.binary.rhs->u.ival <= 0 || mod->u.binary.rhs->u.ival % q != 0)
     return mul;
-  inner = simp_div(ctx, mod->u.binary.lhs, ixs_node_int(ctx, q));
+  /* This is an optional rewrite. A quotient whose rational coefficient does
+   * not fit must leave the valid input and its diagnostics unchanged. */
+  inner = simp_try_div(ctx, mod->u.binary.lhs, ixs_node_int(ctx, q),
+                       &unrepresentable);
+  if (!inner || ixs_node_is_sentinel(inner))
+    return unrepresentable ? mul : inner;
   modulus = ixs_node_int(ctx, mod->u.binary.rhs->u.ival / q);
-  if (!inner || !modulus)
+  if (!modulus)
     return NULL;
-  if (ixs_node_is_sentinel(inner))
-    return inner;
   if (!node_is_integer(bnds, inner))
     return mul;
   reduced = simp_mod_bnds(ctx, bnds, inner, modulus);

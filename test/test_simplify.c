@@ -1775,6 +1775,13 @@ static void test_mod_bounds_tighten(void) {
                 ixs_int(ctx, 3));
     ixs_node *nonintegral =
         ixs_div(ctx, ixs_mod(ctx, x, two32), ixs_int(ctx, 2));
+    /* A derived quotient whose rational coefficient cannot fit is an
+     * optional no-match: keep the input and do not append a diagnostic. */
+    ixs_node *extreme = ixs_div(
+        ctx,
+        ixs_mod(ctx, ixs_div(ctx, x, ixs_int(ctx, INT64_MAX)), ixs_int(ctx, 4)),
+        ixs_int(ctx, 2));
+    size_t errors = ixs_ctx_nerrors(ctx);
 
     CHECK(ixs_simplify(ctx, quotient, NULL, 0) == expected);
     CHECK(ixs_simplify(ctx, quotient, nonnegative, 2) == x);
@@ -1782,6 +1789,8 @@ static void test_mod_bounds_tighten(void) {
     CHECK(ixs_simplify(ctx, quotient, &negative, 1) == ixs_int(ctx, INT32_MAX));
     CHECK(ixs_simplify(ctx, nondividing, NULL, 0) == nondividing);
     CHECK(ixs_simplify(ctx, nonintegral, NULL, 0) == nonintegral);
+    CHECK(ixs_simplify(ctx, extreme, NULL, 0) == extreme);
+    CHECK(ixs_ctx_nerrors(ctx) == errors);
   }
 
   /* Mod(3/2*x, 1) must NOT get bounds [0,0] — dividend is not integer.

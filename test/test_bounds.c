@@ -3133,7 +3133,7 @@ static void test_public_grouped_add_wave_identity(void) {
   CHECK(ixs_facts_assume_pred(oom_facts, domain));
   CHECK(ixs_facts_assume_pred(alloc_facts, alloc_domain));
 
-  CHECK(ixs_bounds_equivalence_partition_limit_probe(
+  CHECK(ixs_bounds_equivalence_quotient_limit_probe(
             facts, shifted, projected) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, shifted, projected) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(facts, shifted_eq) == IXS_CHECK_TRUE);
@@ -7950,6 +7950,16 @@ static void test_public_total_equivalence(void) {
   ixs_node *mod_rhs =
       ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, x, k), ixs_int(ctx, 16)),
               IXS_CMP_LT, ixs_int(ctx, 8));
+  ixs_node *mod_eq_lhs = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *mod_eq_rhs =
+      ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, x, k), ixs_int(ctx, 16)),
+              IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *mod_ne_lhs = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                 IXS_CMP_NE, ixs_int(ctx, 3));
+  ixs_node *mod_ne_rhs =
+      ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, x, k), ixs_int(ctx, 16)),
+              IXS_CMP_NE, ixs_int(ctx, 3));
   ixs_node *ordinary_lhs = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 8));
   ixs_node *ordinary_rhs =
       ixs_cmp(ctx, ixs_add(ctx, x, k), IXS_CMP_LT, ixs_int(ctx, 8));
@@ -8012,6 +8022,20 @@ static void test_public_total_equivalence(void) {
                                       IXS_CMP_EQ, ixs_int(ctx, 0))));
   CHECK(test_ixs_equivalent_facts(mod_facts, mod_lhs, mod_rhs) ==
         IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(mod_facts, mod_eq_lhs, mod_eq_rhs) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(mod_facts, mod_ne_lhs, mod_ne_rhs) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(
+            mod_facts, mod_eq_lhs,
+            ixs_cmp(ctx, ixs_mod(ctx, ixs_add(ctx, x, k), ixs_int(ctx, 16)),
+                    IXS_CMP_EQ, ixs_int(ctx, 4))) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(mod_facts, mod_eq_lhs, mod_ne_rhs) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(empty, mod_eq_lhs, mod_eq_rhs) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(empty, mod_ne_lhs, mod_ne_rhs) ==
+        IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(mod_facts, ordinary_lhs, ordinary_rhs) ==
         IXS_CHECK_UNKNOWN);
   CHECK(ixs_facts_assume_pred(grid_facts, x_grid));
@@ -8200,6 +8224,198 @@ static void test_generic_modulo_recurrence_equivalence(void) {
       wraps, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, INT64_C(4294967295)))));
   CHECK(test_ixs_equivalent_facts(wraps, fixed_lhs, fixed_rhs) ==
         IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
+typedef struct {
+  int64_t radix;
+  int64_t scale;
+  int64_t residue;
+  int64_t shift;
+} test_quotient_remainder_case;
+
+static ixs_node *test_euclidean_reconstruction(ixs_ctx *ctx, ixs_node *dividend,
+                                               ixs_node *divisor) {
+  ixs_node *quotient = ixs_floor(ctx, ixs_div(ctx, dividend, divisor));
+  return ixs_add(ctx, ixs_mul(ctx, divisor, quotient),
+                 ixs_mod(ctx, dividend, divisor));
+}
+
+static void test_generic_quotient_remainder_algebra(void) {
+  static const test_quotient_remainder_case cases[] = {
+      {3, 2, 1, 1},
+      {5, 7, 3, -2},
+      {16, 3, 4, 5},
+      {31, 11, 9, -7},
+  };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "quotient_remainder_x");
+  ixs_node *a = ixs_sym(ctx, "quotient_remainder_dynamic_a");
+  ixs_node *d = ixs_sym(ctx, "quotient_remainder_dynamic_d");
+  ixs_node *e = ixs_sym(ctx, "quotient_remainder_dynamic_e");
+  ixs_node *s = ixs_sym(ctx, "quotient_remainder_dynamic_scale");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  size_t i;
+
+  CHECK(ctx && x && a && d && e && s && zero && one);
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const test_quotient_remainder_case *test_case = &cases[i];
+    int64_t scaled_radix = test_case->scale * test_case->radix;
+    ixs_node *radix = ixs_int(ctx, test_case->radix);
+    ixs_node *scale = ixs_int(ctx, test_case->scale);
+    ixs_node *offset = ixs_int(ctx, test_case->scale - 1);
+    ixs_node *remainder = ixs_mod(ctx, x, radix);
+    ixs_node *quotient = ixs_floor(ctx, ixs_div(ctx, x, radix));
+    ixs_node *reconstructed = test_euclidean_reconstruction(ctx, x, radix);
+    ixs_node *scaled_reconstructed = ixs_mul(ctx, scale, reconstructed);
+    ixs_node *distributed_reconstruction =
+        ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, scaled_radix), quotient),
+                ixs_mul(ctx, scale, remainder));
+    ixs_node *scaled_wrapped =
+        ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, scale, x), offset),
+                ixs_int(ctx, scaled_radix));
+    ixs_node *scaled_projected =
+        ixs_add(ctx, ixs_mul(ctx, scale, remainder), offset);
+    ixs_node *nested_remainder =
+        ixs_mod(ctx, ixs_mod(ctx, x, ixs_int(ctx, scaled_radix)), radix);
+    ixs_node *projected_quotient =
+        ixs_div(ctx, ixs_sub(ctx, x, remainder), radix);
+    ixs_node *shifted =
+        ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, test_case->shift)), radix);
+    ixs_node *shifted_projected =
+        ixs_add(ctx, remainder, ixs_int(ctx, test_case->shift));
+    ixs_node *residue_fact =
+        ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, test_case->residue));
+    ixs_facts *facts = ixs_facts_create(ctx);
+    int64_t difference = 0;
+
+    CHECK(radix && scale && offset && remainder && quotient && reconstructed &&
+          scaled_reconstructed && distributed_reconstruction &&
+          scaled_wrapped && scaled_projected && nested_remainder &&
+          projected_quotient && shifted && shifted_projected && residue_fact &&
+          facts);
+    CHECK(ixs_facts_assume_pred(facts, residue_fact));
+    CHECK(test_ixs_equivalent_facts(facts, reconstructed, x) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, scaled_reconstructed,
+                                    distributed_reconstruction) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, scaled_reconstructed,
+                                    ixs_mul(ctx, scale, x)) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, scaled_wrapped, scaled_projected) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, nested_remainder, remainder) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, quotient, projected_quotient) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(facts, shifted, shifted_projected) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_constant_difference_facts(
+        facts, ixs_mul(ctx, scale, shifted), ixs_mul(ctx, scale, remainder),
+        &difference));
+    CHECK(difference == test_case->scale * test_case->shift);
+  }
+
+  {
+    ixs_node *remainder = ixs_mod(ctx, a, d);
+    ixs_node *plus_five = ixs_mod(ctx, ixs_add(ctx, a, ixs_int(ctx, 5)), d);
+    ixs_node *plus_five_projected = ixs_add(ctx, remainder, ixs_int(ctx, 5));
+    ixs_node *minus_three = ixs_mod(ctx, ixs_sub(ctx, a, ixs_int(ctx, 3)), d);
+    ixs_node *minus_three_projected = ixs_sub(ctx, remainder, ixs_int(ctx, 3));
+    ixs_node *divisor_fifth = ixs_div(ctx, d, ixs_int(ctx, 5));
+    ixs_node *scaled_wrapped = ixs_mod(
+        ctx, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 5), a), ixs_int(ctx, 2)),
+        d);
+    ixs_node *scaled_projected = ixs_add(
+        ctx, ixs_mul(ctx, ixs_int(ctx, 5), ixs_mod(ctx, a, divisor_fifth)),
+        ixs_int(ctx, 2));
+    ixs_node *mismatched = ixs_add(
+        ctx, ixs_mul(ctx, e, ixs_floor(ctx, ixs_div(ctx, a, e))), remainder);
+    ixs_node *half = ixs_div(ctx, a, ixs_int(ctx, 2));
+    ixs_node *nonintegral =
+        ixs_add(ctx,
+                ixs_mul(ctx, ixs_int(ctx, 5),
+                        ixs_floor(ctx, ixs_div(ctx, half, ixs_int(ctx, 5)))),
+                ixs_mod(ctx, a, ixs_int(ctx, 5)));
+    ixs_node *unrounded =
+        ixs_add(ctx, ixs_mul(ctx, d, ixs_div(ctx, a, d)), remainder);
+    ixs_facts *dynamic = ixs_facts_create(ctx);
+    ixs_facts *mismatched_divisor = ixs_facts_create(ctx);
+    ixs_facts *noninteger = ixs_facts_create(ctx);
+
+    CHECK(remainder && plus_five && plus_five_projected && minus_three &&
+          minus_three_projected && divisor_fifth && scaled_wrapped &&
+          scaled_projected && mismatched && half && nonintegral && unrounded &&
+          dynamic && mismatched_divisor && noninteger);
+    CHECK(ixs_facts_assume_pred(dynamic, ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+    CHECK(ixs_facts_assume_pred(
+        dynamic,
+        ixs_cmp(ctx, ixs_mod(ctx, d, ixs_int(ctx, 5)), IXS_CMP_EQ, zero)));
+    CHECK(ixs_facts_assume_pred(
+        dynamic, ixs_cmp(ctx, remainder, IXS_CMP_GE, ixs_int(ctx, 3))));
+    CHECK(ixs_facts_assume_pred(
+        dynamic, ixs_cmp(ctx, plus_five_projected, IXS_CMP_LT, d)));
+    CHECK(test_ixs_equivalent_facts(dynamic, plus_five, plus_five_projected) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(dynamic, minus_three,
+                                    minus_three_projected) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(dynamic, scaled_wrapped,
+                                    scaled_projected) == IXS_CHECK_TRUE);
+
+    CHECK(ixs_facts_assume_pred(mismatched_divisor,
+                                ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+    CHECK(ixs_facts_assume_pred(mismatched_divisor,
+                                ixs_cmp(ctx, e, IXS_CMP_GT, zero)));
+    CHECK(test_ixs_equivalent_facts(mismatched_divisor, mismatched, a) ==
+          IXS_CHECK_UNKNOWN);
+
+    CHECK(ixs_facts_assume_pred(
+        noninteger,
+        ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 2)), IXS_CMP_EQ, one)));
+    CHECK(test_ixs_equivalent_facts(noninteger, nonintegral, half) ==
+          IXS_CHECK_UNKNOWN);
+    CHECK(test_ixs_equivalent_facts(dynamic, unrounded, a) != IXS_CHECK_TRUE);
+  }
+
+  {
+    ixs_node *scaled_divisor = ixs_mul(ctx, s, d);
+    ixs_node *scaled_wrapped = ixs_mod(ctx, ixs_mul(ctx, s, a), scaled_divisor);
+    ixs_node *scaled_projected = ixs_mul(ctx, s, ixs_mod(ctx, a, d));
+    ixs_facts *positive_scale = ixs_facts_create(ctx);
+    ixs_facts *unknown_scale = ixs_facts_create(ctx);
+
+    CHECK(scaled_divisor && scaled_wrapped && scaled_projected &&
+          positive_scale && unknown_scale);
+    CHECK(ixs_facts_assume_pred(positive_scale,
+                                ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+    CHECK(ixs_facts_assume_pred(positive_scale,
+                                ixs_cmp(ctx, s, IXS_CMP_GT, zero)));
+    CHECK(ixs_facts_assume_pred(unknown_scale,
+                                ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+    CHECK(test_ixs_equivalent_facts(positive_scale, scaled_wrapped,
+                                    scaled_projected) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_equivalent_facts(unknown_scale, scaled_wrapped,
+                                    scaled_projected) == IXS_CHECK_UNKNOWN);
+  }
+
+  {
+    ixs_node *seven = ixs_int(ctx, 7);
+    ixs_node *remainder = ixs_mod(ctx, x, seven);
+    ixs_node *shifted = ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 2)), seven);
+    ixs_node *projected = ixs_add(ctx, remainder, ixs_int(ctx, 2));
+    ixs_node *boundary = ixs_cmp(ctx, remainder, IXS_CMP_EQ, ixs_int(ctx, 6));
+    ixs_facts *wraps = ixs_facts_create(ctx);
+    ixs_facts *unknown = ixs_facts_create(ctx);
+
+    CHECK(seven && remainder && shifted && projected && boundary && wraps &&
+          unknown);
+    CHECK(ixs_facts_assume_pred(wraps, boundary));
+    CHECK(test_ixs_equivalent_facts(wraps, shifted, projected) ==
+          IXS_CHECK_FALSE);
+    CHECK(test_ixs_equivalent_facts(unknown, shifted, projected) ==
+          IXS_CHECK_UNKNOWN);
+  }
 
   ixs_ctx_destroy(ctx);
 }
@@ -11288,6 +11504,7 @@ int main(void) {
   test_public_equivalence_ordered_candidate_growth();
   test_public_total_equivalence();
   test_generic_modulo_recurrence_equivalence();
+  test_generic_quotient_remainder_algebra();
   test_generic_bounded_scaled_mod_equivalence();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_public_trunc_primitive_constant_difference();
