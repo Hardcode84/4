@@ -8,6 +8,7 @@
  * propagation through expression trees.
  */
 
+#include "additive_row.h"
 #include "bounds.h"
 #include "interval.h"
 #include "node.h"
@@ -761,6 +762,62 @@ static void test_bounds_exact_fork(void) {
 
   ixs_bounds_destroy(&child);
   ixs_bounds_destroy(&parent);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_additive_row_ownership_and_extrema(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_arena scratch;
+  ixs_node *x = ixs_sym(ctx, "additive_row_x");
+  ixs_node *y = ixs_sym(ctx, "additive_row_y");
+  ixs_node *z = ixs_sym(ctx, "additive_row_z");
+  ixs_node *lhs = ixs_add(ctx, x, z);
+  ixs_node *unit_min = ixs_add(ctx, x, ixs_int(ctx, INT64_MIN));
+  ixs_node *coefficient_min =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MIN), x), y);
+  ixs_node *positive = y;
+  ixs_node *negative = z;
+  ixs_node *term = y;
+  int64_t offset = 37;
+  int64_t value = 41;
+  size_t errors;
+
+  CHECK(lhs && unit_min && coefficient_min);
+  CHECK(unit_min->tag == IXS_ADD && coefficient_min->tag == IXS_ADD);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  ixs_arena_init(&scratch, 4096);
+
+  errors = ixs_ctx_nerrors(ctx);
+  ixs_arena_set_fail_after(&scratch, 0);
+  CHECK(ixs_additive_row_relation(ctx, &scratch, lhs, y, &positive, &negative,
+                                  &offset) == IXS_ADDITIVE_ROW_OOM);
+  CHECK(positive == y && negative == z && offset == 37);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  ixs_arena_set_fail_after(&scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_additive_row_relation(ctx, &scratch, lhs, y, &positive, &negative,
+                                  &offset) == IXS_ADDITIVE_ROW_MATCH);
+  CHECK(ixs_same_node(positive, lhs));
+  CHECK(ixs_same_node(negative, y));
+  CHECK(offset == 0);
+
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(!ixs_additive_row_unit_value(unit_min, &term, &value));
+  CHECK(term == y && value == 41);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  positive = y;
+  negative = z;
+  offset = 37;
+  CHECK(ixs_additive_row_relation(ctx, &scratch, coefficient_min,
+                                  ixs_int(ctx, 0), &positive, &negative,
+                                  &offset) == IXS_ADDITIVE_ROW_NO_MATCH);
+  CHECK(positive == y && negative == z && offset == 37);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  ixs_arena_destroy(&scratch);
   ixs_session_unbind(&binding);
   ixs_ctx_destroy(ctx);
 }
@@ -11418,6 +11475,7 @@ int main(void) {
   test_bounds_expr_index_fork();
   test_bounds_difference_fork();
   test_bounds_exact_fork();
+  test_additive_row_ownership_and_extrema();
   test_mod_inverse_watchers_fixed_point_and_work();
   test_mod_inverse_watcher_fork_oom_is_atomic();
 

@@ -1833,6 +1833,20 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   the relation. Affine `floor` and `ceil` contexts may move residuals into their
   arguments only when each residual is proven integer-valued.
 
+  Immediate canonical additive-row mechanics are owned by the private
+  `src/additive_row.c` component. Allocation-free recognizers recover a single
+  unit equation or two opposite unit terms. The cached constant-drop transform
+  rebuilds only the immediate sorted terms. Exact relation partitioning first
+  constructs `lhs-rhs`, then separates its positive and negative coefficients
+  without disturbing canonical term order; an `INT64_MIN` constant reverses
+  the endpoints so its stored offset remains representable. Arithmetic that
+  cannot be represented is a local no-match, allocation failure is OOM, and no
+  component operation performs a bounds query or changes definedness policy.
+  Recognition and cache hits are O(1), while constant-drop cache misses and
+  relation sign partitioning are O(T). Constructing the relation residual
+  inherits the simplifier's O(T^2) worst case; partitioning uses O(T) query
+  scratch.
+
   Positive-divisor quotient/remainder equality is implemented by the private
   `src/quotient_algebra.c` component. It constructs and simplifies `lhs-rhs`
   once, then borrows a canonical `ADD` as a sorted sparse row; a non-`ADD`
@@ -2888,6 +2902,8 @@ ixsimpl/
 ├── include/
 │   └── ixsimpl.h            # public C API (single header)
 ├── src/
+│   ├── additive_row.c       # canonical additive-row operations
+│   ├── additive_row.h
 │   ├── arena.c              # arena allocator
 │   ├── arena.h
 │   ├── rational.c           # exact rational arithmetic

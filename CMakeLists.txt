@@ -13,6 +13,7 @@ if(USE_AMALGAMATION)
     set(LIB_SOURCES ixsimpl_amalg.c)
 else()
     set(LIB_SOURCES
+        src/additive_row.c
         src/arena.c
         src/bounds.c
         src/ctx.c

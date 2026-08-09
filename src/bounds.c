@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "bounds.h"
+#include "additive_row.h"
 #include "expand.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
@@ -2006,41 +2007,6 @@ static ixs_interval interval_from_sym_cmp_const(ixs_cmp_op op, int64_t cp,
   return iv;
 }
 
-/* Cache hits are expected O(1); a miss rebuilds the n immediate ADD terms. */
-static ixs_node *bounds_expr_without_add_const(ixs_bounds *b, ixs_node *expr) {
-  ixs_node *cached;
-  ixs_node *result;
-  uint32_t i;
-  if (!b || !b->ctx || !expr || expr->tag != IXS_ADD ||
-      ixs_node_is_zero(expr->u.add.coeff) || expr->u.add.nterms == 0)
-    return NULL;
-
-  cached = ixs_node_transform_cache_lookup(
-      b->ctx, expr, IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST);
-  if (cached)
-    return cached;
-
-  result = b->ctx->node_zero;
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    ixs_node *term = expr->u.add.terms[i].term;
-    ixs_node *coeff = expr->u.add.terms[i].coeff;
-    ixs_node *scaled =
-        ixs_node_is_one(coeff) ? term : simp_mul(b->ctx, coeff, term);
-    if (!scaled) {
-      b->oom = true;
-      return NULL;
-    }
-    result = simp_add(b->ctx, result, scaled);
-    if (!result) {
-      b->oom = true;
-      return NULL;
-    }
-  }
-  ixs_node_transform_cache_store(b->ctx, expr,
-                                 IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST, result);
-  return result;
-}
-
 /*
  * Write an ADD as offset + scale * primitive, using its first canonical term
  * coefficient as scale. The transform cache makes repeated range queries
@@ -2149,11 +2115,16 @@ static ixs_interval bounds_invert_affine(ixs_interval iv, int64_t scale_p,
 static void add_shifted_add_range(ixs_bounds *b, ixs_node *expr,
                                   ixs_interval iv) {
   ixs_node *base;
+  ixs_additive_row_status status;
   int64_t cp, cq, np, nq;
   ixs_interval offset, shifted;
 
-  base = bounds_expr_without_add_const(b, expr);
-  if (!base || base == expr)
+  if (!b->ctx)
+    return;
+  status = ixs_additive_row_without_constant(b->ctx, expr, &base);
+  if (status == IXS_ADDITIVE_ROW_OOM)
+    b->oom = true;
+  if (status != IXS_ADDITIVE_ROW_MATCH || base == expr)
     return;
   ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
   if (!ixs_rat_neg(cp, cq, &np, &nq))
@@ -2267,28 +2238,6 @@ static bool node_coeff_is(ixs_node *n, int64_t value) {
   return p == value && q == 1;
 }
 
-static bool extract_add_term_eq_const(ixs_node *n, ixs_node **expr,
-                                      int64_t *value) {
-  int64_t kp, kq, cp, cq;
-  if (!n || n->tag != IXS_ADD || n->u.add.nterms != 1)
-    return false;
-  ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
-  ixs_node_get_rat(n->u.add.terms[0].coeff, &cp, &cq);
-  if (kq != 1 || cq != 1)
-    return false;
-  if (cp == 1) {
-    if (kp == INT64_MIN)
-      return false;
-    *value = -kp;
-  } else if (cp == -1) {
-    *value = kp;
-  } else {
-    return false;
-  }
-  *expr = n->u.add.terms[0].term;
-  return true;
-}
-
 /* Recover "expr == integer" from either direct comparisons or the normalized
  * ADD(k, +/-expr) == 0 form produced by cmp_normalize_to_zero. */
 static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
@@ -2298,10 +2247,10 @@ static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
     return false;
 
   if (ixs_node_is_zero(cmp->u.binary.rhs) &&
-      extract_add_term_eq_const(cmp->u.binary.lhs, expr, value))
+      ixs_additive_row_unit_value(cmp->u.binary.lhs, expr, value))
     return true;
   if (ixs_node_is_zero(cmp->u.binary.lhs) &&
-      extract_add_term_eq_const(cmp->u.binary.rhs, expr, value))
+      ixs_additive_row_unit_value(cmp->u.binary.rhs, expr, value))
     return true;
 
   if (node_get_int_const(cmp->u.binary.rhs, &c) &&
@@ -2320,27 +2269,17 @@ static bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
   return false;
 }
 
-static bool extract_add_node_equality(ixs_node *n, ixs_node **a, ixs_node **b) {
-  int64_t kp, kq;
-  const ixs_addterm *t0, *t1;
-  if (!n || n->tag != IXS_ADD || n->u.add.nterms != 2)
+static bool bounds_extract_unit_equality(ixs_node *expr, ixs_node **lhs,
+                                         ixs_node **rhs) {
+  ixs_node *positive;
+  ixs_node *negative;
+  int64_t constant;
+  if (!ixs_additive_row_unit_pair(expr, &positive, &negative, &constant) ||
+      constant != 0)
     return false;
-  ixs_node_get_rat(n->u.add.coeff, &kp, &kq);
-  if (kp != 0 || kq != 1)
-    return false;
-  t0 = &n->u.add.terms[0];
-  t1 = &n->u.add.terms[1];
-  if (node_coeff_is(t0->coeff, 1) && node_coeff_is(t1->coeff, -1)) {
-    *a = t0->term;
-    *b = t1->term;
-    return true;
-  }
-  if (node_coeff_is(t0->coeff, -1) && node_coeff_is(t1->coeff, 1)) {
-    *a = t0->term;
-    *b = t1->term;
-    return true;
-  }
-  return false;
+  *lhs = positive;
+  *rhs = negative;
+  return true;
 }
 
 static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
@@ -2348,9 +2287,9 @@ static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
   if (!cmp || cmp->tag != IXS_CMP || cmp->u.binary.cmp_op != IXS_CMP_EQ)
     return false;
   if (ixs_node_is_zero(cmp->u.binary.rhs))
-    return extract_add_node_equality(cmp->u.binary.lhs, a, b);
+    return bounds_extract_unit_equality(cmp->u.binary.lhs, a, b);
   if (ixs_node_is_zero(cmp->u.binary.lhs))
-    return extract_add_node_equality(cmp->u.binary.rhs, a, b);
+    return bounds_extract_unit_equality(cmp->u.binary.rhs, a, b);
   if (!ixs_node_is_const(cmp->u.binary.lhs) &&
       !ixs_node_is_const(cmp->u.binary.rhs)) {
     *a = cmp->u.binary.lhs;
@@ -2358,128 +2297,6 @@ static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
     return true;
   }
   return false;
-}
-
-static ixs_node *bounds_cmp_exact_residual(ixs_bounds *b, ixs_node *cmp) {
-  ixs_node *difference;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
-
-  if (ixs_node_is_zero(cmp->u.binary.rhs))
-    return cmp->u.binary.lhs;
-  if (ixs_node_is_zero(cmp->u.binary.lhs))
-    return cmp->u.binary.rhs;
-
-  /* Failure to represent an optional residual is a missed relation, not a
-   * diagnostic on an otherwise valid comparison. */
-  diag_mark = ixs_arena_save(&b->ctx->diag);
-  saved_errors = b->ctx->errors;
-  saved_nerrors = b->ctx->nerrors;
-  saved_errors_cap = b->ctx->errors_cap;
-  difference = simp_sub(b->ctx, cmp->u.binary.lhs, cmp->u.binary.rhs);
-  if (!difference) {
-    b->oom = true;
-    return NULL;
-  }
-  if (!ixs_node_is_sentinel(difference))
-    return difference;
-  ixs_arena_restore(&b->ctx->diag, diag_mark);
-  b->ctx->errors = saved_errors;
-  b->ctx->nerrors = saved_nerrors;
-  b->ctx->errors_cap = saved_errors_cap;
-  return NULL;
-}
-
-/* The source residual is already a canonical ADD: its terms are unique and
- * sorted by node key. Stable sign partitioning preserves both properties, so
- * build each side in one hash-consing pass. */
-static ixs_node *bounds_build_exact_relation_side(ixs_bounds *b,
-                                                  ixs_addterm *terms,
-                                                  uint32_t nterms) {
-  ixs_node *result;
-  if (nterms == 0)
-    return b->ctx->node_zero;
-  if (nterms == 1) {
-    if (ixs_node_is_one(terms[0].coeff))
-      return terms[0].term;
-    result = simp_mul(b->ctx, terms[0].coeff, terms[0].term);
-  } else {
-    result = ixs_node_add(b->ctx, b->ctx->node_zero, nterms, terms);
-  }
-  if (!result) {
-    b->oom = true;
-    return NULL;
-  }
-  return ixs_node_is_sentinel(result) ? NULL : result;
-}
-
-static bool bounds_partition_exact_relation(ixs_bounds *b, ixs_node *difference,
-                                            ixs_node **positive,
-                                            ixs_node **negative) {
-  ixs_arena_mark mark = ixs_arena_save(b->scratch);
-  ixs_addterm *terms;
-  ixs_addterm *positive_terms;
-  ixs_addterm *negative_terms;
-  size_t bytes;
-  uint32_t positive_count = 0;
-  uint32_t negative_count = 0;
-  uint32_t i;
-  bool ok = false;
-
-  bytes = (size_t)difference->u.add.nterms * sizeof(*terms);
-  if (bytes / sizeof(*terms) != difference->u.add.nterms ||
-      bytes > SIZE_MAX / 2u) {
-    b->oom = true;
-    ixs_arena_restore(b->scratch, mark);
-    return false;
-  }
-  bytes *= 2u;
-  terms = ixs_arena_alloc(b->scratch, bytes, sizeof(void *));
-  if (!terms) {
-    b->oom = true;
-    ixs_arena_restore(b->scratch, mark);
-    return false;
-  }
-  positive_terms = terms;
-  negative_terms = terms + difference->u.add.nterms;
-
-  for (i = 0; i < difference->u.add.nterms; i++) {
-    ixs_node *coefficient = difference->u.add.terms[i].coeff;
-    int64_t coefficient_p;
-    int64_t coefficient_q;
-    int sign;
-
-    ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
-    sign = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1);
-    if (sign > 0) {
-      positive_terms[positive_count++] = difference->u.add.terms[i];
-      continue;
-    }
-    if (sign == 0)
-      continue;
-    if (!ixs_rat_neg(coefficient_p, coefficient_q, &coefficient_p,
-                     &coefficient_q))
-      goto cleanup;
-    coefficient = ixs_node_rat(b->ctx, coefficient_p, coefficient_q);
-    if (!coefficient) {
-      b->oom = true;
-      goto cleanup;
-    }
-    negative_terms[negative_count].term = difference->u.add.terms[i].term;
-    negative_terms[negative_count++].coeff = coefficient;
-  }
-
-  *positive =
-      bounds_build_exact_relation_side(b, positive_terms, positive_count);
-  *negative =
-      bounds_build_exact_relation_side(b, negative_terms, negative_count);
-  ok = *positive && *negative;
-
-cleanup:
-  ixs_arena_restore(b->scratch, mark);
-  return ok;
 }
 
 /* Split an exact comparison residual
@@ -2491,40 +2308,16 @@ cleanup:
 static bool bounds_extract_cmp_exact_relation(ixs_bounds *b, ixs_node *cmp,
                                               ixs_node **lhs, ixs_node **rhs,
                                               int64_t *offset) {
-  ixs_node *difference;
-  ixs_node *positive;
-  ixs_node *negative;
-  int64_t constant;
-  int64_t constant_q;
+  ixs_additive_row_status status;
 
   if (!b || !b->ctx || !cmp || cmp->tag != IXS_CMP ||
       cmp->u.binary.cmp_op != IXS_CMP_EQ || !lhs || !rhs || !offset)
     return false;
-
-  difference = bounds_cmp_exact_residual(b, cmp);
-  if (!difference)
-    return false;
-  if (difference->tag != IXS_ADD || difference->u.add.nterms < 2u)
-    return false;
-  ixs_node_get_rat(difference->u.add.coeff, &constant, &constant_q);
-  if (constant_q != 1)
-    return false;
-  if (!bounds_partition_exact_relation(b, difference, &positive, &negative))
-    return false;
-  if (ixs_node_is_zero(positive) || ixs_node_is_zero(negative))
-    return false;
-  if (constant == INT64_MIN) {
-    /* positive == negative + 2^63 is not representable in this orientation.
-     * Store the reverse relation, whose offset is INT64_MIN. */
-    *lhs = negative;
-    *rhs = positive;
-    *offset = INT64_MIN;
-  } else {
-    *lhs = positive;
-    *rhs = negative;
-    *offset = -constant;
-  }
-  return true;
+  status = ixs_additive_row_relation(b->ctx, b->scratch, cmp->u.binary.lhs,
+                                     cmp->u.binary.rhs, lhs, rhs, offset);
+  if (status == IXS_ADDITIVE_ROW_OOM)
+    b->oom = true;
+  return status == IXS_ADDITIVE_ROW_MATCH;
 }
 
 static bool sym_name_matches(ixs_node *n, const char *name) {
@@ -4125,34 +3918,16 @@ static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
 
 static bool bounds_extract_unit_difference(ixs_node *expr, ixs_node **lhs,
                                            ixs_node **rhs, int64_t *constant) {
-  uint32_t i;
-  int64_t p;
-  int64_t q;
-  if (!expr || !lhs || !rhs || !constant || expr->tag != IXS_ADD ||
-      expr->u.add.nterms != 2u)
+  ixs_node *positive;
+  ixs_node *negative;
+  if (!expr || expr->tag != IXS_ADD)
     return false;
-  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
-  if (q != 1)
+  if (!ixs_additive_row_unit_pair(expr, &positive, &negative, constant) ||
+      positive->tag != IXS_SYM || negative->tag != IXS_SYM)
     return false;
-  *constant = p;
-  *lhs = NULL;
-  *rhs = NULL;
-  for (i = 0; i < 2u; i++) {
-    ixs_node *term = expr->u.add.terms[i].term;
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (term->tag != IXS_SYM || q != 1 || (p != 1 && p != -1))
-      return false;
-    if (p == 1) {
-      if (*lhs)
-        return false;
-      *lhs = term;
-    } else {
-      if (*rhs)
-        return false;
-      *rhs = term;
-    }
-  }
-  return *lhs && *rhs && *lhs != *rhs;
+  *lhs = positive;
+  *rhs = negative;
+  return true;
 }
 
 static bool bounds_exact_unit_difference_value(ixs_bounds *b, ixs_node *expr,
@@ -8051,9 +7826,14 @@ static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   }
   if (!b->oom && b->nexprs != 0)
     result = iv_intersect(result, bounds_get_proportional_range(b, expr));
-  if (!b->oom && b->nexprs != 0 && !ixs_node_is_zero(expr->u.add.coeff)) {
-    ixs_node *base = bounds_expr_without_add_const(b, expr);
-    if (base && base != expr) {
+  if (!b->oom && b->ctx && b->nexprs != 0 &&
+      !ixs_node_is_zero(expr->u.add.coeff)) {
+    ixs_node *base;
+    ixs_additive_row_status status =
+        ixs_additive_row_without_constant(b->ctx, expr, &base);
+    if (status == IXS_ADDITIVE_ROW_OOM) {
+      b->oom = true;
+    } else if (status == IXS_ADDITIVE_ROW_MATCH && base != expr) {
       ixs_interval base_iv = ixs_bounds_get(b, base);
       ixs_interval offset = ixs_bounds_get(b, expr->u.add.coeff);
       result = iv_intersect(result, iv_add(base_iv, offset));
@@ -18371,7 +18151,7 @@ static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
 
   *lhs = cmp->u.binary.lhs;
   *rhs = cmp->u.binary.rhs;
-  if (!ixs_node_is_zero(*rhs) || extract_add_node_equality(*lhs, lhs, rhs))
+  if (!ixs_node_is_zero(*rhs) || bounds_extract_unit_equality(*lhs, lhs, rhs))
     return;
   equivalence_atom_find_exact_sides(*lhs, &sides);
   if (sides.has_piecewise) {
@@ -19226,21 +19006,6 @@ facts_query_finite_difference(ixs_facts *facts, ixs_node *expr,
   return query_result;
 }
 
-static ixs_node *algebra_add_without_constant(ixs_ctx *ctx, ixs_node *expr) {
-  ixs_node *residual = ctx->node_zero;
-  uint32_t i;
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    ixs_node *term =
-        simp_mul(ctx, expr->u.add.terms[i].coeff, expr->u.add.terms[i].term);
-    if (!term || ixs_node_is_sentinel(term))
-      return NULL;
-    residual = simp_add(ctx, residual, term);
-    if (!residual || ixs_node_is_sentinel(residual))
-      return NULL;
-  }
-  return residual;
-}
-
 static ixs_additive_constant_result
 facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
   algebra_query_scope scope;
@@ -19268,12 +19033,15 @@ facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
       goto cleanup;
     result_residual = scope.ctx->node_zero;
   } else if (expr->tag == IXS_ADD) {
+    ixs_additive_row_status status;
     ixs_node_get_rat(expr->u.add.coeff, &result_constant, &q);
     if (q != 1)
       goto cleanup;
-    result_residual = algebra_add_without_constant(scope.ctx, expr);
-    if (!result_residual) {
-      scope.status = IXS_FACT_QUERY_OOM;
+    status =
+        ixs_additive_row_without_constant(scope.ctx, expr, &result_residual);
+    if (status != IXS_ADDITIVE_ROW_MATCH) {
+      scope.status = status == IXS_ADDITIVE_ROW_OOM ? IXS_FACT_QUERY_OOM
+                                                    : IXS_FACT_QUERY_INVALID;
       goto cleanup;
     }
   } else {
