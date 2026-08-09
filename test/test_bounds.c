@@ -3108,7 +3108,7 @@ static void test_public_trunc_remainder_range(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_trunc_remainder_production_witness(void) {
+static void test_public_trunc_remainder_nested_composition(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *raw1 = ixs_sym(ctx, "trunc_witness_raw1");
   ixs_node *raw2 = ixs_sym(ctx, "trunc_witness_raw2");
@@ -3120,13 +3120,14 @@ static void test_public_trunc_remainder_production_witness(void) {
   ixs_node *b_argument = test_safe_signed_quotient(ctx, raw1, four_a);
   ixs_node *b = ixs_trunc(ctx, b_argument);
   ixs_node *remainder = ixs_sub(ctx, raw1, ixs_mul(ctx, four_a, b));
-  ixs_node *tile =
+  ixs_node *segment =
       ixs_trunc(ctx, ixs_div(ctx, ixs_add(ctx, ixs_int(ctx, 255), raw3),
                              ixs_int(ctx, 256)));
-  ixs_node *p_base = ixs_sub(ctx, tile, ixs_mul(ctx, ixs_int(ctx, 4), b));
-  ixs_node *p_values[] = {p_base, ixs_int(ctx, 4)};
+  ixs_node *adjusted_segment =
+      ixs_sub(ctx, segment, ixs_mul(ctx, ixs_int(ctx, 4), b));
+  ixs_node *p_values[] = {adjusted_segment, ixs_int(ctx, 4)};
   ixs_node *p_conditions[] = {
-      ixs_cmp(ctx, ixs_sub(ctx, p_base, ixs_int(ctx, 4)), IXS_CMP_LT,
+      ixs_cmp(ctx, ixs_sub(ctx, adjusted_segment, ixs_int(ctx, 4)), IXS_CMP_LT,
               ixs_int(ctx, 0)),
       ixs_int(ctx, 1),
   };
@@ -9005,6 +9006,70 @@ static void test_same_bucket_floor_oom_is_conservative(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounded_delta_quotient_stability(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "bounded_quotient_a");
+  ixs_node *d = ixs_sym(ctx, "bounded_quotient_d");
+  ixs_node *delta = ixs_sym(ctx, "bounded_quotient_delta");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *seven = ixs_int(ctx, 7);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *base = ixs_trunc(ctx, ixs_div(ctx, a, d));
+  ixs_node *shifted = ixs_trunc(ctx, ixs_div(ctx, ixs_add(ctx, a, delta), d));
+  ixs_node *same = ixs_cmp(ctx, shifted, IXS_CMP_EQ, base);
+  ixs_node *facts[] = {
+      ixs_cmp(ctx, a, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, d, IXS_CMP_GT, zero),
+      ixs_cmp(ctx, delta, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, delta, IXS_CMP_LE, seven),
+      ixs_cmp(ctx, delta, IXS_CMP_EQ, ixs_floor(ctx, delta)),
+      ixs_cmp(ctx, ixs_mod(ctx, a, eight), IXS_CMP_EQ, zero),
+      ixs_cmp(ctx, ixs_mod(ctx, d, eight), IXS_CMP_EQ, zero),
+  };
+  ixs_node *missing_sign[] = {facts[1], facts[2], facts[3],
+                              facts[4], facts[5], facts[6]};
+  ixs_node *crossing[] = {
+      facts[0], facts[1], facts[2], ixs_cmp(ctx, delta, IXS_CMP_LE, eight),
+      facts[4], facts[5], facts[6],
+  };
+  ixs_node *negative_facts[] = {
+      ixs_cmp(ctx, a, IXS_CMP_EQ, ixs_int(ctx, -8)),
+      ixs_cmp(ctx, d, IXS_CMP_EQ, eight),
+      ixs_cmp(ctx, delta, IXS_CMP_EQ, ixs_int(ctx, 3)),
+  };
+  ixs_node *residue_facts[] = {
+      facts[0],
+      facts[1],
+      ixs_cmp(ctx, delta, IXS_CMP_GE, ixs_int(ctx, -3)),
+      ixs_cmp(ctx, delta, IXS_CMP_LE, ixs_int(ctx, 4)),
+      facts[4],
+      ixs_cmp(ctx, ixs_mod(ctx, a, eight), IXS_CMP_EQ, ixs_int(ctx, 3)),
+      facts[6],
+  };
+  ixs_facts *safe = ixs_facts_create(ctx);
+  ixs_facts *safe_residue = ixs_facts_create(ctx);
+  ixs_facts *unsigned_domain_missing = ixs_facts_create(ctx);
+  ixs_facts *may_cross = ixs_facts_create(ctx);
+  ixs_facts *negative = ixs_facts_create(ctx);
+
+  CHECK(ctx && a && d && delta && zero && seven && eight && base && shifted &&
+        same && safe && safe_residue && unsigned_domain_missing && may_cross &&
+        negative);
+  CHECK(ixs_facts_assume_preds(safe, facts, 7));
+  CHECK(ixs_facts_assume_preds(safe_residue, residue_facts, 7));
+  CHECK(ixs_facts_assume_preds(unsigned_domain_missing, missing_sign, 6));
+  CHECK(ixs_facts_assume_preds(may_cross, crossing, 7));
+  CHECK(ixs_facts_assume_preds(negative, negative_facts, 3));
+  CHECK(test_ixs_check_predicate_facts(safe, same) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(safe_residue, same) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(unsigned_domain_missing, same) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(may_cross, same) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(negative, same) == IXS_CHECK_FALSE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_associative_constructor_oom(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "assoc_oom_x");
@@ -9357,7 +9422,7 @@ int main(void) {
   test_public_range_associative_many();
   test_public_range_piecewise();
   test_public_trunc_remainder_range();
-  test_public_trunc_remainder_production_witness();
+  test_public_trunc_remainder_nested_composition();
   test_failed_expand_is_not_expression_fact_alias();
   test_bounds_canonical_alias_cache();
   test_bounds_canonical_alias_failure_semantics();
@@ -9440,6 +9505,7 @@ int main(void) {
   test_batch_rewrite_cache_oom_is_atomic();
   test_mod_rewrite_oom_propagates();
   test_same_bucket_floor_oom_is_conservative();
+  test_bounded_delta_quotient_stability();
   test_associative_constructor_oom();
   test_deep_node_order_is_iterative();
 

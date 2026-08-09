@@ -737,12 +737,11 @@ fast pre-checks (sentinel propagation, const fold, identity) directly,
 constructs the node, then calls `try_rules(ctx, NULL, node, *_rules)`.
 For the top-down rewrite pass, each `simp_*_bnds` variant takes an
 optional `ixs_bounds *` and calls `try_rules(ctx, bnds, ...)` so
-bounds-dependent rules also fire. `rewrite_impl` is just:
+bounds-dependent rules also fire. Nodes rewrite their children before calling
+the matching canonicalizer. Rounding nodes use the same path:
 ```c
-case IXS_FLOOR:
-    return simp_floor_bnds(ctx, bnds, rewrite(ctx, arg, ...));
-case IXS_TRUNC:
-    return simp_trunc_bnds(ctx, bnds, rewrite(ctx, arg, ...));
+arg = rewrite(ctx, source_arg, ...);
+return simp_floor_bnds(ctx, bnds, arg); /* or ceil/trunc */
 ```
 There is one rule table per type, used by both construction and rewriting.
 
@@ -1685,21 +1684,25 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   returns `UNKNOWN`, and contradictory facts never establish a result.
 - **Public predicate-tree checking** (`ixs_check_predicate_facts`, Python
   `Context.check_predicate`, C++ `Facts::check_predicate`): accepts only nodes
-  classified by `ixs_node_is_pred`. It simplifies once against the reusable
-  facts, then evaluates `AND`, `OR`, and `NOT` with conservative tri-state
-  truth tables. `AND` is true only when every child is true and false when any
-  child is false; `OR` is true when any child is true and false only when every
-  child is false; `NOT` inverts true and false. Predicate-valued `Piecewise`
-  nodes that do not collapse during fact-backed simplification remain
-  unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
-  diagnostic rather than interpreted as boolean trees. An otherwise unknown
-  binary `OR` with either an explicit `NOT(A)` disjunct or a comparison
-  disjunct is also checked as an implication. For a comparison disjunct, its
-  complementary comparison is the local antecedent; this covers the canonical
-  form produced when `NOT(CMP)` is folded. The query first proves the original
-  predicate total, then forks the bounds state, ingests the antecedent, and
-  proves the other disjunct locally. The fork shares the enclosing query guard
-  and resource budget and is discarded after this single implication level.
+  classified by `ixs_node_is_pred`. Equality-defined canonical aliases are
+  simplified and evaluated first. Otherwise the source predicate shape,
+  including finite-domain and implication proofs, remains the first query so
+  structural evidence is not erased. An otherwise unknown source predicate is
+  simplified once against the reusable facts and evaluated again. `AND`, `OR`,
+  and `NOT` use conservative tri-state truth tables. `AND` is true only when
+  every child is true and false when any child is false; `OR` is true when any
+  child is true and false only when every child is false; `NOT` inverts true
+  and false. Predicate-valued `Piecewise` nodes that do not collapse during
+  fact-backed simplification remain unknown. Numeric bitwise `AND`/`OR` nodes
+  are rejected with a `predicate:` diagnostic rather than interpreted as
+  boolean trees. An otherwise unknown binary `OR` with either an explicit
+  `NOT(A)` disjunct or a comparison disjunct is also checked as an implication.
+  For a comparison disjunct, its complementary comparison is the local
+  antecedent; this covers the canonical form produced when `NOT(CMP)` is
+  folded. The query first proves the original predicate total, then forks the
+  bounds state, ingests the antecedent, and proves the other disjunct locally.
+  The fork shares the enclosing query guard and resource budget and is
+  discarded after this single implication level.
 - **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
   `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
   defined over every valuation admitted by the incoming facts before pointer

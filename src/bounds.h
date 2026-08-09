@@ -259,12 +259,13 @@ IXS_STATIC bool ixs_bounds_is_pow2_positive(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
                                               int64_t m);
 
-/* True when congruence facts prove that shifting the Euclidean remainder of
- * dividend by shift stays in the canonical interval for denominator. */
+/* True when congruence and range facts prove that shifting the Euclidean
+ * remainder of dividend by delta stays in the canonical interval for
+ * denominator. */
 IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(ixs_bounds *b,
                                                       ixs_node *dividend,
                                                       ixs_node *denominator,
-                                                      int64_t shift);
+                                                      ixs_node *delta);
 
 /* True when expr is provably integer-valued given congruence info. */
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,

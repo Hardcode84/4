@@ -2887,7 +2887,7 @@ static ixs_node *floor_rebuild_without_term(ixs_ctx *ctx, ixs_node *x,
 
 static ixs_node *floor_drop_small_bounded_term(ixs_ctx *ctx, ixs_bounds *bnds,
                                                ixs_node *x) {
-  uint32_t drop, i;
+  uint32_t drop, keep, i;
 
   if (!bnds || x->tag != IXS_ADD || x->u.add.nterms < 2 ||
       !ixs_node_is_integer_valued(x->u.add.coeff))
@@ -2916,6 +2916,34 @@ static ixs_node *floor_drop_small_bounded_term(ixs_ctx *ctx, ixs_bounds *bnds,
     iv = ixs_bounds_get(bnds, candidate);
     if (interval_nonnegative_below(iv, 1, lcm))
       return floor_rebuild_without_term(ctx, x, drop);
+  }
+
+  /* With two terms, the loop above already considers both possible
+   * base/remainder partitions. */
+  if (x->u.add.nterms == 2)
+    return x;
+
+  /* The bounded remainder can itself be a sum.  Conservatively choose one
+   * term as the grid-aligned base and prove that every other term together
+   * stays below one base-grid step.  This is the same quotient-stability
+   * argument as the single-term case above, with the partition reversed. */
+  for (keep = 0; keep < x->u.add.nterms; keep++) {
+    int64_t denom = floor_term_effective_denom(bnds, &x->u.add.terms[keep]);
+    ixs_node *remainder;
+    ixs_node *base;
+    ixs_interval iv;
+
+    if (denom == 0)
+      continue;
+    remainder = floor_rebuild_without_term(ctx, x, keep);
+    if (!remainder)
+      return NULL;
+    iv = ixs_bounds_get(bnds, remainder);
+    if (!interval_nonnegative_below(iv, 1, denom))
+      continue;
+    base = simp_mul(ctx, x->u.add.terms[keep].coeff,
+                    x->u.add.terms[keep].term);
+    return base;
   }
 
   return x;
@@ -7149,8 +7177,6 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
   ixs_node *upper_difference;
   bool lower_safe;
   bool upper_safe;
-  int64_t shift_value;
-  int64_t shift_q;
   if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
       ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
       ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
@@ -7175,13 +7201,11 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
                bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
   upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
                bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
-  if ((!lower_safe || !upper_safe) && ixs_node_is_const(shift)) {
-    ixs_node_get_rat(shift, &shift_value, &shift_q);
-    if (shift_q == 1 && ixs_bounds_mod_shift_stays_in_residue(
-                            bnds, numerator, denominator, shift_value)) {
-      lower_safe = true;
-      upper_safe = true;
-    }
+  if ((!lower_safe || !upper_safe) && ixs_bounds_mod_shift_stays_in_residue(
+                                           bnds, numerator, denominator,
+                                           shift)) {
+    lower_safe = true;
+    upper_safe = true;
   }
   if (bnds->oom)
     return FLOOR_SHIFT_ERROR;

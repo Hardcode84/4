@@ -17087,31 +17087,31 @@ static bool bounds_unique_modular_delta(ixs_bounds *bounds, ixs_node *lhs,
 }
 
 static bool bounds_residue_shift_in_range(uint64_t residue, uint64_t modulus,
-                                          int64_t shift) {
-  uint64_t magnitude;
-  if (shift >= 0) {
-    uint64_t positive = (uint64_t)shift;
-    return positive < modulus && residue < modulus - positive;
-  }
-  magnitude = bounds_int64_magnitude(shift);
-  return magnitude <= residue;
+                                          int64_t lower, int64_t upper) {
+  int64_t minimum = -(int64_t)residue;
+  int64_t limit = (int64_t)(modulus - residue);
+  return lower >= minimum && upper < limit;
 }
 
-/* If the dividend and positive divisor share a stride class, a shift which
- * stays within one stride bucket cannot cross a divisor boundary. */
+/* If the dividend and positive divisor share a stride class, a bounded delta
+ * which stays within one stride bucket cannot cross a divisor boundary. */
 IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(ixs_bounds *bounds,
                                                       ixs_node *dividend,
                                                       ixs_node *denominator,
-                                                      int64_t shift) {
+                                                      ixs_node *delta) {
+  ixs_integer_range_result range;
   uint64_t modulus;
   uint64_t residue;
   if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
       modulus > (uint64_t)INT64_MAX ||
       !bounds_known_residue(bounds, dividend, modulus, &residue) ||
       ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
-          IXS_CHECK_TRUE)
+          IXS_CHECK_TRUE ||
+      !bounds_get_integer_range(bounds, delta, &range) || !range.has_lower ||
+      !range.has_upper)
     return false;
-  return bounds_residue_shift_in_range(residue, modulus, shift);
+  return bounds_residue_shift_in_range(residue, modulus, range.lower,
+                                       range.upper);
 }
 
 static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
@@ -17495,6 +17495,7 @@ static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
   ixs_node *denominator;
   int64_t coefficient;
   int64_t modular_delta;
+  ixs_node *delta;
   if (!query->child_proved ||
       !bounds_modular_pair(frame->difference, frame->matched_positive,
                            frame->matched_negative, &lhs_term, &rhs_term,
@@ -17507,9 +17508,14 @@ static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
                                      &modular_delta))
       return false;
   } else {
+    delta = ixs_node_int(query->ctx, query->child_delta);
+    if (!delta) {
+      query->oom = true;
+      return false;
+    }
     if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
         !ixs_bounds_mod_shift_stays_in_residue(
-            query->bounds, rhs_representative, denominator, query->child_delta))
+            query->bounds, rhs_representative, denominator, delta))
       return false;
     modular_delta = query->child_delta;
   }
@@ -18046,9 +18052,14 @@ static bool equivalence_mod_shift_by_congruence(equivalence_state *state,
                                                 ixs_node *dividend,
                                                 ixs_node *denominator,
                                                 int64_t shift) {
+  ixs_node *delta = ixs_node_int(state->ctx, shift);
+  if (!delta) {
+    state->oom = true;
+    return false;
+  }
   if (!equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT) ||
       !ixs_bounds_mod_shift_stays_in_residue(state->bounds, dividend,
-                                             denominator, shift)) {
+                                             denominator, delta)) {
     if (state->bounds->oom)
       state->oom = true;
     return false;
@@ -19746,12 +19757,34 @@ facts_query_predicate_shape(ixs_bounds *bounds, ixs_node *predicate,
 }
 
 static ixs_fact_check_result
+facts_query_simplified_predicate(ixs_facts *facts, ixs_ctx *ctx,
+                                 ixs_node *predicate) {
+  ixs_fact_check_result result = {IXS_FACT_QUERY_COMPLETE, IXS_CHECK_UNKNOWN};
+  bool simplify_limited = false;
+  ixs_node *simplified = simp_simplify_bounds_status(
+      ctx, predicate, &facts->bounds, &simplify_limited);
+
+  if (simplify_limited) {
+    result.status = IXS_FACT_QUERY_LIMITED;
+    return result;
+  }
+  if (!simplified) {
+    result.status = IXS_FACT_QUERY_OOM;
+    return result;
+  }
+  if (ixs_node_is_sentinel(simplified)) {
+    result.status = IXS_FACT_QUERY_INVALID;
+    return result;
+  }
+  return facts_query_predicate_shape(&facts->bounds, simplified, false);
+}
+
+static ixs_fact_check_result
 facts_query_normalized_predicate(ixs_facts *facts, ixs_ctx *ctx,
                                  ixs_node *predicate, bool *source_fallback) {
   ixs_fact_check_result result = {IXS_FACT_QUERY_COMPLETE, IXS_CHECK_UNKNOWN};
   ixs_node *normalized = NULL;
   facts_definition_status definition_status;
-  bool simplify_limited = false;
 
   *source_fallback = false;
   definition_status = facts_apply_equality_definitions(ctx, &facts->bounds,
@@ -19773,24 +19806,9 @@ facts_query_normalized_predicate(ixs_facts *facts, ixs_ctx *ctx,
     return result;
   }
 
-  normalized = simp_simplify_bounds_status(ctx, normalized, &facts->bounds,
-                                           &simplify_limited);
-  if (simplify_limited) {
-    result.status = IXS_FACT_QUERY_LIMITED;
-    return result;
-  }
-  if (!normalized) {
-    result.status = IXS_FACT_QUERY_OOM;
-    return result;
-  }
-  if (ixs_node_is_sentinel(normalized)) {
-    result.status = IXS_FACT_QUERY_INVALID;
-    return result;
-  }
-
   /* Equality definitions expose the canonical proof before the bounded
    * predicate engine spends work on an alias-heavy source tree. */
-  result = facts_query_predicate_shape(&facts->bounds, normalized, false);
+  result = facts_query_simplified_predicate(facts, ctx, normalized);
   *source_fallback = result.status == IXS_FACT_QUERY_COMPLETE &&
                      result.check == IXS_CHECK_UNKNOWN;
   return result;
@@ -19841,6 +19859,9 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
    * shape.  Keep that engine as a fallback only when normalization did not
    * decide the predicate. */
   result = facts_query_predicate_shape(&facts->bounds, predicate, true);
+  if (result.status == IXS_FACT_QUERY_COMPLETE &&
+      result.check == IXS_CHECK_UNKNOWN)
+    result = facts_query_simplified_predicate(facts, ctx, predicate);
 
 cleanup:
   if (scratch_saved)
