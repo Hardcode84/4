@@ -142,10 +142,13 @@ typedef struct {
   bool empty_cache_valid;
   bool empty_cache_value;
   bool oom;
-  /* Contextless query state and its growable tables live here.  Context-backed
-   * bounds use the context arena instead, but still own this empty arena so a
-   * fork never aliases arena ownership with its source. */
+  /* Contextless query state, owner-local projection memos, and their growable
+   * tables live here. Context-backed bounds use the context arena for shared
+   * state, but forks still own projection storage here. */
   ixs_arena query_arena;
+  /* Scoped proof stacks live separately so restoring temporary workspace
+   * cannot invalidate owner-local query state created by a nested proof. */
+  ixs_arena work_arena;
   ixs_bounds_query_state *query_state;
   uint64_t query_owner;
   /* Owner-local exact-component projection memo.  Persistent fact bounds reuse
@@ -258,8 +261,10 @@ IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
 
 /* True when congruence facts prove that shifting the Euclidean remainder of
  * dividend by shift stays in the canonical interval for denominator. */
-IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(
-    ixs_bounds *b, ixs_node *dividend, ixs_node *denominator, int64_t shift);
+IXS_STATIC bool ixs_bounds_mod_shift_stays_in_residue(ixs_bounds *b,
+                                                      ixs_node *dividend,
+                                                      ixs_node *denominator,
+                                                      int64_t shift);
 
 /* True when expr is provably integer-valued given congruence info. */
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,

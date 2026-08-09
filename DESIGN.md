@@ -290,6 +290,13 @@ the window between scratch allocation and restore. Restoring the main arena
 would destroy those nodes. The scratch arena holds only temporaries, so
 restoring it is always safe.
 
+Bounds objects apply the same ownership rule internally. `query_arena` owns
+contextless query state and fork-local projection memos that survive nested
+proof calls. `work_arena` owns only scoped proof stacks and term arrays.
+Restoring `work_arena` therefore cannot invalidate query state or a projection
+table allocated by a nested proof, while restoring session scratch cannot roll
+back semantic bounds mutations performed during that proof.
+
 **Arena grow**: Growing a scratch array is common enough to warrant a
 dedicated operation. `ixs_arena_grow` extends an existing allocation in
 place when possible, falling back to alloc + copy. Primarily intended for
@@ -1017,6 +1024,15 @@ Scaled exact division keeps modular wrap explicit. For example,
 `Mod(2*x,2^32)/2` reduces to `Mod(x,2^31)` when `x` is integer-valued, then to
 `x` only when the bounds prove `0 <= x < 2^31`. A signed 32-bit range crosses
 the wrap and does not justify the second reduction.
+
+Range propagation also recognizes a canonical ADD
+`x - d*Trunc(y)`. It partitions `d > 0`, `d < 0`, and `d == 0`. A reachable
+nonzero partition uses the integer remainder bound
+`-(|d|-1) <= x-d*Trunc(y) <= |d|-1` only when the fact-backed simplifier proves
+`d*y == x` and the required integer and definedness contracts. A reachable
+zero partition contributes the actual range of `x` after proving the complete
+ADD defined. Every direct `Trunc` factor is a candidate; surrounding factors
+remain opaque algebraic expressions.
 
 Scale extraction may establish the `g*m` condition through congruence facts
 instead of a structural leading coefficient.  If every non-constant dividend

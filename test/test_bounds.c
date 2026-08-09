@@ -2998,6 +2998,161 @@ static void check_public_range(ixs_facts *facts, ixs_node *expr, int64_t lower,
   CHECK(range.has_upper && range.upper_p == upper && range.upper_q == 1);
 }
 
+static void assume_public_integer_range(ixs_facts *facts, ixs_node *expr,
+                                        int64_t lower, int64_t upper) {
+  ixs_range_result range = {true, true, lower, 1, upper, 1};
+  CHECK(ixs_facts_assume_range(facts, expr, &range));
+}
+
+static ixs_node *test_safe_signed_quotient(ixs_ctx *ctx, ixs_node *dividend,
+                                           ixs_node *divisor) {
+  ixs_node *minus_one = ixs_int(ctx, -1);
+  ixs_node *negative_divisor = ixs_neg(ctx, divisor);
+  ixs_node *inner_args[] = {minus_one, divisor};
+  ixs_node *inner = ixs_max_many(ctx, 2, inner_args);
+  ixs_node *sign_args[] = {minus_one, ixs_neg(ctx, inner)};
+  ixs_node *sign = ixs_max_many(ctx, 2, sign_args);
+  ixs_node *magnitude_args[] = {ixs_int(ctx, 1), negative_divisor, divisor};
+  ixs_node *magnitude = ixs_max_many(ctx, 3, magnitude_args);
+  return ixs_div(ctx, ixs_mul(ctx, ixs_neg(ctx, dividend), sign), magnitude);
+}
+
+static void test_public_trunc_remainder_range(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "trunc_remainder_x");
+  ixs_node *d = ixs_sym(ctx, "trunc_remainder_d");
+  ixs_node *z = ixs_sym(ctx, "trunc_remainder_z");
+  ixs_facts *positive = ixs_facts_create(ctx);
+  ixs_facts *negative = ixs_facts_create(ctx);
+  ixs_facts *mixed = ixs_facts_create(ctx);
+  ixs_facts *wrong = ixs_facts_create(ctx);
+  ixs_node *positive_remainder =
+      ixs_sub(ctx, x, ixs_mul(ctx, d, ixs_trunc(ctx, ixs_div(ctx, x, d))));
+  ixs_node *negative_remainder = positive_remainder;
+  ixs_node *safe_argument = test_safe_signed_quotient(ctx, x, d);
+  ixs_node *mixed_remainder =
+      ixs_sub(ctx, x, ixs_mul(ctx, d, ixs_trunc(ctx, safe_argument)));
+  ixs_node *wrong_remainder =
+      ixs_sub(ctx, x,
+              ixs_mul(ctx, ixs_int(ctx, 7),
+                      ixs_trunc(ctx, ixs_div(ctx, z, ixs_int(ctx, 3)))));
+  ixs_node *constant_positive =
+      ixs_sub(ctx, x,
+              ixs_mul(ctx, ixs_int(ctx, 7),
+                      ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 7)))));
+  ixs_node *constant_negative =
+      ixs_sub(ctx, x,
+              ixs_mul(ctx, ixs_int(ctx, -7),
+                      ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, -7)))));
+  ixs_range_result range;
+
+  assume_public_integer_range(positive, x, -1000, 1000);
+  assume_public_integer_range(positive, d, 3, 11);
+  check_public_range(positive, positive_remainder, -10, 10);
+  check_public_range(positive, constant_positive, -6, 6);
+  check_public_range(positive, constant_negative, -6, 6);
+
+  assume_public_integer_range(negative, x, -1000, 1000);
+  assume_public_integer_range(negative, d, -11, -3);
+  check_public_range(negative, negative_remainder, -10, 10);
+
+  assume_public_integer_range(mixed, x, -100, 100);
+  assume_public_integer_range(mixed, d, -11, 11);
+  check_public_range(mixed, mixed_remainder, -100, 100);
+
+  assume_public_integer_range(wrong, x, -100, 100);
+  assume_public_integer_range(wrong, z, -100, 100);
+  CHECK(test_ixs_range_facts(wrong, wrong_remainder, &range));
+  CHECK(range.has_lower && range.lower_p < -6);
+  CHECK(range.has_upper && range.upper_p > 6);
+
+  {
+    ixs_node *undefined_remainder =
+        ixs_sub(ctx, x, ixs_mul(ctx, d, ixs_trunc(ctx, ixs_div(ctx, x, d))));
+    CHECK(!test_ixs_range_facts(mixed, undefined_remainder, &range));
+  }
+
+  {
+    ixs_node *half = ixs_div(ctx, ixs_int(ctx, 9), ixs_int(ctx, 2));
+    ixs_node *noninteger_remainder =
+        ixs_sub(ctx, half,
+                ixs_mul(ctx, ixs_int(ctx, 5),
+                        ixs_trunc(ctx, ixs_div(ctx, half, ixs_int(ctx, 5)))));
+    CHECK(ixs_range(ctx, noninteger_remainder, NULL, 0, &range));
+    CHECK(range.has_lower && range.lower_p == 9 && range.lower_q == 2);
+    CHECK(range.has_upper && range.upper_p == 9 && range.upper_q == 2);
+  }
+
+  {
+    ixs_node *three_halves = ixs_div(ctx, ixs_int(ctx, 3), ixs_int(ctx, 2));
+    ixs_node *noninteger_divisor =
+        ixs_sub(ctx, x,
+                ixs_mul(ctx, three_halves,
+                        ixs_trunc(ctx, ixs_div(ctx, x, three_halves))));
+    ixs_facts *one = ixs_facts_create(ctx);
+    assume_public_integer_range(one, x, 1, 1);
+    check_public_exact_range(one, noninteger_divisor, 1);
+  }
+
+  {
+    ixs_node *first = ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 7)));
+    ixs_node *second = ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 5)));
+    ixs_node *ambiguous =
+        ixs_sub(ctx, ixs_sub(ctx, x, ixs_mul(ctx, ixs_int(ctx, 7), first)),
+                ixs_mul(ctx, ixs_int(ctx, 5), second));
+    CHECK(test_ixs_range_facts(positive, ambiguous, &range));
+    CHECK(range.has_lower && range.lower_p < -10);
+    CHECK(range.has_upper && range.upper_p > 10);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_trunc_remainder_production_witness(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *raw1 = ixs_sym(ctx, "trunc_witness_raw1");
+  ixs_node *raw2 = ixs_sym(ctx, "trunc_witness_raw2");
+  ixs_node *raw3 = ixs_sym(ctx, "trunc_witness_raw3");
+  ixs_node *a =
+      ixs_trunc(ctx, ixs_div(ctx, ixs_add(ctx, ixs_int(ctx, 255), raw2),
+                             ixs_int(ctx, 256)));
+  ixs_node *four_a = ixs_mul(ctx, ixs_int(ctx, 4), a);
+  ixs_node *b_argument = test_safe_signed_quotient(ctx, raw1, four_a);
+  ixs_node *b = ixs_trunc(ctx, b_argument);
+  ixs_node *remainder = ixs_sub(ctx, raw1, ixs_mul(ctx, four_a, b));
+  ixs_node *tile =
+      ixs_trunc(ctx, ixs_div(ctx, ixs_add(ctx, ixs_int(ctx, 255), raw3),
+                             ixs_int(ctx, 256)));
+  ixs_node *p_base = ixs_sub(ctx, tile, ixs_mul(ctx, ixs_int(ctx, 4), b));
+  ixs_node *p_values[] = {p_base, ixs_int(ctx, 4)};
+  ixs_node *p_conditions[] = {
+      ixs_cmp(ctx, ixs_sub(ctx, p_base, ixs_int(ctx, 4)), IXS_CMP_LT,
+              ixs_int(ctx, 0)),
+      ixs_int(ctx, 1),
+  };
+  ixs_node *p = ixs_pw(ctx, 2, p_values, p_conditions);
+  ixs_node *minus_one = ixs_int(ctx, -1);
+  ixs_node *inner_args[] = {minus_one, p};
+  ixs_node *inner = ixs_max_many(ctx, 2, inner_args);
+  ixs_node *outer_args[] = {minus_one, ixs_neg(ctx, inner)};
+  ixs_node *outer = ixs_max_many(ctx, 2, outer_args);
+  ixs_node *numerator = ixs_mul(ctx, ixs_neg(ctx, remainder), outer);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  assume_public_integer_range(facts, raw1, INT32_MIN, INT32_MAX);
+  assume_public_integer_range(facts, raw2, INT32_MIN, INT32_MAX);
+  assume_public_integer_range(facts, raw3, INT32_MIN, INT32_MAX);
+  check_public_range(facts, remainder, INT32_MIN, INT32_MAX);
+  CHECK(test_ixs_range_facts(facts, numerator, &range));
+  CHECK(range.has_lower && range.lower_q == 1 &&
+        range.lower_p >= -INT64_C(4294967295));
+  CHECK(range.has_upper && range.upper_q == 1 &&
+        range.upper_p <= INT64_C(4294967295));
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_exact_residual_relation_chain_and_boundaries(void) {
   enum { CHAIN_LENGTH = 320 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -8687,7 +8842,7 @@ static void test_fact_simplify_session_lifetime_and_oom(void) {
   }
 }
 
-static void test_fact_query_arena_session_teardown(void) {
+static void test_fact_work_arena_session_teardown(void) {
   ixs_ctx *ctx = (ixs_ctx_create)();
   ixs_session session;
   ixs_node *x;
@@ -8710,18 +8865,22 @@ static void test_fact_query_arena_session_teardown(void) {
   CHECK(result == IXS_CHECK_UNKNOWN);
   result = (ixs_check_predicate_facts)(second, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
-  CHECK(first->bounds.query_arena.current != NULL ||
-        first->bounds.query_arena.spare != NULL);
-  CHECK(second->bounds.query_arena.current != NULL ||
-        second->bounds.query_arena.spare != NULL);
+  CHECK(first->bounds.work_arena.current != NULL ||
+        first->bounds.work_arena.spare != NULL);
+  CHECK(second->bounds.work_arena.current != NULL ||
+        second->bounds.work_arena.spare != NULL);
 
   ixs_session_reset(&session);
   CHECK(first->impl == NULL && first->epoch == 0 &&
         first->bounds.query_arena.current == NULL &&
-        first->bounds.query_arena.spare == NULL);
+        first->bounds.query_arena.spare == NULL &&
+        first->bounds.work_arena.current == NULL &&
+        first->bounds.work_arena.spare == NULL);
   CHECK(second->impl == NULL && second->epoch == 0 &&
         second->bounds.query_arena.current == NULL &&
-        second->bounds.query_arena.spare == NULL);
+        second->bounds.query_arena.spare == NULL &&
+        second->bounds.work_arena.current == NULL &&
+        second->bounds.work_arena.spare == NULL);
   result = (ixs_check_predicate_facts)(first, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
 
@@ -8729,13 +8888,15 @@ static void test_fact_query_arena_session_teardown(void) {
   CHECK(after_reset != NULL);
   result = (ixs_check_predicate_facts)(after_reset, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
-  CHECK(after_reset->bounds.query_arena.current != NULL ||
-        after_reset->bounds.query_arena.spare != NULL);
+  CHECK(after_reset->bounds.work_arena.current != NULL ||
+        after_reset->bounds.work_arena.spare != NULL);
 
   ixs_session_destroy(&session);
   CHECK(after_reset->impl == NULL && after_reset->epoch == 0 &&
         after_reset->bounds.query_arena.current == NULL &&
-        after_reset->bounds.query_arena.spare == NULL);
+        after_reset->bounds.query_arena.spare == NULL &&
+        after_reset->bounds.work_arena.current == NULL &&
+        after_reset->bounds.work_arena.spare == NULL);
   result = (ixs_check_predicate_facts)(after_reset, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
   (ixs_ctx_destroy)(ctx);
@@ -9029,7 +9190,7 @@ static void test_mod_inverse_watcher_fork_oom_is_atomic(void) {
   candidate_ready = ixs_bounds_fork(&candidate, &facts->bounds);
   CHECK(candidate_ready);
   if (candidate_ready) {
-    ixs_arena_set_fail_after(&candidate.query_arena, 0);
+    ixs_arena_set_fail_after(&candidate.work_arena, 0);
     ixs_bounds_add_expr(&candidate, x, ixs_interval_range(-7, 1, 7, 1));
     CHECK(candidate.oom);
     ixs_bounds_destroy(&candidate);
@@ -9195,6 +9356,8 @@ int main(void) {
   test_public_range_xor();
   test_public_range_associative_many();
   test_public_range_piecewise();
+  test_public_trunc_remainder_range();
+  test_public_trunc_remainder_production_witness();
   test_failed_expand_is_not_expression_fact_alias();
   test_bounds_canonical_alias_cache();
   test_bounds_canonical_alias_failure_semantics();
@@ -9273,7 +9436,7 @@ int main(void) {
   test_public_facts_closed_batch_contract();
   test_public_defined_traversal_bounds_and_sharing();
   test_fact_simplify_session_lifetime_and_oom();
-  test_fact_query_arena_session_teardown();
+  test_fact_work_arena_session_teardown();
   test_batch_rewrite_cache_oom_is_atomic();
   test_mod_rewrite_oom_propagates();
   test_same_bucket_floor_oom_is_conservative();

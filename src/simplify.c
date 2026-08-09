@@ -499,19 +499,34 @@ static inline int add_accum_push_checked(ixs_ctx *ctx, add_accum *acc,
   return 1;
 }
 
+/* Reassociate a + scale * b so exact cancellation precedes overflow. */
+static bool add_accum_fused_constant(int64_t ap, int64_t aq, int64_t scale_p,
+                                     int64_t scale_q, int64_t bp, int64_t bq,
+                                     int64_t *rp, int64_t *rq) {
+  int64_t product_p, product_q;
+  int64_t inner_p, inner_q;
+
+  if (ixs_rat_mul(scale_p, scale_q, bp, bq, &product_p, &product_q) &&
+      ixs_rat_add(ap, aq, product_p, product_q, rp, rq))
+    return true;
+
+  return ixs_rat_div(ap, aq, scale_p, scale_q, &inner_p, &inner_q) &&
+         ixs_rat_add(inner_p, inner_q, bp, bq, &inner_p, &inner_q) &&
+         ixs_rat_mul(scale_p, scale_q, inner_p, inner_q, rp, rq);
+}
+
 static inline int add_accum_absorb_scaled_add(ixs_ctx *ctx, add_accum *acc,
                                               int64_t sp, int64_t sq,
                                               ixs_node *add) {
   uint32_t j;
-  int64_t bp, bq, rp, rq;
+  int64_t bp, bq;
   ixs_node_get_rat(add->u.add.coeff, &bp, &bq);
-  if (!ixs_rat_mul(sp, sq, bp, bq, &rp, &rq))
+  if (!add_accum_fused_constant(acc->const_p, acc->const_q, sp, sq, bp, bq,
+                                &acc->const_p, &acc->const_q))
     return -1;
-  int rc = add_accum_push_checked(ctx, acc, rp, rq, NULL);
-  if (rc <= 0)
-    return rc;
   for (j = 0; j < add->u.add.nterms; j++) {
     int64_t tp, tq, np, nq;
+    int rc;
     ixs_node_get_rat(add->u.add.terms[j].coeff, &tp, &tq);
     if (!ixs_rat_mul(sp, sq, tp, tq, &np, &nq))
       return -1;
@@ -522,18 +537,32 @@ static inline int add_accum_absorb_scaled_add(ixs_ctx *ctx, add_accum *acc,
   return 1;
 }
 
+static inline int add_accum_absorb_scaled_node_checked(ixs_ctx *ctx,
+                                                       add_accum *acc,
+                                                       int64_t sp, int64_t sq,
+                                                       ixs_node *x) {
+  int64_t cp, cq, rp, rq;
+  ixs_node *base;
+
+  if (x->tag == IXS_ADD)
+    return add_accum_absorb_scaled_add(ctx, acc, sp, sq, x);
+  add_decompose(ctx, x, &cp, &cq, &base);
+  if (!base) {
+    return add_accum_fused_constant(acc->const_p, acc->const_q, sp, sq, cp, cq,
+                                    &acc->const_p, &acc->const_q)
+               ? 1
+               : -1;
+  }
+  if (!ixs_rat_mul(sp, sq, cp, cq, &rp, &rq))
+    return -1;
+  if (base->tag == IXS_ADD)
+    return add_accum_absorb_scaled_add(ctx, acc, rp, rq, base);
+  return add_accum_push_checked(ctx, acc, rp, rq, base);
+}
+
 static inline int add_accum_absorb_node(ixs_ctx *ctx, add_accum *acc,
                                         ixs_node *x) {
-  int64_t cp, cq;
-  ixs_node *base;
-  if (x->tag == IXS_ADD)
-    return add_accum_absorb_scaled_add(ctx, acc, 1, 1, x);
-  add_decompose(ctx, x, &cp, &cq, &base);
-  if (!base)
-    return add_accum_push_checked(ctx, acc, cp, cq, NULL);
-  if (base->tag == IXS_ADD)
-    return add_accum_absorb_scaled_add(ctx, acc, cp, cq, base);
-  return add_accum_push_checked(ctx, acc, cp, cq, base);
+  return add_accum_absorb_scaled_node_checked(ctx, acc, 1, 1, x);
 }
 
 static inline bool add_accum_has_tag(add_accum *acc, ixs_tag tag) {
@@ -1310,8 +1339,19 @@ typedef struct {
   ixs_node *outer;
 } mod_term_parts;
 
-static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
-                                     floor_term_parts *parts) {
+/* A floor/Mod cancellation is optional.  An exact product that cannot be
+ * represented makes the probe inapplicable; allocation failure remains hard. */
+static int cancel_floor_mod_try_mul(ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+                                    ixs_node **result) {
+  bool unrepresentable = false;
+  *result = simp_try_mul(ctx, lhs, rhs, &unrepresentable);
+  if (*result)
+    return 1;
+  return unrepresentable ? 0 : -1;
+}
+
+static int floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
+                                    floor_term_parts *parts) {
   int32_t floor_idx;
   ixs_node *mul_rest;
   parts->node = NULL;
@@ -1322,21 +1362,22 @@ static bool floor_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
     parts->node = term->term;
     parts->arg = term->term->u.unary.arg;
     parts->mul = term->coeff;
-    return true;
+    return 1;
   }
 
   if (term->term->tag != IXS_MUL)
-    return false;
+    return 0;
   floor_idx = find_pow1_factor(term->term, IXS_FLOOR);
   if (floor_idx < 0)
-    return false;
+    return 0;
   mul_rest = mul_without_factor(ctx, term->term, floor_idx);
-  if (!mul_rest || ixs_node_is_sentinel(mul_rest))
-    return false;
+  if (!mul_rest)
+    return -1;
+  if (ixs_node_is_sentinel(mul_rest))
+    return 0;
   parts->node = term->term->u.mul.factors[floor_idx].base;
   parts->arg = parts->node->u.unary.arg;
-  parts->mul = simp_mul(ctx, term->coeff, mul_rest);
-  return parts->mul != NULL;
+  return cancel_floor_mod_try_mul(ctx, term->coeff, mul_rest, &parts->mul);
 }
 
 static bool mod_parts_from_addterm(ixs_ctx *ctx, ixs_addterm *term,
@@ -1584,6 +1625,7 @@ static int cancel_floor_mod_wide_pair(ixs_ctx *ctx, ixs_addterm *terms,
   ixs_node *residual_floor;
   int64_t ratio_p;
   int64_t ratio_q;
+  int product_status;
 
   if (!allow_wide || mod->modulus->tag != IXS_INT || mod->modulus->u.ival <= 0)
     return 0;
@@ -1607,11 +1649,10 @@ static int cancel_floor_mod_wide_pair(ixs_ctx *ctx, ixs_addterm *terms,
   }
   if (residual->tag != IXS_MUL)
     return 0;
-  residual_floor = simp_mul(ctx, residual, parts->node);
-  if (!residual_floor)
-    return -1;
-  if (ixs_node_is_sentinel(residual_floor))
-    return 0;
+  product_status =
+      cancel_floor_mod_try_mul(ctx, residual, parts->node, &residual_floor);
+  if (product_status <= 0)
+    return product_status;
   terms[i].term = replacement;
   terms[j].term = residual_floor;
   terms[j].coeff = make_const(ctx, 1, 1);
@@ -1625,16 +1666,21 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
   mod_term_parts mod;
   ixs_node *ci_outer, *ci_outer_times_m, *expected_floor;
   int64_t ci_p, ci_q;
+  int product_status;
 
   if (!terms[i].term || !mod_parts_from_addterm(ctx, &terms[i], &mod))
     return 0;
 
   ixs_node_get_rat(terms[i].coeff, &ci_p, &ci_q);
 
-  ci_outer = simp_mul(ctx, terms[i].coeff, mod.outer);
-  ci_outer_times_m = ci_outer ? simp_mul(ctx, ci_outer, mod.modulus) : NULL;
-  if (!ci_outer_times_m || ixs_node_is_sentinel(ci_outer_times_m))
-    return 0;
+  product_status =
+      cancel_floor_mod_try_mul(ctx, terms[i].coeff, mod.outer, &ci_outer);
+  if (product_status <= 0)
+    return product_status;
+  product_status =
+      cancel_floor_mod_try_mul(ctx, ci_outer, mod.modulus, &ci_outer_times_m);
+  if (product_status <= 0)
+    return product_status;
 
   expected_floor = simp_floor(ctx, simp_div(ctx, mod.arg, mod.modulus));
   if (!expected_floor || ixs_node_is_sentinel(expected_floor))
@@ -1643,21 +1689,24 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
   for (j = 0; j < nterms; j++) {
     floor_term_parts parts;
     ixs_node *replacement;
+    int parts_status;
     int wide_result;
     if (j == i || !terms[j].term)
       continue;
     if (*inspected >= FLOOR_MOD_PAIR_LIMIT)
       return 0;
     (*inspected)++;
-    if (!floor_parts_from_addterm(ctx, &terms[j], &parts))
+    parts_status = floor_parts_from_addterm(ctx, &terms[j], &parts);
+    if (parts_status < 0)
+      return -1;
+    if (parts_status == 0)
       continue;
     if (!floor_pair_matches(ctx, expected_floor, &parts, mod.modulus, mod.arg))
       continue;
-    replacement = simp_mul(ctx, mod.outer, mod.arg);
-    if (!replacement)
-      return -1;
-    if (ixs_node_is_sentinel(replacement))
-      return 0;
+    product_status =
+        cancel_floor_mod_try_mul(ctx, mod.outer, mod.arg, &replacement);
+    if (product_status <= 0)
+      return product_status;
     if (floor_mul_matches(ctx, parts.mul, ci_outer_times_m)) {
       terms[i].term = NULL;
       terms[j].term = replacement;
@@ -2001,6 +2050,53 @@ static ixs_node *pw_fold_in_add(ixs_ctx *ctx, ixs_addterm *terms,
   return simp_pw(ctx, nc, vals, cds);
 }
 
+static bool add_accum_init(ixs_ctx *ctx, add_accum *acc) {
+  acc->cap = 16;
+  acc->nterms = 0;
+  acc->const_p = 0;
+  acc->const_q = 1;
+  acc->terms = ixs_arena_alloc(&ctx->scratch, acc->cap * sizeof(*acc->terms),
+                               sizeof(void *));
+  return acc->terms != NULL;
+}
+
+static ixs_node *add_accum_finish(ixs_ctx *ctx, add_accum *acc,
+                                  bool *unrepresentable) {
+  ixs_node *prop;
+  int rc;
+
+  rc = add_accum_coalesce(ctx, acc);
+  if (rc < 0)
+    goto overflow;
+  if (rc == 0)
+    return NULL;
+
+  rc = reduce_opposite_mul_add(ctx, acc->terms, &acc->nterms, &acc->const_p,
+                               &acc->const_q);
+  if (rc < 0)
+    goto overflow;
+  if (rc == 0)
+    return NULL;
+
+  rc = add_accum_flatten_mod_terms(ctx, acc);
+  if (rc < 0)
+    goto overflow;
+  if (rc == 0)
+    return NULL;
+
+  prop = add_try_rewrites(ctx, acc);
+  if (prop)
+    return prop;
+  return add_build_result(ctx, acc);
+
+overflow:
+  if (unrepresentable) {
+    *unrepresentable = true;
+    return NULL;
+  }
+  return simp_err(ctx, "rational overflow in add");
+}
+
 static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
                                bool *unrepresentable) {
   ixs_node *prop;
@@ -2012,14 +2108,7 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
   prop = ixs_propagate2(a, b);
   if (prop)
     return prop;
-
-  acc.cap = 16;
-  acc.nterms = 0;
-  acc.const_p = 0;
-  acc.const_q = 1;
-  acc.terms = ixs_arena_alloc(&ctx->scratch, acc.cap * sizeof(*acc.terms),
-                              sizeof(void *));
-  if (!acc.terms)
+  if (!add_accum_init(ctx, &acc))
     return NULL;
 
   rc = add_accum_absorb_node(ctx, &acc, a);
@@ -2032,30 +2121,7 @@ static ixs_node *simp_add_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
     goto overflow;
   if (rc == 0)
     return NULL;
-
-  rc = add_accum_coalesce(ctx, &acc);
-  if (rc < 0)
-    goto overflow;
-  if (rc == 0)
-    return NULL;
-
-  rc = reduce_opposite_mul_add(ctx, acc.terms, &acc.nterms, &acc.const_p,
-                               &acc.const_q);
-  if (rc < 0)
-    goto overflow;
-  if (rc == 0)
-    return NULL;
-
-  rc = add_accum_flatten_mod_terms(ctx, &acc);
-  if (rc < 0)
-    goto overflow;
-  if (rc == 0)
-    return NULL;
-
-  prop = add_try_rewrites(ctx, &acc);
-  if (prop)
-    return prop;
-  return add_build_result(ctx, &acc);
+  return add_accum_finish(ctx, &acc, unrepresentable);
 
 overflow:
   if (unrepresentable) {
@@ -7544,38 +7610,110 @@ simp_normalize_rational_carrier(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *add) {
   return result;
 }
 
+/* Returns 1 on accumulation, 0 when the optional rewrite must be declined,
+ * and -1 on a hard failure stored in *failure. */
+static int rewrite_add_term(ixs_ctx *ctx, ixs_node *n, uint32_t i,
+                            ixs_bounds *bnds, rewrite_memo_slot *memo,
+                            rewrite_shared_cache *shared, add_accum *acc,
+                            unsigned *floor_candidates, ixs_node **failure) {
+  ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds, memo, shared);
+  ixs_node *rewritten_term;
+  ixs_node *c = n->u.add.terms[i].coeff;
+  bool unrepresentable = false;
+  int rc;
+
+  if (!t || ixs_node_is_sentinel(t)) {
+    *failure = t;
+    return -1;
+  }
+  if (t->tag == IXS_FLOOR && *floor_candidates < 2u)
+    (*floor_candidates)++;
+  rewritten_term = t;
+  t = simp_try_mul(ctx, c, t, &unrepresentable);
+  if (!t) {
+    int64_t cp, cq;
+    if (!unrepresentable) {
+      *failure = NULL;
+      return -1;
+    }
+    ixs_node_get_rat(c, &cp, &cq);
+    rc = add_accum_absorb_scaled_node_checked(ctx, acc, cp, cq, rewritten_term);
+    if (rc < 0)
+      return 0;
+    if (rc == 0) {
+      *failure = NULL;
+      return -1;
+    }
+    return 1;
+  }
+  /* An ADD stores each term's rational coefficient outside the child node.
+   * Re-run the generic rewrite on the reconstructed scalar term so rules
+   * that consume the complete product also apply below an additive root. */
+  if (t != rewritten_term) {
+    t = rewrite(ctx, t, bnds, memo, shared);
+    if (!t || ixs_node_is_sentinel(t)) {
+      *failure = t;
+      return -1;
+    }
+  }
+  rc = add_accum_absorb_node(ctx, acc, t);
+  if (rc < 0)
+    return 0;
+  if (rc == 0) {
+    *failure = NULL;
+    return -1;
+  }
+  return 1;
+}
+
 static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                   rewrite_memo_slot *memo,
                                   rewrite_shared_cache *shared) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  add_accum acc;
+  ixs_node *result = NULL;
   uint32_t i;
   unsigned floor_candidates = 0;
-  ixs_node *result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared);
-  if (!result)
-    return NULL;
-  for (i = 0; i < n->u.add.nterms; i++) {
-    ixs_node *t = rewrite(ctx, n->u.add.terms[i].term, bnds, memo, shared);
-    ixs_node *rewritten_term;
-    ixs_node *c = n->u.add.terms[i].coeff;
-    if (!t)
-      return NULL;
-    if (t->tag == IXS_FLOOR && floor_candidates < 2u)
-      floor_candidates++;
-    rewritten_term = t;
-    t = simp_mul(ctx, c, t);
-    if (!t)
-      return NULL;
-    /* An ADD stores each term's rational coefficient outside the child node.
-     * Re-run the generic rewrite on the reconstructed scalar term so rules
-     * that consume the complete product also apply below an additive root. */
-    if (t != rewritten_term) {
-      t = rewrite(ctx, t, bnds, memo, shared);
-      if (!t)
-        return NULL;
-    }
-    result = simp_add(ctx, result, t);
-    if (!result)
-      return NULL;
+  int rc;
+
+  if (!add_accum_init(ctx, &acc))
+    goto cleanup;
+  result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared);
+  if (!result || ixs_node_is_sentinel(result))
+    goto cleanup;
+  rc = add_accum_absorb_node(ctx, &acc, result);
+  if (rc < 0) {
+    result = n;
+    goto cleanup;
   }
+  if (rc == 0) {
+    result = NULL;
+    goto cleanup;
+  }
+  for (i = 0; i < n->u.add.nterms; i++) {
+    ixs_node *failure = NULL;
+    rc = rewrite_add_term(ctx, n, i, bnds, memo, shared, &acc,
+                          &floor_candidates, &failure);
+    if (rc == 0) {
+      result = n;
+      goto cleanup;
+    }
+    if (rc < 0) {
+      result = failure;
+      goto cleanup;
+    }
+  }
+  {
+    bool unrepresentable = false;
+    result = add_accum_finish(ctx, &acc, &unrepresentable);
+    if (!result && unrepresentable)
+      result = n;
+  }
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!result || ixs_node_is_sentinel(result))
+    return result;
   result = cancel_ceil_remainder_node(ctx, bnds, result);
   if (!result)
     return NULL;
