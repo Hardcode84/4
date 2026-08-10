@@ -577,8 +577,6 @@ static void test_opposite_max_nonzero_range(void) {
   ixs_ctx_destroy(ctx);
 }
 
-
-
 int main(void) {
   test_integer_overflow();
   test_division_by_zero();

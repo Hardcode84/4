@@ -2738,19 +2738,14 @@ static void test_mod_floor_regression(void) {
         ixs_mod(ctx, ixs_mul(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 32));
     ixs_node *symbolic_modulus = ixs_sym(ctx, "flatten_modulus");
     ixs_node *symbolic_inner = ixs_mod(ctx, x, symbolic_modulus);
-    ixs_node *symbolic_scaled =
-        ixs_mul(ctx, ixs_int(ctx, 3), symbolic_inner);
+    ixs_node *symbolic_scaled = ixs_mul(ctx, ixs_int(ctx, 3), symbolic_inner);
     ixs_node *distinct_inner = ixs_mod(ctx, x, ixs_int(ctx, 12));
-    ixs_node *distinct_scaled =
-        ixs_mul(ctx, ixs_int(ctx, 2), distinct_inner);
+    ixs_node *distinct_scaled = ixs_mul(ctx, ixs_int(ctx, 2), distinct_inner);
     ixs_node *wrong_modulus = ixs_mod(ctx, scaled, ixs_int(ctx, 24));
     ixs_node *fractional =
-        ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), inner),
-                ixs_int(ctx, 32));
+        ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), inner), ixs_int(ctx, 32));
     ixs_node *extra_factor =
-        ixs_mod(ctx,
-                ixs_mul(ctx, scaled, y),
-                ixs_int(ctx, 32));
+        ixs_mod(ctx, ixs_mul(ctx, scaled, y), ixs_int(ctx, 32));
     ixs_node *powered =
         ixs_mod(ctx, ixs_mul(ctx, inner, inner), ixs_int(ctx, 32));
 

@@ -3219,7 +3219,6 @@ def test_grouped_mod_congruence_ranges() -> None:
     assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
 
 
-
 def test_range_composite_predicate_fact() -> None:
     ctx = ixsimpl.Context()
     a, b = ctx.sym("A"), ctx.sym("B")
@@ -3496,9 +3495,7 @@ def test_fact_equality_definition_normalization() -> None:
     fresh_x = ctx.sym("binding_definition_fresh_x")
     fresh_y = ctx.sym("binding_definition_fresh_y")
     facts = ctx.facts()
-    facts.assume_many(
-        [ctx.eq(source_x, fresh_x), ctx.eq(source_y, fresh_y + 3)]
-    )
+    facts.assume_many([ctx.eq(source_x, fresh_x), ctx.eq(source_y, fresh_y + 3)])
 
     expr = source_x + 2 * source_y
     expected = fresh_x + 2 * fresh_y + 6
@@ -3562,19 +3559,14 @@ def test_mod_representative_definition_check() -> None:
     assert ctx.check(ctx.eq(digit, quotient_digit), facts=facts) is True
 
     radix_digit = ixsimpl.floor((slot % 8) / 2)
-    radix_digit_sum = (ixsimpl.floor(slot / 2) % 2) + 2 * (
-        ixsimpl.floor(slot / 4) % 2
-    )
+    radix_digit_sum = (ixsimpl.floor(slot / 2) % 2) + 2 * (ixsimpl.floor(slot / 4) % 2)
     assert ctx.check(ctx.eq(radix_digit, radix_digit_sum), facts=facts) is True
     assert ctx.check(ctx.eq(4 * radix_digit, 4 * radix_digit_sum), facts=facts) is True
 
     quotient8 = ixsimpl.floor(slot / 8)
     quotient4 = ixsimpl.floor(slot / 4)
     owner = 128 * (quotient8 % 2) + 16 * (quotient4 % 2)
-    toggled_owner = (
-        128 * (ixsimpl.xor_(quotient8, 2) % 2)
-        + 16 * (ixsimpl.xor_(quotient4, 4) % 2)
-    )
+    toggled_owner = 128 * (ixsimpl.xor_(quotient8, 2) % 2) + 16 * (ixsimpl.xor_(quotient4, 4) % 2)
     assert ctx.check(ctx.eq(owner, toggled_owner), facts=facts) is True
 
 

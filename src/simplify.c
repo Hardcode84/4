@@ -2941,8 +2941,7 @@ static ixs_node *floor_drop_small_bounded_term(ixs_ctx *ctx, ixs_bounds *bnds,
     iv = ixs_bounds_get(bnds, remainder);
     if (!interval_nonnegative_below(iv, 1, denom))
       continue;
-    base = simp_mul(ctx, x->u.add.terms[keep].coeff,
-                    x->u.add.terms[keep].term);
+    base = simp_mul(ctx, x->u.add.terms[keep].coeff, x->u.add.terms[keep].term);
     return base;
   }
 
@@ -4131,6 +4130,24 @@ static ixs_node *rule_mod_nested_divisor(ixs_ctx *ctx, ixs_bounds *bnds,
   return simp_mod(ctx, inner->u.binary.lhs, outerModulus);
 }
 
+static bool mod_term_coefficient_is_congruent(ixs_node *term,
+                                              ixs_node *denominator,
+                                              int64_t coefficient_p,
+                                              int64_t coefficient_q) {
+  int64_t required;
+
+  if (coefficient_q != 1 || term->tag != IXS_MOD)
+    return false;
+  if (term->u.binary.rhs == denominator)
+    return true;
+  if (term->u.binary.rhs->tag != IXS_INT || denominator->tag != IXS_INT ||
+      term->u.binary.rhs->u.ival <= 0 || denominator->u.ival <= 0)
+    return false;
+  required = denominator->u.ival /
+             ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
+  return coefficient_p % required == 0;
+}
+
 /* Replace k*Mod(x, m) by k*x under Mod(..., d) whenever d divides k*m. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
@@ -4152,20 +4169,11 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     ixs_node *term = dividend->u.mul.factors[0].base;
     int64_t coefficient_p;
     int64_t coefficient_q;
-    int64_t required;
-    bool congruent;
     ixs_node_get_rat(dividend->u.mul.coeff, &coefficient_p, &coefficient_q);
     if (coefficient_q != 1)
       return n;
-    congruent = term->u.binary.rhs == denominator;
-    if (!congruent && term->u.binary.rhs->tag == IXS_INT &&
-        denominator->tag == IXS_INT && term->u.binary.rhs->u.ival > 0 &&
-        denominator->u.ival > 0) {
-      required = denominator->u.ival /
-                 ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
-      congruent = coefficient_p % required == 0;
-    }
-    if (!congruent)
+    if (!mod_term_coefficient_is_congruent(term, denominator, coefficient_p,
+                                           coefficient_q))
       return n;
     flattened = simp_mul(ctx, dividend->u.mul.coeff, term->u.binary.lhs);
     return flattened ? simp_mod(ctx, flattened, denominator) : NULL;
@@ -4183,19 +4191,10 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     ixs_node *term = dividend->u.add.terms[i].term;
     int64_t coefficient_p;
     int64_t coefficient_q;
-    bool congruent;
     terms[i] = dividend->u.add.terms[i];
     ixs_node_get_rat(terms[i].coeff, &coefficient_p, &coefficient_q);
-    congruent = term->tag == IXS_MOD && term->u.binary.rhs == denominator;
-    if (!congruent && coefficient_q == 1 && term->tag == IXS_MOD &&
-        term->u.binary.rhs->tag == IXS_INT && denominator->tag == IXS_INT &&
-        term->u.binary.rhs->u.ival > 0 && denominator->u.ival > 0) {
-      int64_t required =
-          denominator->u.ival /
-          ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
-      congruent = coefficient_p % required == 0;
-    }
-    if (coefficient_q == 1 && congruent) {
+    if (mod_term_coefficient_is_congruent(term, denominator, coefficient_p,
+                                          coefficient_q)) {
       terms[i].term = term->u.binary.lhs;
       changed = true;
     }
@@ -7225,9 +7224,9 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
                bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
   upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
                bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
-  if ((!lower_safe || !upper_safe) && ixs_bounds_mod_shift_stays_in_residue(
-                                           bnds, numerator, denominator,
-                                           shift)) {
+  if ((!lower_safe || !upper_safe) &&
+      ixs_bounds_mod_shift_stays_in_residue(bnds, numerator, denominator,
+                                            shift)) {
     lower_safe = true;
     upper_safe = true;
   }
