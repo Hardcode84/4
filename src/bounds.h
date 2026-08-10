@@ -177,6 +177,14 @@ IXS_STATIC ixs_node *bounds_condition_assumption(ixs_bounds *bounds,
 IXS_STATIC ixs_check_result bounds_condition_truth(ixs_bounds *bounds,
                                                    ixs_node *condition);
 
+/* Lower proof queries used by the facts-facing read service. */
+IXS_STATIC ixs_algebra_status
+bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
+                                ixs_node *rhs, ixs_check_result *result);
+IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
+    int64_t *delta, bool *matched);
+
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 

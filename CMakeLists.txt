@@ -31,6 +31,7 @@ else()
         src/ctx.c
         src/division_algebra.c
         src/expand.c
+        src/facts_query.c
         src/facts_store.c
         src/import.c
         src/interval.c

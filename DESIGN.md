@@ -1246,8 +1246,10 @@ implication branches, and finite-domain enumeration over range/nonzero atoms.
 `facts_store.c` owns reusable fact-set session/epoch identity, transaction
 fork/commit/poison, fact transfer, dependency closure, its bounded retained
 cache, and the create/assume/derive/substitute mutation APIs. Predicate branches
-borrow its one-root closure entry point. `bounds.c` retains exact EQ/NE fallback
-policy and read-query orchestration.
+borrow its one-root closure entry point. `facts_query.c` owns fact-set read
+validation and query transactions, scalar and batch simplification, exact
+division, metadata queries, and the public read API. `bounds.c` retains the
+lower exact EQ/NE and constant-difference proof services.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
@@ -1567,6 +1569,14 @@ scratch only for the transaction; commit resets both query workspaces before
 publishing the aggregate and preserves only context-owned semantic storage.
 Failure discards the candidate and poisons the destination, so no borrowed
 query state, temporary arena storage, or partial publication survives return.
+
+Each public fact read binds the current session, snapshots query transport and
+diagnostics, and restores bounds-local OOM state before unbinding. Invalid,
+limited, and OOM outcomes invalidate speculative read caches and retain their
+distinct diagnostics. Failed batch simplification restores every input root;
+scalar metadata calls initialize output parameters before validation. The read
+service owns that publication policy while lower bounds services return typed
+algebra status without writing public outputs.
 
 Scalar `ixs_simplify` has a separate session-local reuse path for its direct
 assumption array. The first nonempty array containing at most 64 roots retains
@@ -3147,6 +3157,7 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
+│   ├── facts_query.c        # fact-set reads, simplification, public query API
 │   ├── facts_store.c        # persistent facts lifetime, transactions, closure
 │   ├── facts_store.h
 │   ├── bounds.c             # query policy and aggregate coordination
