@@ -500,6 +500,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #include "additive_row.h"
 #include "bounds_defined.h"
 #include "bounds_difference.h"
+#include "bounds_modular.h"
 #include "bounds_predicate.h"
 #include "bounds_query.h"
 #include "bounds_range.h"
@@ -518,19 +519,6 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-
-static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
-                                                              ixs_node *expr,
-                                                              bool *oom,
-                                                              bool *limited);
-IXS_STATIC ixs_algebra_status bounds_collect_relation_component(
-    ixs_bounds *b, ixs_node *expr, bounds_relation_component *component);
-IXS_STATIC ixs_algebra_status bounds_relation_offset_checked(
-    ixs_bounds *b, ixs_node *lhs, ixs_node *rhs, ixs_relation_offset *offset);
-static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
-                                                           ixs_node *lhs,
-                                                           ixs_node *rhs,
-                                                           int64_t *delta);
 
 IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
   bounds_store_invalidate_reads(b);
@@ -581,8 +569,16 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->oom = false;
   bounds_query_inherit_fork(dst, src);
   dst->equality_disabled_depth = src->equality_disabled_depth;
-  /* A fork made by a nested query remains inside the source predicate probe;
-   * inheriting the guard prevents the fork from reopening the same cycle. */
+  /* A fork made by a
+   * nested query
+   * remains inside
+   * the source
+   * predicate probe;
+   * inheriting the
+   * guard prevents
+   * the fork from
+   * reopening the
+   * same cycle. */
   dst->predicate_equivalence_depth = src->predicate_equivalence_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
   bounds_range_inherit_fork(dst, src);
@@ -618,7 +614,12 @@ IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   if (cached)
     return cached;
 
-  /* Alias diagnostics must not leak into otherwise valid range queries. */
+  /* Alias
+   * diagnostics must
+   * not leak into
+   * otherwise valid
+   * range queries.
+   */
   diag_mark = ixs_arena_save(&b->ctx->diag);
   saved_errors = b->ctx->errors;
   saved_nerrors = b->ctx->nerrors;
@@ -655,173 +656,6 @@ IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
     return;
   bounds_store_publish_relation_status(
       b, ixs_relation_algebra_assert(&b->relations, lhs, rhs, offset));
-}
-
-static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
-                                                              ixs_node *expr,
-                                                              bool *oom,
-                                                              bool *limited) {
-  ixs_check_result result;
-  assert(b->equality_disabled_depth != UINT_MAX);
-  b->equality_disabled_depth++;
-  result = bounds_defined_check_detail(b, expr, oom, limited);
-  b->equality_disabled_depth--;
-  return result;
-}
-
-static ixs_algebra_status bounds_relation_require_defined(ixs_bounds *b,
-                                                          ixs_node *expr) {
-  bool defined_oom = false;
-  bool defined_limited = false;
-  if (bounds_check_defined_without_equality(b, expr, &defined_oom,
-                                            &defined_limited) == IXS_CHECK_TRUE)
-    return IXS_ALGEBRA_MATCH;
-  if (defined_oom)
-    return IXS_ALGEBRA_OOM;
-  if (!defined_limited)
-    return IXS_ALGEBRA_NO_MATCH;
-  if (bounds_query_is_tracking(b))
-    bounds_query_note_limit(b);
-  return IXS_ALGEBRA_LIMITED;
-}
-
-/* Collect the independently defined component incident to expr. Traversal is
- * nonrecursive and grows with the component; there is no semantic walk cap. */
-IXS_STATIC ixs_algebra_status bounds_collect_relation_component(
-    ixs_bounds *b, ixs_node *expr, bounds_relation_component *component) {
-  bounds_relation_cursor_step step;
-  ixs_algebra_status status;
-  ixs_node *candidate = NULL;
-  size_t root_endpoint;
-  component->scratch = NULL;
-  if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
-      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &root_endpoint))
-    return IXS_ALGEBRA_NO_MATCH;
-  status = bounds_relation_require_defined(b, expr);
-  if (status != IXS_ALGEBRA_MATCH)
-    return status;
-  step = bounds_relation_component_begin(&b->relations, b->scratch,
-                                         root_endpoint, component);
-  for (;;) {
-    if (step == BOUNDS_RELATION_CURSOR_READY) {
-      step = bounds_relation_component_pull(component, &candidate);
-      continue;
-    }
-    if (step == BOUNDS_RELATION_CURSOR_ADMISSION) {
-      if (!candidate)
-        abort();
-      status = bounds_relation_require_defined(b, candidate);
-      if (status == IXS_ALGEBRA_MATCH) {
-        step = bounds_relation_component_resolve(component, true);
-        continue;
-      }
-      if (status == IXS_ALGEBRA_NO_MATCH) {
-        step = bounds_relation_component_resolve(component, false);
-        continue;
-      }
-      return status;
-    }
-    if (step == BOUNDS_RELATION_CURSOR_COMPLETE)
-      return IXS_ALGEBRA_MATCH;
-    if (step == BOUNDS_RELATION_CURSOR_OOM) {
-      b->oom = true;
-      return IXS_ALGEBRA_OOM;
-    }
-    assert(step == BOUNDS_RELATION_CURSOR_INVALID);
-    bounds_query_note_invalid(b);
-    return IXS_ALGEBRA_INVALID;
-  }
-}
-
-IXS_STATIC bool
-bounds_publish_relation_component(ixs_bounds *b,
-                                  const bounds_relation_component *component) {
-  if (!bounds_query_is_tracking(b))
-    return true;
-  if (!bounds_relation_component_publish_defined(b, component)) {
-    b->oom = true;
-    return false;
-  }
-  return true;
-}
-
-IXS_STATIC ixs_algebra_status bounds_relation_offset_checked(
-    ixs_bounds *b, ixs_node *lhs, ixs_node *rhs, ixs_relation_offset *offset) {
-  bounds_relation_component component;
-  ixs_algebra_status status;
-  ixs_relation_query_status cached;
-  size_t lhs_endpoint;
-  size_t rhs_endpoint;
-  size_t entry_index;
-  if (!b || !lhs || !rhs || !offset || b->oom || b->contradiction)
-    return IXS_ALGEBRA_NO_MATCH;
-  if (lhs == rhs) {
-    *offset = ixs_relation_offset_from_int64(0);
-    return IXS_ALGEBRA_MATCH;
-  }
-  if (!ixs_relation_algebra_find_endpoint(&b->relations, lhs, &lhs_endpoint))
-    return IXS_ALGEBRA_NO_MATCH;
-  if (bounds_query_is_tracking(b) &&
-      ixs_relation_algebra_find_endpoint(&b->relations, rhs, &rhs_endpoint)) {
-    cached =
-        bounds_relation_cached_offset(b, rhs_endpoint, rhs_endpoint, offset);
-    if (cached == IXS_RELATION_QUERY_NONE) {
-      status = bounds_collect_relation_component(b, rhs, &component);
-      if (status != IXS_ALGEBRA_MATCH) {
-        bounds_relation_component_destroy(&component);
-        return status;
-      }
-      if (!bounds_publish_relation_component(b, &component)) {
-        bounds_relation_component_destroy(&component);
-        return IXS_ALGEBRA_OOM;
-      }
-      bounds_relation_component_destroy(&component);
-    } else if (cached == IXS_RELATION_QUERY_INVALID) {
-      bounds_query_note_invalid(b);
-      return IXS_ALGEBRA_INVALID;
-    }
-    cached =
-        bounds_relation_cached_offset(b, lhs_endpoint, rhs_endpoint, offset);
-    if (cached == IXS_RELATION_QUERY_INVALID) {
-      bounds_query_note_invalid(b);
-      return IXS_ALGEBRA_INVALID;
-    }
-    return cached == IXS_RELATION_QUERY_FOUND ? IXS_ALGEBRA_MATCH
-                                              : IXS_ALGEBRA_NO_MATCH;
-  }
-  status = bounds_collect_relation_component(b, rhs, &component);
-  if (status != IXS_ALGEBRA_MATCH) {
-    bounds_relation_component_destroy(&component);
-    return status;
-  }
-  if (!bounds_relation_component_find(&component, lhs_endpoint, &entry_index)) {
-    bounds_relation_component_destroy(&component);
-    return IXS_ALGEBRA_NO_MATCH;
-  }
-  *offset = component.entries[entry_index].offset;
-  bounds_relation_component_destroy(&component);
-  return IXS_ALGEBRA_MATCH;
-}
-
-static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
-                                                           ixs_node *lhs,
-                                                           ixs_node *rhs,
-                                                           int64_t *delta) {
-  ixs_algebra_status status;
-  ixs_relation_offset offset;
-  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction)
-    return IXS_ALGEBRA_NO_MATCH;
-  /* Preserve the weighted symbol forest as the hot path. */
-  if (lhs->tag == IXS_SYM && rhs->tag == IXS_SYM &&
-      ixs_relation_algebra_total_symbol_difference(&b->relations, lhs, rhs,
-                                                   delta))
-    return IXS_ALGEBRA_MATCH;
-  status = bounds_relation_offset_checked(b, lhs, rhs, &offset);
-  if (status != IXS_ALGEBRA_MATCH)
-    return status;
-  if (!ixs_relation_offset_to_int64(offset, delta))
-    return IXS_ALGEBRA_UNREPRESENTABLE;
-  return IXS_ALGEBRA_MATCH;
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
@@ -866,9 +700,18 @@ static ixs_check_result
 equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
                                        ixs_node *rhs);
 
-/* Algebraic bridge rules may nest only through this fixed allowance. */
+/* Algebraic bridge
+ * rules may nest
+ * only through this
+ * fixed allowance.
+ */
 #define EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH 4u
-/* The Piecewise fallback represents one complete selector domain in a mask. */
+/* The Piecewise
+ * fallback
+ * represents one
+ * complete selector
+ * domain in a mask.
+ */
 #define EQUIVALENCE_PIECEWISE_MAX_CASES 16u
 #define EQUIVALENCE_PIECEWISE_MAX_POINTS 64u
 
@@ -1185,9 +1028,18 @@ static bool equivalence_xor_child_proven(equivalence_state *state,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Canonical XOR nodes are already flat. The production-backed binary case
- * pairs exact arguments before semantic candidates. The matcher remains
- * O(A^2) in its admitted arity A=2. */
+/* Canonical XOR
+ * nodes are already
+ * flat. The
+ * production-backed
+ * binary case pairs
+ * exact arguments
+ * before semantic
+ * candidates. The
+ * matcher remains
+ * O(A^2) in its
+ * admitted arity
+ * A=2. */
 static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
                                                       ixs_node *lhs,
                                                       ixs_node *rhs,
@@ -1204,8 +1056,16 @@ static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
   right_zero = rhs->u.assoc.args[0];
   right_one = rhs->u.assoc.args[1];
 
-  /* Commit exact pairs first. The remaining child then has only one possible
-   * partner, so this preserves deterministic matching without backtracking. */
+  /* Commit exact
+   * pairs first. The
+   * remaining child
+   * then has only
+   * one possible
+   * partner, so this
+   * preserves
+   * deterministic
+   * matching without
+   * backtracking. */
   if (left_zero == right_zero)
     return equivalence_xor_child_proven(state, left_one, right_one, depth)
                ? IXS_CHECK_TRUE
@@ -1316,9 +1176,19 @@ static bool equivalence_context_process_pair(
                                               simplified_rhs);
 }
 
-/* Worklist insertion and lookup are expected O(N) in the paired canonical DAG.
- * Existing child proofs keep their own bounds; XOR may add O(A^2) bounded
- * child proofs after exact argument pairing. */
+/* Worklist insertion
+ * and lookup are
+ * expected O(N) in
+ * the paired
+ * canonical DAG.
+ * Existing child
+ * proofs keep their
+ * own bounds; XOR
+ * may add O(A^2)
+ * bounded child
+ * proofs after exact
+ * argument pairing.
+ */
 static ixs_check_result equivalence_same_context(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
@@ -1346,10 +1216,23 @@ static ixs_check_result equivalence_same_context(equivalence_state *state,
   return IXS_CHECK_TRUE;
 }
 
-/* Optional algebraic proof rules must not turn a valid query into a session
- * diagnostic merely because an intermediate rational cannot be represented.
- * Build their small linear intermediates directly from canonical nodes:
- * overflow is a rule miss and allocation failure remains OOM. */
+/* Optional algebraic
+ * proof rules must
+ * not turn a valid
+ * query into a
+ * session diagnostic
+ * merely because an
+ * intermediate
+ * rational cannot be
+ * represented. Build
+ * their small linear
+ * intermediates
+ * directly from
+ * canonical nodes:
+ * overflow is a rule
+ * miss and
+ * allocation failure
+ * remains OOM. */
 typedef enum {
   EQUIVALENCE_BUILD_OK,
   EQUIVALENCE_BUILD_NO_MATCH,
@@ -1445,10 +1328,25 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (proved)
     return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 
-  /* A variable difference need not be constant to prove that the two
-   * expressions never agree.  Reuse the ordinary range, bit, and congruence
-   * query for the canonical difference instead of teaching equivalence those
-   * domains again. */
+  /* A variable
+   * difference need
+   * not be constant
+   * to prove that
+   * the two
+   * expressions
+   * never agree.
+   * Reuse the
+   * ordinary range,
+   * bit, and
+   * congruence query
+   * for the
+   * canonical
+   * difference
+   * instead of
+   * teaching
+   * equivalence
+   * those domains
+   * again. */
   if (ixs_node_is_sentinel(difference))
     return IXS_CHECK_UNKNOWN;
   memset(&nonzero, 0, sizeof(nonzero));
@@ -1464,8 +1362,17 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (nonzero_result == IXS_CHECK_TRUE)
     return IXS_CHECK_FALSE;
 
-  /* Integer equality is also bitwise equality.  Canonical xor cancels shared
-   * subexpressions that an arithmetic difference deliberately preserves. */
+  /* Integer equality
+   * is also bitwise
+   * equality.
+   * Canonical xor
+   * cancels shared
+   * subexpressions
+   * that an
+   * arithmetic
+   * difference
+   * deliberately
+   * preserves. */
   if (ixs_bounds_check_integer_valued(state->bounds, lhs) == IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(state->bounds, rhs) == IXS_CHECK_TRUE) {
     ixs_node *bit_difference = simp_xor(state->ctx, lhs, rhs);
@@ -1498,697 +1405,11 @@ static bool equivalence_integer_delta(equivalence_state *state, ixs_node *lhs,
   return proved && !state->oom;
 }
 
-typedef struct {
-  uint64_t magnitude;
-  bool negative;
-} bounds_wide_integer;
-
-static bounds_wide_integer bounds_wide_integer_from_int64(int64_t value) {
-  bounds_wide_integer result;
-  result.magnitude = ixs_int64_magnitude(value);
-  result.negative = value < 0;
-  return result;
-}
-
-static bounds_wide_integer
-bounds_wide_integer_negate(bounds_wide_integer value) {
-  if (value.magnitude != 0)
-    value.negative = !value.negative;
-  return value;
-}
-
-static bool bounds_wide_integer_add(bounds_wide_integer lhs,
-                                    bounds_wide_integer rhs,
-                                    bounds_wide_integer *result) {
-  if (lhs.negative == rhs.negative) {
-    if (lhs.magnitude > UINT64_MAX - rhs.magnitude)
-      return false;
-    result->magnitude = lhs.magnitude + rhs.magnitude;
-    result->negative = lhs.negative;
-  } else if (lhs.magnitude >= rhs.magnitude) {
-    result->magnitude = lhs.magnitude - rhs.magnitude;
-    result->negative = lhs.negative;
-  } else {
-    result->magnitude = rhs.magnitude - lhs.magnitude;
-    result->negative = rhs.negative;
-  }
-  if (result->magnitude == 0)
-    result->negative = false;
-  return true;
-}
-
-static bool bounds_wide_integer_difference(int64_t lhs, int64_t rhs,
-                                           bounds_wide_integer *result) {
-  return bounds_wide_integer_add(
-      bounds_wide_integer_from_int64(lhs),
-      bounds_wide_integer_negate(bounds_wide_integer_from_int64(rhs)), result);
-}
-
-static int bounds_wide_integer_compare(bounds_wide_integer lhs,
-                                       bounds_wide_integer rhs) {
-  if (lhs.negative != rhs.negative)
-    return lhs.negative ? -1 : 1;
-  if (lhs.magnitude == rhs.magnitude)
-    return 0;
-  if (lhs.negative)
-    return lhs.magnitude > rhs.magnitude ? -1 : 1;
-  return lhs.magnitude < rhs.magnitude ? -1 : 1;
-}
-
-static bool bounds_wide_integer_to_int64(bounds_wide_integer value,
-                                         int64_t *result) {
-  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
-  if (!value.negative) {
-    if (value.magnitude > (uint64_t)INT64_MAX)
-      return false;
-    *result = (int64_t)value.magnitude;
-    return true;
-  }
-  if (value.magnitude > negative_limit)
-    return false;
-  if (value.magnitude == negative_limit) {
-    *result = INT64_MIN;
-    return true;
-  }
-  *result = -(int64_t)value.magnitude;
-  return true;
-}
-
-static uint64_t bounds_wide_integer_residue(bounds_wide_integer value,
-                                            uint64_t modulus) {
-  uint64_t residue = value.magnitude % modulus;
-  if (value.negative && residue != 0)
-    residue = modulus - residue;
-  return residue;
-}
-
-static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
-                                     int64_t *lower, int64_t *upper) {
-  ixs_interval interval;
-
-  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
-      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
-    return false;
-  interval = ixs_bounds_get(bounds, expr);
-  if (!bounds_refine_integral_interval(
-          bounds, expr, /*expression_defined=*/true, &interval) ||
-      interval.lo_inf || interval.hi_inf)
-    return false;
-  *lower = interval.lo_p;
-  *upper = interval.hi_p;
-  return true;
-}
-
-/* Each Mod result preserves its dividend modulo the positive literal divisor.
- * Independent finite ranges enclose every possible result difference. Exactly
- * one member of the required residue class makes that difference exact. */
-static bool bounds_unique_modular_delta(ixs_bounds *bounds, ixs_node *lhs,
-                                        ixs_node *rhs,
-                                        int64_t representative_delta,
-                                        int64_t modulus, int64_t *delta) {
-  bounds_wide_integer lower;
-  bounds_wide_integer upper;
-  bounds_wide_integer candidate;
-  bounds_wide_integer next;
-  bounds_wide_integer shift;
-  int64_t lhs_lower;
-  int64_t lhs_upper;
-  int64_t rhs_lower;
-  int64_t rhs_upper;
-  uint64_t current_residue;
-  uint64_t expected_residue;
-  uint64_t modulus_u = (uint64_t)modulus;
-  uint64_t amount;
-
-  if (modulus <= 1 ||
-      !bounds_integer_enclosure(bounds, lhs, &lhs_lower, &lhs_upper) ||
-      !bounds_integer_enclosure(bounds, rhs, &rhs_lower, &rhs_upper) ||
-      !bounds_wide_integer_difference(lhs_lower, rhs_upper, &lower) ||
-      !bounds_wide_integer_difference(lhs_upper, rhs_lower, &upper) ||
-      bounds_wide_integer_compare(lower, upper) > 0)
-    return false;
-
-  expected_residue =
-      (uint64_t)ixs_integer_congruence_residue(representative_delta, modulus);
-  current_residue = bounds_wide_integer_residue(lower, modulus_u);
-  amount = expected_residue >= current_residue
-               ? expected_residue - current_residue
-               : modulus_u - (current_residue - expected_residue);
-  shift.magnitude = amount;
-  shift.negative = false;
-  if (!bounds_wide_integer_add(lower, shift, &candidate) ||
-      bounds_wide_integer_compare(candidate, upper) > 0 ||
-      !bounds_wide_integer_to_int64(candidate, delta))
-    return false;
-
-  shift.magnitude = modulus_u;
-  if (bounds_wide_integer_add(candidate, shift, &next) &&
-      bounds_wide_integer_compare(next, upper) <= 0)
-    return false;
-  return true;
-}
-
-static bool bounds_residue_shift_in_range(uint64_t residue, uint64_t modulus,
-                                          int64_t shift) {
-  uint64_t magnitude;
-  if (shift >= 0) {
-    uint64_t positive = (uint64_t)shift;
-    return positive < modulus && residue < modulus - positive;
-  }
-  magnitude = ixs_int64_magnitude(shift);
-  return magnitude <= residue;
-}
-
-/* If the dividend and positive divisor share a stride class, a shift which
- * stays within one stride bucket cannot cross a divisor boundary. */
-static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
-                                           ixs_node *dividend,
-                                           ixs_node *denominator,
-                                           int64_t shift) {
-  uint64_t modulus;
-  uint64_t residue;
-  if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
-      modulus > (uint64_t)INT64_MAX ||
-      !bounds_known_residue(bounds, dividend, modulus, &residue) ||
-      ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
-          IXS_CHECK_TRUE)
-    return false;
-  return bounds_residue_shift_in_range(residue, modulus, shift);
-}
-
-static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
-                                               ixs_node *denominator) {
-  ixs_interval range = ixs_bounds_get(bounds, denominator);
-  return range.valid && !range.lo_inf &&
-         ixs_rat_cmp(range.lo_p, range.lo_q, 0, 1) > 0;
-}
-
-typedef enum {
-  BOUNDS_DELTA_FRAME_INITIAL,
-  BOUNDS_DELTA_FRAME_SEARCH,
-  BOUNDS_DELTA_FRAME_REPRESENTATIVE,
-  BOUNDS_DELTA_FRAME_RESIDUAL
-} bounds_delta_frame_stage;
-
-typedef struct {
-  ixs_node *lhs;
-  ixs_node *rhs;
-  ixs_node *difference;
-  uint32_t scan_positive;
-  uint32_t scan_negative;
-  uint32_t matched_positive;
-  uint32_t matched_negative;
-  int64_t modular_delta;
-  bool allow_expand;
-  bool tried_expand;
-  bounds_delta_frame_stage stage;
-} bounds_delta_frame;
-
-typedef struct {
-  ixs_ctx *ctx;
-  ixs_bounds *bounds;
-  bounds_delta_frame *frames;
-  size_t depth;
-  size_t capacity;
-  bool child_proved;
-  int64_t child_delta;
-  bool frames_arena_owned;
-  bool oom;
-  bool invalid;
-  bool limited;
-} bounds_delta_query;
-
-static bool bounds_delta_push(bounds_delta_query *query, ixs_node *lhs,
-                              ixs_node *rhs, bool allow_expand) {
-  bounds_delta_frame *frames;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-  if (query->depth == query->capacity) {
-    capacity = query->capacity ? query->capacity : 4u;
-    if (query->capacity) {
-      if (capacity > SIZE_MAX / 2u)
-        goto failed;
-      capacity *= 2u;
-    }
-    if (query->capacity > SIZE_MAX / sizeof(*frames) ||
-        capacity > SIZE_MAX / sizeof(*frames))
-      goto failed;
-    old_bytes = query->capacity * sizeof(*frames);
-    new_bytes = capacity * sizeof(*frames);
-    if (query->frames_arena_owned) {
-      frames = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
-                              new_bytes, sizeof(void *));
-    } else {
-      frames =
-          ixs_arena_alloc(query->bounds->scratch, new_bytes, sizeof(void *));
-      if (frames)
-        memcpy(frames, query->frames, old_bytes);
-    }
-    if (!frames)
-      goto failed;
-    query->frames = frames;
-    query->capacity = capacity;
-    query->frames_arena_owned = true;
-  }
-  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-  query->frames[query->depth].lhs = lhs;
-  query->frames[query->depth].rhs = rhs;
-  query->frames[query->depth].allow_expand = allow_expand;
-  query->frames[query->depth].stage = BOUNDS_DELTA_FRAME_INITIAL;
-  query->depth++;
-  return true;
-
-failed:
-  query->bounds->oom = true;
-  return false;
-}
-
-static void bounds_delta_complete(bounds_delta_query *query, bool proved,
-                                  int64_t delta) {
-  query->depth--;
-  query->child_proved = proved;
-  query->child_delta = proved ? delta : 0;
-}
-
-static ixs_node *bounds_delta_simplify(bounds_delta_query *query,
-                                       ixs_node *expr) {
-  if (!expr) {
-    query->bounds->oom = true;
-    return NULL;
-  }
-  if (ixs_node_is_sentinel(expr))
-    return NULL;
-  expr = simp_simplify_bounds(query->ctx, expr, query->bounds);
-  if (!expr)
-    query->bounds->oom = true;
-  return expr && !ixs_node_is_sentinel(expr) ? expr : NULL;
-}
-
-static bool bounds_modular_pair(ixs_node *difference, uint32_t lhs_index,
-                                uint32_t rhs_index, ixs_node **lhs_term,
-                                ixs_node **rhs_term,
-                                ixs_node **lhs_representative,
-                                ixs_node **rhs_representative,
-                                ixs_node **denominator, int64_t *coefficient) {
-  int64_t lhs_p;
-  int64_t lhs_q;
-  int64_t rhs_p;
-  int64_t rhs_q;
-  int64_t opposite_rhs;
-  ixs_node *lhs_denominator;
-  ixs_node *rhs_denominator;
-
-  *lhs_term = difference->u.add.terms[lhs_index].term;
-  *rhs_term = difference->u.add.terms[rhs_index].term;
-  ixs_node_get_rat(difference->u.add.terms[lhs_index].coeff, &lhs_p, &lhs_q);
-  ixs_node_get_rat(difference->u.add.terms[rhs_index].coeff, &rhs_p, &rhs_q);
-  if (lhs_q != 1 || rhs_q != 1 || lhs_p <= 0 || rhs_p >= 0 ||
-      !ixs_safe_neg(rhs_p, &opposite_rhs) || lhs_p != opposite_rhs ||
-      (*lhs_term)->tag != IXS_MOD || (*rhs_term)->tag != IXS_MOD)
-    return false;
-  *lhs_representative = (*lhs_term)->u.binary.lhs;
-  *rhs_representative = (*rhs_term)->u.binary.lhs;
-  lhs_denominator = (*lhs_term)->u.binary.rhs;
-  rhs_denominator = (*rhs_term)->u.binary.rhs;
-  if (lhs_denominator != rhs_denominator)
-    return false;
-  *denominator = lhs_denominator;
-  *coefficient = lhs_p;
-  return true;
-}
-
-static bool bounds_delta_next_modular_pair(bounds_delta_frame *frame) {
-  uint32_t count = frame->difference->u.add.nterms;
-  while (frame->scan_positive < count) {
-    uint32_t positive = frame->scan_positive;
-    int64_t p;
-    int64_t q;
-    ixs_node_get_rat(frame->difference->u.add.terms[positive].coeff, &p, &q);
-    if (q != 1 || p <= 0 ||
-        frame->difference->u.add.terms[positive].term->tag != IXS_MOD) {
-      frame->scan_positive++;
-      frame->scan_negative = 0;
-      continue;
-    }
-    while (frame->scan_negative < count) {
-      uint32_t negative = frame->scan_negative++;
-      ixs_node *lhs_term;
-      ixs_node *rhs_term;
-      ixs_node *lhs_representative;
-      ixs_node *rhs_representative;
-      ixs_node *denominator;
-      int64_t coefficient;
-      if (!bounds_modular_pair(frame->difference, positive, negative, &lhs_term,
-                               &rhs_term, &lhs_representative,
-                               &rhs_representative, &denominator, &coefficient))
-        continue;
-      (void)lhs_term;
-      (void)rhs_term;
-      (void)lhs_representative;
-      (void)rhs_representative;
-      (void)denominator;
-      frame->matched_positive = positive;
-      frame->matched_negative = negative;
-      (void)coefficient;
-      return true;
-    }
-    frame->scan_positive++;
-    frame->scan_negative = 0;
-  }
-  return false;
-}
-
-static bool bounds_modular_pair_valid(bounds_delta_query *query,
-                                      ixs_node *lhs_term, ixs_node *rhs_term,
-                                      ixs_node *lhs_representative,
-                                      ixs_node *rhs_representative) {
-  return ixs_bounds_check_defined(query->bounds, lhs_term) == IXS_CHECK_TRUE &&
-         ixs_bounds_check_defined(query->bounds, rhs_term) == IXS_CHECK_TRUE &&
-         ixs_bounds_check_defined(query->bounds, lhs_representative) ==
-             IXS_CHECK_TRUE &&
-         ixs_bounds_check_defined(query->bounds, rhs_representative) ==
-             IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(query->bounds, lhs_term) ==
-             IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(query->bounds, rhs_term) ==
-             IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(query->bounds, lhs_representative) ==
-             IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(query->bounds, rhs_representative) ==
-             IXS_CHECK_TRUE;
-}
-
-static ixs_node *bounds_modular_delta_residual(bounds_delta_query *query,
-                                               ixs_node *difference,
-                                               uint32_t lhs_index,
-                                               uint32_t rhs_index) {
-  ixs_addterm *terms;
-  uint32_t count = difference->u.add.nterms - 2u;
-  uint32_t i;
-  uint32_t write = 0;
-  size_t bytes;
-  if (count == 0)
-    return difference->u.add.coeff;
-  bytes = (size_t)count * sizeof(*terms);
-  if (bytes / sizeof(*terms) != count) {
-    query->bounds->oom = true;
-    return NULL;
-  }
-  terms = ixs_arena_alloc(query->bounds->scratch, bytes, sizeof(void *));
-  if (!terms) {
-    query->bounds->oom = true;
-    return NULL;
-  }
-  for (i = 0; i < difference->u.add.nterms; i++) {
-    if (i != lhs_index && i != rhs_index)
-      terms[write++] = difference->u.add.terms[i];
-  }
-  if (count == 1u) {
-    ixs_node *result = simp_mul(query->ctx, terms[0].coeff, terms[0].term);
-    if (!result) {
-      query->bounds->oom = true;
-      return NULL;
-    }
-    if (ixs_node_is_sentinel(result))
-      return NULL;
-    if (ixs_node_is_zero(difference->u.add.coeff))
-      return result;
-    result = simp_add(query->ctx, difference->u.add.coeff, result);
-    if (!result)
-      query->bounds->oom = true;
-    return result && !ixs_node_is_sentinel(result) ? result : NULL;
-  }
-  {
-    ixs_node *result =
-        ixs_node_add(query->ctx, difference->u.add.coeff, count, terms);
-    if (!result)
-      query->bounds->oom = true;
-    return result;
-  }
-}
-
-static bool bounds_delta_prepare_difference(bounds_delta_query *query,
-                                            bounds_delta_frame *frame,
-                                            ixs_node *difference) {
-  int64_t delta;
-  frame->difference = difference;
-  frame->scan_positive = 0;
-  frame->scan_negative = 0;
-  if (bounds_range_exact_integer_difference(query->bounds, difference,
-                                            &delta)) {
-    bounds_delta_complete(query, true, delta);
-    return true;
-  }
-  if (difference->tag != IXS_ADD || difference->u.add.nterms < 2u)
-    return false;
-  frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
-  return true;
-}
-
-static bool bounds_delta_try_expanded(bounds_delta_query *query,
-                                      bounds_delta_frame *frame) {
-  ixs_node *expanded;
-  if (!frame->allow_expand || frame->tried_expand)
-    return false;
-  frame->tried_expand = true;
-  expanded =
-      bounds_delta_simplify(query, expand_impl(query->ctx, frame->difference));
-  if (!expanded || expanded == frame->difference)
-    return false;
-  return bounds_delta_prepare_difference(query, frame, expanded);
-}
-
-static void bounds_delta_step_initial(bounds_delta_query *query,
-                                      size_t frame_index) {
-  bounds_delta_frame *frame = &query->frames[frame_index];
-  ixs_algebra_status relation_status;
-  int64_t relation_delta;
-  ixs_node *difference;
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
-  if (bounds_defined_check_detail(query->bounds, frame->lhs, &lhs_oom,
-                                  &lhs_limited) != IXS_CHECK_TRUE ||
-      bounds_defined_check_detail(query->bounds, frame->rhs, &rhs_oom,
-                                  &rhs_limited) != IXS_CHECK_TRUE) {
-    query->oom = lhs_oom || rhs_oom;
-    query->limited = lhs_limited || rhs_limited;
-    if (query->oom || query->limited)
-      return;
-    bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (frame->lhs == frame->rhs) {
-    bounds_delta_complete(query, true, 0);
-    return;
-  }
-  relation_status = bounds_exact_relation_difference(
-      query->bounds, frame->lhs, frame->rhs, &relation_delta);
-  if (relation_status == IXS_ALGEBRA_MATCH) {
-    bounds_delta_complete(query, true, relation_delta);
-    return;
-  }
-  if (relation_status == IXS_ALGEBRA_OOM) {
-    query->oom = true;
-    return;
-  }
-  if (relation_status == IXS_ALGEBRA_LIMITED) {
-    query->limited = true;
-    return;
-  }
-  if (relation_status == IXS_ALGEBRA_INVALID) {
-    query->invalid = true;
-    bounds_delta_complete(query, false, 0);
-    return;
-  }
-  difference = bounds_delta_simplify(
-      query, simp_sub(query->ctx, frame->lhs, frame->rhs));
-  if (!difference) {
-    if (!query->bounds->oom)
-      bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (!bounds_delta_prepare_difference(query, frame, difference) &&
-      !bounds_delta_try_expanded(query, frame))
-    bounds_delta_complete(query, false, 0);
-}
-
-static void bounds_delta_step_search(bounds_delta_query *query,
-                                     size_t frame_index) {
-  bounds_delta_frame *frame = &query->frames[frame_index];
-  ixs_node *lhs_term;
-  ixs_node *rhs_term;
-  ixs_node *lhs_representative;
-  ixs_node *rhs_representative;
-  ixs_node *denominator;
-  int64_t coefficient;
-  if (!bounds_delta_next_modular_pair(frame)) {
-    if (!bounds_delta_try_expanded(query, frame))
-      bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (!bounds_modular_pair(frame->difference, frame->matched_positive,
-                           frame->matched_negative, &lhs_term, &rhs_term,
-                           &lhs_representative, &rhs_representative,
-                           &denominator, &coefficient) ||
-      !bounds_modular_pair_valid(query, lhs_term, rhs_term, lhs_representative,
-                                 rhs_representative))
-    return;
-  (void)denominator;
-  (void)coefficient;
-  frame->stage = BOUNDS_DELTA_FRAME_REPRESENTATIVE;
-  (void)bounds_delta_push(query, lhs_representative, rhs_representative,
-                          frame->allow_expand);
-}
-
-static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
-                                          bounds_delta_frame *frame,
-                                          int64_t *scaled_delta) {
-  ixs_node *lhs_term;
-  ixs_node *rhs_term;
-  ixs_node *lhs_representative;
-  ixs_node *rhs_representative;
-  ixs_node *denominator;
-  int64_t coefficient;
-  int64_t modular_delta;
-  if (!query->child_proved ||
-      !bounds_modular_pair(frame->difference, frame->matched_positive,
-                           frame->matched_negative, &lhs_term, &rhs_term,
-                           &lhs_representative, &rhs_representative,
-                           &denominator, &coefficient))
-    return false;
-  if (denominator->tag == IXS_INT) {
-    if (!bounds_unique_modular_delta(query->bounds, lhs_term, rhs_term,
-                                     query->child_delta, denominator->u.ival,
-                                     &modular_delta))
-      return false;
-  } else {
-    if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
-        !bounds_mod_shift_by_congruence(query->bounds, rhs_representative,
-                                        denominator, query->child_delta))
-      return false;
-    modular_delta = query->child_delta;
-  }
-  return ixs_safe_mul(modular_delta, coefficient, scaled_delta);
-}
-
-static void bounds_delta_step_representative(bounds_delta_query *query,
-                                             size_t frame_index) {
-  bounds_delta_frame *frame = &query->frames[frame_index];
-  ixs_node *residual;
-  if (!bounds_delta_project_mod_pair(query, frame, &frame->modular_delta)) {
-    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
-    return;
-  }
-  residual = bounds_modular_delta_residual(query, frame->difference,
-                                           frame->matched_positive,
-                                           frame->matched_negative);
-  if (!residual) {
-    if (!query->bounds->oom)
-      frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
-    return;
-  }
-  frame->stage = BOUNDS_DELTA_FRAME_RESIDUAL;
-  (void)bounds_delta_push(query, residual, query->ctx->node_zero,
-                          frame->allow_expand);
-}
-
-static void bounds_delta_step_residual(bounds_delta_query *query,
-                                       size_t frame_index) {
-  bounds_delta_frame *frame = &query->frames[frame_index];
-  int64_t result;
-  if (query->child_proved &&
-      ixs_safe_add(frame->modular_delta, query->child_delta, &result)) {
-    bounds_delta_complete(query, true, result);
-  } else {
-    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
-  }
-}
-
-/* This is an explicit proof stack, not a bounded recursive search. Every child
- * either enters a Mod dividend or removes a matched Mod pair from a canonical
- * ADD. Work is therefore finite in the queried expression DAG; stack growth
- * is geometric and allocation failure returns unknown. */
-static bool bounds_delta_query_start(bounds_delta_query *query,
-                                     bounds_delta_frame *initial_frame,
-                                     ixs_ctx *ctx, ixs_bounds *bounds,
-                                     ixs_node *lhs, ixs_node *rhs,
-                                     bool allow_expand) {
-  memset(query, 0, sizeof(*query));
-  query->ctx = ctx;
-  query->bounds = bounds;
-  query->frames = initial_frame;
-  query->capacity = 1u;
-  return ctx && bounds && lhs && rhs && !bounds->oom &&
-         !bounds->contradiction &&
-         bounds_delta_push(query, lhs, rhs, allow_expand);
-}
-
-static void bounds_delta_query_run(bounds_delta_query *query) {
-  while (query->depth != 0 && !query->bounds->oom && !query->oom &&
-         !query->invalid && !query->limited) {
-    size_t frame_index = query->depth - 1u;
-    switch (query->frames[frame_index].stage) {
-    case BOUNDS_DELTA_FRAME_INITIAL:
-      bounds_delta_step_initial(query, frame_index);
-      break;
-    case BOUNDS_DELTA_FRAME_SEARCH:
-      bounds_delta_step_search(query, frame_index);
-      break;
-    case BOUNDS_DELTA_FRAME_REPRESENTATIVE:
-      bounds_delta_step_representative(query, frame_index);
-      break;
-    case BOUNDS_DELTA_FRAME_RESIDUAL:
-      bounds_delta_step_residual(query, frame_index);
-      break;
-    }
-  }
-}
-
-static bool bounds_delta_query_result(const bounds_delta_query *query,
-                                      int64_t *delta, bool *invalid,
-                                      bool *limited, bool *oom) {
-  if (invalid)
-    *invalid = query->invalid;
-  if (limited)
-    *limited = query->limited;
-  if (oom)
-    *oom = query->oom;
-  if (query->bounds->oom || query->oom || query->invalid || query->limited ||
-      query->depth != 0 || !query->child_proved)
-    return false;
-  *delta = query->child_delta;
-  return true;
-}
-
-static bool bounds_constant_delta_query_detail(ixs_ctx *ctx, ixs_bounds *bounds,
-                                               ixs_node *lhs, ixs_node *rhs,
-                                               bool allow_expand,
-                                               int64_t *delta, bool *invalid,
-                                               bool *limited, bool *oom) {
-  bounds_delta_query query;
-  bounds_delta_frame initial_frame;
-  if (invalid)
-    *invalid = false;
-  if (limited)
-    *limited = false;
-  if (oom)
-    *oom = false;
-  if (!delta || !bounds_delta_query_start(&query, &initial_frame, ctx, bounds,
-                                          lhs, rhs, allow_expand))
-    return false;
-  bounds_delta_query_run(&query);
-  return bounds_delta_query_result(&query, delta, invalid, limited, oom);
-}
-
 static bool bounds_constant_delta_query(ixs_ctx *ctx, ixs_bounds *bounds,
                                         ixs_node *lhs, ixs_node *rhs,
                                         bool allow_expand, int64_t *delta) {
-  return bounds_constant_delta_query_detail(ctx, bounds, lhs, rhs, allow_expand,
-                                            delta, NULL, NULL, NULL);
+  return bounds_modular_exact_delta_detail(ctx, bounds, lhs, rhs, allow_expand,
+                                           delta, NULL, NULL, NULL);
 }
 
 static bool equivalence_no_reachable_integer(equivalence_state *state,
@@ -2260,8 +1481,13 @@ static size_t equivalence_modulus_hash(int64_t modulus) {
   return (size_t)x;
 }
 
-/* Rehashing is amortized O(1), and storage grows only with distinct moduli in
- * the two queried expression DAGs. */
+/* Rehashing is
+ * amortized O(1),
+ * and storage grows
+ * only with distinct
+ * moduli in the two
+ * queried expression
+ * DAGs. */
 static bool equivalence_modulus_set_grow(ixs_arena *arena,
                                          equivalence_modulus_set *set) {
   size_t new_capacity = set->capacity ? set->capacity * 2u : 8u;
@@ -2307,9 +1533,21 @@ static bool equivalence_modulus_set_insert(ixs_arena *arena,
   return true;
 }
 
-/* Discover congruence candidates by visiting each node in the two queried
- * residual DAGs once. Growable query-local storage avoids semantic depth,
- * visit, and candidate-count cutoffs without scanning unrelated context state.
+/* Discover
+ * congruence
+ * candidates by
+ * visiting each node
+ * in the two queried
+ * residual DAGs
+ * once. Growable
+ * query-local
+ * storage avoids
+ * semantic depth,
+ * visit, and
+ * candidate-count
+ * cutoffs without
+ * scanning unrelated
+ * context state.
  */
 static bool equivalence_collect_congruences(equivalence_state *state,
                                             ixs_node *lhs, ixs_node *rhs,
@@ -2564,8 +1802,17 @@ static bool equivalence_flatten_logic(equivalence_state *state, ixs_node *root,
     bool inserted;
     if (!query_node_set_insert(&state->ctx->scratch, &visited, node, &inserted))
       goto oom;
-    /* AND and OR are idempotent, so sharing and repeated operands may be
-     * visited once.  This also makes malformed cyclic nodes terminate. */
+    /* AND and OR are
+     * idempotent, so
+     * sharing and
+     * repeated
+     * operands may
+     * be visited
+     * once.  This
+     * also makes
+     * malformed
+     * cyclic nodes
+     * terminate. */
     if (!inserted)
       continue;
     if (node->tag == tag && ixs_node_is_bool_valued(node)) {
@@ -2621,8 +1868,15 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
     memset(right_matched, 0, nright);
   }
 
-  /* Exact terms first.  This makes matching deterministic and avoids proof
-   * work on the common reordered-tree case. */
+  /* Exact terms
+   * first.  This
+   * makes matching
+   * deterministic
+   * and avoids proof
+   * work on the
+   * common
+   * reordered-tree
+   * case. */
   for (i = 0; i < nleft; i++) {
     for (j = 0; j < nright; j++) {
       if (!right_matched[j] && left_terms[i] == right_terms[j]) {
@@ -2635,9 +1889,24 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
   for (i = 0; i < nleft; i++) {
     if (left_matched[i])
       continue;
-    /* Nested associative matching is a conservative optional refinement.
-     * Only the outer match starts subproofs, statically bounding C recursion;
-     * each subproof still has unbounded growable traversal of its DAG. */
+    /* Nested
+     * associative
+     * matching is a
+     * conservative
+     * optional
+     * refinement.
+     * Only the outer
+     * match starts
+     * subproofs,
+     * statically
+     * bounding C
+     * recursion;
+     * each subproof
+     * still has
+     * unbounded
+     * growable
+     * traversal of
+     * its DAG. */
     if (depth != 0u)
       goto cleanup;
     for (j = 0; j < nright; j++) {
@@ -2677,8 +1946,19 @@ static ixs_check_result equivalence_predicate_shapes(equivalence_state *state,
   if (lhs->tag == IXS_CMP && rhs->tag == IXS_CMP) {
     int64_t delta;
     ixs_check_result result = equivalence_ordered_comparisons(state, lhs, rhs);
-    /* Comparisons are canonical residuals against a shared right operand. An
-     * exact zero delta therefore preserves any common comparison operator. */
+    /* Comparisons
+     * are canonical
+     * residuals
+     * against a
+     * shared right
+     * operand. An
+     * exact zero
+     * delta
+     * therefore
+     * preserves any
+     * common
+     * comparison
+     * operator. */
     if (result == IXS_CHECK_UNKNOWN &&
         lhs->u.binary.cmp_op == rhs->u.binary.cmp_op &&
         lhs->u.binary.rhs == rhs->u.binary.rhs &&
@@ -2767,8 +2047,15 @@ static bool equivalence_low_bits_domain(equivalence_state *state,
   return status == IXS_ALGEBRA_MATCH;
 }
 
-/* The original outer operations own the domain certificate. Projection never
- * substitutes a normalized root for that source obligation. */
+/* The original outer
+ * operations own the
+ * domain
+ * certificate.
+ * Projection never
+ * substitutes a
+ * normalized root
+ * for that source
+ * obligation. */
 static ixs_check_result equivalence_low_bits(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
@@ -2842,9 +2129,18 @@ static ixs_check_result equivalence_core(equivalence_state *state,
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-/* Start an otherwise ordinary equivalence query with the bounded child-proof
- * budget exhausted. This exercises the production stop condition without a
- * test-only branch in the proof rules. */
+/* Start an otherwise
+ * ordinary
+ * equivalence query
+ * with the bounded
+ * child-proof budget
+ * exhausted. This
+ * exercises the
+ * production stop
+ * condition without
+ * a test-only branch
+ * in the proof
+ * rules. */
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
   equivalence_state state;
@@ -2861,7 +2157,11 @@ IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
   return result;
 }
 
-/* Exercise the production quotient-algebra budget without a test-only proof
+/* Exercise the
+ * production
+ * quotient-algebra
+ * budget without a
+ * test-only proof
  * branch. */
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_quotient_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
@@ -3093,8 +2393,16 @@ static bool equivalence_piecewise_single_point(uint64_t mask, size_t *index) {
   return false;
 }
 
-/* Piecewise arm substitution is admitted only for small complete DAGs. This
- * cap prevents branch count from multiplying reconstruction of a large peer. */
+/* Piecewise arm
+ * substitution is
+ * admitted only for
+ * small complete
+ * DAGs. This cap
+ * prevents branch
+ * count from
+ * multiplying
+ * reconstruction of
+ * a large peer. */
 static bool equivalence_piecewise_small_operand(ixs_node *root) {
   ixs_node *stack[EQUIVALENCE_PIECEWISE_MAX_POINTS];
   ixs_node *seen[EQUIVALENCE_PIECEWISE_MAX_POINTS];
@@ -3173,11 +2481,27 @@ equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Final bounded fallback for an exact root Piecewise. It tracks first-match
- * reachability in a complete finite congruent selector mask, then proves only
- * single-point arms. No fact-table fork or whole-operand Piecewise
- * substitution occurs. Work is bounded by 16 arms, 64 selector points, and
- * 64-node arm/peer DAGs. */
+/* Final bounded
+ * fallback for an
+ * exact root
+ * Piecewise. It
+ * tracks first-match
+ * reachability in a
+ * complete finite
+ * congruent selector
+ * mask, then proves
+ * only single-point
+ * arms. No
+ * fact-table fork or
+ * whole-operand
+ * Piecewise
+ * substitution
+ * occurs. Work is
+ * bounded by 16
+ * arms, 64 selector
+ * points, and
+ * 64-node arm/peer
+ * DAGs. */
 static ixs_check_result equivalence_piecewise_root(equivalence_state *state,
                                                    ixs_node *lhs, ixs_node *rhs,
                                                    unsigned depth) {
@@ -3442,9 +2766,20 @@ equivalence_atom_find_exact_sides(ixs_node *difference,
   }
 }
 
-/* Isolate one unit Piecewise term from a normalized zero-sum ADD. Multiplying
- * every other coefficient by the opposite unit preserves canonical term
- * order, so the peer is rebuilt once without distributing into any arm. */
+/* Isolate one unit
+ * Piecewise term
+ * from a normalized
+ * zero-sum ADD.
+ * Multiplying every
+ * other coefficient
+ * by the opposite
+ * unit preserves
+ * canonical term
+ * order, so the peer
+ * is rebuilt once
+ * without
+ * distributing into
+ * any arm. */
 static bool bounds_isolate_piecewise_relation(ixs_bounds *bounds,
                                               ixs_node *difference,
                                               ixs_node *piecewise,
@@ -3520,10 +2855,25 @@ cleanup:
   return ok;
 }
 
-/* Predicate construction normalizes equality to a zero-sum ADD. Recover its
- * exact operands so the ordinary equivalence rules see the same scaled-Mod or
- * exact root-Piecewise relation as the direct API. Each path is O(T) in the
- * direct terms and uses O(T) query scratch. */
+/* Predicate
+ * construction
+ * normalizes
+ * equality to a
+ * zero-sum ADD.
+ * Recover its exact
+ * operands so the
+ * ordinary
+ * equivalence rules
+ * see the same
+ * scaled-Mod or
+ * exact
+ * root-Piecewise
+ * relation as the
+ * direct API. Each
+ * path is O(T) in
+ * the direct terms
+ * and uses O(T)
+ * query scratch. */
 static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
                                           ixs_node **lhs, ixs_node **rhs) {
   struct ixs_node_impl equality;
@@ -3628,12 +2978,24 @@ IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
   return result;
 }
 
-IXS_STATIC ixs_check_result bounds_cmp_atom(ixs_bounds *bounds, ixs_node *cmp) {
+IXS_STATIC
+ixs_check_result bounds_cmp_atom(ixs_bounds *bounds, ixs_node *cmp) {
   ixs_check_result result;
 
-  /* A reflexive equality is the public predicate encoding for totality.
-   * Do not send it through arithmetic simplification: a fact-proven domain
-   * failure is a FALSE proof, not an invalid query or a diagnostic. */
+  /* A reflexive
+   * equality is the
+   * public predicate
+   * encoding for
+   * totality. Do not
+   * send it through
+   * arithmetic
+   * simplification:
+   * a fact-proven
+   * domain failure
+   * is a FALSE
+   * proof, not an
+   * invalid query or
+   * a diagnostic. */
   if (cmp->u.binary.cmp_op == IXS_CMP_EQ &&
       cmp->u.binary.lhs == cmp->u.binary.rhs)
     return ixs_bounds_check_defined(bounds, cmp->u.binary.lhs);
@@ -3688,7 +3050,7 @@ static void constant_difference_try_projection(
     bool projected_invalid = false;
     bool projected_limited = false;
     bool projected_oom = false;
-    attempt->ok = bounds_constant_delta_query_detail(
+    attempt->ok = bounds_modular_exact_delta_detail(
         ctx, bounds, nodes[0], nodes[1], true, &attempt->result,
         &projected_invalid, &projected_limited, &projected_oom);
     attempt->invalid = attempt->invalid || projected_invalid;
@@ -3760,14 +3122,25 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
   }
   transport = ixs_bounds_query_transport_snapshot(bounds);
 
-  /* Normalize each side before constructing the difference.  Rewriting only
-   * lhs-rhs can erase the affine numerator shared by two exact remainder
-   * encodings before either encoding is recognized. */
+  /* Normalize each
+   * side before
+   * constructing the
+   * difference.
+   * Rewriting only
+   * lhs-rhs can
+   * erase the affine
+   * numerator shared
+   * by two exact
+   * remainder
+   * encodings before
+   * either encoding
+   * is recognized.
+   */
   if (has_rounding && !constant_difference_normalize_operands(ctx, bounds, &lhs,
                                                               &rhs, &attempt))
     goto finish;
 
-  attempt.ok = bounds_constant_delta_query_detail(
+  attempt.ok = bounds_modular_exact_delta_detail(
       ctx, bounds, lhs, rhs, true, &attempt.result, &attempt.invalid,
       &attempt.delta_limited, &attempt.delta_oom);
   attempt.oom = attempt.delta_oom || (!old_oom && bounds->oom);
@@ -3775,9 +3148,9 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
       attempt.delta_limited || bounds_query_limited_since(bounds, transport);
   if (!attempt.ok && !attempt.oom && !attempt.limited && !attempt.invalid &&
       has_rounding) {
-    /* Projection recognizes source-level truncating-remainder protocols.  A
-     * useful partial normalization must not hide that independent proof
-     * strategy when the normalized direct proof remains inconclusive. */
+    /* Projection recognizes source-level truncating-remainder protocols.
+     * Partial normalization must not hide that independent proof strategy
+     * when the normalized direct proof remains inconclusive. */
     constant_difference_try_projection(ctx, bounds, original_lhs, original_rhs,
                                        transport, old_oom, &attempt);
   }
@@ -8583,6 +7956,716 @@ bounds_integer_check_without_equality(ixs_bounds *b, ixs_node *expr) {
 }
 
 /* ==================================================================== */
+/* bounds_modular.c                                                   */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "bounds_modular.h"
+#include "bounds_defined.h"
+#include "bounds_query.h"
+#include "bounds_range.h"
+#include "bounds_relation.h"
+#include "bounds_residue.h"
+#include "bounds_store.h"
+#include "bounds_stride.h"
+#include "expand.h"
+#include "rational.h"
+#include "simplify.h"
+#include <assert.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
+                                                           ixs_node *lhs,
+                                                           ixs_node *rhs,
+                                                           int64_t *delta) {
+  ixs_algebra_status status;
+  ixs_relation_offset offset;
+  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  /* Preserve the weighted symbol forest as the hot path. */
+  if (lhs->tag == IXS_SYM && rhs->tag == IXS_SYM &&
+      ixs_relation_algebra_total_symbol_difference(&b->relations, lhs, rhs,
+                                                   delta))
+    return IXS_ALGEBRA_MATCH;
+  status = bounds_relation_offset_checked(b, lhs, rhs, &offset);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  if (!ixs_relation_offset_to_int64(offset, delta))
+    return IXS_ALGEBRA_UNREPRESENTABLE;
+  return IXS_ALGEBRA_MATCH;
+}
+
+typedef struct {
+  uint64_t magnitude;
+  bool negative;
+} bounds_wide_integer;
+
+static bool bounds_wide_integer_add(bounds_wide_integer lhs,
+                                    bounds_wide_integer rhs,
+                                    bounds_wide_integer *result) {
+  if (lhs.negative == rhs.negative) {
+    if (lhs.magnitude > UINT64_MAX - rhs.magnitude)
+      return false;
+    result->magnitude = lhs.magnitude + rhs.magnitude;
+    result->negative = lhs.negative;
+  } else if (lhs.magnitude >= rhs.magnitude) {
+    result->magnitude = lhs.magnitude - rhs.magnitude;
+    result->negative = lhs.negative;
+  } else {
+    result->magnitude = rhs.magnitude - lhs.magnitude;
+    result->negative = rhs.negative;
+  }
+  if (result->magnitude == 0)
+    result->negative = false;
+  return true;
+}
+
+static bool bounds_wide_integer_difference(int64_t lhs, int64_t rhs,
+                                           bounds_wide_integer *result) {
+  return bounds_wide_integer_add(
+      (bounds_wide_integer){ixs_int64_magnitude(lhs), lhs < 0},
+      (bounds_wide_integer){ixs_int64_magnitude(rhs), rhs > 0}, result);
+}
+
+static int bounds_wide_integer_compare(bounds_wide_integer lhs,
+                                       bounds_wide_integer rhs) {
+  if (lhs.negative != rhs.negative)
+    return lhs.negative ? -1 : 1;
+  if (lhs.magnitude == rhs.magnitude)
+    return 0;
+  if (lhs.negative)
+    return lhs.magnitude > rhs.magnitude ? -1 : 1;
+  return lhs.magnitude < rhs.magnitude ? -1 : 1;
+}
+
+static bool bounds_wide_integer_to_int64(bounds_wide_integer value,
+                                         int64_t *result) {
+  uint64_t negative_limit = (uint64_t)INT64_MAX + 1u;
+  if (!value.negative) {
+    if (value.magnitude > (uint64_t)INT64_MAX)
+      return false;
+    *result = (int64_t)value.magnitude;
+    return true;
+  }
+  if (value.magnitude > negative_limit)
+    return false;
+  if (value.magnitude == negative_limit) {
+    *result = INT64_MIN;
+    return true;
+  }
+  *result = -(int64_t)value.magnitude;
+  return true;
+}
+
+static uint64_t bounds_wide_integer_residue(bounds_wide_integer value,
+                                            uint64_t modulus) {
+  uint64_t residue = value.magnitude % modulus;
+  if (value.negative && residue != 0)
+    residue = modulus - residue;
+  return residue;
+}
+
+static bool bounds_integer_enclosure(ixs_bounds *bounds, ixs_node *expr,
+                                     int64_t *lower, int64_t *upper) {
+  ixs_interval interval;
+
+  if (!bounds || !expr || bounds->oom || ixs_bounds_has_empty(bounds) ||
+      ixs_bounds_check_defined(bounds, expr) != IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, expr) != IXS_CHECK_TRUE)
+    return false;
+  interval = ixs_bounds_get(bounds, expr);
+  if (!bounds_refine_integral_interval(
+          bounds, expr, /*expression_defined=*/true, &interval) ||
+      interval.lo_inf || interval.hi_inf)
+    return false;
+  *lower = interval.lo_p;
+  *upper = interval.hi_p;
+  return true;
+}
+
+/* Each Mod result preserves its dividend modulo the positive literal divisor.
+ * Independent finite ranges enclose every possible result difference. Exactly
+ * one member of the required residue class makes that difference exact. */
+static bool bounds_unique_modular_delta(ixs_bounds *bounds, ixs_node *lhs,
+                                        ixs_node *rhs,
+                                        int64_t representative_delta,
+                                        int64_t modulus, int64_t *delta) {
+  bounds_wide_integer lower;
+  bounds_wide_integer upper;
+  bounds_wide_integer candidate;
+  bounds_wide_integer next;
+  bounds_wide_integer shift;
+  int64_t lhs_lower;
+  int64_t lhs_upper;
+  int64_t rhs_lower;
+  int64_t rhs_upper;
+  uint64_t current_residue;
+  uint64_t expected_residue;
+  uint64_t modulus_u = (uint64_t)modulus;
+  uint64_t amount;
+
+  if (modulus <= 1 ||
+      !bounds_integer_enclosure(bounds, lhs, &lhs_lower, &lhs_upper) ||
+      !bounds_integer_enclosure(bounds, rhs, &rhs_lower, &rhs_upper) ||
+      !bounds_wide_integer_difference(lhs_lower, rhs_upper, &lower) ||
+      !bounds_wide_integer_difference(lhs_upper, rhs_lower, &upper) ||
+      bounds_wide_integer_compare(lower, upper) > 0)
+    return false;
+
+  expected_residue =
+      (uint64_t)ixs_integer_congruence_residue(representative_delta, modulus);
+  current_residue = bounds_wide_integer_residue(lower, modulus_u);
+  amount = expected_residue >= current_residue
+               ? expected_residue - current_residue
+               : modulus_u - (current_residue - expected_residue);
+  shift.magnitude = amount;
+  shift.negative = false;
+  if (!bounds_wide_integer_add(lower, shift, &candidate) ||
+      bounds_wide_integer_compare(candidate, upper) > 0 ||
+      !bounds_wide_integer_to_int64(candidate, delta))
+    return false;
+
+  shift.magnitude = modulus_u;
+  if (bounds_wide_integer_add(candidate, shift, &next) &&
+      bounds_wide_integer_compare(next, upper) <= 0)
+    return false;
+  return true;
+}
+
+/* If the dividend and positive divisor share a stride class, a shift which
+ * stays within one stride bucket cannot cross a divisor boundary. */
+static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
+                                           ixs_node *dividend,
+                                           ixs_node *denominator,
+                                           int64_t shift) {
+  uint64_t modulus;
+  uint64_t residue;
+  if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
+      modulus > (uint64_t)INT64_MAX ||
+      !bounds_known_residue(bounds, dividend, modulus, &residue) ||
+      ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
+          IXS_CHECK_TRUE)
+    return false;
+  if (shift >= 0) {
+    uint64_t positive = (uint64_t)shift;
+    return positive < modulus && residue < modulus - positive;
+  }
+  return ixs_int64_magnitude(shift) <= residue;
+}
+
+static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
+                                               ixs_node *denominator) {
+  ixs_interval range = ixs_bounds_get(bounds, denominator);
+  return range.valid && !range.lo_inf &&
+         ixs_rat_cmp(range.lo_p, range.lo_q, 0, 1) > 0;
+}
+
+typedef enum {
+  BOUNDS_DELTA_FRAME_INITIAL,
+  BOUNDS_DELTA_FRAME_SEARCH,
+  BOUNDS_DELTA_FRAME_REPRESENTATIVE,
+  BOUNDS_DELTA_FRAME_RESIDUAL
+} bounds_delta_frame_stage;
+
+typedef struct {
+  ixs_node *lhs;
+  ixs_node *rhs;
+  ixs_node *difference;
+  uint32_t scan_positive;
+  uint32_t scan_negative;
+  uint32_t matched_positive;
+  uint32_t matched_negative;
+  int64_t modular_delta;
+  bool allow_expand;
+  bool tried_expand;
+  bounds_delta_frame_stage stage;
+} bounds_delta_frame;
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  bounds_delta_frame *frames;
+  size_t depth;
+  size_t capacity;
+  bool child_proved;
+  int64_t child_delta;
+  bool frames_arena_owned;
+  bool oom;
+  bool invalid;
+  bool limited;
+} bounds_delta_query;
+
+static bool bounds_delta_push(bounds_delta_query *query, ixs_node *lhs,
+                              ixs_node *rhs, bool allow_expand) {
+  bounds_delta_frame *frames;
+  size_t capacity;
+  size_t old_bytes;
+  size_t new_bytes;
+  if (query->depth == query->capacity) {
+    capacity = query->capacity ? query->capacity : 4u;
+    if (query->capacity) {
+      if (capacity > SIZE_MAX / 2u)
+        goto failed;
+      capacity *= 2u;
+    }
+    if (query->capacity > SIZE_MAX / sizeof(*frames) ||
+        capacity > SIZE_MAX / sizeof(*frames))
+      goto failed;
+    old_bytes = query->capacity * sizeof(*frames);
+    new_bytes = capacity * sizeof(*frames);
+    if (query->frames_arena_owned) {
+      frames = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
+                              new_bytes, sizeof(void *));
+    } else {
+      frames =
+          ixs_arena_alloc(query->bounds->scratch, new_bytes, sizeof(void *));
+      if (frames)
+        memcpy(frames, query->frames, old_bytes);
+    }
+    if (!frames)
+      goto failed;
+    query->frames = frames;
+    query->capacity = capacity;
+    query->frames_arena_owned = true;
+  }
+  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
+  query->frames[query->depth].lhs = lhs;
+  query->frames[query->depth].rhs = rhs;
+  query->frames[query->depth].allow_expand = allow_expand;
+  query->frames[query->depth].stage = BOUNDS_DELTA_FRAME_INITIAL;
+  query->depth++;
+  return true;
+
+failed:
+  query->bounds->oom = true;
+  return false;
+}
+
+static void bounds_delta_complete(bounds_delta_query *query, bool proved,
+                                  int64_t delta) {
+  query->depth--;
+  query->child_proved = proved;
+  query->child_delta = proved ? delta : 0;
+}
+
+static ixs_node *bounds_delta_simplify(bounds_delta_query *query,
+                                       ixs_node *expr) {
+  if (!expr) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  if (ixs_node_is_sentinel(expr))
+    return NULL;
+  expr = simp_simplify_bounds(query->ctx, expr, query->bounds);
+  if (!expr)
+    query->bounds->oom = true;
+  return expr && !ixs_node_is_sentinel(expr) ? expr : NULL;
+}
+
+static bool bounds_modular_pair(ixs_node *difference, uint32_t lhs_index,
+                                uint32_t rhs_index, ixs_node **lhs_term,
+                                ixs_node **rhs_term,
+                                ixs_node **lhs_representative,
+                                ixs_node **rhs_representative,
+                                ixs_node **denominator, int64_t *coefficient) {
+  int64_t lhs_p;
+  int64_t lhs_q;
+  int64_t rhs_p;
+  int64_t rhs_q;
+  int64_t opposite_rhs;
+  ixs_node *lhs_denominator;
+  ixs_node *rhs_denominator;
+
+  *lhs_term = difference->u.add.terms[lhs_index].term;
+  *rhs_term = difference->u.add.terms[rhs_index].term;
+  ixs_node_get_rat(difference->u.add.terms[lhs_index].coeff, &lhs_p, &lhs_q);
+  ixs_node_get_rat(difference->u.add.terms[rhs_index].coeff, &rhs_p, &rhs_q);
+  if (lhs_q != 1 || rhs_q != 1 || lhs_p <= 0 || rhs_p >= 0 ||
+      !ixs_safe_neg(rhs_p, &opposite_rhs) || lhs_p != opposite_rhs ||
+      (*lhs_term)->tag != IXS_MOD || (*rhs_term)->tag != IXS_MOD)
+    return false;
+  *lhs_representative = (*lhs_term)->u.binary.lhs;
+  *rhs_representative = (*rhs_term)->u.binary.lhs;
+  lhs_denominator = (*lhs_term)->u.binary.rhs;
+  rhs_denominator = (*rhs_term)->u.binary.rhs;
+  if (lhs_denominator != rhs_denominator)
+    return false;
+  *denominator = lhs_denominator;
+  *coefficient = lhs_p;
+  return true;
+}
+
+static bool bounds_delta_next_modular_pair(bounds_delta_frame *frame) {
+  uint32_t count = frame->difference->u.add.nterms;
+  while (frame->scan_positive < count) {
+    uint32_t positive = frame->scan_positive;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(frame->difference->u.add.terms[positive].coeff, &p, &q);
+    if (q != 1 || p <= 0 ||
+        frame->difference->u.add.terms[positive].term->tag != IXS_MOD) {
+      frame->scan_positive++;
+      frame->scan_negative = 0;
+      continue;
+    }
+    while (frame->scan_negative < count) {
+      uint32_t negative = frame->scan_negative++;
+      ixs_node *lhs_term;
+      ixs_node *rhs_term;
+      ixs_node *lhs_representative;
+      ixs_node *rhs_representative;
+      ixs_node *denominator;
+      int64_t coefficient;
+      if (!bounds_modular_pair(frame->difference, positive, negative, &lhs_term,
+                               &rhs_term, &lhs_representative,
+                               &rhs_representative, &denominator, &coefficient))
+        continue;
+      (void)lhs_term;
+      (void)rhs_term;
+      (void)lhs_representative;
+      (void)rhs_representative;
+      (void)denominator;
+      frame->matched_positive = positive;
+      frame->matched_negative = negative;
+      (void)coefficient;
+      return true;
+    }
+    frame->scan_positive++;
+    frame->scan_negative = 0;
+  }
+  return false;
+}
+
+static bool bounds_modular_pair_valid(bounds_delta_query *query,
+                                      ixs_node *lhs_term, ixs_node *rhs_term,
+                                      ixs_node *lhs_representative,
+                                      ixs_node *rhs_representative) {
+  return ixs_bounds_check_defined(query->bounds, lhs_term) == IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, rhs_term) == IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, lhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_defined(query->bounds, rhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, lhs_term) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, rhs_term) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, lhs_representative) ==
+             IXS_CHECK_TRUE &&
+         ixs_bounds_check_integer_valued(query->bounds, rhs_representative) ==
+             IXS_CHECK_TRUE;
+}
+
+static ixs_node *bounds_modular_delta_residual(bounds_delta_query *query,
+                                               ixs_node *difference,
+                                               uint32_t lhs_index,
+                                               uint32_t rhs_index) {
+  ixs_addterm *terms;
+  uint32_t count = difference->u.add.nterms - 2u;
+  uint32_t i;
+  uint32_t write = 0;
+  size_t bytes;
+  if (count == 0)
+    return difference->u.add.coeff;
+  bytes = (size_t)count * sizeof(*terms);
+  if (bytes / sizeof(*terms) != count) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  terms = ixs_arena_alloc(query->bounds->scratch, bytes, sizeof(void *));
+  if (!terms) {
+    query->bounds->oom = true;
+    return NULL;
+  }
+  for (i = 0; i < difference->u.add.nterms; i++) {
+    if (i != lhs_index && i != rhs_index)
+      terms[write++] = difference->u.add.terms[i];
+  }
+  if (count == 1u) {
+    ixs_node *result = simp_mul(query->ctx, terms[0].coeff, terms[0].term);
+    if (!result) {
+      query->bounds->oom = true;
+      return NULL;
+    }
+    if (ixs_node_is_sentinel(result))
+      return NULL;
+    if (ixs_node_is_zero(difference->u.add.coeff))
+      return result;
+    result = simp_add(query->ctx, difference->u.add.coeff, result);
+    if (!result)
+      query->bounds->oom = true;
+    return result && !ixs_node_is_sentinel(result) ? result : NULL;
+  }
+  {
+    ixs_node *result =
+        ixs_node_add(query->ctx, difference->u.add.coeff, count, terms);
+    if (!result)
+      query->bounds->oom = true;
+    return result;
+  }
+}
+
+static bool bounds_delta_prepare_difference(bounds_delta_query *query,
+                                            bounds_delta_frame *frame,
+                                            ixs_node *difference) {
+  int64_t delta;
+  frame->difference = difference;
+  frame->scan_positive = 0;
+  frame->scan_negative = 0;
+  if (bounds_range_exact_integer_difference(query->bounds, difference,
+                                            &delta)) {
+    bounds_delta_complete(query, true, delta);
+    return true;
+  }
+  if (difference->tag != IXS_ADD || difference->u.add.nterms < 2u)
+    return false;
+  frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+  return true;
+}
+
+static bool bounds_delta_try_expanded(bounds_delta_query *query,
+                                      bounds_delta_frame *frame) {
+  ixs_node *expanded;
+  if (!frame->allow_expand || frame->tried_expand)
+    return false;
+  frame->tried_expand = true;
+  expanded =
+      bounds_delta_simplify(query, expand_impl(query->ctx, frame->difference));
+  if (!expanded || expanded == frame->difference)
+    return false;
+  return bounds_delta_prepare_difference(query, frame, expanded);
+}
+
+static void bounds_delta_step_initial(bounds_delta_query *query,
+                                      size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_algebra_status relation_status;
+  int64_t relation_delta;
+  ixs_node *difference;
+  bool lhs_oom = false;
+  bool rhs_oom = false;
+  bool lhs_limited = false;
+  bool rhs_limited = false;
+  if (bounds_defined_check_detail(query->bounds, frame->lhs, &lhs_oom,
+                                  &lhs_limited) != IXS_CHECK_TRUE ||
+      bounds_defined_check_detail(query->bounds, frame->rhs, &rhs_oom,
+                                  &rhs_limited) != IXS_CHECK_TRUE) {
+    query->oom = lhs_oom || rhs_oom;
+    query->limited = lhs_limited || rhs_limited;
+    if (query->oom || query->limited)
+      return;
+    bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (frame->lhs == frame->rhs) {
+    bounds_delta_complete(query, true, 0);
+    return;
+  }
+  relation_status = bounds_exact_relation_difference(
+      query->bounds, frame->lhs, frame->rhs, &relation_delta);
+  if (relation_status == IXS_ALGEBRA_MATCH) {
+    bounds_delta_complete(query, true, relation_delta);
+    return;
+  }
+  if (relation_status == IXS_ALGEBRA_OOM) {
+    query->oom = true;
+    return;
+  }
+  if (relation_status == IXS_ALGEBRA_LIMITED) {
+    query->limited = true;
+    return;
+  }
+  if (relation_status == IXS_ALGEBRA_INVALID) {
+    query->invalid = true;
+    bounds_delta_complete(query, false, 0);
+    return;
+  }
+  difference = bounds_delta_simplify(
+      query, simp_sub(query->ctx, frame->lhs, frame->rhs));
+  if (!difference) {
+    if (!query->bounds->oom)
+      bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (!bounds_delta_prepare_difference(query, frame, difference) &&
+      !bounds_delta_try_expanded(query, frame))
+    bounds_delta_complete(query, false, 0);
+}
+
+static void bounds_delta_step_search(bounds_delta_query *query,
+                                     size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_node *lhs_term;
+  ixs_node *rhs_term;
+  ixs_node *lhs_representative;
+  ixs_node *rhs_representative;
+  ixs_node *denominator;
+  int64_t coefficient;
+  if (!bounds_delta_next_modular_pair(frame)) {
+    if (!bounds_delta_try_expanded(query, frame))
+      bounds_delta_complete(query, false, 0);
+    return;
+  }
+  if (!bounds_modular_pair(frame->difference, frame->matched_positive,
+                           frame->matched_negative, &lhs_term, &rhs_term,
+                           &lhs_representative, &rhs_representative,
+                           &denominator, &coefficient) ||
+      !bounds_modular_pair_valid(query, lhs_term, rhs_term, lhs_representative,
+                                 rhs_representative))
+    return;
+  (void)denominator;
+  (void)coefficient;
+  frame->stage = BOUNDS_DELTA_FRAME_REPRESENTATIVE;
+  (void)bounds_delta_push(query, lhs_representative, rhs_representative,
+                          frame->allow_expand);
+}
+
+static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
+                                          bounds_delta_frame *frame,
+                                          int64_t *scaled_delta) {
+  ixs_node *lhs_term;
+  ixs_node *rhs_term;
+  ixs_node *lhs_representative;
+  ixs_node *rhs_representative;
+  ixs_node *denominator;
+  int64_t coefficient;
+  int64_t modular_delta;
+  if (!query->child_proved ||
+      !bounds_modular_pair(frame->difference, frame->matched_positive,
+                           frame->matched_negative, &lhs_term, &rhs_term,
+                           &lhs_representative, &rhs_representative,
+                           &denominator, &coefficient))
+    return false;
+  if (denominator->tag == IXS_INT) {
+    if (!bounds_unique_modular_delta(query->bounds, lhs_term, rhs_term,
+                                     query->child_delta, denominator->u.ival,
+                                     &modular_delta))
+      return false;
+  } else {
+    if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
+        !bounds_mod_shift_by_congruence(query->bounds, rhs_representative,
+                                        denominator, query->child_delta))
+      return false;
+    modular_delta = query->child_delta;
+  }
+  return ixs_safe_mul(modular_delta, coefficient, scaled_delta);
+}
+
+static void bounds_delta_step_representative(bounds_delta_query *query,
+                                             size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  ixs_node *residual;
+  if (!bounds_delta_project_mod_pair(query, frame, &frame->modular_delta)) {
+    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+    return;
+  }
+  residual = bounds_modular_delta_residual(query, frame->difference,
+                                           frame->matched_positive,
+                                           frame->matched_negative);
+  if (!residual) {
+    if (!query->bounds->oom)
+      frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+    return;
+  }
+  frame->stage = BOUNDS_DELTA_FRAME_RESIDUAL;
+  (void)bounds_delta_push(query, residual, query->ctx->node_zero,
+                          frame->allow_expand);
+}
+
+static void bounds_delta_step_residual(bounds_delta_query *query,
+                                       size_t frame_index) {
+  bounds_delta_frame *frame = &query->frames[frame_index];
+  int64_t result;
+  if (query->child_proved &&
+      ixs_safe_add(frame->modular_delta, query->child_delta, &result)) {
+    bounds_delta_complete(query, true, result);
+  } else {
+    frame->stage = BOUNDS_DELTA_FRAME_SEARCH;
+  }
+}
+
+/* This is an explicit proof stack, not a bounded recursive search. Every child
+ * either enters a Mod dividend or removes a matched Mod pair from a canonical
+ * ADD. Work is therefore finite in the queried expression DAG; stack growth
+ * is geometric and allocation failure returns unknown. */
+static bool bounds_delta_query_start(bounds_delta_query *query,
+                                     bounds_delta_frame *initial_frame,
+                                     ixs_ctx *ctx, ixs_bounds *bounds,
+                                     ixs_node *lhs, ixs_node *rhs,
+                                     bool allow_expand) {
+  memset(query, 0, sizeof(*query));
+  query->ctx = ctx;
+  query->bounds = bounds;
+  query->frames = initial_frame;
+  query->capacity = 1u;
+  return ctx && bounds && lhs && rhs && !bounds->oom &&
+         !bounds->contradiction &&
+         bounds_delta_push(query, lhs, rhs, allow_expand);
+}
+
+static void bounds_delta_query_run(bounds_delta_query *query) {
+  while (query->depth != 0 && !query->bounds->oom && !query->oom &&
+         !query->invalid && !query->limited) {
+    size_t frame_index = query->depth - 1u;
+    switch (query->frames[frame_index].stage) {
+    case BOUNDS_DELTA_FRAME_INITIAL:
+      bounds_delta_step_initial(query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_SEARCH:
+      bounds_delta_step_search(query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_REPRESENTATIVE:
+      bounds_delta_step_representative(query, frame_index);
+      break;
+    case BOUNDS_DELTA_FRAME_RESIDUAL:
+      bounds_delta_step_residual(query, frame_index);
+      break;
+    }
+  }
+}
+
+static bool bounds_delta_query_result(const bounds_delta_query *query,
+                                      int64_t *delta, bool *invalid,
+                                      bool *limited, bool *oom) {
+  if (invalid)
+    *invalid = query->invalid;
+  if (limited)
+    *limited = query->limited;
+  if (oom)
+    *oom = query->oom;
+  if (query->bounds->oom || query->oom || query->invalid || query->limited ||
+      query->depth != 0 || !query->child_proved)
+    return false;
+  *delta = query->child_delta;
+  return true;
+}
+
+IXS_STATIC bool bounds_modular_exact_delta_detail(ixs_ctx *ctx,
+                                                  ixs_bounds *bounds,
+                                                  ixs_node *lhs, ixs_node *rhs,
+                                                  bool allow_expand,
+                                                  int64_t *delta, bool *invalid,
+                                                  bool *limited, bool *oom) {
+  bounds_delta_query query;
+  bounds_delta_frame initial_frame;
+  if (invalid)
+    *invalid = false;
+  if (limited)
+    *limited = false;
+  if (oom)
+    *oom = false;
+  if (!delta || !bounds_delta_query_start(&query, &initial_frame, ctx, bounds,
+                                          lhs, rhs, allow_expand))
+    return false;
+  bounds_delta_query_run(&query);
+  return bounds_delta_query_result(&query, delta, invalid, limited, oom);
+}
+
+/* ==================================================================== */
 /* bounds_predicate.c                                                 */
 /* ==================================================================== */
 
@@ -9874,6 +9957,7 @@ IXS_STATIC void bounds_query_reset_arena(ixs_bounds *b) {
 #include "bounds_range.h"
 #include "additive_row.h"
 #include "bounds_bitfacts.h"
+#include "bounds_defined.h"
 #include "bounds_difference.h"
 #include "bounds_integer.h"
 #include "bounds_query.h"
@@ -9894,6 +9978,152 @@ IXS_STATIC void bounds_query_reset_arena(ixs_bounds *b) {
 #include <string.h>
 
 #define BOUNDS_CACHE_CAP 32u
+
+static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
+                                                              ixs_node *expr,
+                                                              bool *oom,
+                                                              bool *limited) {
+  ixs_check_result result;
+  assert(b->equality_disabled_depth != UINT_MAX);
+  b->equality_disabled_depth++;
+  result = bounds_defined_check_detail(b, expr, oom, limited);
+  b->equality_disabled_depth--;
+  return result;
+}
+
+static ixs_algebra_status bounds_relation_require_defined(ixs_bounds *b,
+                                                          ixs_node *expr) {
+  bool defined_oom = false;
+  bool defined_limited = false;
+  if (bounds_check_defined_without_equality(b, expr, &defined_oom,
+                                            &defined_limited) == IXS_CHECK_TRUE)
+    return IXS_ALGEBRA_MATCH;
+  if (defined_oom)
+    return IXS_ALGEBRA_OOM;
+  if (!defined_limited)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (bounds_query_is_tracking(b))
+    bounds_query_note_limit(b);
+  return IXS_ALGEBRA_LIMITED;
+}
+
+/* Collect the independently defined component incident to expr. Traversal is
+ * nonrecursive and grows with the component; there is no semantic walk cap. */
+IXS_STATIC ixs_algebra_status bounds_collect_relation_component(
+    ixs_bounds *b, ixs_node *expr, bounds_relation_component *component) {
+  bounds_relation_cursor_step step;
+  ixs_algebra_status status;
+  ixs_node *candidate = NULL;
+  size_t root_endpoint;
+  component->scratch = NULL;
+  if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
+      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &root_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_relation_require_defined(b, expr);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  step = bounds_relation_component_begin(&b->relations, b->scratch,
+                                         root_endpoint, component);
+  for (;;) {
+    if (step == BOUNDS_RELATION_CURSOR_READY) {
+      step = bounds_relation_component_pull(component, &candidate);
+      continue;
+    }
+    if (step == BOUNDS_RELATION_CURSOR_ADMISSION) {
+      if (!candidate)
+        abort();
+      status = bounds_relation_require_defined(b, candidate);
+      if (status == IXS_ALGEBRA_MATCH) {
+        step = bounds_relation_component_resolve(component, true);
+        continue;
+      }
+      if (status == IXS_ALGEBRA_NO_MATCH) {
+        step = bounds_relation_component_resolve(component, false);
+        continue;
+      }
+      return status;
+    }
+    if (step == BOUNDS_RELATION_CURSOR_COMPLETE)
+      return IXS_ALGEBRA_MATCH;
+    if (step == BOUNDS_RELATION_CURSOR_OOM) {
+      b->oom = true;
+      return IXS_ALGEBRA_OOM;
+    }
+    assert(step == BOUNDS_RELATION_CURSOR_INVALID);
+    bounds_query_note_invalid(b);
+    return IXS_ALGEBRA_INVALID;
+  }
+}
+
+IXS_STATIC bool
+bounds_publish_relation_component(ixs_bounds *b,
+                                  const bounds_relation_component *component) {
+  if (!bounds_query_is_tracking(b))
+    return true;
+  if (!bounds_relation_component_publish_defined(b, component)) {
+    b->oom = true;
+    return false;
+  }
+  return true;
+}
+
+IXS_STATIC ixs_algebra_status bounds_relation_offset_checked(
+    ixs_bounds *b, ixs_node *lhs, ixs_node *rhs, ixs_relation_offset *offset) {
+  bounds_relation_component component;
+  ixs_algebra_status status;
+  ixs_relation_query_status cached;
+  size_t lhs_endpoint;
+  size_t rhs_endpoint;
+  size_t entry_index;
+  if (!b || !lhs || !rhs || !offset || b->oom || b->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (lhs == rhs) {
+    *offset = ixs_relation_offset_from_int64(0);
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (!ixs_relation_algebra_find_endpoint(&b->relations, lhs, &lhs_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  if (bounds_query_is_tracking(b) &&
+      ixs_relation_algebra_find_endpoint(&b->relations, rhs, &rhs_endpoint)) {
+    cached =
+        bounds_relation_cached_offset(b, rhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_NONE) {
+      status = bounds_collect_relation_component(b, rhs, &component);
+      if (status != IXS_ALGEBRA_MATCH) {
+        bounds_relation_component_destroy(&component);
+        return status;
+      }
+      if (!bounds_publish_relation_component(b, &component)) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
+      }
+      bounds_relation_component_destroy(&component);
+    } else if (cached == IXS_RELATION_QUERY_INVALID) {
+      bounds_query_note_invalid(b);
+      return IXS_ALGEBRA_INVALID;
+    }
+    cached =
+        bounds_relation_cached_offset(b, lhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_INVALID) {
+      bounds_query_note_invalid(b);
+      return IXS_ALGEBRA_INVALID;
+    }
+    return cached == IXS_RELATION_QUERY_FOUND ? IXS_ALGEBRA_MATCH
+                                              : IXS_ALGEBRA_NO_MATCH;
+  }
+  status = bounds_collect_relation_component(b, rhs, &component);
+  if (status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
+    return status;
+  }
+  if (!bounds_relation_component_find(&component, lhs_endpoint, &entry_index)) {
+    bounds_relation_component_destroy(&component);
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  *offset = component.entries[entry_index].offset;
+  bounds_relation_component_destroy(&component);
+  return IXS_ALGEBRA_MATCH;
+}
 
 static bool bounds_cache_lookup(ixs_bounds *b, ixs_node *expr,
                                 ixs_interval *out) {

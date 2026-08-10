@@ -1239,8 +1239,7 @@ cursor traversal, equality projection, and the projection-cache lifecycle.
 `bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
 `bounds_defined.c` owns iterative domain proofs, Piecewise partition coverage,
 depth-safe range subqueries, and definedness projection-cache publication.
-`bounds_integer.c` owns exact integer and divisibility proofs; equality-component
-admission and projection remain caller policy in `bounds.c`.
+`bounds_integer.c` owns exact integer and divisibility proofs.
 `bounds_predicate.c` owns iterative tri-state predicate evaluation, bounded
 implication branches, and finite-domain enumeration over range/nonzero atoms.
 `facts_store.c` owns reusable fact-set session/epoch identity, transaction
@@ -1249,15 +1248,17 @@ cache, and the create/assume/derive/substitute mutation APIs. Predicate branches
 borrow its one-root closure entry point. `facts_query.c` owns fact-set read
 validation and query transactions, scalar and batch simplification, exact
 division, metadata queries, and the public read API. `bounds.c` retains the
-lower exact EQ/NE and constant-difference proof services.
+exact EQ/NE and constant-difference adapters. `bounds_modular.c` owns the
+paired-Mod exact-delta search, wide signed arithmetic, dynamic no-wrap lifts,
+and its growable progress stack.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
 scaling.
-Canonical alias creation, relation endpoint admission, and query proof policy
-remain in `bounds.c`, which passes canonical nodes or trusted symbols to the
-leaf owners. `bounds_range.c` owns direct interval caching and transfer,
-structural and Piecewise ranges, equality-component range projection, integral
+Canonical alias creation and equivalence query policy remain in `bounds.c`,
+which passes canonical nodes or trusted symbols to the leaf owners.
+`bounds_range.c` owns relation endpoint admission, direct interval caching and
+transfer, structural and Piecewise ranges, equality-component range projection, integral
 and congruence refinement, truncating-remainder ranges, emptiness, and interval
 comparison entailment. Full store invalidation refreshes the central query
 owner, clears range caches, then clears relation projections; each leaf
@@ -1663,9 +1664,9 @@ one direct-edge index serve two deliberately different weighted closures:
   symbol differences remain independent of one-sided inequality fan-out.
 
 `bounds_relation.c` exposes asserted components through a typed pull cursor,
-not a proof callback. `bounds.c` proves the root defined before `begin`, so a
-failed root proof performs no component allocation. The cursor grows its entry
-array before its seen index, returns each unseen original endpoint before
+not a proof callback. `bounds_range.c` proves the root defined before `begin`,
+so a failed root proof performs no component allocation. The cursor grows its
+entry array before its seen index, returns each unseen original endpoint before
 adding or recording the pending edge offset, and waits for the caller to prove
 that endpoint with equality projection disabled. Rejecting an endpoint skips
 only that edge. The relation algebra remains immutable until cursor destroy
@@ -2144,7 +2145,8 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   failure remain `UNKNOWN`. This is a local first-match proof, not generic
   finite-domain equivalence, and it adds no context-wide scan.
 
-  Constant-difference and equivalence queries also pair equally scaled,
+  `bounds_modular.c` implements the following exact strategy.
+  Constant-difference and equivalence queries pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,
   each Mod result gets a finite integer enclosure tightened to its structural
@@ -3172,6 +3174,8 @@ ixsimpl/
 │   ├── bounds_difference.h
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
+│   ├── bounds_modular.c     # paired-Mod exact-delta proof
+│   ├── bounds_modular.h
 │   ├── bounds_predicate.c   # tri-state and finite-domain predicate proof
 │   ├── bounds_predicate.h
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle

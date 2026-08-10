@@ -21,6 +21,7 @@ else()
         src/bounds_defined.c
         src/bounds_difference.c
         src/bounds_integer.c
+        src/bounds_modular.c
         src/bounds_predicate.c
         src/bounds_query.c
         src/bounds_range.c

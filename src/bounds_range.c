@@ -4,6 +4,7 @@
 #include "bounds_range.h"
 #include "additive_row.h"
 #include "bounds_bitfacts.h"
+#include "bounds_defined.h"
 #include "bounds_difference.h"
 #include "bounds_integer.h"
 #include "bounds_query.h"
@@ -24,6 +25,152 @@
 #include <string.h>
 
 #define BOUNDS_CACHE_CAP 32u
+
+static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
+                                                              ixs_node *expr,
+                                                              bool *oom,
+                                                              bool *limited) {
+  ixs_check_result result;
+  assert(b->equality_disabled_depth != UINT_MAX);
+  b->equality_disabled_depth++;
+  result = bounds_defined_check_detail(b, expr, oom, limited);
+  b->equality_disabled_depth--;
+  return result;
+}
+
+static ixs_algebra_status bounds_relation_require_defined(ixs_bounds *b,
+                                                          ixs_node *expr) {
+  bool defined_oom = false;
+  bool defined_limited = false;
+  if (bounds_check_defined_without_equality(b, expr, &defined_oom,
+                                            &defined_limited) == IXS_CHECK_TRUE)
+    return IXS_ALGEBRA_MATCH;
+  if (defined_oom)
+    return IXS_ALGEBRA_OOM;
+  if (!defined_limited)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (bounds_query_is_tracking(b))
+    bounds_query_note_limit(b);
+  return IXS_ALGEBRA_LIMITED;
+}
+
+/* Collect the independently defined component incident to expr. Traversal is
+ * nonrecursive and grows with the component; there is no semantic walk cap. */
+IXS_STATIC ixs_algebra_status bounds_collect_relation_component(
+    ixs_bounds *b, ixs_node *expr, bounds_relation_component *component) {
+  bounds_relation_cursor_step step;
+  ixs_algebra_status status;
+  ixs_node *candidate = NULL;
+  size_t root_endpoint;
+  component->scratch = NULL;
+  if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
+      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &root_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_relation_require_defined(b, expr);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  step = bounds_relation_component_begin(&b->relations, b->scratch,
+                                         root_endpoint, component);
+  for (;;) {
+    if (step == BOUNDS_RELATION_CURSOR_READY) {
+      step = bounds_relation_component_pull(component, &candidate);
+      continue;
+    }
+    if (step == BOUNDS_RELATION_CURSOR_ADMISSION) {
+      if (!candidate)
+        abort();
+      status = bounds_relation_require_defined(b, candidate);
+      if (status == IXS_ALGEBRA_MATCH) {
+        step = bounds_relation_component_resolve(component, true);
+        continue;
+      }
+      if (status == IXS_ALGEBRA_NO_MATCH) {
+        step = bounds_relation_component_resolve(component, false);
+        continue;
+      }
+      return status;
+    }
+    if (step == BOUNDS_RELATION_CURSOR_COMPLETE)
+      return IXS_ALGEBRA_MATCH;
+    if (step == BOUNDS_RELATION_CURSOR_OOM) {
+      b->oom = true;
+      return IXS_ALGEBRA_OOM;
+    }
+    assert(step == BOUNDS_RELATION_CURSOR_INVALID);
+    bounds_query_note_invalid(b);
+    return IXS_ALGEBRA_INVALID;
+  }
+}
+
+IXS_STATIC bool
+bounds_publish_relation_component(ixs_bounds *b,
+                                  const bounds_relation_component *component) {
+  if (!bounds_query_is_tracking(b))
+    return true;
+  if (!bounds_relation_component_publish_defined(b, component)) {
+    b->oom = true;
+    return false;
+  }
+  return true;
+}
+
+IXS_STATIC ixs_algebra_status bounds_relation_offset_checked(
+    ixs_bounds *b, ixs_node *lhs, ixs_node *rhs, ixs_relation_offset *offset) {
+  bounds_relation_component component;
+  ixs_algebra_status status;
+  ixs_relation_query_status cached;
+  size_t lhs_endpoint;
+  size_t rhs_endpoint;
+  size_t entry_index;
+  if (!b || !lhs || !rhs || !offset || b->oom || b->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (lhs == rhs) {
+    *offset = ixs_relation_offset_from_int64(0);
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (!ixs_relation_algebra_find_endpoint(&b->relations, lhs, &lhs_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  if (bounds_query_is_tracking(b) &&
+      ixs_relation_algebra_find_endpoint(&b->relations, rhs, &rhs_endpoint)) {
+    cached =
+        bounds_relation_cached_offset(b, rhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_NONE) {
+      status = bounds_collect_relation_component(b, rhs, &component);
+      if (status != IXS_ALGEBRA_MATCH) {
+        bounds_relation_component_destroy(&component);
+        return status;
+      }
+      if (!bounds_publish_relation_component(b, &component)) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
+      }
+      bounds_relation_component_destroy(&component);
+    } else if (cached == IXS_RELATION_QUERY_INVALID) {
+      bounds_query_note_invalid(b);
+      return IXS_ALGEBRA_INVALID;
+    }
+    cached =
+        bounds_relation_cached_offset(b, lhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_INVALID) {
+      bounds_query_note_invalid(b);
+      return IXS_ALGEBRA_INVALID;
+    }
+    return cached == IXS_RELATION_QUERY_FOUND ? IXS_ALGEBRA_MATCH
+                                              : IXS_ALGEBRA_NO_MATCH;
+  }
+  status = bounds_collect_relation_component(b, rhs, &component);
+  if (status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
+    return status;
+  }
+  if (!bounds_relation_component_find(&component, lhs_endpoint, &entry_index)) {
+    bounds_relation_component_destroy(&component);
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  *offset = component.entries[entry_index].offset;
+  bounds_relation_component_destroy(&component);
+  return IXS_ALGEBRA_MATCH;
+}
 
 static bool bounds_cache_lookup(ixs_bounds *b, ixs_node *expr,
                                 ixs_interval *out) {
