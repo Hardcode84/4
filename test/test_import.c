@@ -376,6 +376,34 @@ static void test_import_many(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+static void test_import_preserves_erased_domain(void) {
+  ixs_ctx *src_ctx = NULL;
+  ixs_ctx *dst_ctx = NULL;
+  ixs_session src_s;
+  ixs_session dst_s;
+  ixs_node *src_k;
+  ixs_node *expr;
+  ixs_node *imported;
+  ixs_node *dst_k;
+
+  if (!init_session(&src_ctx, &src_s))
+    return;
+  if (!init_session(&dst_ctx, &dst_s)) {
+    destroy_session(src_ctx, &src_s);
+    return;
+  }
+  src_k = ixs_sym(&src_s, "K");
+  expr = ixs_div(&src_s, src_k, ixs_div(&src_s, src_k, ixs_int(&src_s, 32)));
+  imported = ixs_import_node(&dst_s, expr);
+  CHECK(imported && ixs_node_tag(imported) == IXS_PIECEWISE);
+  CHECK(imported && ixs_node_pw_value(imported, 0) == ixs_int(&dst_s, 32));
+  dst_k = ixs_sym(&dst_s, "K");
+  CHECK(ixs_is_domain_error(
+      ixs_subs(&dst_s, imported, dst_k, ixs_int(&dst_s, 0))));
+  destroy_session(dst_ctx, &dst_s);
+  destroy_session(src_ctx, &src_s);
+}
+
 int main(void) {
   test_same_store_structural_import();
   test_cross_store_import();
@@ -388,6 +416,7 @@ int main(void) {
   test_import_null_inputs();
   test_import_many_failure_preserves_out();
   test_import_many();
+  test_import_preserves_erased_domain();
 
   if (failures != 0) {
     fprintf(stderr, "test_import: %d failure(s)\n", failures);

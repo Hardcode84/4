@@ -1559,6 +1559,42 @@ static void test_node_limit_rejected_without_pollution(void) {
   destroy_session(ctx, &s);
 }
 
+static void test_roundtrip_preserves_erased_domain(void) {
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  ixs_node *k;
+  ixs_node *expr;
+  ixs_node *decoded;
+
+  if (!init_session(&ctx, &s))
+    return;
+  buf.fail_after = (size_t)-1;
+  k = ixs_sym(&s, "K");
+  expr = ixs_div(&s, k, ixs_div(&s, k, ixs_int(&s, 32)));
+  CHECK(expr && ixs_node_tag(expr) == IXS_PIECEWISE);
+  CHECK(serialize_to_buffer(&s, expr, &buf));
+  decoded = deserialize_from_buffer(&s, &buf);
+  CHECK(decoded == expr);
+  CHECK(ixs_is_domain_error(ixs_subs(&s, decoded, k, ixs_int(&s, 0))));
+  ixs_session_clear_errors(&s);
+
+  {
+    ixs_node *t0 = ixs_sym(&s, "t0");
+    ixs_node *t1 = ixs_sym(&s, "t1");
+    ixs_node *modulus = ixs_div(&s, k, ixs_int(&s, 32));
+    ixs_node *multiple = ixs_mul(&s, ixs_int(&s, 8), ixs_mul(&s, k, t1));
+    expr = ixs_mod(&s, ixs_add(&s, t0, multiple), modulus);
+    CHECK(expr && ixs_node_tag(expr) == IXS_PIECEWISE);
+    CHECK(serialize_to_buffer(&s, expr, &buf));
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded == expr);
+    CHECK(ixs_is_domain_error(ixs_subs(&s, decoded, k, ixs_int(&s, 0))));
+  }
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
 int main(void) {
   test_roundtrip_deterministic();
   test_associative_permutation_encoding();
@@ -1581,6 +1617,7 @@ int main(void) {
 #endif
   test_nonpositive_mod_rejected_on_deserialize();
   test_node_limit_rejected_without_pollution();
+  test_roundtrip_preserves_erased_domain();
   if (failures) {
     fprintf(stderr, "%d serialize test(s) failed\n", failures);
     return 1;

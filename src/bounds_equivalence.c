@@ -1384,15 +1384,8 @@ static bool equivalence_low_bits_domain(equivalence_state *state,
   return status == IXS_ALGEBRA_MATCH;
 }
 
-/* The original outer
- * operations own the
- * domain
- * certificate.
- * Projection never
- * substitutes a
- * normalized root
- * for that source
- * obligation. */
+/* The original outer operations own the domain certificate. Projection never
+ * substitutes a normalized root for that source obligation. */
 static ixs_check_result equivalence_low_bits(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {

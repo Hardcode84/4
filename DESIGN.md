@@ -130,9 +130,13 @@ reusable session.
 
 Node construction and simplification are **one logical layer**: every
 constructor (e.g., `ixs_add`, `ixs_floor`) applies canonicalization rules
-before hash-consing. This is intentional — it ensures all nodes in the DAG
-are always in canonical form. `ixs_simplify()` runs an additional top-down
-pass that leverages assumptions for bound-dependent rewrites.
+before hash-consing. Public, parser, expansion, and substitution entry points
+also preserve the domain of every eagerly evaluated source operand. When a
+canonical rewrite removes a possibly partial operand, the source boundary
+retains that exact obligation in a two-arm Piecewise carrier whose values are
+identical. `ixs_simplify()` runs an additional top-down pass that uses
+assumptions to discharge the carrier or return a domain error when the
+obligation is false.
 
 **Implementation dependency split**: Public constructors (in `ctx.c`) call
 rule functions (in `simplify.c`), which call internal node allocators (in
@@ -730,24 +734,33 @@ The parser collects each associative chain or argument list and calls its
 ### Layer 4: Simplification Engine
 
 Simplification is **table-driven**. Each node type has an ordered array of
-`ixs_rule` entries (function pointer, name, needs-bounds flag). The
+`ixs_rule` entries (function pointer, name, needs-bounds flag,
+erases-domain flag). The
 `try_rules()` dispatch walks the array, tries each rule, records an
 `IXS_STATS` hit when one fires, and returns. Rules that require bounds
 are skipped when `bnds == NULL`.
 
 Each `simp_*` constructor (e.g., `simp_floor`, `simp_mod`) applies the
 fast pre-checks (sentinel propagation, const fold, identity) directly,
-constructs the node, then calls `try_rules(ctx, NULL, node, *_rules)`.
+constructs the node, then calls `try_rules(ctx, NULL, node, *_rules, ...)`.
 For the top-down rewrite pass, each `simp_*_bnds` variant takes an
 optional `ixs_bounds *` and calls `try_rules(ctx, bnds, ...)` so
 bounds-dependent rules also fire. `rewrite_impl` is just:
 ```c
 case IXS_FLOOR:
-    return simp_floor_bnds(ctx, bnds, rewrite(ctx, arg, ...));
+    return simp_floor_bnds_strict(ctx, bnds, rewrite(ctx, arg, ...));
 case IXS_TRUNC:
     return simp_trunc_bnds(ctx, bnds, rewrite(ctx, arg, ...));
 ```
 There is one rule table per type, used by both construction and rewriting.
+
+Internal proof builders use the canonical constructors directly. Source
+rebuilders use the strict variants, which add a carrier only when the selected
+rule or arithmetic cancellation actually removes a non-total child. A carrier
+has the raw form `Piecewise((value, witness), (value, True))`; first-match
+evaluation forces `witness` without changing `value`. Multiple obligations are
+combined in one eager comparison condition. Import copies this ordinary DAG
+shape, and serialization preserves it rather than re-running the erasing rule.
 
 **Termination guarantee**: The top-down rewrite pass in `ixs_simplify()` runs
 a fixed-point loop with a configurable iteration limit (default 64). Each
@@ -987,8 +1000,8 @@ Mod(c*x, c*m)       where c > 1         → c*Mod(x, m)
 (reverse direction, in simp_add — recognize_mod)
 c*E - c*N*floor(E/N)                    → c*Mod(E, N)
 c*N*ceil(E/N) - c*E                     → c*Mod(-E, N)
-c*E - c*D*floor(E/D)                    → c*Mod(E, D)     (D symbolic)
-c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
+c*E - c*D*floor(E/D)                    → c*Mod(E, D)     (D positive literal)
+c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D positive literal)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
@@ -1087,7 +1100,7 @@ the result is `IXS_ERROR` (no defined value).
 Piecewise((v, True))                → v
 Piecewise((v, False), rest...)      → Piecewise(rest...)
 Piecewise((v, c), (v, d), rest...)  → Piecewise((v, c | d), rest...)
-                                      (same value, merge conditions)
+                                      when c and d are structurally total
 Piecewise((a, c), (b, True))       where c evaluates to True → a
                                     where c evaluates to False → b
 
@@ -1104,6 +1117,10 @@ enclosing operation is a simple linear function of the Piecewise result
 simplify independently. Do NOT lift Piecewise outward (e.g., wrap an entire
 Add in Piecewise) as that duplicates the non-Piecewise terms and causes
 expression blowup.
+
+Equal-value conditions are not merged when either condition is partial. The
+original Piecewise evaluates them in order, while eager `c | d` would evaluate
+both and could introduce a domain error on a branch the source never reaches.
 
 **Branch-aware bounds**: During bounds-aware rewriting, each non-default
 Piecewise branch gets a forked copy of the current bounds augmented with

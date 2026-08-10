@@ -33,6 +33,8 @@ simp_assumption_cache_stats(const ixs_session_impl *impl,
 
 IXS_STATIC ixs_node *simp_add(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_add_strict(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_mul_strict(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 /* Optional proof construction: arithmetic overflow is reported separately
  * without appending a diagnostic; NULL with false still means allocation
  * failure. These retain the canonical smart-constructor semantics. */
@@ -43,12 +45,17 @@ IXS_STATIC ixs_node *simp_try_mul(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
 IXS_STATIC ixs_node *simp_neg(ixs_ctx *ctx, ixs_node *a);
 IXS_STATIC ixs_node *simp_sub(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_sub_strict(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_div_strict(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_try_div(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
                                   bool *unrepresentable);
 IXS_STATIC ixs_node *simp_floor(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_ceil(ixs_ctx *ctx, ixs_node *x);
+IXS_STATIC ixs_node *simp_floor_strict(ixs_ctx *ctx, ixs_node *x);
+IXS_STATIC ixs_node *simp_ceil_strict(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_trunc(ixs_ctx *ctx, ixs_node *x);
 IXS_STATIC ixs_node *simp_mod(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
+IXS_STATIC ixs_node *simp_mod_strict(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_max(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_min(ixs_ctx *ctx, ixs_node *a, ixs_node *b);
 IXS_STATIC ixs_node *simp_xor(ixs_ctx *ctx, ixs_node *a, ixs_node *b);

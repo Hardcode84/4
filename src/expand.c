@@ -250,7 +250,7 @@ static ixs_node *mul_expand(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
       scaled = mul_expand(ctx, a->u.add.terms[i].coeff, term);
       if (!scaled || ixs_node_is_sentinel(scaled))
         return scaled;
-      result = simp_add(ctx, result, scaled);
+      result = simp_add_strict(ctx, result, scaled);
       if (!result || ixs_node_is_sentinel(result))
         return result;
     }
@@ -258,7 +258,7 @@ static ixs_node *mul_expand(ixs_ctx *ctx, ixs_node *a, ixs_node *b) {
   }
   if (b->tag == IXS_ADD)
     return mul_expand(ctx, b, a);
-  return simp_mul(ctx, a, b);
+  return simp_mul_strict(ctx, a, b);
 }
 
 /* Every representable positive exponent takes logarithmic multiply steps. */
@@ -297,7 +297,7 @@ static ixs_node *expand_negative_power(ixs_ctx *ctx, ixs_node *result,
   if (!one)
     return NULL;
   power = ixs_node_mul(ctx, one, 1, &factor);
-  return power ? simp_mul(ctx, result, power) : NULL;
+  return power ? simp_mul_strict(ctx, result, power) : NULL;
 }
 
 static ixs_node *expand_build_add(ixs_ctx *ctx, expand_state *state,
@@ -317,7 +317,7 @@ static ixs_node *expand_build_add(ixs_ctx *ctx, expand_state *state,
     scaled = mul_expand(ctx, coeff, term);
     if (!scaled || ixs_node_is_sentinel(scaled))
       return scaled;
-    result = simp_add(ctx, result, scaled);
+    result = simp_add_strict(ctx, result, scaled);
     if (!result || ixs_node_is_sentinel(result))
       return result;
   }
@@ -362,7 +362,7 @@ static ixs_node *expand_build_binary(ixs_ctx *ctx, expand_state *state,
   if (!rhs || ixs_node_is_sentinel(rhs))
     return rhs;
   if (node->tag == IXS_MOD)
-    return simp_mod(ctx, lhs, rhs);
+    return simp_mod_strict(ctx, lhs, rhs);
   return simp_cmp(ctx, lhs, node->u.binary.cmp_op, rhs);
 }
 
@@ -466,9 +466,9 @@ static ixs_node *expand_build_simple_node(ixs_ctx *ctx, expand_state *state,
     if (!arg || ixs_node_is_sentinel(arg))
       return arg;
     if (node->tag == IXS_FLOOR)
-      return simp_floor(ctx, arg);
+      return simp_floor_strict(ctx, arg);
     if (node->tag == IXS_CEIL)
-      return simp_ceil(ctx, arg);
+      return simp_ceil_strict(ctx, arg);
     return simp_trunc(ctx, arg);
   case IXS_MOD:
   case IXS_CMP:

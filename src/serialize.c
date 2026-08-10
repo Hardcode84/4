@@ -1405,7 +1405,26 @@ static ixs_node *decode_build_pw(ixs_ctx *ctx, const decode_node *node,
     values[i] = built[node->u.pw.cases[i].value];
     conds[i] = built[node->u.pw.cases[i].cond];
   }
+  if (node->u.pw.ncases == 2u && values[0] == values[1] &&
+      ixs_node_is_known_true(conds[1])) {
+    ixs_pwcase carrier[2];
+    carrier[0].value = values[0];
+    carrier[0].cond = conds[0];
+    carrier[1].value = values[1];
+    carrier[1].cond = conds[1];
+    return ixs_node_pw(ctx, 2u, carrier);
+  }
   return simp_pw(ctx, node->u.pw.ncases, values, conds);
+}
+
+static ixs_node *decode_build_mod(ixs_ctx *ctx, const decode_node *node,
+                                  ixs_node *const *built) {
+  ixs_node *lhs = built[node->u.binary.lhs];
+  ixs_node *rhs = built[node->u.binary.rhs];
+  ixs_mod_divisor_class divisor = ixs_node_classify_mod_divisor(rhs);
+  if (divisor == IXS_MOD_DIVISOR_ZERO || divisor == IXS_MOD_DIVISOR_NEGATIVE)
+    return simp_mod(ctx, lhs, rhs);
+  return ixs_node_binary(ctx, IXS_MOD, lhs, rhs, (ixs_cmp_op)0);
 }
 
 static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
@@ -1471,7 +1490,7 @@ static ixs_node *decode_build_node(ixs_ctx *ctx, const decode_node *nodes,
   case WIRE_TRUNC:
     return ixs_node_trunc(ctx, built[node->u.unary.arg]);
   case WIRE_MOD:
-    return simp_mod(ctx, built[node->u.binary.lhs], built[node->u.binary.rhs]);
+    return decode_build_mod(ctx, node, built);
   case WIRE_PIECEWISE:
     return decode_build_pw(ctx, node, built);
   case WIRE_MAX:

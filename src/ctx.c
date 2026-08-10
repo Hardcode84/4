@@ -341,7 +341,7 @@ ixs_node *ixs_sym(ixs_session *s, const char *name) {
 ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_add(ctx, a, b);
+  ixs_node *result = simp_add_strict(ctx, a, b);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -349,7 +349,7 @@ ixs_node *ixs_add(ixs_session *s, ixs_node *a, ixs_node *b) {
 ixs_node *ixs_mul(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_mul(ctx, a, b);
+  ixs_node *result = simp_mul_strict(ctx, a, b);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -365,7 +365,7 @@ ixs_node *ixs_neg(ixs_session *s, ixs_node *a) {
 ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_sub(ctx, a, b);
+  ixs_node *result = simp_sub_strict(ctx, a, b);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -373,7 +373,7 @@ ixs_node *ixs_sub(ixs_session *s, ixs_node *a, ixs_node *b) {
 ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_div(ctx, a, b);
+  ixs_node *result = simp_div_strict(ctx, a, b);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -381,7 +381,7 @@ ixs_node *ixs_div(ixs_session *s, ixs_node *a, ixs_node *b) {
 ixs_node *ixs_floor(ixs_session *s, ixs_node *x) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_floor(ctx, x);
+  ixs_node *result = simp_floor_strict(ctx, x);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -389,7 +389,7 @@ ixs_node *ixs_floor(ixs_session *s, ixs_node *x) {
 ixs_node *ixs_ceil(ixs_session *s, ixs_node *x) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_ceil(ctx, x);
+  ixs_node *result = simp_ceil_strict(ctx, x);
   ixs_session_unbind(&binding);
   return result;
 }
@@ -405,7 +405,7 @@ ixs_node *ixs_trunc(ixs_session *s, ixs_node *x) {
 ixs_node *ixs_mod(ixs_session *s, ixs_node *a, ixs_node *b) {
   ixs_session_binding binding;
   ixs_ctx *ctx = ixs_session_bind(&binding, s);
-  ixs_node *result = simp_mod(ctx, a, b);
+  ixs_node *result = simp_mod_strict(ctx, a, b);
   ixs_session_unbind(&binding);
   return result;
 }
