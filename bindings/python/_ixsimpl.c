@@ -918,7 +918,7 @@ static PyObject *Expr_get_tag(ExprObject *self, void *Py_UNUSED(closure)) {
 }
 
 static PyObject *Expr_get_node_ptr(ExprObject *self, void *Py_UNUSED(closure)) {
-  return PyLong_FromVoidPtr(self->node);
+  return PyLong_FromVoidPtr((void *)self->node);
 }
 
 static PyObject *Expr_get_nchildren(ExprObject *self,
