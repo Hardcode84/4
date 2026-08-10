@@ -1271,11 +1271,15 @@ layout, load factor, and allocation remain consumer-owned.
   `128+64*u+w` and `128+2*(64*u+w)` without requiring independent ranges for
   `u` and `w`. Rational overflow or an unrepresentable inverse conservatively
   skips the proportional alias.
-- **Nonzero facts**: normalized `expr != 0` assumptions are retained in a
-  pointer-keyed expression set. The set is copied by bounds forks and fact
-  substitution, so reciprocal guards can use both incoming disequalities and
-  branch-local conditions. A direct zero range for the same expression is a
-  detected contradiction.
+- **Nonzero facts**: normalized `expr != 0` assumptions are retained in dense
+  insertion order. Up to four entries use a bounded inline scan. The fifth
+  creates an 8-slot open-addressed pointer index, which doubles before
+  exceeding 75% load for expected O(1) membership. Index preparation precedes
+  vector growth, and neither publishes on failure. Bounds forks copy the dense
+  vector and then
+  its index, and fact substitution retains the same order. Reciprocal guards
+  can therefore use incoming disequalities and branch-local conditions. A
+  direct zero range for the same expression is a detected contradiction.
 - **Contradiction cache**: the detected-empty result is cached until any bound,
   congruence, bit, nonzero, or expression-range mutation. Query hits are O(1);
   a miss scans unique variables, expressions, and exclusions once.

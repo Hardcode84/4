@@ -13,6 +13,7 @@
 #include "bounds_query.h"
 #include "bounds_store.h"
 #include "division_algebra.h"
+#include "hash.h"
 #include "interval.h"
 #include "low_bits_algebra.h"
 #include "node.h"
@@ -666,6 +667,171 @@ static void test_bounds_expr_index_fork(void) {
 
   ixs_bounds_destroy(&child);
   ixs_bounds_destroy(&parent);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_collect_nonzero_collision(ixs_ctx *ctx, ixs_node **values,
+                                           size_t count) {
+  enum { CAPACITY = 16, CANDIDATES = 2048 };
+  size_t bucket = SIZE_MAX;
+  size_t found = 0;
+  size_t i;
+  for (i = 0; i < CANDIDATES && found < count; i++) {
+    char name[48];
+    ixs_node *candidate;
+    size_t candidate_bucket;
+    (void)snprintf(name, sizeof(name), "nonzero_collision_%lu",
+                   (unsigned long)i);
+    candidate = ixs_sym(ctx, name);
+    candidate_bucket = ixs_hash_ptr(candidate) & (CAPACITY - 1u);
+    if (bucket == SIZE_MAX)
+      bucket = candidate_bucket;
+    if (candidate_bucket == bucket)
+      values[found++] = candidate;
+  }
+  CHECK(found == count);
+}
+
+static void test_bounds_nonzero_index_growth_oom_and_fork(void) {
+  enum { COLLISIONS = 8 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_arena_mark mark;
+  ixs_bounds bounds;
+  ixs_bounds child;
+  ixs_bounds small;
+  ixs_node *values[COLLISIONS];
+  ixs_node **saved_values;
+  size_t *saved_index;
+  size_t initial_slot;
+  size_t i;
+
+  test_collect_nonzero_collision(ctx, values, COLLISIONS);
+  CHECK(ixs_bounds_init(&bounds, scratch));
+  for (i = 0; i < 4u; i++)
+    CHECK(bounds_store_add_nonzero(&bounds, values[i]));
+  CHECK(bounds.nnonzero == 4u && bounds.nonzero_cap == 4u);
+  CHECK(bounds.nonzero_index == NULL && bounds.nonzero_index_cap == 0u);
+
+  CHECK(!ixs_bounds_has_empty(&bounds));
+  CHECK(bounds.empty_cache_valid);
+  saved_values = bounds.nonzero;
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(!bounds_store_add_nonzero(&bounds, values[4]));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(bounds.oom && !bounds.empty_cache_valid);
+  CHECK(bounds.nnonzero == 4u && bounds.nonzero == saved_values);
+  CHECK(bounds.nonzero_index == NULL && bounds.nonzero_index_cap == 0u);
+  bounds.oom = false;
+
+  CHECK(!ixs_bounds_has_empty(&bounds));
+  ixs_arena_set_fail_after(scratch, 1);
+  CHECK(!bounds_store_add_nonzero(&bounds, values[4]));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(bounds.oom && !bounds.empty_cache_valid);
+  CHECK(bounds.nnonzero == 4u && bounds.nonzero == saved_values);
+  CHECK(bounds.nonzero_index == NULL && bounds.nonzero_index_cap == 0u);
+  bounds.oom = false;
+
+  CHECK(bounds_store_add_nonzero(&bounds, values[4]));
+  CHECK(bounds.nnonzero == 5u && bounds.nonzero_cap == 8u);
+  CHECK(bounds.nonzero != saved_values);
+  CHECK(bounds.nonzero_index != NULL && bounds.nonzero_index_cap == 8u);
+  initial_slot = ixs_hash_ptr(values[0]) & 7u;
+  for (i = 0; i < 5u; i++)
+    CHECK(bounds.nonzero_index[(initial_slot + i) & 7u] == i + 1u);
+
+  CHECK(bounds_store_add_nonzero(&bounds, values[5]));
+  saved_values = bounds.nonzero;
+  saved_index = bounds.nonzero_index;
+  CHECK(!ixs_bounds_has_empty(&bounds));
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(!bounds_store_add_nonzero(&bounds, values[6]));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(bounds.oom && !bounds.empty_cache_valid);
+  CHECK(bounds.nnonzero == 6u && bounds.nonzero == saved_values);
+  CHECK(bounds.nonzero_index == saved_index && bounds.nonzero_index_cap == 8u);
+  bounds.oom = false;
+
+  CHECK(bounds_store_add_nonzero(&bounds, values[6]));
+  CHECK(bounds.nnonzero == 7u && bounds.nonzero == saved_values);
+  CHECK(bounds.nonzero_index != saved_index && bounds.nonzero_index_cap == 16u);
+  initial_slot = ixs_hash_ptr(values[0]) & 15u;
+  for (i = 0; i < 7u; i++)
+    CHECK(bounds.nonzero_index[(initial_slot + i) & 15u] == i + 1u);
+  CHECK(bounds_store_contains_nonzero(&bounds, values[6]));
+  CHECK(!bounds_store_contains_nonzero(&bounds, values[7]));
+
+  CHECK(!ixs_bounds_has_empty(&bounds));
+  CHECK(!bounds_store_add_nonzero(&bounds, values[6]));
+  CHECK(!bounds.oom && bounds.empty_cache_valid && bounds.nnonzero == 7u);
+
+  mark = ixs_arena_save(scratch);
+  CHECK(ixs_bounds_fork(&child, &bounds));
+  CHECK(child.nonzero != bounds.nonzero);
+  CHECK(child.nonzero_index != bounds.nonzero_index);
+  CHECK(child.nonzero_index_cap == bounds.nonzero_index_cap);
+  for (i = 0; i < bounds.nnonzero; i++)
+    CHECK(child.nonzero[i] == bounds.nonzero[i]);
+  CHECK(bounds_store_contains_nonzero(&child, values[6]));
+  CHECK(!bounds_store_contains_nonzero(&child, values[7]));
+  CHECK(bounds_store_add_nonzero(&child, values[7]));
+  CHECK(child.nnonzero == 8u && bounds.nnonzero == 7u);
+  ixs_bounds_destroy(&child);
+  ixs_arena_restore(scratch, mark);
+
+  mark = ixs_arena_save(scratch);
+  ixs_arena_set_fail_after(scratch, 2);
+  CHECK(!ixs_bounds_fork(&child, &bounds));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_restore(scratch, mark);
+  CHECK(bounds.nnonzero == 7u && bounds.nonzero_index_cap == 16u);
+
+  CHECK(ixs_bounds_init(&small, scratch));
+  for (i = 0; i < 4u; i++)
+    CHECK(bounds_store_add_nonzero(&small, values[i]));
+  mark = ixs_arena_save(scratch);
+  ixs_arena_set_fail_after(scratch, 2);
+  CHECK(ixs_bounds_fork(&child, &small));
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(child.nonzero_index == NULL && child.nonzero_index_cap == 0u);
+  ixs_bounds_destroy(&child);
+  ixs_arena_restore(scratch, mark);
+
+  ixs_bounds_destroy(&small);
+  ixs_bounds_destroy(&bounds);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_nonzero_index_present_and_absent(void) {
+  enum { FACT_COUNT = 128 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *values[FACT_COUNT];
+  ixs_node *absent = ixs_sym(ctx, "nonzero_index_absent");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  size_t i;
+
+  for (i = 0; i < FACT_COUNT; i++) {
+    char name[40];
+    (void)snprintf(name, sizeof(name), "nonzero_index_%lu", (unsigned long)i);
+    values[i] = ixs_sym(ctx, name);
+    CHECK(ixs_facts_assume_pred(facts,
+                                ixs_cmp(ctx, values[i], IXS_CMP_NE, zero)));
+    if (i == 63u || i == 127u) {
+      CHECK(facts->bounds.nnonzero == i + 1u);
+      CHECK(facts->bounds.nonzero_index != NULL);
+      CHECK(facts->bounds.nnonzero <= facts->bounds.nonzero_index_cap -
+                                          facts->bounds.nonzero_index_cap / 4u);
+      CHECK(test_ixs_check_defined_facts(facts, ixs_div(ctx, one, values[i])) ==
+            IXS_CHECK_TRUE);
+      CHECK(test_ixs_check_defined_facts(facts, ixs_div(ctx, one, absent)) ==
+            IXS_CHECK_UNKNOWN);
+    }
+  }
+  CHECK(bounds_store_contains_nonzero(&facts->bounds, values[127]));
+  CHECK(!bounds_store_contains_nonzero(&facts->bounds, absent));
   ixs_ctx_destroy(ctx);
 }
 
@@ -2031,11 +2197,7 @@ static void test_bounds_expr_override_invalidates_cache(void) {
 }
 
 static size_t test_expr_index_bucket(const ixs_node *expr, size_t capacity) {
-  uint64_t x = (uint64_t)(uintptr_t)expr;
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x & (capacity - 1u);
+  return ixs_hash_ptr(expr) & (capacity - 1u);
 }
 
 static void test_bounds_expr_index_collision(void) {
@@ -6121,6 +6283,8 @@ static void test_public_facts_closure_cache_hit_rejects_open_domain(void) {
   CHECK(closed->bounds.nexprs == before.nexprs);
   CHECK(closed->bounds.nonzero == before.nonzero);
   CHECK(closed->bounds.nnonzero == before.nnonzero);
+  CHECK(closed->bounds.nonzero_index == before.nonzero_index);
+  CHECK(closed->bounds.nonzero_index_cap == before.nonzero_index_cap);
   ixs_facts_closure_cache_stats(ctx, &stats);
   CHECK(stats.lookups == 2 && stats.hits == 1 && stats.stores == 1);
 
@@ -6216,6 +6380,8 @@ static void test_public_facts_assume_batch_mid_simplify_oom(void) {
   CHECK(failed->bounds.nonzero == before.nonzero);
   CHECK(failed->bounds.nnonzero == before.nnonzero);
   CHECK(failed->bounds.nonzero_cap == before.nonzero_cap);
+  CHECK(failed->bounds.nonzero_index == before.nonzero_index);
+  CHECK(failed->bounds.nonzero_index_cap == before.nonzero_index_cap);
   CHECK(failed->bounds.cache == before.cache);
   CHECK(failed->bounds.cache_cap == before.cache_cap);
   CHECK(failed->bounds.contradiction == before.contradiction);
@@ -11079,7 +11245,9 @@ static void check_bounds_payload_unchanged(const ixs_bounds *actual,
         actual->ndifferences == before->ndifferences);
   check_relation_payload_unchanged(&actual->relations, &before->relations);
   CHECK(actual->nonzero == before->nonzero &&
-        actual->nnonzero == before->nnonzero);
+        actual->nnonzero == before->nnonzero &&
+        actual->nonzero_index == before->nonzero_index &&
+        actual->nonzero_index_cap == before->nonzero_index_cap);
   CHECK(actual->contradiction == before->contradiction &&
         actual->oom == before->oom);
 }
@@ -11756,6 +11924,8 @@ int main(void) {
   /* Bounds: fork */
   test_bounds_fork();
   test_bounds_expr_index_fork();
+  test_bounds_nonzero_index_growth_oom_and_fork();
+  test_public_nonzero_index_present_and_absent();
   test_bounds_difference_fork();
   test_bounds_exact_fork();
   test_additive_row_ownership_and_extrema();

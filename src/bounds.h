@@ -99,9 +99,11 @@ typedef struct {
   size_t difference_var_cap;
   size_t difference_epoch;
   ixs_relation_algebra relations;
-  ixs_node **nonzero; /* expressions excluded from zero by NE predicates */
+  ixs_node **nonzero;    /* dense insertion order; first four scan directly */
+  size_t *nonzero_index; /* dense indices plus one after the fourth entry */
   size_t nnonzero;
   size_t nonzero_cap;
+  size_t nonzero_index_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
   size_t range_pw_depth;

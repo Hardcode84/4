@@ -6,11 +6,14 @@
 #include "bounds_range.h"
 #include "bounds_relation.h"
 #include "hash.h"
+#include <assert.h>
 #include <limits.h>
 #include <string.h>
 
 #define BOUNDS_VAR_INDEX_INIT_CAP 8u
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
+#define BOUNDS_NONZERO_INLINE_COUNT 4u
+#define BOUNDS_NONZERO_INDEX_INIT_CAP 8u
 #define BOUNDS_INIT_CAP 16u
 
 IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
@@ -35,8 +38,10 @@ IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->mod_inverse_watcher_cap = 0;
   b->mod_inverse_watch_visits = 0;
   b->nonzero = NULL;
+  b->nonzero_index = NULL;
   b->nnonzero = 0;
   b->nonzero_cap = 0;
+  b->nonzero_index_cap = 0;
   b->has_modrem = false;
   b->contradiction = false;
   b->semantic_changed = NULL;
@@ -98,6 +103,9 @@ IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst,
   dst->nnonzero = src->nnonzero;
   dst->nonzero_cap = src->nnonzero;
   dst->nonzero = NULL;
+  dst->nonzero_index = NULL;
+  dst->nonzero_index_cap =
+      src->nnonzero > BOUNDS_NONZERO_INLINE_COUNT ? src->nonzero_index_cap : 0;
   dst->has_modrem = src->has_modrem;
   dst->contradiction = src->contradiction;
   dst->semantic_changed = NULL;
@@ -183,6 +191,16 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
   if (!dst->nonzero)
     return false;
   memcpy(dst->nonzero, src->nonzero, src->nnonzero * sizeof(*src->nonzero));
+  if (src->nnonzero <= BOUNDS_NONZERO_INLINE_COUNT)
+    return true;
+  assert(src->nonzero_index != NULL && src->nonzero_index_cap != 0);
+  dst->nonzero_index = ixs_arena_alloc(
+      dst->scratch, dst->nonzero_index_cap * sizeof(*dst->nonzero_index),
+      sizeof(void *));
+  if (!dst->nonzero_index)
+    return false;
+  memcpy(dst->nonzero_index, src->nonzero_index,
+         dst->nonzero_index_cap * sizeof(*src->nonzero_index));
   return true;
 }
 
@@ -736,44 +754,121 @@ IXS_STATIC void bounds_store_add_expr_raw(ixs_bounds *b, ixs_node *expr,
   bounds_store_invalidate_reads(b);
 }
 
+static size_t bounds_nonzero_index_slot(const size_t *index, size_t capacity,
+                                        ixs_node *const *values,
+                                        const ixs_node *expr) {
+  size_t slot = ixs_hash_ptr(expr) & (capacity - 1u);
+  while (index[slot] && values[index[slot] - 1u] != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static size_t *bounds_nonzero_build_index(ixs_bounds *b, size_t capacity) {
+  size_t *index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  size_t i;
+  if (!index)
+    return NULL;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->nnonzero; i++) {
+    size_t slot =
+        bounds_nonzero_index_slot(index, capacity, b->nonzero, b->nonzero[i]);
+    index[slot] = i + 1u;
+  }
+  return index;
+}
+
+static bool bounds_nonzero_prepare_index(ixs_bounds *b, size_t count,
+                                         size_t **result,
+                                         size_t *result_capacity) {
+  size_t capacity = b->nonzero_index_cap;
+  *result = b->nonzero_index;
+  *result_capacity = capacity;
+  if (count <= BOUNDS_NONZERO_INLINE_COUNT ||
+      (capacity && count <= capacity - capacity / 4u))
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_NONZERO_INDEX_INIT_CAP;
+  if (capacity <= b->nonzero_index_cap ||
+      capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result = bounds_nonzero_build_index(b, capacity);
+  if (!*result)
+    return false;
+  *result_capacity = capacity;
+  return true;
+}
+
+static bool bounds_nonzero_prepare_values(ixs_bounds *b, size_t count,
+                                          ixs_node ***result,
+                                          size_t *result_capacity) {
+  size_t capacity = b->nonzero_cap;
+  *result = b->nonzero;
+  *result_capacity = capacity;
+  if (count <= capacity)
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_NONZERO_INLINE_COUNT;
+  if (capacity <= b->nonzero_cap || capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(**result), sizeof(void *));
+  if (!*result)
+    return false;
+  if (b->nnonzero)
+    memcpy(*result, b->nonzero, b->nnonzero * sizeof(**result));
+  *result_capacity = capacity;
+  return true;
+}
+
 IXS_STATIC bool bounds_store_contains_nonzero(const ixs_bounds *b,
                                               const ixs_node *expr) {
   size_t i;
+  size_t slot;
   if (!b || !expr)
     return false;
-  for (i = 0; i < b->nnonzero; i++) {
-    if (b->nonzero[i] == expr)
-      return true;
+  if (b->nnonzero <= BOUNDS_NONZERO_INLINE_COUNT) {
+    for (i = 0; i < b->nnonzero; i++) {
+      if (b->nonzero[i] == expr)
+        return true;
+    }
+    return false;
   }
-  return false;
+  assert(b->nonzero_index != NULL && b->nonzero_index_cap != 0);
+  slot = bounds_nonzero_index_slot(b->nonzero_index, b->nonzero_index_cap,
+                                   b->nonzero, expr);
+  return b->nonzero_index[slot] != 0;
 }
 
 IXS_STATIC bool bounds_store_add_nonzero(ixs_bounds *b, ixs_node *expr) {
-  ixs_node **grown;
-  size_t new_cap;
+  ixs_node **values;
+  size_t *index;
+  size_t count;
+  size_t index_capacity;
+  size_t value_capacity;
+  size_t slot;
   if (!b || !expr || b->oom || bounds_store_contains_nonzero(b, expr))
     return false;
   bounds_range_invalidate_empty(b);
-  if (b->nnonzero < b->nonzero_cap) {
-    b->nonzero[b->nnonzero++] = expr;
-    bounds_store_mark_semantic_changed(b);
-    return true;
-  }
-  new_cap = b->nonzero_cap ? b->nonzero_cap * 2u : 4u;
-  if (new_cap < b->nonzero_cap || new_cap > SIZE_MAX / sizeof(*b->nonzero)) {
+  if (b->nnonzero == SIZE_MAX) {
     b->oom = true;
     return false;
   }
-  grown = ixs_arena_alloc(b->scratch, new_cap * sizeof(*grown), sizeof(void *));
-  if (!grown) {
+  count = b->nnonzero + 1u;
+  if (!bounds_nonzero_prepare_index(b, count, &index, &index_capacity) ||
+      !bounds_nonzero_prepare_values(b, count, &values, &value_capacity)) {
     b->oom = true;
     return false;
   }
-  if (b->nnonzero)
-    memcpy(grown, b->nonzero, b->nnonzero * sizeof(*grown));
-  b->nonzero = grown;
-  b->nonzero_cap = new_cap;
-  b->nonzero[b->nnonzero++] = expr;
+  values[b->nnonzero] = expr;
+  if (count > BOUNDS_NONZERO_INLINE_COUNT) {
+    slot = bounds_nonzero_index_slot(index, index_capacity, values, expr);
+    assert(index[slot] == 0);
+    index[slot] = count;
+  }
+  b->nonzero = values;
+  b->nonzero_cap = value_capacity;
+  b->nonzero_index = index;
+  b->nonzero_index_cap = index_capacity;
+  b->nnonzero = count;
   bounds_store_mark_semantic_changed(b);
   return true;
 }
