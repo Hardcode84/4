@@ -1347,17 +1347,31 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   Initial storage is symbol-level in `ixs_var_bound`. Expression-level
   bitfacts are computed on demand for constants, symbols, comparisons,
   logical NOT, `ADD`, restricted `MUL`/`FLOOR`/`MOD`, and `AND`/`OR`/`XOR`.
-  Bitfacts and known stride share the private iterative query stack in
-  `query_walk.c`. Typed frames keep the expression pointer first; the stack
-  starts at 16 frames, doubles with checked arena growth at pointer alignment,
-  and rolls back one outer scratch mark. The structural driver owns only
-  push/pop, growth, and LIFO abort. Each consumer owns transfer values, fixed
-  `bounds_query` cache entry/finish policy, and final publication. Bitfacts
-  allocates its per-child result arrays while preparing supported nodes.
-  Query-stack push/pop is amortized O(1) and uses O(depth) scratch. Tracked
-  bitfacts and stride queries memoize shared nodes; their transfer functions
-  and fixed query cache determine total work. Neither walker has a semantic
-  depth ceiling.
+  Iterative bounds queries use the private structural stack in `query_walk.c`.
+  Typed frames keep the expression pointer first; storage starts at the
+  consumer's configured capacity, doubles with checked arena growth at pointer
+  alignment, and is zeroed before the expression is published. Bitfacts,
+  stride, residue, and interval queries start at 16 frames. Exact integer
+  proofs use 16 inline frames and grow on scratch. Definedness, predicate, and
+  AND-assumption walks start at 32 frames.
+
+  The structural driver owns push/pop, growth, and optional LIFO abort. Its
+  `run` entry owns one scratch mark; memo-first consumers use the mark-free
+  seeded driver inside a caller-owned mark. Definedness, predicate, and
+  AND-assumption walks allocate a per-query node-identity memo before their
+  stack. Exact integer proofs keep an inline 32-entry compound-key memo over
+  `(node, relation, modulus)`. Residue and interval walks use the central
+  `bounds_query` cache because their keys and values belong to that environment.
+  Local identity and compound memos share the stack's caller-owned mark and die
+  at its restore. The central cache is generation-scoped and owner-keyed; forks
+  share its query state while those keys isolate bounds owners and generations.
+
+  Consumers own transfer values, cache finish policy, transport status, and
+  final publication. Bitfacts allocates its per-child result arrays while
+  preparing supported nodes. Query-stack push/pop is amortized O(1) and uses
+  O(depth) scratch. Memoized walkers visit shared structural obligations once;
+  consumer transfer and cache policy determine their remaining work. No walker
+  stack imposes a fixed depth ceiling; consumer query budgets still apply.
   Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
   assumptions remain isolated.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
@@ -1372,8 +1386,8 @@ bounded iterative walker: `ixs_simplify`, `ixs_simplify_batch`, `ixs_check`,
 true/false node, or an AND tree whose leaves have those forms. True
 contributes no fact; false marks the bounds as contradictory. Supporting these
 constants preserves predicates that simplify before ingestion, such as
-`(x & 0) == 0`. The walker visits at most 1024 nodes per root and therefore does
-not consume one C call frame per nested conjunction.
+`(x & 0) == 0`. The iterative walker has no semantic depth ceiling and does not
+consume one C call frame per nested conjunction.
 
 OR, NOT, other node kinds, NULL or sentinel nodes, malformed CMP/AND nodes, and
 nodes from another context are rejected with an `assumptions:` diagnostic.
@@ -2401,8 +2415,9 @@ ixs_node *ixs_false(ixs_session *s);
 // Assumption roots must be CMP or canonical true/false nodes, or flat AND
 // nodes with those leaves, built in the same context. True is a no-op and
 // false is a contradiction. OR, NOT, malformed, NULL, sentinel, and other
-// roots are rejected atomically with an `assumptions:` diagnostic. Trees are walked with
-// a 1024-node limit per root. Pass NULL/0 for no assumptions.
+// roots are rejected atomically with an `assumptions:` diagnostic. Trees are
+// walked iteratively without a semantic depth ceiling. Pass NULL/0 for no
+// assumptions.
 // NOTE: if the fixed-point iteration limit is reached without convergence, the
 // current best result is returned and an error is appended to the session list.
 ixs_node *ixs_simplify(ixs_session *s, ixs_node *expr,
@@ -2936,10 +2951,10 @@ installed; pinned versions live in `scripts/requirements-check.txt`).
 
 Known blind spots, by design: calls through function pointers and calls
 to external (libc) functions are assumed scan-free, so walker callbacks
-must honor the hot contract on their own. The bitfacts and stride advance
-and abort callbacks used by `query_walk.c` are explicit `/* hot */` roots;
-the generic callback result contains structural progress or storage failure
-only, not proof values, cache publication, or transport policy.
+must honor the hot contract on their own. Advance and abort callbacks used by
+`query_walk.c` are explicit `/* hot */` roots. The generic callback result
+contains structural progress, consumer stop, or storage failure. The driver
+does not classify or publish proof values, cache entries, or transport status.
 Function-like macros are modeled as pseudo-functions. Their bodies are
 re-parsed for calls, so scans reached through a macro are caught; same-name
 macro variants

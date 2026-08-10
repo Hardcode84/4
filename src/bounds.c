@@ -5361,21 +5361,13 @@ typedef struct {
 
 typedef struct {
   ixs_bounds *bounds;
-  bounds_exact_proof_frame *frames;
-  size_t depth;
-  size_t capacity;
+  ixs_query_walk walk;
   bounds_exact_proof_memo memo;
   bool child_result;
-  bool invalid;
+  bool stack_oom;
   bounds_exact_proof_frame inline_frames[16];
   bounds_exact_proof_memo_entry inline_memo[32];
 } bounds_exact_proof_query;
-
-typedef enum {
-  BOUNDS_EXACT_PROOF_STEP_ADVANCED,
-  BOUNDS_EXACT_PROOF_STEP_OOM,
-  BOUNDS_EXACT_PROOF_STEP_INVALID
-} bounds_exact_proof_step;
 
 static size_t bounds_exact_proof_hash(ixs_node *expr,
                                       bounds_exact_proof_kind kind,
@@ -5443,72 +5435,50 @@ bounds_exact_proof_memo_get(bounds_exact_proof_query *query, ixs_node *expr,
   return &query->memo.entries[slot];
 }
 
-static bool bounds_exact_proof_stack_grow(bounds_exact_proof_query *query) {
-  size_t capacity = query->capacity ? query->capacity * 2u : 32u;
-  size_t old_bytes;
-  size_t new_bytes;
-  bounds_exact_proof_frame *grown;
-  if (capacity <= query->capacity ||
-      capacity > SIZE_MAX / sizeof(*query->frames))
-    return false;
-  old_bytes = query->capacity * sizeof(*query->frames);
-  new_bytes = capacity * sizeof(*query->frames);
-  grown = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
-                         new_bytes, sizeof(void *));
-  if (!grown)
-    return false;
-  query->frames = grown;
-  query->capacity = capacity;
-  return true;
-}
-
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_push(bounds_exact_proof_query *query, ixs_node *expr,
                         bounds_exact_proof_kind kind, int64_t modulus) {
   bounds_exact_proof_memo_entry *entry;
   bounds_exact_proof_frame *frame;
+  ixs_query_walk_step step;
   if (!expr || (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0)) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   entry = bounds_exact_proof_memo_get(query, expr, kind, modulus, true);
   if (!entry)
-    return BOUNDS_EXACT_PROOF_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   if (entry->active) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   if (entry->complete) {
     query->child_result = entry->result;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
-  if (query->depth == query->capacity && !bounds_exact_proof_stack_grow(query))
-    return BOUNDS_EXACT_PROOF_STEP_OOM;
-  frame = &query->frames[query->depth++];
-  memset(frame, 0, sizeof(*frame));
-  frame->expr = expr;
+  step = ixs_query_walk_push(&query->walk, expr);
+  if (step != IXS_QUERY_WALK_ADVANCED)
+    return step;
+  frame = IXS_QUERY_WALK_TOP(&query->walk);
   frame->kind = kind;
   frame->modulus = modulus;
   frame->stage = BOUNDS_EXACT_PROOF_INITIAL;
   entry->active = true;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_complete(bounds_exact_proof_query *query, bool result) {
-  bounds_exact_proof_frame *frame = &query->frames[query->depth - 1u];
+  bounds_exact_proof_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
   bounds_exact_proof_memo_entry *entry = bounds_exact_proof_memo_get(
       query, frame->expr, frame->kind, frame->modulus, false);
   if (!entry || !entry->active) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   entry->result = result;
   entry->active = false;
   entry->complete = true;
-  query->depth--;
+  IXS_QUERY_WALK_POP(&query->walk);
   query->child_result = result;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
@@ -5519,7 +5489,7 @@ static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
   return *q > 0;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_divisible_after_add(bounds_exact_proof_query *query,
                                        bounds_exact_proof_frame *frame) {
   ixs_bitfacts bits;
@@ -5530,40 +5500,37 @@ bounds_exact_proof_divisible_after_add(bounds_exact_proof_query *query,
         (bits.known_zero & mask) == mask)
       return bounds_exact_proof_complete(query, true);
     if (query->bounds->oom)
-      return BOUNDS_EXACT_PROOF_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
   }
   return bounds_exact_proof_complete(query, false);
 }
 
-static bounds_exact_proof_step
-bounds_exact_proof_start_integer_mul(bounds_exact_proof_query *query,
-                                     bounds_exact_proof_frame *frame) {
+static ixs_query_walk_step
+bounds_exact_proof_start_integer_mul(bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
   int64_t p;
   int64_t q;
   int64_t divisor;
   if (!bounds_exact_proof_rational(node->u.mul.coeff, &p, &q) ||
       (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   frame->index = 0;
   if (q == 1) {
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   divisor = ixs_gcd(p, q);
   if (divisor <= 0 || q % divisor != 0) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   frame->denominator = q / divisor;
   frame->denominator_cancelled = frame->denominator == 1;
   frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
                                      bounds_exact_proof_frame *frame) {
   int64_t p;
@@ -5571,8 +5538,7 @@ bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
   ixs_node *node = frame->expr;
   if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
       (node->u.add.nterms != 0 && !node->u.add.terms)) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   (void)p;
   if (q != 1)
@@ -5580,10 +5546,10 @@ bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
         query, bounds_add_known_divisible(query->bounds, node, 1));
   frame->index = 0;
   frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
                                  bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5591,7 +5557,7 @@ bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
     return bounds_exact_proof_complete(query, true);
   switch (node->tag) {
   case IXS_MUL:
-    return bounds_exact_proof_start_integer_mul(query, frame);
+    return bounds_exact_proof_start_integer_mul(frame);
   case IXS_ADD:
     return bounds_exact_proof_start_integer_add(query, frame);
   case IXS_MAX:
@@ -5600,24 +5566,21 @@ bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
   case IXS_AND:
   case IXS_OR:
     if (node->u.assoc.nargs < 2 || !node->u.assoc.args) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->index = 0;
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   case IXS_PIECEWISE:
     if (node->u.pw.ncases == 0 || !node->u.pw.cases) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->index = 0;
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   case IXS_MOD:
     if (!node->u.binary.lhs || !node->u.binary.rhs) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS;
     return bounds_exact_proof_push(query, node->u.binary.lhs,
@@ -5627,7 +5590,7 @@ bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
   }
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_start_divisible_add(bounds_exact_proof_query *query,
                                        bounds_exact_proof_frame *frame) {
   int64_t p;
@@ -5635,40 +5598,38 @@ bounds_exact_proof_start_divisible_add(bounds_exact_proof_query *query,
   ixs_node *node = frame->expr;
   if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
       (node->u.add.nterms != 0 && !node->u.add.terms)) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   if (q != 1) {
     if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
       return bounds_exact_proof_complete(query, true);
     if (query->bounds->oom)
-      return BOUNDS_EXACT_PROOF_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
     return bounds_exact_proof_divisible_after_add(query, frame);
   }
   if (p % frame->modulus != 0)
     return bounds_exact_proof_divisible_after_add(query, frame);
   frame->index = 0;
   frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_start_divisible_mul(bounds_exact_proof_query *query,
                                        bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
   if (!node->u.mul.coeff || node->u.mul.coeff->tag != IXS_INT ||
       (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   if (node->u.mul.coeff->u.ival == 0)
     return bounds_exact_proof_complete(query, true);
   frame->index = 0;
   frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN;
-  return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
                                    bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5689,7 +5650,7 @@ bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
         (bits.known_zero & mask) == mask)
       return bounds_exact_proof_complete(query, true);
     if (query->bounds->oom)
-      return BOUNDS_EXACT_PROOF_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
   }
   switch (node->tag) {
   case IXS_INT:
@@ -5697,8 +5658,7 @@ bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
                                        node->u.ival % frame->modulus == 0);
   case IXS_SYM:
     if (!node->u.name) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     return bounds_exact_proof_complete(
         query,
@@ -5710,18 +5670,17 @@ bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
   case IXS_MAX:
   case IXS_MIN:
     if (node->u.assoc.nargs == 0 || !node->u.assoc.args) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->index = 0;
     frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   default:
     return bounds_exact_proof_complete(query, false);
   }
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5733,9 +5692,8 @@ bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
     if (!node->u.mul.factors[frame->index].base ||
         node->u.mul.factors[frame->index].exp <= 0) {
       if (!node->u.mul.factors[frame->index].base)
-        query->invalid = true;
-      return query->invalid ? BOUNDS_EXACT_PROOF_STEP_INVALID
-                            : bounds_exact_proof_complete(query, false);
+        return IXS_QUERY_WALK_STOP;
+      return bounds_exact_proof_complete(query, false);
     }
     frame->index++;
     return bounds_exact_proof_push(query,
@@ -5750,18 +5708,18 @@ bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
       frame->denominator_cancelled = true;
       frame->index++;
       frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-      return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+      return IXS_QUERY_WALK_ADVANCED;
     }
     known = bounds_known_residue_independent(
         query->bounds, base, (uint64_t)frame->denominator, &residue);
     if (query->bounds->oom)
-      return BOUNDS_EXACT_PROOF_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
     if (known) {
       if (residue == 0)
         frame->denominator_cancelled = true;
       frame->index++;
       frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-      return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+      return IXS_QUERY_WALK_ADVANCED;
     }
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
     return bounds_exact_proof_push(query, base, BOUNDS_EXACT_PROOF_INTEGER, 0);
@@ -5771,16 +5729,15 @@ bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
       return bounds_exact_proof_complete(query, false);
     frame->index++;
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-    return BOUNDS_EXACT_PROOF_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   if (frame->index == node->u.mul.nfactors)
     return bounds_exact_proof_complete(query, frame->denominator_cancelled);
   if (!node->u.mul.factors[frame->index].base ||
       node->u.mul.factors[frame->index].exp <= 0) {
     if (!node->u.mul.factors[frame->index].base)
-      query->invalid = true;
-    return query->invalid ? BOUNDS_EXACT_PROOF_STEP_INVALID
-                          : bounds_exact_proof_complete(query, false);
+      return IXS_QUERY_WALK_STOP;
+    return bounds_exact_proof_complete(query, false);
   }
   if (frame->denominator_cancelled) {
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
@@ -5794,7 +5751,7 @@ bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
                                  frame->denominator);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5818,8 +5775,7 @@ bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
     int64_t q;
     int64_t divisor;
     if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     if (q == 1) {
       frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER;
@@ -5828,8 +5784,7 @@ bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
     }
     divisor = ixs_gcd(p, q);
     if (divisor <= 0 || q % divisor != 0) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE;
     return bounds_exact_proof_push(query, term->term,
@@ -5837,7 +5792,7 @@ bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
   }
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_integer_assoc(bounds_exact_proof_query *query,
                                         bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5846,15 +5801,14 @@ bounds_exact_proof_resume_integer_assoc(bounds_exact_proof_query *query,
   if (frame->index == node->u.assoc.nargs)
     return bounds_exact_proof_complete(query, true);
   if (!node->u.assoc.args[frame->index]) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   frame->index++;
   return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
                                  BOUNDS_EXACT_PROOF_INTEGER, 0);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
                                             bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5871,8 +5825,7 @@ bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
     ixs_node *value = node->u.pw.cases[frame->index].value;
     ixs_check_result truth = IXS_CHECK_UNKNOWN;
     if (!cond || !value) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     if (ixs_node_is_known_false(cond))
       truth = IXS_CHECK_FALSE;
@@ -5881,7 +5834,7 @@ bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
     else if (cond->tag == IXS_CMP)
       truth = ixs_bounds_check(query->bounds, cond);
     if (query->bounds->oom)
-      return BOUNDS_EXACT_PROOF_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
     if (truth == IXS_CHECK_FALSE) {
       frame->index++;
       continue;
@@ -5894,7 +5847,7 @@ bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
   return bounds_exact_proof_complete(query, frame->reachable);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_integer_mod(bounds_exact_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
   if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS) {
@@ -5907,7 +5860,7 @@ bounds_exact_proof_resume_integer_mod(bounds_exact_proof_query *query,
   return bounds_exact_proof_complete(query, query->child_result);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
                                         bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5925,20 +5878,18 @@ bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
     int64_t q;
     int64_t divisor;
     if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     if (q != 1) {
       if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
         return bounds_exact_proof_complete(query, true);
       if (query->bounds->oom)
-        return BOUNDS_EXACT_PROOF_STEP_OOM;
+        return IXS_QUERY_WALK_OOM;
       return bounds_exact_proof_divisible_after_add(query, frame);
     }
     divisor = ixs_gcd(p, frame->modulus);
     if (divisor <= 0 || frame->modulus % divisor != 0) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD;
     return bounds_exact_proof_push(query, term->term,
@@ -5947,7 +5898,7 @@ bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
   }
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
                                         bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5959,9 +5910,8 @@ bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
       const ixs_mulfactor *factor = &node->u.mul.factors[frame->index];
       if (!factor->base || factor->exp < 0) {
         if (!factor->base)
-          query->invalid = true;
-        return query->invalid ? BOUNDS_EXACT_PROOF_STEP_INVALID
-                              : bounds_exact_proof_complete(query, false);
+          return IXS_QUERY_WALK_STOP;
+        return bounds_exact_proof_complete(query, false);
       }
       frame->index++;
       return bounds_exact_proof_push(query, factor->base,
@@ -5969,8 +5919,7 @@ bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
     }
     divisor = ixs_gcd(node->u.mul.coeff->u.ival, frame->modulus);
     if (divisor <= 0 || frame->modulus % divisor != 0) {
-      query->invalid = true;
-      return BOUNDS_EXACT_PROOF_STEP_INVALID;
+      return IXS_QUERY_WALK_STOP;
     }
     frame->denominator = frame->modulus / divisor;
     if (frame->denominator == 1)
@@ -5994,7 +5943,7 @@ bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
                                  frame->denominator);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume_divisible_assoc(bounds_exact_proof_query *query,
                                           bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
@@ -6005,15 +5954,14 @@ bounds_exact_proof_resume_divisible_assoc(bounds_exact_proof_query *query,
   if (frame->index == node->u.assoc.nargs)
     return bounds_exact_proof_complete(query, true);
   if (!node->u.assoc.args[frame->index]) {
-    query->invalid = true;
-    return BOUNDS_EXACT_PROOF_STEP_INVALID;
+    return IXS_QUERY_WALK_STOP;
   }
   frame->index++;
   return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
                                  BOUNDS_EXACT_PROOF_DIVISIBLE, frame->modulus);
 }
 
-static bounds_exact_proof_step
+static ixs_query_walk_step
 bounds_exact_proof_resume(bounds_exact_proof_query *query,
                           bounds_exact_proof_frame *frame) {
   switch (frame->stage) {
@@ -6046,8 +5994,18 @@ bounds_exact_proof_resume(bounds_exact_proof_query *query,
   case BOUNDS_EXACT_PROOF_INITIAL:
     break;
   }
-  query->invalid = true;
-  return BOUNDS_EXACT_PROOF_STEP_INVALID;
+  return IXS_QUERY_WALK_STOP;
+}
+
+/* hot */
+static ixs_query_walk_step bounds_exact_proof_advance(void *state, void *top) {
+  bounds_exact_proof_query *query = state;
+  bounds_exact_proof_frame *frame = top;
+  if (frame->stage == BOUNDS_EXACT_PROOF_INITIAL)
+    return frame->kind == BOUNDS_EXACT_PROOF_INTEGER
+               ? bounds_exact_proof_start_integer(query, frame)
+               : bounds_exact_proof_start_divisible(query, frame);
+  return bounds_exact_proof_resume(query, frame);
 }
 
 /* Both proof relations are one iterative dependency graph.  The common small
@@ -6060,7 +6018,7 @@ static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
                                     int64_t modulus) {
   ixs_arena_mark mark;
   bounds_exact_proof_query query;
-  bounds_exact_proof_step step;
+  ixs_query_walk_step step;
   bool result = false;
   if (!b || !expr || b->oom ||
       (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0))
@@ -6078,33 +6036,26 @@ static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
   b->exact_proof_call_depth++;
   mark = ixs_arena_save(b->scratch);
   query.bounds = b;
-  query.frames = query.inline_frames;
-  query.depth = 0;
-  query.capacity = sizeof(query.inline_frames) / sizeof(query.inline_frames[0]);
+  query.stack_oom = false;
+  IXS_QUERY_WALK_INIT_INLINE(&query.walk, b->scratch, &query.stack_oom,
+                             bounds_exact_proof_frame, expr,
+                             query.inline_frames);
   query.memo.entries = query.inline_memo;
   query.memo.count = 0;
   query.memo.capacity =
       sizeof(query.inline_memo) / sizeof(query.inline_memo[0]);
   query.child_result = false;
-  query.invalid = false;
   memset(query.inline_memo, 0, sizeof(query.inline_memo));
   step = bounds_exact_proof_push(&query, expr, kind, modulus);
-  while (step == BOUNDS_EXACT_PROOF_STEP_ADVANCED && query.depth != 0) {
-    bounds_exact_proof_frame *frame = &query.frames[query.depth - 1u];
-    if (frame->stage == BOUNDS_EXACT_PROOF_INITIAL) {
-      step = frame->kind == BOUNDS_EXACT_PROOF_INTEGER
-                 ? bounds_exact_proof_start_integer(&query, frame)
-                 : bounds_exact_proof_start_divisible(&query, frame);
-    } else {
-      step = bounds_exact_proof_resume(&query, frame);
-    }
-  }
-  if (step == BOUNDS_EXACT_PROOF_STEP_OOM || b->oom) {
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    step = ixs_query_walk_drive(&query.walk, &query, bounds_exact_proof_advance,
+                                NULL);
+  if (step == IXS_QUERY_WALK_OOM || b->oom) {
     b->oom = true;
     bounds_query_note_transport(b->query_state, BOUNDS_QUERY_OUTCOME_OOM);
-  } else if (step == BOUNDS_EXACT_PROOF_STEP_INVALID || query.invalid) {
+  } else if (step == IXS_QUERY_WALK_STOP) {
     bounds_query_note_invalid(b->query_state);
-  } else if (query.depth == 0) {
+  } else {
     result = query.child_result;
   }
   ixs_arena_restore(b->scratch, mark);
@@ -6583,8 +6534,8 @@ typedef enum {
 } bounds_residue_stage;
 
 typedef struct {
-  ixs_bounds *bounds;
   ixs_node *expr;
+  ixs_bounds *bounds;
   uint64_t modulus;
   bounds_query_scope scope;
   bounds_residue_group *groups;
@@ -6607,47 +6558,27 @@ typedef struct {
 
 typedef struct {
   ixs_bounds *root;
-  bounds_residue_frame *frames;
-  size_t depth;
-  size_t capacity;
+  ixs_query_walk walk;
   uint64_t child_residue;
   bool child_success;
   bool proof_independent;
 } bounds_residue_query;
 
-static bool bounds_residue_push(bounds_residue_query *query, ixs_bounds *b,
-                                ixs_node *expr, uint64_t modulus) {
-  bounds_residue_frame *grown;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
+static ixs_query_walk_step bounds_residue_push(bounds_residue_query *query,
+                                               ixs_bounds *b, ixs_node *expr,
+                                               uint64_t modulus) {
+  bounds_residue_frame *frame;
+  ixs_query_walk_step step;
   if (!b || !expr || modulus == 0 || b->oom)
-    return false;
-  if (query->depth == query->capacity) {
-    capacity = query->capacity ? query->capacity * 2u : 16u;
-    if (capacity < query->capacity ||
-        capacity > SIZE_MAX / sizeof(*query->frames)) {
-      query->root->oom = true;
-      return false;
-    }
-    old_bytes = query->capacity * sizeof(*query->frames);
-    new_bytes = capacity * sizeof(*query->frames);
-    grown = ixs_arena_grow(query->root->scratch, query->frames, old_bytes,
-                           new_bytes, sizeof(void *));
-    if (!grown) {
-      query->root->oom = true;
-      return false;
-    }
-    query->frames = grown;
-    query->capacity = capacity;
-  }
-  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-  query->frames[query->depth].bounds = b;
-  query->frames[query->depth].expr = expr;
-  query->frames[query->depth].modulus = modulus;
-  query->frames[query->depth].stage = BOUNDS_RESIDUE_INITIAL;
-  query->depth++;
-  return true;
+    return b && b->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_STOP;
+  step = ixs_query_walk_push(&query->walk, expr);
+  if (step != IXS_QUERY_WALK_ADVANCED)
+    return step;
+  frame = IXS_QUERY_WALK_TOP(&query->walk);
+  frame->bounds = b;
+  frame->modulus = modulus;
+  frame->stage = BOUNDS_RESIDUE_INITIAL;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 static void bounds_residue_destroy_fork(bounds_residue_query *query,
@@ -6664,9 +6595,9 @@ static void bounds_residue_destroy_fork(bounds_residue_query *query,
   *fork = NULL;
 }
 
-static void bounds_residue_complete(bounds_residue_query *query, bool success,
-                                    uint64_t residue) {
-  bounds_residue_frame *frame = &query->frames[query->depth - 1u];
+static void bounds_residue_close(bounds_residue_query *query,
+                                 bounds_residue_frame *frame, bool success,
+                                 uint64_t residue) {
   bounds_residue_destroy_fork(query, frame, true);
   bounds_residue_destroy_fork(query, frame, false);
   if (frame->tracked) {
@@ -6677,14 +6608,22 @@ static void bounds_residue_complete(bounds_residue_query *query, bool success,
     else
       success = false;
   }
-  query->depth--;
   query->child_success = success;
   query->child_residue = residue;
 }
 
-static void bounds_residue_unwind(bounds_residue_query *query) {
-  while (query->depth != 0)
-    bounds_residue_complete(query, false, 0);
+static ixs_query_walk_step bounds_residue_complete(bounds_residue_query *query,
+                                                   bool success,
+                                                   uint64_t residue) {
+  bounds_residue_close(query, IXS_QUERY_WALK_TOP(&query->walk), success,
+                       residue);
+  IXS_QUERY_WALK_POP(&query->walk);
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static void bounds_residue_abort(void *state, void *top) {
+  bounds_residue_close(state, top, false, 0);
 }
 
 static bool bounds_residue_prepare_add(bounds_residue_query *query,
@@ -6805,32 +6744,24 @@ static bool bounds_residue_merge(uint64_t branch, uint64_t *result,
   return *result == branch;
 }
 
-typedef enum {
-  BOUNDS_RESIDUE_STEP_ADVANCED,
-  BOUNDS_RESIDUE_STEP_READY,
-  BOUNDS_RESIDUE_STEP_OOM
-} bounds_residue_step;
-
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_track_frame(bounds_residue_query *query,
                            bounds_residue_frame *frame) {
   bounds_query_cache_entry *cached = NULL;
   bounds_query_enter_result enter;
   if (!bounds_query_should_track(frame->bounds, frame->expr))
-    return BOUNDS_RESIDUE_STEP_READY;
+    return IXS_QUERY_WALK_NEXT;
   enter = bounds_query_begin(frame->bounds, BOUNDS_QUERY_RESIDUE, frame->expr,
                              frame->modulus, &frame->scope, &cached);
   if (enter == BOUNDS_QUERY_ENTER_CACHED) {
-    bounds_residue_complete(query, cached->success,
-                            cached->success ? cached->result.residue : 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(
+        query, cached->success, cached->success ? cached->result.residue : 0);
   }
   if (enter != BOUNDS_QUERY_ENTER_STARTED) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->tracked = true;
-  return BOUNDS_RESIDUE_STEP_READY;
+  return IXS_QUERY_WALK_NEXT;
 }
 
 static bool bounds_residue_structural_first(const ixs_node *node) {
@@ -6839,7 +6770,7 @@ static bool bounds_residue_structural_first(const ixs_node *node) {
          ixs_node_is_integer_valued(node) && ixs_node_is_known_total(node);
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_direct_independent(bounds_residue_query *query,
                                   bounds_residue_frame *frame) {
   ixs_bounds *current = frame->bounds;
@@ -6851,18 +6782,15 @@ bounds_residue_direct_independent(bounds_residue_query *query,
 
   /* Public integrality would re-enter the live exact-proof stack. */
   if (!ixs_node_is_known_total(node)) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   if (node->tag == IXS_ADD &&
       bounds_exact_unit_difference_value(current, node, &exact)) {
-    bounds_residue_complete(query, true,
-                            bounds_normalize_residue(exact, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(
+        query, true, bounds_normalize_residue(exact, frame->modulus));
   }
   if (ixs_node_is_integer_valued(node) && frame->modulus == 1u) {
-    bounds_residue_complete(query, true, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, true, 0);
   }
   iv = bounds_get_expr_overrides(current, node);
   if (node->tag == IXS_SYM)
@@ -6870,26 +6798,24 @@ bounds_residue_direct_independent(bounds_residue_query *query,
   if (var)
     iv = iv.valid ? iv_intersect(iv, var->iv) : var->iv;
   if (ixs_interval_is_point_int(iv, &exact)) {
-    bounds_residue_complete(query, true,
-                            bounds_normalize_residue(exact, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(
+        query, true, bounds_normalize_residue(exact, frame->modulus));
   }
   if (ixs_node_is_integer_valued(node) && uint64_is_pow2(frame->modulus) &&
       bounds_get_bitfacts_iterative(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
-      bounds_residue_complete(query, true, bits.known_one & mask);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, true, bits.known_one & mask);
     }
   }
   if (current->oom) {
     query->root->oom = true;
-    return BOUNDS_RESIDUE_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   }
-  return BOUNDS_RESIDUE_STEP_READY;
+  return IXS_QUERY_WALK_NEXT;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_direct_tracked(bounds_residue_query *query,
                               bounds_residue_frame *frame) {
   ixs_bounds *current = frame->bounds;
@@ -6902,51 +6828,46 @@ bounds_residue_direct_tracked(bounds_residue_query *query,
    * difference is an O(1) producer invariant and retains its affine offset. */
   if (node->tag == IXS_ADD &&
       bounds_exact_unit_difference_value(current, node, &exact)) {
-    bounds_residue_complete(query, true,
-                            bounds_normalize_residue(exact, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(
+        query, true, bounds_normalize_residue(exact, frame->modulus));
   }
   if (bounds_residue_structural_first(node))
-    return BOUNDS_RESIDUE_STEP_READY;
+    return IXS_QUERY_WALK_NEXT;
   if (ixs_bounds_check_integer_valued(current, node) != IXS_CHECK_TRUE ||
       !ixs_node_is_known_total(node)) {
     if (current->oom)
       query->root->oom = true;
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return IXS_QUERY_WALK_OOM;
+    return bounds_residue_complete(query, false, 0);
   }
   if (frame->modulus == 1u) {
-    bounds_residue_complete(query, true, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, true, 0);
   }
   iv = bounds_get_tracked(current, node);
   if (current->oom) {
     query->root->oom = true;
-    return BOUNDS_RESIDUE_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   }
   if (ixs_interval_is_point_int(iv, &exact)) {
-    bounds_residue_complete(query, true,
-                            bounds_normalize_residue(exact, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(
+        query, true, bounds_normalize_residue(exact, frame->modulus));
   }
   if (uint64_is_pow2(frame->modulus) &&
       bounds_get_bitfacts_iterative(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
-      bounds_residue_complete(query, true, bits.known_one & mask);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, true, bits.known_one & mask);
     }
   }
   if (current->oom) {
     query->root->oom = true;
-    return BOUNDS_RESIDUE_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   }
-  return BOUNDS_RESIDUE_STEP_READY;
+  return IXS_QUERY_WALK_NEXT;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_direct_fact(bounds_residue_query *query,
                            bounds_residue_frame *frame) {
   if (query->proof_independent)
@@ -6954,7 +6875,7 @@ bounds_residue_direct_fact(bounds_residue_query *query,
   return bounds_residue_direct_tracked(query, frame);
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_start_mul(bounds_residue_query *query,
                          bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
@@ -6962,80 +6883,71 @@ bounds_residue_start_mul(bounds_residue_query *query,
   int64_t q;
   ixs_node_get_rat(node->u.mul.coeff, &p, &q);
   if (q != 1) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->coefficient = bounds_normalize_residue(p, frame->modulus);
   frame->reduced_modulus =
       frame->modulus / bounds_u64_gcd(frame->coefficient, frame->modulus);
   if (frame->reduced_modulus == 1u) {
-    bounds_residue_complete(query, true, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, true, 0);
   }
   frame->result = 1u % frame->reduced_modulus;
   frame->index = 0;
   frame->stage = BOUNDS_RESIDUE_MUL_SCAN;
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_start_assoc(bounds_residue_query *query,
                            bounds_residue_frame *frame, bool bitwise) {
   ixs_node *node = frame->expr;
   if ((bitwise && !uint64_is_pow2(frame->modulus)) ||
       node->u.assoc.nargs == 0 || !node->u.assoc.args) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->index = 0;
   frame->have_result = false;
   frame->stage = BOUNDS_RESIDUE_ASSOC_SCAN;
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_start_frame(bounds_residue_query *query,
                            bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   switch (node->tag) {
   case IXS_INT:
-    bounds_residue_complete(
+    return bounds_residue_complete(
         query, true, bounds_normalize_residue(node->u.ival, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
   case IXS_RAT:
-    bounds_residue_complete(
+    return bounds_residue_complete(
         query, node->u.rat.q == 1,
         node->u.rat.q == 1
             ? bounds_normalize_residue(node->u.rat.p, frame->modulus)
             : 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
   case IXS_SYM: {
     uint64_t residue = 0;
     bool success = bounds_known_symbol_residue(frame->bounds, node,
                                                frame->modulus, &residue);
-    bounds_residue_complete(query, success, residue);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, success, residue);
   }
   case IXS_ADD:
     if (!bounds_residue_prepare_add(query, frame, 1u)) {
       if (query->root->oom)
-        return BOUNDS_RESIDUE_STEP_OOM;
-      bounds_residue_complete(query, false, 0);
+        return IXS_QUERY_WALK_OOM;
+      return bounds_residue_complete(query, false, 0);
     }
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   case IXS_MUL:
     return bounds_residue_start_mul(query, frame);
   case IXS_MOD:
     if (node->u.binary.rhs->tag != IXS_INT || node->u.binary.rhs->u.ival <= 0 ||
         (uint64_t)node->u.binary.rhs->u.ival % frame->modulus != 0) {
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, false, 0);
     }
     frame->stage = BOUNDS_RESIDUE_MOD_CHILD;
     return bounds_residue_push(query, frame->bounds, node->u.binary.lhs,
-                               frame->modulus)
-               ? BOUNDS_RESIDUE_STEP_ADVANCED
-               : BOUNDS_RESIDUE_STEP_OOM;
+                               frame->modulus);
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
@@ -7045,26 +6957,23 @@ bounds_residue_start_frame(bounds_residue_query *query,
     return bounds_residue_start_assoc(query, frame, false);
   case IXS_PIECEWISE:
     if (!frame->bounds->ctx || node->u.pw.ncases == 0 || !node->u.pw.cases) {
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, false, 0);
     }
     frame->index = 0;
     frame->have_result = false;
     frame->stage = BOUNDS_RESIDUE_PW_TOTAL_SCAN;
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   default:
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_add(bounds_residue_query *query,
                           bounds_residue_frame *frame) {
   if (frame->stage == BOUNDS_RESIDUE_ADD_CHILD) {
     if (!query->child_success) {
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, false, 0);
     }
     frame->result =
         bounds_add_mod(frame->result,
@@ -7072,7 +6981,7 @@ bounds_residue_resume_add(bounds_residue_query *query,
                                       frame->modulus),
                        frame->modulus);
     frame->stage = BOUNDS_RESIDUE_ADD_SCAN;
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   while (frame->group_index < frame->group_capacity) {
     bounds_residue_group *group = &frame->groups[frame->group_index++];
@@ -7085,22 +6994,18 @@ bounds_residue_resume_add(bounds_residue_query *query,
       continue;
     frame->stage = BOUNDS_RESIDUE_ADD_CHILD;
     return bounds_residue_push(query, frame->bounds, group->representative,
-                               frame->reduced_modulus)
-               ? BOUNDS_RESIDUE_STEP_ADVANCED
-               : BOUNDS_RESIDUE_STEP_OOM;
+                               frame->reduced_modulus);
   }
-  bounds_residue_complete(query, true, frame->result);
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return bounds_residue_complete(query, true, frame->result);
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_mul(bounds_residue_query *query,
                           bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   if (frame->stage == BOUNDS_RESIDUE_MUL_CHILD) {
     if (!query->child_success) {
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, false, 0);
     }
     frame->result =
         bounds_mul_mod(frame->result,
@@ -7110,7 +7015,7 @@ bounds_residue_resume_mul(bounds_residue_query *query,
                        frame->reduced_modulus);
     frame->index++;
     frame->stage = BOUNDS_RESIDUE_MUL_SCAN;
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   /* Ordinary residue queries have already proved every factor integral and
    * may stop after a zero product.  Independent exact-proof queries have no
@@ -7118,24 +7023,20 @@ bounds_residue_resume_mul(bounds_residue_query *query,
    * cannot hide a rational one. */
   if ((!query->proof_independent && frame->result == 0) ||
       frame->index == node->u.mul.nfactors) {
-    bounds_residue_complete(
+    return bounds_residue_complete(
         query, true,
         bounds_mul_mod(frame->coefficient, frame->result, frame->modulus));
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
   }
   if (node->u.mul.factors[frame->index].exp < 0) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->stage = BOUNDS_RESIDUE_MUL_CHILD;
   return bounds_residue_push(query, frame->bounds,
                              node->u.mul.factors[frame->index].base,
-                             frame->reduced_modulus)
-             ? BOUNDS_RESIDUE_STEP_ADVANCED
-             : BOUNDS_RESIDUE_STEP_OOM;
+                             frame->reduced_modulus);
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_assoc(bounds_residue_query *query,
                             bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
@@ -7144,18 +7045,14 @@ bounds_residue_resume_assoc(bounds_residue_query *query,
       uint64_t result = frame->result;
       if (node->tag == IXS_XOR || node->tag == IXS_AND || node->tag == IXS_OR)
         result &= frame->modulus - 1u;
-      bounds_residue_complete(query, frame->have_result, result);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, frame->have_result, result);
     }
     frame->stage = BOUNDS_RESIDUE_ASSOC_CHILD;
-    return bounds_residue_push(query, frame->bounds,
-                               node->u.assoc.args[frame->index], frame->modulus)
-               ? BOUNDS_RESIDUE_STEP_ADVANCED
-               : BOUNDS_RESIDUE_STEP_OOM;
+    return bounds_residue_push(
+        query, frame->bounds, node->u.assoc.args[frame->index], frame->modulus);
   }
   if (!query->child_success) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   if (!frame->have_result) {
     frame->result = query->child_residue;
@@ -7167,12 +7064,11 @@ bounds_residue_resume_assoc(bounds_residue_query *query,
   } else if (node->tag == IXS_OR) {
     frame->result |= query->child_residue;
   } else if (frame->result != query->child_residue) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->index++;
   frame->stage = BOUNDS_RESIDUE_ASSOC_SCAN;
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 static bool bounds_residue_add_condition(bounds_residue_query *query,
@@ -7187,44 +7083,40 @@ static bool bounds_residue_add_condition(bounds_residue_query *query,
   return false;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_pw_total(bounds_residue_query *query,
                                bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   if (frame->stage == BOUNDS_RESIDUE_PW_TOTAL_SCAN) {
     if (frame->index == node->u.pw.ncases) {
-      bounds_residue_complete(query, frame->have_result, frame->result);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, frame->have_result, frame->result);
     }
     frame->stage = BOUNDS_RESIDUE_PW_TOTAL_CHILD;
     return bounds_residue_push(query, frame->bounds,
                                node->u.pw.cases[frame->index].value,
-                               frame->modulus)
-               ? BOUNDS_RESIDUE_STEP_ADVANCED
-               : BOUNDS_RESIDUE_STEP_OOM;
+                               frame->modulus);
   }
   if (!query->child_success ||
       !bounds_residue_merge(query->child_residue, &frame->result,
                             &frame->have_result)) {
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
     if (query->proof_independent) {
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, false, 0);
     }
     if (!bounds_residue_start_reachable(query, frame)) {
       if (query->root->oom)
-        return BOUNDS_RESIDUE_STEP_OOM;
-      bounds_residue_complete(query, false, 0);
+        return IXS_QUERY_WALK_OOM;
+      return bounds_residue_complete(query, false, 0);
     }
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   frame->index++;
   frame->stage = BOUNDS_RESIDUE_PW_TOTAL_SCAN;
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_pw_reach_scan(bounds_residue_query *query,
                                     bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
@@ -7233,17 +7125,15 @@ bounds_residue_resume_pw_reach_scan(bounds_residue_query *query,
   ixs_check_result truth;
   if (frame->remaining->oom) {
     query->root->oom = true;
-    return BOUNDS_RESIDUE_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   }
   if (ixs_bounds_has_empty(frame->remaining)) {
     frame->covered = true;
-    bounds_residue_complete(query, frame->have_result, frame->result);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, frame->have_result, frame->result);
   }
   if (frame->index == node->u.pw.ncases) {
-    bounds_residue_complete(query, frame->covered && frame->have_result,
-                            frame->result);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, frame->covered && frame->have_result,
+                                   frame->result);
   }
   cond = node->u.pw.cases[frame->index].cond;
   value = node->u.pw.cases[frame->index].value;
@@ -7252,82 +7142,72 @@ bounds_residue_resume_pw_reach_scan(bounds_residue_query *query,
     if (frame->remaining->oom)
       query->root->oom = true;
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return IXS_QUERY_WALK_OOM;
+    return bounds_residue_complete(query, false, 0);
   }
   truth = bounds_condition_truth(frame->remaining, cond);
   if (truth == IXS_CHECK_FALSE) {
     frame->index++;
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   if (!bounds_residue_alloc_fork(query, frame, frame->remaining, true))
-    return BOUNDS_RESIDUE_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   if (!bounds_residue_add_condition(query, frame->active, cond, true)) {
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return IXS_QUERY_WALK_OOM;
+    return bounds_residue_complete(query, false, 0);
   }
   if (ixs_bounds_has_empty(frame->active)) {
     bounds_residue_destroy_fork(query, frame, true);
     if (truth == IXS_CHECK_TRUE) {
       frame->covered = true;
-      bounds_residue_complete(query, frame->have_result, frame->result);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return bounds_residue_complete(query, frame->have_result, frame->result);
     }
     if (!bounds_residue_add_condition(query, frame->remaining, cond, false)) {
       if (query->root->oom)
-        return BOUNDS_RESIDUE_STEP_OOM;
-      bounds_residue_complete(query, false, 0);
-      return BOUNDS_RESIDUE_STEP_ADVANCED;
+        return IXS_QUERY_WALK_OOM;
+      return bounds_residue_complete(query, false, 0);
     }
     frame->index++;
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   if (ixs_bounds_check_defined(frame->active, value) != IXS_CHECK_TRUE) {
     if (frame->active->oom)
       query->root->oom = true;
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return IXS_QUERY_WALK_OOM;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->branch_truth = truth;
   frame->stage = BOUNDS_RESIDUE_PW_REACH_CHILD;
-  return bounds_residue_push(query, frame->active, value, frame->modulus)
-             ? BOUNDS_RESIDUE_STEP_ADVANCED
-             : BOUNDS_RESIDUE_STEP_OOM;
+  return bounds_residue_push(query, frame->active, value, frame->modulus);
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_pw_reach_child(bounds_residue_query *query,
                                      bounds_residue_frame *frame) {
   ixs_node *cond = frame->expr->u.pw.cases[frame->index].cond;
   if (!query->child_success ||
       !bounds_residue_merge(query->child_residue, &frame->result,
                             &frame->have_result)) {
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
   bounds_residue_destroy_fork(query, frame, true);
   if (frame->branch_truth == IXS_CHECK_TRUE) {
     frame->covered = true;
-    bounds_residue_complete(query, true, frame->result);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, true, frame->result);
   }
   if (!bounds_residue_add_condition(query, frame->remaining, cond, false)) {
     if (query->root->oom)
-      return BOUNDS_RESIDUE_STEP_OOM;
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+      return IXS_QUERY_WALK_OOM;
+    return bounds_residue_complete(query, false, 0);
   }
   frame->index++;
   frame->stage = BOUNDS_RESIDUE_PW_REACH_SCAN;
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bounds_residue_step
+static ixs_query_walk_step
 bounds_residue_resume_frame(bounds_residue_query *query,
                             bounds_residue_frame *frame) {
   switch (frame->stage) {
@@ -7338,9 +7218,9 @@ bounds_residue_resume_frame(bounds_residue_query *query,
   case BOUNDS_RESIDUE_MUL_CHILD:
     return bounds_residue_resume_mul(query, frame);
   case BOUNDS_RESIDUE_MOD_CHILD:
-    bounds_residue_complete(query, query->child_success,
-                            query->child_success ? query->child_residue : 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, query->child_success,
+                                   query->child_success ? query->child_residue
+                                                        : 0);
   case BOUNDS_RESIDUE_ASSOC_SCAN:
   case BOUNDS_RESIDUE_ASSOC_CHILD:
     return bounds_residue_resume_assoc(query, frame);
@@ -7352,10 +7232,24 @@ bounds_residue_resume_frame(bounds_residue_query *query,
   case BOUNDS_RESIDUE_PW_REACH_CHILD:
     return bounds_residue_resume_pw_reach_child(query, frame);
   case BOUNDS_RESIDUE_INITIAL:
-    bounds_residue_complete(query, false, 0);
-    return BOUNDS_RESIDUE_STEP_ADVANCED;
+    return bounds_residue_complete(query, false, 0);
   }
-  return BOUNDS_RESIDUE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static ixs_query_walk_step bounds_residue_advance(void *state, void *top) {
+  bounds_residue_query *query = state;
+  bounds_residue_frame *frame = top;
+  ixs_query_walk_step step;
+  if (frame->stage != BOUNDS_RESIDUE_INITIAL)
+    return bounds_residue_resume_frame(query, frame);
+  step = bounds_residue_track_frame(query, frame);
+  if (step == IXS_QUERY_WALK_NEXT)
+    step = bounds_residue_direct_fact(query, frame);
+  if (step == IXS_QUERY_WALK_NEXT)
+    step = bounds_residue_start_frame(query, frame);
+  return step;
 }
 
 static bool bounds_known_residue_mode(ixs_bounds *b, ixs_node *expr,
@@ -7363,6 +7257,7 @@ static bool bounds_known_residue_mode(ixs_bounds *b, ixs_node *expr,
                                       bool proof_independent) {
   ixs_arena_mark mark;
   bounds_residue_query query;
+  ixs_query_walk_step step;
   if (!b || !expr || !out || modulus == 0 || b->oom)
     return false;
 
@@ -7370,35 +7265,16 @@ static bool bounds_known_residue_mode(ixs_bounds *b, ixs_node *expr,
   memset(&query, 0, sizeof(query));
   query.root = b;
   query.proof_independent = proof_independent;
-  if (!bounds_residue_push(&query, b, expr, modulus))
-    goto failed;
-
-  while (query.depth != 0) {
-    bounds_residue_frame *frame = &query.frames[query.depth - 1u];
-    bounds_residue_step step;
-
-    if (frame->stage == BOUNDS_RESIDUE_INITIAL) {
-      step = bounds_residue_track_frame(&query, frame);
-      if (step == BOUNDS_RESIDUE_STEP_READY)
-        step = bounds_residue_direct_fact(&query, frame);
-      if (step == BOUNDS_RESIDUE_STEP_READY)
-        step = bounds_residue_start_frame(&query, frame);
-    } else {
-      step = bounds_residue_resume_frame(&query, frame);
-    }
-    if (step == BOUNDS_RESIDUE_STEP_OOM)
-      goto failed;
-  }
-
+  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_residue_frame,
+                      expr);
+  step = bounds_residue_push(&query, b, expr, modulus);
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    step = ixs_query_walk_drive(&query.walk, &query, bounds_residue_advance,
+                                bounds_residue_abort);
   if (query.child_success)
     *out = query.child_residue;
   ixs_arena_restore(b->scratch, mark);
-  return query.child_success;
-
-failed:
-  bounds_residue_unwind(&query);
-  ixs_arena_restore(b->scratch, mark);
-  return false;
+  return step == IXS_QUERY_WALK_ADVANCED && query.child_success;
 }
 
 static bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
@@ -8858,9 +8734,7 @@ typedef struct {
 
 typedef struct {
   ixs_bounds *bounds;
-  bounds_interval_frame *frames;
-  size_t depth;
-  size_t capacity;
+  ixs_query_walk walk;
   ixs_interval child;
 } bounds_interval_query;
 
@@ -8913,37 +8787,9 @@ static ixs_node *bounds_interval_child(const ixs_node *expr, uint32_t index) {
   }
 }
 
-static bool bounds_interval_push(bounds_interval_query *query, ixs_node *expr) {
-  bounds_interval_frame *grown;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-  if (query->depth == query->capacity) {
-    capacity = query->capacity ? query->capacity * 2u : 16u;
-    if (capacity < query->capacity ||
-        capacity > SIZE_MAX / sizeof(*query->frames)) {
-      query->bounds->oom = true;
-      return false;
-    }
-    old_bytes = query->capacity * sizeof(*query->frames);
-    new_bytes = capacity * sizeof(*query->frames);
-    grown = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
-                           new_bytes, sizeof(void *));
-    if (!grown) {
-      query->bounds->oom = true;
-      return false;
-    }
-    query->frames = grown;
-    query->capacity = capacity;
-  }
-  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-  query->frames[query->depth++].expr = expr;
-  return true;
-}
-
-static void bounds_interval_complete(bounds_interval_query *query,
-                                     ixs_interval result) {
-  bounds_interval_frame *frame = &query->frames[query->depth - 1u];
+static void bounds_interval_close(bounds_interval_query *query,
+                                  bounds_interval_frame *frame,
+                                  ixs_interval result) {
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, result.valid);
@@ -8952,14 +8798,53 @@ static void bounds_interval_complete(bounds_interval_query *query,
     else
       result = ixs_interval_unknown();
   }
-  query->depth--;
   query->child = result;
 }
 
-static void bounds_interval_unwind(bounds_interval_query *query) {
+static ixs_query_walk_step
+bounds_interval_complete(bounds_interval_query *query, ixs_interval result) {
+  bounds_interval_close(query, IXS_QUERY_WALK_TOP(&query->walk), result);
+  IXS_QUERY_WALK_POP(&query->walk);
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static void bounds_interval_abort(void *state, void *top) {
+  bounds_interval_close(state, top, ixs_interval_unknown());
+}
+
+/* hot */
+static ixs_query_walk_step bounds_interval_advance(void *state, void *top) {
+  bounds_interval_query *query = state;
+  bounds_interval_frame *frame = top;
+  ixs_bounds *b = query->bounds;
   ixs_interval unknown = ixs_interval_unknown();
-  while (query->depth != 0)
-    bounds_interval_complete(query, unknown);
+  if (!frame->children_ready) {
+    bounds_query_cache_entry *cached = NULL;
+    bounds_query_enter_result enter = bounds_query_begin(
+        b, BOUNDS_QUERY_INTERVAL, frame->expr, 0, &frame->scope, &cached);
+    if (enter == BOUNDS_QUERY_ENTER_CACHED)
+      return bounds_interval_complete(query, cached->result.interval);
+    if (enter != BOUNDS_QUERY_ENTER_STARTED)
+      return bounds_interval_complete(query, unknown);
+    frame->tracked = true;
+    frame->children_ready = true;
+    frame->child_count = bounds_interval_child_count(frame->expr);
+  }
+  if (frame->next_child < frame->child_count) {
+    ixs_node *child = bounds_interval_child(frame->expr, frame->next_child++);
+    return child ? ixs_query_walk_push(&query->walk, child)
+                 : IXS_QUERY_WALK_STOP;
+  }
+  {
+    bool old_evaluating = b->interval_evaluating;
+    ixs_interval result;
+    b->interval_evaluating = true;
+    result = bounds_get_query_impl(b, frame->expr);
+    b->interval_evaluating = old_evaluating;
+    return b->oom ? IXS_QUERY_WALK_OOM
+                  : bounds_interval_complete(query, result);
+  }
 }
 
 /* Precompute structural children in an explicit postorder. Existing transfer
@@ -8971,6 +8856,7 @@ static ixs_interval bounds_get_interval_iterative(ixs_bounds *b,
                                                   ixs_node *expr) {
   ixs_arena_mark mark;
   bounds_interval_query query;
+  ixs_query_walk_step step;
   ixs_interval unknown = ixs_interval_unknown();
   if (!b || !expr || b->oom)
     return unknown;
@@ -8980,52 +8866,16 @@ static ixs_interval bounds_get_interval_iterative(ixs_bounds *b,
   mark = ixs_arena_save(b->scratch);
   memset(&query, 0, sizeof(query));
   query.bounds = b;
-  if (!bounds_interval_push(&query, expr))
-    goto failed;
-
-  while (query.depth != 0) {
-    bounds_interval_frame *frame = &query.frames[query.depth - 1u];
-    if (!frame->children_ready) {
-      bounds_query_cache_entry *cached = NULL;
-      bounds_query_enter_result enter = bounds_query_begin(
-          b, BOUNDS_QUERY_INTERVAL, frame->expr, 0, &frame->scope, &cached);
-      if (enter == BOUNDS_QUERY_ENTER_CACHED) {
-        bounds_interval_complete(&query, cached->result.interval);
-        continue;
-      }
-      if (enter != BOUNDS_QUERY_ENTER_STARTED) {
-        bounds_interval_complete(&query, unknown);
-        continue;
-      }
-      frame->tracked = true;
-      frame->children_ready = true;
-      frame->child_count = bounds_interval_child_count(frame->expr);
-    }
-    if (frame->next_child < frame->child_count) {
-      ixs_node *child = bounds_interval_child(frame->expr, frame->next_child++);
-      if (!child || !bounds_interval_push(&query, child))
-        goto failed;
-      continue;
-    }
-    {
-      bool old_evaluating = b->interval_evaluating;
-      ixs_interval result;
-      b->interval_evaluating = true;
-      result = bounds_get_query_impl(b, frame->expr);
-      b->interval_evaluating = old_evaluating;
-      if (b->oom)
-        goto failed;
-      bounds_interval_complete(&query, result);
-    }
-  }
-
+  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_interval_frame,
+                      expr);
+  step = ixs_query_walk_push(&query.walk, expr);
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    step = ixs_query_walk_drive(&query.walk, &query, bounds_interval_advance,
+                                bounds_interval_abort);
   ixs_arena_restore(b->scratch, mark);
-  return query.child;
-
-failed:
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    return query.child;
   b->interval_evaluating = false;
-  bounds_interval_unwind(&query);
-  ixs_arena_restore(b->scratch, mark);
   return unknown;
 }
 
@@ -9571,13 +9421,7 @@ typedef struct {
   ixs_check_result result;
   bool active;
   bool complete;
-} defined_memo_entry;
-
-typedef struct {
-  defined_memo_entry *entries;
-  size_t count;
-  size_t capacity;
-} defined_memo;
+} bounds_check_memo_entry;
 
 typedef struct {
   ixs_node *node;
@@ -9591,22 +9435,27 @@ typedef struct {
 } defined_frame;
 
 typedef struct {
+  defined_state *state;
+  ixs_bounds *bounds;
+  ixs_query_walk walk;
+  ixs_query_node_memo memo;
+  ixs_check_result answer;
+  unsigned pw_depth;
+} defined_query;
+
+typedef struct {
   ixs_node *node;
   uint32_t next_child;
   uint32_t nchildren;
 } defined_depth_frame;
 
 typedef struct {
-  ixs_node *node;
-  bool active;
-  bool complete;
-} defined_depth_entry;
-
-typedef struct {
-  defined_depth_entry *entries;
-  size_t count;
-  size_t capacity;
-} defined_depth_memo;
+  defined_state *state;
+  ixs_query_walk walk;
+  ixs_query_node_memo memo;
+  bool *shared;
+  size_t visited;
+} defined_depth_query;
 
 typedef struct {
   ixs_arena_mark mark;
@@ -9805,92 +9654,69 @@ static ixs_node *defined_child_at(ixs_node *node, uint32_t child) {
   }
 }
 
-static bool defined_depth_memo_grow(ixs_arena *arena,
-                                    defined_depth_memo *memo) {
-  size_t next_capacity = memo->capacity ? memo->capacity * 2u : 32u;
-  defined_depth_entry *grown;
-  size_t i;
-  if (next_capacity <= memo->capacity ||
-      next_capacity > SIZE_MAX / sizeof(*grown))
-    return false;
-  grown =
-      ixs_arena_alloc(arena, next_capacity * sizeof(*grown), sizeof(void *));
-  if (!grown)
-    return false;
-  memset(grown, 0, next_capacity * sizeof(*grown));
-  for (i = 0; i < memo->capacity; i++) {
-    defined_depth_entry entry = memo->entries[i];
-    size_t index;
-    if (!entry.node)
-      continue;
-    index = entry.node->hash & (next_capacity - 1u);
-    while (grown[index].node)
-      index = (index + 1u) & (next_capacity - 1u);
-    grown[index] = entry;
+static ixs_query_walk_step defined_depth_push(defined_depth_query *query,
+                                              ixs_node *node,
+                                              uint32_t nchildren) {
+  bounds_check_memo_entry *entry =
+      ixs_query_node_memo_get(&query->memo, node, true);
+  defined_depth_frame *frame;
+  ixs_query_walk_step step;
+  if (!entry) {
+    query->state->oom = true;
+    return IXS_QUERY_WALK_OOM;
   }
-  memo->entries = grown;
-  memo->capacity = next_capacity;
-  return true;
+  if (entry->active) {
+    query->state->invalid = true;
+    return IXS_QUERY_WALK_STOP;
+  }
+  if (entry->complete) {
+    if (query->shared)
+      *query->shared = true;
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  step = ixs_query_walk_push(&query->walk, node);
+  if (step != IXS_QUERY_WALK_ADVANCED)
+    return step;
+  frame = IXS_QUERY_WALK_TOP(&query->walk);
+  frame->nchildren = nchildren;
+  entry->active = true;
+  query->visited++;
+  return step;
 }
 
-static defined_depth_entry *defined_depth_memo_get(ixs_arena *arena,
-                                                   defined_depth_memo *memo,
-                                                   ixs_node *node,
-                                                   bool create) {
-  size_t index;
-  if (create && (!memo->capacity || memo->count + 1u > memo->capacity / 2u)) {
-    if (!defined_depth_memo_grow(arena, memo))
-      return NULL;
+/* hot */
+static ixs_query_walk_step defined_depth_advance(void *state, void *top) {
+  defined_depth_query *query = state;
+  defined_depth_frame *frame = top;
+  bounds_check_memo_entry *entry;
+  ixs_node *child;
+  uint32_t nchildren;
+  if (frame->next_child < frame->nchildren) {
+    child = defined_child_at(frame->node, frame->next_child++);
+    if (!child || !defined_child_count(child, &nchildren)) {
+      query->state->invalid = true;
+      return IXS_QUERY_WALK_STOP;
+    }
+    return defined_depth_push(query, child, nchildren);
   }
-  if (!memo->capacity)
-    return NULL;
-  index = node->hash & (memo->capacity - 1u);
-  while (memo->entries[index].node && memo->entries[index].node != node)
-    index = (index + 1u) & (memo->capacity - 1u);
-  if (!memo->entries[index].node) {
-    if (!create)
-      return NULL;
-    memo->entries[index].node = node;
-    memo->count++;
+  entry = ixs_query_node_memo_get(&query->memo, frame->node, false);
+  if (!entry || !entry->active) {
+    query->state->invalid = true;
+    return IXS_QUERY_WALK_STOP;
   }
-  return &memo->entries[index];
-}
-
-static bool defined_depth_stack_push(ixs_arena *arena,
-                                     defined_depth_frame **stack, size_t *depth,
-                                     size_t *capacity, ixs_node *node,
-                                     uint32_t nchildren) {
-  if (*depth == *capacity) {
-    size_t next_capacity = *capacity ? *capacity * 2u : 32u;
-    defined_depth_frame *grown;
-    if (next_capacity <= *capacity || next_capacity > SIZE_MAX / sizeof(*grown))
-      return false;
-    grown = ixs_arena_grow(arena, *stack, *capacity * sizeof(*grown),
-                           next_capacity * sizeof(*grown), sizeof(void *));
-    if (!grown)
-      return false;
-    *stack = grown;
-    *capacity = next_capacity;
-  }
-  (*stack)[*depth].node = node;
-  (*stack)[*depth].next_child = 0;
-  (*stack)[*depth].nchildren = nchildren;
-  (*depth)++;
-  return true;
+  entry->active = false;
+  entry->complete = true;
+  IXS_QUERY_WALK_POP(&query->walk);
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
                                       ixs_node *root, bool *shared,
                                       size_t *node_visits) {
-  defined_depth_frame *stack = NULL;
   ixs_arena_mark mark;
-  defined_depth_memo memo;
-  defined_depth_entry *entry;
-  size_t depth = 0;
-  size_t stack_capacity = 0;
-  size_t visited = 0;
+  defined_depth_query query;
+  ixs_query_walk_step step;
   uint32_t nchildren;
-  bool safe = false;
 
   if (shared)
     *shared = false;
@@ -9901,62 +9727,21 @@ static bool defined_bounds_depth_safe(defined_state *state, ixs_bounds *b,
     return false;
   }
   mark = ixs_arena_save(b->scratch);
-  memset(&memo, 0, sizeof(memo));
-  entry = defined_depth_memo_get(b->scratch, &memo, root, true);
-  if (!entry || !defined_depth_stack_push(b->scratch, &stack, &depth,
-                                          &stack_capacity, root, nchildren)) {
-    state->oom = true;
-    ixs_arena_restore(b->scratch, mark);
-    return false;
-  }
-  entry->active = true;
-  visited = 1;
-
-  while (depth > 0) {
-    defined_depth_frame *frame = &stack[depth - 1];
-    ixs_node *child;
-    if (frame->next_child >= frame->nchildren) {
-      entry = defined_depth_memo_get(b->scratch, &memo, frame->node, false);
-      assert(entry != NULL && entry->active);
-      entry->active = false;
-      entry->complete = true;
-      depth--;
-      continue;
-    }
-    child = defined_child_at(frame->node, frame->next_child++);
-    if (!child || !defined_child_count(child, &nchildren)) {
-      state->invalid = true;
-      goto cleanup;
-    }
-    entry = defined_depth_memo_get(b->scratch, &memo, child, true);
-    if (!entry) {
-      state->oom = true;
-      goto cleanup;
-    }
-    if (entry->active) {
-      state->invalid = true;
-      goto cleanup;
-    }
-    if (entry->complete) {
-      if (shared)
-        *shared = true;
-      continue;
-    }
-    entry->active = true;
-    if (!defined_depth_stack_push(b->scratch, &stack, &depth, &stack_capacity,
-                                  child, nchildren)) {
-      state->oom = true;
-      goto cleanup;
-    }
-    visited++;
-  }
-  safe = true;
-  if (node_visits)
-    *node_visits = visited;
-
-cleanup:
+  query.state = state;
+  query.shared = shared;
+  query.visited = 0;
+  IXS_QUERY_NODE_MEMO_INIT(&query.memo, b->scratch, bounds_check_memo_entry,
+                           node);
+  IXS_QUERY_WALK_INIT_CAP(&query.walk, b->scratch, &state->oom,
+                          defined_depth_frame, node, 32u);
+  step = defined_depth_push(&query, root, nchildren);
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    step =
+        ixs_query_walk_drive(&query.walk, &query, defined_depth_advance, NULL);
+  if (step == IXS_QUERY_WALK_ADVANCED && node_visits)
+    *node_visits = query.visited;
   ixs_arena_restore(b->scratch, mark);
-  return safe;
+  return step == IXS_QUERY_WALK_ADVANCED;
 }
 
 static size_t defined_bounds_cache_capacity(size_t node_visits) {
@@ -10111,82 +9896,6 @@ static ixs_node *defined_condition_assumption(defined_state *state,
     storage->u.binary.cmp_op = value ? IXS_CMP_NE : IXS_CMP_EQ;
   }
   return storage;
-}
-
-static bool defined_memo_grow(ixs_arena *arena, defined_memo *memo) {
-  size_t next_capacity = memo->capacity ? memo->capacity * 2u : 32u;
-  defined_memo_entry *grown;
-  size_t i;
-  if (next_capacity <= memo->capacity ||
-      next_capacity > SIZE_MAX / sizeof(*grown))
-    return false;
-  grown =
-      ixs_arena_alloc(arena, next_capacity * sizeof(*grown), sizeof(void *));
-  if (!grown)
-    return false;
-  memset(grown, 0, next_capacity * sizeof(*grown));
-  for (i = 0; i < memo->capacity; i++) {
-    defined_memo_entry entry = memo->entries[i];
-    size_t index;
-    if (!entry.node)
-      continue;
-    index = entry.node->hash & (next_capacity - 1u);
-    while (grown[index].node)
-      index = (index + 1u) & (next_capacity - 1u);
-    grown[index] = entry;
-  }
-  memo->entries = grown;
-  memo->capacity = next_capacity;
-  return true;
-}
-
-static defined_memo_entry *defined_memo_get(ixs_arena *arena,
-                                            defined_memo *memo, ixs_node *node,
-                                            bool create) {
-  size_t index;
-  if (create && (!memo->capacity || memo->count + 1u > memo->capacity / 2u)) {
-    if (!defined_memo_grow(arena, memo))
-      return NULL;
-  }
-  if (!memo->capacity)
-    return NULL;
-  index = node->hash & (memo->capacity - 1u);
-  while (memo->entries[index].node && memo->entries[index].node != node)
-    index = (index + 1u) & (memo->capacity - 1u);
-  if (!memo->entries[index].node) {
-    if (!create)
-      return NULL;
-    memo->entries[index].node = node;
-    memo->count++;
-  }
-  return &memo->entries[index];
-}
-
-static bool defined_stack_push(ixs_arena *arena, defined_frame **stack,
-                               size_t *depth, size_t *capacity,
-                               ixs_node *node) {
-  if (*depth == *capacity) {
-    size_t next_capacity = *capacity ? *capacity * 2u : 32u;
-    defined_frame *grown;
-    if (next_capacity <= *capacity || next_capacity > SIZE_MAX / sizeof(*grown))
-      return false;
-    grown = ixs_arena_grow(arena, *stack, *capacity * sizeof(*grown),
-                           next_capacity * sizeof(*grown), sizeof(void *));
-    if (!grown)
-      return false;
-    *stack = grown;
-    *capacity = next_capacity;
-  }
-  (*stack)[*depth].node = node;
-  (*stack)[*depth].selected_condition = NULL;
-  (*stack)[*depth].selected_value = NULL;
-  (*stack)[*depth].next_child = 0;
-  (*stack)[*depth].nchildren = 0;
-  (*stack)[*depth].result = IXS_CHECK_TRUE;
-  (*stack)[*depth].started = false;
-  (*stack)[*depth].selected_piecewise_case = false;
-  (*depth)++;
-  return true;
 }
 
 static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
@@ -10443,30 +10152,28 @@ static ixs_check_result defined_finalize_node(defined_state *state,
   return result;
 }
 
-static bool defined_complete_frame(defined_state *state, ixs_bounds *b,
-                                   defined_memo *memo, defined_frame *stack,
-                                   size_t *depth, ixs_check_result result,
-                                   ixs_check_result *answer) {
-  defined_frame *frame = &stack[*depth - 1u];
-  defined_memo_entry *entry =
-      defined_memo_get(b->scratch, memo, frame->node, false);
+static ixs_query_walk_step defined_complete_frame(defined_query *query,
+                                                  ixs_check_result result) {
+  defined_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
+  bounds_check_memo_entry *entry =
+      ixs_query_node_memo_get(&query->memo, frame->node, false);
   if (!entry) {
-    state->invalid = true;
+    query->state->invalid = true;
     result = IXS_CHECK_UNKNOWN;
   } else {
     entry->result = result;
     entry->active = false;
     entry->complete = true;
   }
-  (*depth)--;
-  if (*depth == 0) {
-    *answer = result;
-    return true;
+  IXS_QUERY_WALK_POP(&query->walk);
+  if (query->walk.depth == 0) {
+    query->answer = result;
+    return IXS_QUERY_WALK_ADVANCED;
   }
-  frame = &stack[*depth - 1u];
+  frame = IXS_QUERY_WALK_TOP(&query->walk);
   frame->result = defined_combine(frame->result, result);
   frame->next_child++;
-  return false;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 static void defined_start_nested_piecewise(defined_state *state,
@@ -10573,14 +10280,13 @@ static void defined_start_frame(defined_state *state, ixs_bounds *b,
   }
 }
 
-static bool defined_process_child(defined_state *state, ixs_bounds *b,
-                                  defined_memo *memo, defined_frame **stack,
-                                  size_t *depth, size_t *capacity) {
-  defined_frame *frame = &(*stack)[*depth - 1u];
+static ixs_query_walk_step defined_process_child(defined_query *query,
+                                                 defined_frame *frame) {
+  defined_state *state = query->state;
   ixs_node *child;
-  defined_memo_entry *entry;
+  bounds_check_memo_entry *entry;
   if (frame->next_child >= frame->nchildren)
-    return false;
+    return IXS_QUERY_WALK_NEXT;
 
   if (frame->selected_piecewise_case)
     child = frame->next_child == 0u ? frame->selected_condition
@@ -10591,84 +10297,94 @@ static bool defined_process_child(defined_state *state, ixs_bounds *b,
     state->invalid = true;
     frame->result = defined_combine(frame->result, IXS_CHECK_UNKNOWN);
     frame->next_child++;
-    return true;
+    return IXS_QUERY_WALK_ADVANCED;
   }
-  entry = defined_memo_get(b->scratch, memo, child, false);
+  entry = ixs_query_node_memo_get(&query->memo, child, false);
   if (entry && entry->complete) {
     frame->result = defined_combine(frame->result, entry->result);
     frame->next_child++;
-    return true;
+    return IXS_QUERY_WALK_ADVANCED;
   }
   if (entry && entry->active) {
     state->invalid = true;
-    return true;
+    return IXS_QUERY_WALK_STOP;
   }
   if (!entry)
-    entry = defined_memo_get(b->scratch, memo, child, true);
-  if (!entry ||
-      !defined_stack_push(b->scratch, stack, depth, capacity, child)) {
+    entry = ixs_query_node_memo_get(&query->memo, child, true);
+  if (!entry) {
     state->oom = true;
-    return true;
+    return IXS_QUERY_WALK_OOM;
   }
+  if (ixs_query_walk_push(&query->walk, child) != IXS_QUERY_WALK_ADVANCED)
+    return IXS_QUERY_WALK_OOM;
+  ((defined_frame *)IXS_QUERY_WALK_TOP(&query->walk))->result = IXS_CHECK_TRUE;
   entry->active = true;
-  return true;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static ixs_query_walk_step defined_advance(void *state, void *top) {
+  defined_query *query = state;
+  defined_frame *frame = top;
+  ixs_query_walk_step step;
+  if (query->state->oom || query->state->limited || query->state->invalid)
+    return IXS_QUERY_WALK_STOP;
+  if (!frame->started) {
+    ixs_check_result direct = IXS_CHECK_UNKNOWN;
+    bool has_direct = false;
+    defined_start_frame(query->state, query->bounds, frame, query->pw_depth,
+                        &direct, &has_direct);
+    if (query->state->limited)
+      return IXS_QUERY_WALK_STOP;
+    if (has_direct)
+      return defined_complete_frame(query, direct);
+    frame->started = true;
+  }
+  step = defined_process_child(query, frame);
+  if (step != IXS_QUERY_WALK_NEXT)
+    return step;
+  frame->result = defined_finalize_node(query->state, query->bounds,
+                                        frame->node, frame->result);
+  return defined_complete_frame(query, frame->result);
 }
 
 static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
                                      ixs_node *root, unsigned pw_depth) {
   ixs_arena_mark mark;
-  defined_memo memo;
-  defined_memo_entry *root_entry;
-  defined_frame *stack = NULL;
-  size_t depth = 0;
-  size_t capacity = 0;
-  ixs_check_result answer = IXS_CHECK_UNKNOWN;
+  defined_query query;
+  bounds_check_memo_entry *root_entry;
+  ixs_query_walk_step step;
 
   if (!root || state->oom || state->limited || state->invalid)
     return IXS_CHECK_UNKNOWN;
   mark = ixs_arena_save(b->scratch);
-  memset(&memo, 0, sizeof(memo));
-  root_entry = defined_memo_get(b->scratch, &memo, root, true);
-  if (!root_entry ||
-      !defined_stack_push(b->scratch, &stack, &depth, &capacity, root)) {
+  query.state = state;
+  query.bounds = b;
+  query.answer = IXS_CHECK_UNKNOWN;
+  query.pw_depth = pw_depth;
+  IXS_QUERY_NODE_MEMO_INIT(&query.memo, b->scratch, bounds_check_memo_entry,
+                           node);
+  IXS_QUERY_WALK_INIT_CAP(&query.walk, b->scratch, &state->oom, defined_frame,
+                          node, 32u);
+  root_entry = ixs_query_node_memo_get(&query.memo, root, true);
+  if (!root_entry) {
     state->oom = true;
     ixs_arena_restore(b->scratch, mark);
     return IXS_CHECK_UNKNOWN;
   }
-  root_entry->active = true;
-
-  while (depth > 0 && !state->oom && !state->limited && !state->invalid) {
-    defined_frame *frame = &stack[depth - 1u];
-    ixs_node *node = frame->node;
-
-    if (!frame->started) {
-      ixs_check_result direct = IXS_CHECK_UNKNOWN;
-      bool has_direct = false;
-      defined_start_frame(state, b, frame, pw_depth, &direct, &has_direct);
-      if (state->limited)
-        break;
-      if (has_direct) {
-        if (defined_complete_frame(state, b, &memo, stack, &depth, direct,
-                                   &answer))
-          break;
-        continue;
-      }
-      frame->started = true;
-    }
-
-    if (defined_process_child(state, b, &memo, &stack, &depth, &capacity))
-      continue;
-
-    frame->result = defined_finalize_node(state, b, node, frame->result);
-    if (defined_complete_frame(state, b, &memo, stack, &depth, frame->result,
-                               &answer))
-      break;
-  }
-
-  ixs_arena_restore(b->scratch, mark);
-  if (state->oom || state->limited || state->invalid)
+  step = ixs_query_walk_push(&query.walk, root);
+  if (step != IXS_QUERY_WALK_ADVANCED) {
+    ixs_arena_restore(b->scratch, mark);
     return IXS_CHECK_UNKNOWN;
-  return answer;
+  }
+  ((defined_frame *)IXS_QUERY_WALK_TOP(&query.walk))->result = IXS_CHECK_TRUE;
+  root_entry->active = true;
+  step = ixs_query_walk_drive(&query.walk, &query, defined_advance, NULL);
+  ixs_arena_restore(b->scratch, mark);
+  if (step != IXS_QUERY_WALK_ADVANCED || state->oom || state->limited ||
+      state->invalid)
+    return IXS_CHECK_UNKNOWN;
+  return query.answer;
 }
 
 static bool bounds_defined_cache_lookup(ixs_bounds *b, ixs_node *expr,
@@ -10857,47 +10573,21 @@ typedef struct {
   bool started;
 } assumption_predicate_frame;
 
-static bool assumption_predicate_stack_push(ixs_arena *arena,
-                                            assumption_predicate_frame **stack,
-                                            size_t *depth, size_t *capacity,
-                                            ixs_node *node) {
-  assumption_predicate_frame *frame;
-  if (*depth == *capacity) {
-    size_t next_capacity = *capacity ? *capacity * 2u : 32u;
-    assumption_predicate_frame *grown;
-    if (next_capacity <= *capacity || next_capacity > SIZE_MAX / sizeof(*grown))
-      return false;
-    grown = ixs_arena_grow(arena, *stack, *capacity * sizeof(*grown),
-                           next_capacity * sizeof(*grown), sizeof(void *));
-    if (!grown)
-      return false;
-    *stack = grown;
-    *capacity = next_capacity;
-  }
-  frame = &(*stack)[(*depth)++];
-  memset(frame, 0, sizeof(*frame));
-  frame->node = node;
-  return true;
-}
+typedef struct {
+  ixs_bounds *bounds;
+  ixs_arena *arena;
+  ixs_query_walk walk;
+  ixs_query_node_memo memo;
+  ixs_node **leaves;
+  size_t leaf_count;
+  size_t leaf_capacity;
+  ixs_bounds_build_status status;
+  bool oom;
+} assumption_predicate_query;
 
-static bool assumption_predicate_leaf_push(ixs_arena *arena, ixs_node ***leaves,
-                                           size_t *count, size_t *capacity,
-                                           ixs_node *leaf) {
-  if (*count == *capacity) {
-    size_t next_capacity = *capacity ? *capacity * 2u : 32u;
-    ixs_node **grown;
-    if (next_capacity <= *capacity || next_capacity > SIZE_MAX / sizeof(*grown))
-      return false;
-    grown = ixs_arena_grow(arena, *leaves, *capacity * sizeof(*grown),
-                           next_capacity * sizeof(*grown), sizeof(void *));
-    if (!grown)
-      return false;
-    *leaves = grown;
-    *capacity = next_capacity;
-  }
-  (*leaves)[(*count)++] = leaf;
-  return true;
-}
+static bool query_node_stack_push_cap(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node, size_t initial_capacity);
 
 static ixs_bounds_build_status bounds_validate_cmp_leaf(ixs_bounds *b,
                                                         ixs_node *cmp) {
@@ -10948,10 +10638,58 @@ static ixs_bounds_build_status bounds_start_predicate_frame(
     return assumption_invalid(
         b, "expected a CMP, AND, or boolean constant predicate");
   }
-  return assumption_predicate_leaf_push(traversal, leaves, leaf_count,
-                                        leaf_capacity, cur)
+  return query_node_stack_push_cap(traversal, leaves, leaf_count, leaf_capacity,
+                                   cur, 32u)
              ? IXS_BOUNDS_BUILD_OK
              : IXS_BOUNDS_BUILD_OOM;
+}
+
+/* hot */
+static ixs_query_walk_step assumption_predicate_advance(void *state,
+                                                        void *top) {
+  assumption_predicate_query *query = state;
+  assumption_predicate_frame *frame = top;
+  bounds_check_memo_entry *entry;
+  ixs_node *child;
+  if (!frame->started) {
+    query->status = bounds_start_predicate_frame(
+        query->bounds, query->arena, frame, &query->leaves, &query->leaf_count,
+        &query->leaf_capacity);
+    if (query->status != IXS_BOUNDS_BUILD_OK)
+      return query->status == IXS_BOUNDS_BUILD_OOM ? IXS_QUERY_WALK_OOM
+                                                   : IXS_QUERY_WALK_STOP;
+  }
+  if (frame->next_child < frame->nchildren) {
+    child = frame->node->u.assoc.args[frame->next_child++];
+    if (!child) {
+      query->status = assumption_invalid(query->bounds, "NULL predicate child");
+      return IXS_QUERY_WALK_STOP;
+    }
+    entry = ixs_query_node_memo_get(&query->memo, child, true);
+    if (!entry) {
+      query->status = IXS_BOUNDS_BUILD_OOM;
+      return IXS_QUERY_WALK_OOM;
+    }
+    if (entry->active) {
+      query->status =
+          assumption_invalid(query->bounds, "cyclic predicate tree");
+      return IXS_QUERY_WALK_STOP;
+    }
+    if (entry->complete)
+      return IXS_QUERY_WALK_ADVANCED;
+    entry->active = true;
+    return ixs_query_walk_push(&query->walk, child);
+  }
+  entry = ixs_query_node_memo_get(&query->memo, frame->node, false);
+  if (!entry || !entry->active) {
+    query->status =
+        assumption_invalid(query->bounds, "invalid predicate traversal state");
+    return IXS_QUERY_WALK_STOP;
+  }
+  entry->active = false;
+  entry->complete = true;
+  IXS_QUERY_WALK_POP(&query->walk);
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 /* False means the validated root is an AND and needs the iterative walker. */
@@ -10991,13 +10729,9 @@ static bool bounds_process_flat_predicate(ixs_bounds *b, ixs_node *pred,
 static ixs_bounds_build_status
 bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   ixs_arena traversal;
-  assumption_predicate_frame *stack = NULL;
-  defined_depth_memo memo;
-  ixs_node **leaves = NULL;
-  size_t depth = 0;
-  size_t stack_capacity = 0;
-  size_t leaf_count = 0;
-  size_t leaf_capacity = 0;
+  assumption_predicate_query query;
+  bounds_check_memo_entry *entry;
+  ixs_query_walk_step step;
   size_t i;
   ixs_bounds_build_status status = IXS_BOUNDS_BUILD_OK;
 
@@ -11010,69 +10744,29 @@ bounds_process_predicate(ixs_bounds *b, ixs_node *pred, bool ingest) {
   assert(pred != NULL && pred->tag == IXS_AND);
 
   ixs_arena_init(&traversal, IXS_ARENA_DEFAULT_SIZE);
-  memset(&memo, 0, sizeof(memo));
-  {
-    defined_depth_entry *entry =
-        defined_depth_memo_get(&traversal, &memo, pred, true);
-    if (!entry || !assumption_predicate_stack_push(&traversal, &stack, &depth,
-                                                   &stack_capacity, pred)) {
-      status = IXS_BOUNDS_BUILD_OOM;
-      goto cleanup;
-    }
-    entry->active = true;
+  memset(&query, 0, sizeof(query));
+  query.bounds = b;
+  query.arena = &traversal;
+  query.status = IXS_BOUNDS_BUILD_OK;
+  IXS_QUERY_NODE_MEMO_INIT(&query.memo, &traversal, bounds_check_memo_entry,
+                           node);
+  IXS_QUERY_WALK_INIT_CAP(&query.walk, &traversal, &query.oom,
+                          assumption_predicate_frame, node, 32u);
+  entry = ixs_query_node_memo_get(&query.memo, pred, true);
+  if (!entry ||
+      ixs_query_walk_push(&query.walk, pred) != IXS_QUERY_WALK_ADVANCED) {
+    status = IXS_BOUNDS_BUILD_OOM;
+    goto cleanup;
   }
-
-  while (depth > 0) {
-    assumption_predicate_frame *frame = &stack[depth - 1u];
-    ixs_node *cur = frame->node;
-    defined_depth_entry *entry;
-
-    if (!frame->started) {
-      status = bounds_start_predicate_frame(b, &traversal, frame, &leaves,
-                                            &leaf_count, &leaf_capacity);
-      if (status != IXS_BOUNDS_BUILD_OK)
-        goto cleanup;
-    }
-
-    if (frame->next_child < frame->nchildren) {
-      ixs_node *child = cur->u.assoc.args[frame->next_child++];
-      entry =
-          child ? defined_depth_memo_get(&traversal, &memo, child, true) : NULL;
-      if (!child) {
-        status = assumption_invalid(b, "NULL predicate child");
-        goto cleanup;
-      }
-      if (!entry) {
-        status = IXS_BOUNDS_BUILD_OOM;
-        goto cleanup;
-      }
-      if (entry->active) {
-        status = assumption_invalid(b, "cyclic predicate tree");
-        goto cleanup;
-      }
-      if (entry->complete)
-        continue;
-      entry->active = true;
-      if (!assumption_predicate_stack_push(&traversal, &stack, &depth,
-                                           &stack_capacity, child)) {
-        status = IXS_BOUNDS_BUILD_OOM;
-        goto cleanup;
-      }
-      continue;
-    }
-
-    entry = defined_depth_memo_get(&traversal, &memo, cur, false);
-    if (!entry || !entry->active) {
-      status = assumption_invalid(b, "invalid predicate traversal state");
-      goto cleanup;
-    }
-    entry->active = false;
-    entry->complete = true;
-    depth--;
-  }
-
-  for (i = 0; ingest && i < leaf_count; i++) {
-    bounds_ingest_validated_leaf(b, leaves[i], true);
+  entry->active = true;
+  step = ixs_query_walk_drive(&query.walk, &query, assumption_predicate_advance,
+                              NULL);
+  status = query.status;
+  if (step == IXS_QUERY_WALK_OOM)
+    status = IXS_BOUNDS_BUILD_OOM;
+  for (i = 0; status == IXS_BOUNDS_BUILD_OK && ingest && i < query.leaf_count;
+       i++) {
+    bounds_ingest_validated_leaf(b, query.leaves[i], true);
     if (b->oom) {
       status = IXS_BOUNDS_BUILD_OOM;
       break;
@@ -12105,11 +11799,12 @@ IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
   return true;
 }
 
-IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
-                                      size_t *count, size_t *capacity,
-                                      ixs_node *node) {
+IXS_STATIC bool query_node_stack_push_cap(ixs_arena *arena, ixs_node ***stack,
+                                          size_t *count, size_t *capacity,
+                                          ixs_node *node,
+                                          size_t initial_capacity) {
   if (*count >= *capacity) {
-    size_t new_capacity = *capacity ? *capacity * 2u : FACT_WORK_INIT_CAP;
+    size_t new_capacity = *capacity ? *capacity * 2u : initial_capacity;
     ixs_node **grown;
     if (new_capacity <= *capacity || new_capacity > SIZE_MAX / sizeof(**stack))
       return false;
@@ -12122,6 +11817,13 @@ IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
   }
   (*stack)[(*count)++] = node;
   return true;
+}
+
+IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node) {
+  return query_node_stack_push_cap(arena, stack, count, capacity, node,
+                                   FACT_WORK_INIT_CAP);
 }
 
 static bool facts_worklist_index_predicate(facts_worklist *work,
@@ -12961,89 +12663,11 @@ typedef struct {
 } predicate_query_frame;
 
 typedef struct {
-  ixs_node *node;
-  ixs_check_result result;
-  bool active;
-  bool complete;
-} predicate_query_memo_entry;
-
-typedef struct {
-  predicate_query_memo_entry *entries;
-  size_t count;
-  size_t capacity;
-} predicate_query_memo;
-
-static bool predicate_query_memo_grow(ixs_arena *arena,
-                                      predicate_query_memo *memo) {
-  size_t next_capacity = memo->capacity ? memo->capacity * 2u : 32u;
-  predicate_query_memo_entry *grown;
-  size_t i;
-  if (next_capacity <= memo->capacity ||
-      next_capacity > SIZE_MAX / sizeof(*grown))
-    return false;
-  grown =
-      ixs_arena_alloc(arena, next_capacity * sizeof(*grown), sizeof(void *));
-  if (!grown)
-    return false;
-  memset(grown, 0, next_capacity * sizeof(*grown));
-  for (i = 0; i < memo->capacity; i++) {
-    predicate_query_memo_entry entry = memo->entries[i];
-    size_t index;
-    if (!entry.node)
-      continue;
-    index = entry.node->hash & (next_capacity - 1u);
-    while (grown[index].node)
-      index = (index + 1u) & (next_capacity - 1u);
-    grown[index] = entry;
-  }
-  memo->entries = grown;
-  memo->capacity = next_capacity;
-  return true;
-}
-
-static predicate_query_memo_entry *
-predicate_query_memo_get(ixs_arena *arena, predicate_query_memo *memo,
-                         ixs_node *node, bool create) {
-  size_t index;
-  if (create && (!memo->capacity || memo->count + 1u > memo->capacity / 2u)) {
-    if (!predicate_query_memo_grow(arena, memo))
-      return NULL;
-  }
-  if (!memo->capacity)
-    return NULL;
-  index = node->hash & (memo->capacity - 1u);
-  while (memo->entries[index].node && memo->entries[index].node != node)
-    index = (index + 1u) & (memo->capacity - 1u);
-  if (!memo->entries[index].node) {
-    if (!create)
-      return NULL;
-    memo->entries[index].node = node;
-    memo->count++;
-  }
-  return &memo->entries[index];
-}
-
-static bool predicate_query_stack_push(ixs_arena *arena,
-                                       predicate_query_frame **stack,
-                                       size_t *depth, size_t *capacity,
-                                       ixs_node *node) {
-  if (*depth == *capacity) {
-    size_t next_capacity = *capacity ? *capacity * 2u : 32u;
-    predicate_query_frame *grown;
-    if (next_capacity <= *capacity || next_capacity > SIZE_MAX / sizeof(*grown))
-      return false;
-    grown = ixs_arena_grow(arena, *stack, *capacity * sizeof(*grown),
-                           next_capacity * sizeof(*grown), sizeof(void *));
-    if (!grown)
-      return false;
-    *stack = grown;
-    *capacity = next_capacity;
-  }
-  memset(&(*stack)[*depth], 0, sizeof(**stack));
-  (*stack)[*depth].node = node;
-  (*depth)++;
-  return true;
-}
+  ixs_bounds *bounds;
+  ixs_query_walk walk;
+  ixs_query_node_memo memo;
+  ixs_check_result answer;
+} predicate_query;
 
 static ixs_check_result check_result_not(ixs_check_result result) {
   if (result == IXS_CHECK_TRUE)
@@ -13180,17 +12804,59 @@ predicate_query_complete(ixs_bounds *bounds,
   return result;
 }
 
+/* hot */
+static ixs_query_walk_step predicate_query_advance(void *state, void *top) {
+  predicate_query *query = state;
+  predicate_query_frame *frame = top;
+  bounds_check_memo_entry *entry;
+  ixs_node *child;
+  ixs_check_result completed;
+  predicate_query_start(frame);
+  child = predicate_query_next_child(frame);
+  if (child) {
+    entry = ixs_query_node_memo_get(&query->memo, child, true);
+    if (!entry) {
+      query->bounds->oom = true;
+      return IXS_QUERY_WALK_OOM;
+    }
+    if (entry->active) {
+      bounds_query_note_invalid(query->bounds->query_state);
+      return IXS_QUERY_WALK_STOP;
+    }
+    if (entry->complete) {
+      predicate_query_fold(frame, entry->result);
+      return IXS_QUERY_WALK_ADVANCED;
+    }
+    if (ixs_query_walk_push(&query->walk, child) != IXS_QUERY_WALK_ADVANCED)
+      return IXS_QUERY_WALK_OOM;
+    entry->active = true;
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  completed = predicate_query_complete(query->bounds, frame);
+  entry = ixs_query_node_memo_get(&query->memo, frame->node, false);
+  if (!entry || !entry->active) {
+    bounds_query_note_invalid(query->bounds->query_state);
+    return IXS_QUERY_WALK_STOP;
+  }
+  entry->active = false;
+  entry->complete = true;
+  entry->result = completed;
+  IXS_QUERY_WALK_POP(&query->walk);
+  if (query->walk.depth == 0)
+    query->answer = completed;
+  else
+    predicate_query_fold(IXS_QUERY_WALK_TOP(&query->walk), completed);
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
 static ixs_check_result predicate_query_eval_detail(ixs_bounds *bounds,
                                                     ixs_node *predicate,
                                                     bool *limited) {
   ixs_arena *arena;
   ixs_arena_mark mark;
-  predicate_query_frame *stack = NULL;
-  predicate_query_memo memo = {0};
-  predicate_query_memo_entry *entry;
-  size_t depth = 0;
-  size_t capacity = 0;
-  ixs_check_result answer = IXS_CHECK_UNKNOWN;
+  predicate_query query;
+  bounds_check_memo_entry *entry;
+  ixs_query_walk_step step;
 
   if (limited)
     *limited = false;
@@ -13198,64 +12864,28 @@ static ixs_check_result predicate_query_eval_detail(ixs_bounds *bounds,
     return IXS_CHECK_UNKNOWN;
   arena = &bounds->query_arena;
   mark = ixs_arena_save(arena);
-  entry = predicate_query_memo_get(arena, &memo, predicate, true);
-  if (!entry || !predicate_query_stack_push(arena, &stack, &depth, &capacity,
-                                            predicate)) {
+  query.bounds = bounds;
+  query.answer = IXS_CHECK_UNKNOWN;
+  IXS_QUERY_NODE_MEMO_INIT(&query.memo, arena, bounds_check_memo_entry, node);
+  IXS_QUERY_WALK_INIT_CAP(&query.walk, arena, &bounds->oom,
+                          predicate_query_frame, node, 32u);
+  entry = ixs_query_node_memo_get(&query.memo, predicate, true);
+  if (!entry) {
     bounds->oom = true;
-    goto cleanup;
+    ixs_arena_restore(arena, mark);
+    return IXS_CHECK_UNKNOWN;
+  }
+  step = ixs_query_walk_push(&query.walk, predicate);
+  if (step != IXS_QUERY_WALK_ADVANCED) {
+    ixs_arena_restore(arena, mark);
+    return IXS_CHECK_UNKNOWN;
   }
   entry->active = true;
-  while (depth > 0) {
-    predicate_query_frame *frame = &stack[depth - 1u];
-    ixs_node *child = NULL;
-    ixs_check_result completed;
-
-    predicate_query_start(frame);
-    child = predicate_query_next_child(frame);
-
-    if (child) {
-      entry = predicate_query_memo_get(arena, &memo, child, true);
-      if (!entry) {
-        bounds->oom = true;
-        goto cleanup;
-      }
-      if (entry->active) {
-        bounds_query_note_invalid(bounds->query_state);
-        goto cleanup;
-      }
-      if (entry->complete) {
-        predicate_query_fold(frame, entry->result);
-        continue;
-      }
-      if (!predicate_query_stack_push(arena, &stack, &depth, &capacity,
-                                      child)) {
-        bounds->oom = true;
-        goto cleanup;
-      }
-      entry->active = true;
-      continue;
-    }
-
-    completed = predicate_query_complete(bounds, frame);
-    entry = predicate_query_memo_get(arena, &memo, frame->node, false);
-    if (!entry || !entry->active) {
-      bounds_query_note_invalid(bounds->query_state);
-      goto cleanup;
-    }
-    entry->active = false;
-    entry->complete = true;
-    entry->result = completed;
-    depth--;
-    if (depth == 0) {
-      answer = completed;
-      break;
-    }
-    predicate_query_fold(&stack[depth - 1u], completed);
-  }
-
-cleanup:
+  step =
+      ixs_query_walk_drive(&query.walk, &query, predicate_query_advance, NULL);
   ixs_arena_restore(arena, mark);
-  return bounds->oom ? IXS_CHECK_UNKNOWN : answer;
+  return step != IXS_QUERY_WALK_ADVANCED || bounds->oom ? IXS_CHECK_UNKNOWN
+                                                        : query.answer;
 }
 
 /* Check B under a query-local A assumption.  The fork borrows the enclosing
