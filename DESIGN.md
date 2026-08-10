@@ -1245,9 +1245,11 @@ evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
 scaling.
 Canonical alias creation, relation endpoint admission, and query proof policy
 remain in `bounds.c`, which passes canonical nodes or trusted symbols to the
-leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
-Piecewise range-cache lifecycle. Full store invalidation refreshes the central
-query owner, clears range caches, then clears relation projections; each leaf
+leaf owners. `bounds_range.c` owns direct interval caching and transfer,
+structural and Piecewise ranges, equality-component range projection, integral
+and congruence refinement, truncating-remainder ranges, emptiness, and interval
+comparison entailment. Full store invalidation refreshes the central query
+owner, clears range caches, then clears relation projections; each leaf
 component writes only its owned fields.
 
 `bounds.c` orchestrates aggregate initialization, fork, and destruction.
@@ -1277,6 +1279,13 @@ layout, load factor, and allocation remain consumer-owned.
   O(1); a failed growth does not publish a partial variable or index.
 - **Interval bounds**: `$T0 >= 0`, `$T0 < 256`, etc. — the simplifier
   extracts interval bounds from comparison assumptions automatically
+- **Range queries**: The iterative interval walker uses the shared query driver
+  and the central owner/generation cache. Direct expression entries use the
+  fixed range cache, while equality projection reserves and publishes a whole
+  admitted component before completing its columns. Mod, truncating division,
+  extrema, bitwise, and first-match Piecewise transfer stay inside the range
+  owner. Comparison checks consume those intervals without re-entering
+  simplification policy.
 - **Expression range facts**: explicit or derived facts of the form
   `range(expr) = [lo, hi]` are stored in the same bounds context as
   symbol intervals. A dense unique-expression array retains iteration order;
@@ -3135,7 +3144,7 @@ ixsimpl/
 │   ├── bounds_query.h
 │   ├── bounds_store.c       # retained fact records, indexes, and mutation
 │   ├── bounds_store.h
-│   ├── bounds_range.c       # direct and Piecewise range-cache lifecycle
+│   ├── bounds_range.c       # interval transfer, caches, and comparisons
 │   ├── bounds_range.h
 │   ├── bounds_relation.c    # exact-component cursor and equality projection
 │   ├── bounds_relation.h
