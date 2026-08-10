@@ -7,6 +7,7 @@
 #include "bounds_query.h"
 #include "bounds_range.h"
 #include "bounds_store.h"
+#include "facts_store.h"
 #include "query_walk.h"
 #include "simplify.h"
 
@@ -449,7 +450,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   saved_errors_cap = ctx->errors_cap;
   status = bounds_assume_validate_predicate(&branch, antecedent);
   if (status == IXS_BOUNDS_BUILD_OK)
-    status = bounds_ingest_predicate_branch(ctx, &branch, antecedent);
+    status = facts_store_ingest_predicate_branch(ctx, &branch, antecedent);
   ixs_arena_restore(&ctx->diag, diag_mark);
   ctx->errors = saved_errors;
   ctx->nerrors = saved_nerrors;

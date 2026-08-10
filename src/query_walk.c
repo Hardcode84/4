@@ -7,6 +7,59 @@
 #include <stdint.h>
 #include <string.h>
 
+#define QUERY_NODE_SET_INIT_CAP 64u
+
+static bool query_node_set_grow(ixs_arena *arena, query_node_set *set) {
+  size_t new_capacity =
+      set->capacity ? set->capacity * 2u : QUERY_NODE_SET_INIT_CAP;
+  ixs_node **slots;
+  size_t i;
+  if (new_capacity <= set->capacity || new_capacity > SIZE_MAX / sizeof(*slots))
+    return false;
+  slots = ixs_arena_alloc(arena, new_capacity * sizeof(*slots), sizeof(void *));
+  if (!slots)
+    return false;
+  memset(slots, 0, new_capacity * sizeof(*slots));
+  for (i = 0; i < set->capacity; i++) {
+    if (set->slots[i]) {
+      size_t index = set->slots[i]->hash & (new_capacity - 1u);
+      while (slots[index])
+        index = (index + 1u) & (new_capacity - 1u);
+      slots[index] = set->slots[i];
+    }
+  }
+  set->slots = slots;
+  set->capacity = new_capacity;
+  return true;
+}
+
+IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
+                                      ixs_node *node, bool *inserted) {
+  size_t index;
+  if (!set->capacity || set->count >= set->capacity / 2u) {
+    if (!query_node_set_grow(arena, set))
+      return false;
+  }
+  index = node->hash & (set->capacity - 1u);
+  while (set->slots[index] && set->slots[index] != node)
+    index = (index + 1u) & (set->capacity - 1u);
+  if (set->slots[index]) {
+    *inserted = false;
+    return true;
+  }
+  set->slots[index] = node;
+  set->count++;
+  *inserted = true;
+  return true;
+}
+
+IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node) {
+  return ixs_query_node_vector_push(arena, stack, count, capacity, node,
+                                    QUERY_NODE_SET_INIT_CAP);
+}
+
 IXS_STATIC bool ixs_query_node_vector_push(ixs_arena *arena, ixs_node ***nodes,
                                            size_t *count, size_t *capacity,
                                            ixs_node *node,

@@ -15,6 +15,7 @@
 #include "bounds_relation.h"
 #include "bounds_store.h"
 #include "division_algebra.h"
+#include "facts_store.h"
 #include "hash.h"
 #include "interval.h"
 #include "low_bits_algebra.h"
@@ -11597,6 +11598,7 @@ static void test_fact_simplify_session_lifetime_and_oom(void) {
     raw_pred = (ixs_cmp)(&session, raw_x, IXS_CMP_GE, (ixs_int)(&session, 0));
     stale = (ixs_facts_create)(&session);
     CHECK((ixs_facts_assume_pred)(stale, raw_pred));
+    CHECK(stale->bounds.scratch == NULL);
     ixs_session_destroy(&session);
     CHECK(test_ixs_simplify_facts(stale, raw_x) == NULL);
 
@@ -11628,11 +11630,13 @@ static void test_fact_query_arena_session_teardown(void) {
   first = (ixs_facts_create)(&session);
   second = (ixs_facts_create)(&session);
   CHECK(first != NULL && second != NULL);
+  CHECK(first->bounds.scratch == NULL && second->bounds.scratch == NULL);
 
   result = (ixs_check_predicate_facts)(first, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
   result = (ixs_check_predicate_facts)(second, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
+  CHECK(first->bounds.scratch == NULL && second->bounds.scratch == NULL);
   CHECK(first->bounds.query_arena.current != NULL ||
         first->bounds.query_arena.spare != NULL);
   CHECK(second->bounds.query_arena.current != NULL ||
@@ -11654,8 +11658,10 @@ static void test_fact_query_arena_session_teardown(void) {
 
   after_reset = (ixs_facts_create)(&session);
   CHECK(after_reset != NULL);
+  CHECK(after_reset->bounds.scratch == NULL);
   result = (ixs_check_predicate_facts)(after_reset, pred);
   CHECK(result == IXS_CHECK_UNKNOWN);
+  CHECK(after_reset->bounds.scratch == NULL);
   CHECK(after_reset->bounds.query_arena.current != NULL ||
         after_reset->bounds.query_arena.spare != NULL);
   CHECK(after_reset->bounds.query_state_arena.current == NULL);
@@ -11986,6 +11992,7 @@ static void test_mod_inverse_watcher_fork_oom_is_atomic(void) {
   CHECK(ixs_facts_assume_range(facts, mod8, &residue3));
   CHECK(ixs_facts_assume_range(facts, mod16, &residue0_to7));
   CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  bounds_store_bind(&facts->bounds, ctx, &ctx->scratch);
   mark = ixs_arena_save(&ctx->scratch);
   candidate_ready = ixs_bounds_fork(&candidate, &facts->bounds);
   CHECK(candidate_ready);

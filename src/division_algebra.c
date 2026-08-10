@@ -5,6 +5,7 @@
 
 #include "additive_row.h"
 #include "bounds_query.h"
+#include "query_walk.h"
 #include "simplify.h"
 #include <string.h>
 

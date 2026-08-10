@@ -7,6 +7,19 @@
 #include "arena.h"
 #include "node.h"
 
+/* Scratch-local pointer set shared by iterative proof components. */
+typedef struct {
+  ixs_node **slots;
+  size_t capacity;
+  size_t count;
+} query_node_set;
+
+IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
+                                      ixs_node *node, bool *inserted);
+IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node);
+
 typedef struct {
   ixs_arena *arena;
   bool *oom;

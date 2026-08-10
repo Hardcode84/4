@@ -30,13 +30,6 @@ typedef struct ixs_difference_constraint ixs_difference_constraint;
 typedef struct ixs_difference_var ixs_difference_var;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
-/* Scratch-local pointer set shared by iterative proof components. */
-typedef struct {
-  ixs_node **slots;
-  size_t capacity;
-  size_t count;
-} query_node_set;
-
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
@@ -138,31 +131,8 @@ typedef struct ixs_bounds {
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
-struct ixs_facts {
-  ixs_session_impl *impl;
-  ixs_facts *session_next;
-  ixs_ctx *ctx;
-  uint64_t epoch;
-  bool usable;
-  ixs_bounds bounds;
-};
-
 /* Internal hooks emitted only by the test-instrumented library. */
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-typedef struct {
-  size_t lookups;
-  size_t hits;
-  size_t stores;
-  size_t bypasses;
-  size_t entries;
-  size_t retained_bytes;
-  size_t retained_limit;
-  size_t slot_node_capacity;
-} ixs_facts_closure_cache_stats_result;
-
-IXS_STATIC void
-ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
-                              ixs_facts_closure_cache_stats_result *stats);
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_quotient_limit_probe(
@@ -176,12 +146,6 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
 /* Exact total-integer query used by typed algebra components. */
 IXS_STATIC ixs_algebra_status ixs_bounds_check_integer_domain(ixs_bounds *b,
                                                               ixs_node *expr);
-
-IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
-                                      ixs_node *node, bool *inserted);
-IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
-                                      size_t *count, size_t *capacity,
-                                      ixs_node *node);
 
 /* Release bounds-owned query workspace; context-backed central state remains
  * context-owned. Arena-backed semantic bounds storage remains caller-owned. */
@@ -201,8 +165,6 @@ IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                             ixs_node *rhs, int64_t offset);
 IXS_STATIC ixs_check_result bounds_cmp_atom(ixs_bounds *b, ixs_node *cmp);
-IXS_STATIC ixs_bounds_build_status bounds_ingest_predicate_branch(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *predicate);
 /* Lower proof services borrow these query-policy operations. */
 IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);

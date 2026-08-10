@@ -1545,6 +1545,42 @@ IXS_STATIC ixs_bounds_build_status bounds_assume_ingest_predicates(
   return IXS_BOUNDS_BUILD_OK;
 }
 
+IXS_STATIC bool bounds_extract_integer_affine(ixs_node *expr, const char **name,
+                                              int64_t *scale, int64_t *offset) {
+  int64_t p, q;
+  if (!expr || !name || !scale || !offset)
+    return false;
+  if (expr->tag == IXS_SYM) {
+    *name = expr->u.name;
+    *scale = 1;
+    *offset = 0;
+    return true;
+  }
+  if (expr->tag == IXS_MUL && expr->u.mul.nfactors == 1 &&
+      expr->u.mul.factors[0].exp == 1 &&
+      expr->u.mul.factors[0].base->tag == IXS_SYM) {
+    ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+    if (q != 1 || p == 0)
+      return false;
+    *name = expr->u.mul.factors[0].base->u.name;
+    *scale = p;
+    *offset = 0;
+    return true;
+  }
+  if (expr->tag == IXS_ADD && expr->u.add.nterms == 1 &&
+      expr->u.add.terms[0].term->tag == IXS_SYM) {
+    ixs_node_get_rat(expr->u.add.coeff, offset, &q);
+    if (q != 1)
+      return false;
+    ixs_node_get_rat(expr->u.add.terms[0].coeff, scale, &q);
+    if (q != 1 || *scale == 0)
+      return false;
+    *name = expr->u.add.terms[0].term->u.name;
+    return true;
+  }
+  return false;
+}
+
 IXS_STATIC ixs_bounds_build_status
 ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
                      ixs_node *const *assumptions, size_t n_assumptions) {

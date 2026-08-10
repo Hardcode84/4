@@ -4,6 +4,7 @@
 #include <ixsimpl.h>
 
 #include "bounds.h"
+#include "facts_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>

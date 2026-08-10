@@ -3,6 +3,7 @@
  */
 #include "bounds.h"
 #include "expand.h"
+#include "facts_store.h"
 #include "node.h"
 #include "parser.h"
 #include "print.h"
@@ -169,26 +170,6 @@ static uint64_t session_next_epoch(ixs_ctx *ctx) {
   return ctx->next_session_epoch;
 }
 
-/* Fact handles live in the context arena, but their bounds own a heap-backed
- * query arena.  The creating session therefore retains an intrusive owner
- * list and releases every such arena before invalidating the session epoch or
- * its scratch storage.  This teardown is infallible and visits each fact
- * exactly once. */
-static void session_destroy_facts(ixs_session_impl *impl) {
-  ixs_facts *facts = impl->facts_head;
-  impl->facts_head = NULL;
-  while (facts) {
-    ixs_facts *next = facts->session_next;
-    assert(facts->impl == impl);
-    facts->session_next = NULL;
-    ixs_bounds_destroy(&facts->bounds);
-    facts->impl = NULL;
-    facts->epoch = 0;
-    facts->usable = false;
-    facts = next;
-  }
-}
-
 void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
   ixs_arena scratch;
   ixs_session_impl *impl;
@@ -211,7 +192,7 @@ void ixs_session_init(ixs_session *s, ixs_ctx *ctx) {
 void ixs_session_reset(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
   simp_assumption_cache_reset(impl);
-  session_destroy_facts(impl);
+  facts_store_destroy_session(impl);
   ixs_arena_restore(session_scratch(impl), impl->base_mark);
   session_clear_errors_impl(impl);
   impl->epoch = session_next_epoch(impl->ctx);
@@ -220,7 +201,7 @@ void ixs_session_reset(ixs_session *s) {
 void ixs_session_destroy(ixs_session *s) {
   ixs_session_impl *impl = ixs_session_get(s);
   simp_assumption_cache_reset(impl);
-  session_destroy_facts(impl);
+  facts_store_destroy_session(impl);
   ixs_arena_destroy(&impl->diag);
   ixs_arena_destroy(&impl->scratch);
   memset(s, 0, sizeof(*s));

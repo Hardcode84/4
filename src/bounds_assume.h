@@ -34,6 +34,8 @@ IXS_STATIC bool extract_cmp_expr_const(ixs_node *cmp, ixs_node **expr,
                                        int64_t *value);
 IXS_STATIC bool bounds_extract_unit_equality(ixs_node *expr, ixs_node **lhs,
                                              ixs_node **rhs);
+IXS_STATIC bool bounds_extract_integer_affine(ixs_node *expr, const char **name,
+                                              int64_t *scale, int64_t *offset);
 IXS_STATIC bool bounds_extract_cmp_exact_relation(struct ixs_bounds *b,
                                                   ixs_node *cmp, ixs_node **lhs,
                                                   ixs_node **rhs,

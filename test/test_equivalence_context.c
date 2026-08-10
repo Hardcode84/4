@@ -5,6 +5,7 @@
 
 #include "arena.h"
 #include "bounds.h"
+#include "facts_store.h"
 
 #include "test_check.h"
 #include <stdio.h>

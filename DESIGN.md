@@ -1243,8 +1243,11 @@ depth-safe range subqueries, and definedness projection-cache publication.
 admission and projection remain caller policy in `bounds.c`.
 `bounds_predicate.c` owns iterative tri-state predicate evaluation, bounded
 implication branches, and finite-domain enumeration over range/nonzero atoms.
-`bounds.c` supplies branch-local fact-closure admission and retains exact EQ/NE
-fallback policy.
+`facts_store.c` owns reusable fact-set session/epoch identity, transaction
+fork/commit/poison, fact transfer, dependency closure, its bounded retained
+cache, and the create/assume/derive/substitute mutation APIs. Predicate branches
+borrow its one-root closure entry point. `bounds.c` retains exact EQ/NE fallback
+policy and read-query orchestration.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
@@ -1506,7 +1509,7 @@ entries. Invalid input or OOM returns NULL without exposing a partial fact set.
 This compatibility surface is intentionally C-only: C++ and Python `Facts`
 keep the sequential closure semantics of their mutation APIs instead of
 offering two constructors whose predicates have different meanings.
-`ixs_facts_assume_preds` applies the whole array to one fork and commits only
+`facts_store.c` applies `ixs_facts_assume_preds` to one fork and commits only
 after every tree succeeds. It validates the full array and ingests each
 original predicate once before fact-conditioned simplification. This preserves
 exact expression identities that a rewrite may otherwise replace. It then
@@ -1556,6 +1559,14 @@ Cached nodes are context-owned and immutable, so entries survive session reset
 and are released with the context. Lookup is O(n) in explicit batch size;
 replay is O(u + r) for `u` unique originals and `r` recorded refinements. Both
 bounds are independent of total context state.
+
+A reusable fact set retains its owning session implementation, context, epoch,
+usability latch, and committed bounds payload. Every mutation binds the current
+session epoch before touching that payload. The candidate fork borrows active
+scratch only for the transaction; commit resets both query workspaces before
+publishing the aggregate and preserves only context-owned semantic storage.
+Failure discards the candidate and poisons the destination, so no borrowed
+query state, temporary arena storage, or partial publication survives return.
 
 Scalar `ixs_simplify` has a separate session-local reuse path for its direct
 assumption array. The first nonempty array containing at most 64 roots retains
@@ -3136,6 +3147,8 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
+│   ├── facts_store.c        # persistent facts lifetime, transactions, closure
+│   ├── facts_store.h
 │   ├── bounds.c             # query policy and aggregate coordination
 │   ├── bounds.h             # aggregate private bounds state
 │   ├── bounds_assume.c      # assumption validation and fact refinement
@@ -3166,7 +3179,7 @@ ixsimpl/
 │   ├── division_algebra.h
 │   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality
 │   ├── quotient_algebra.h
-│   ├── query_walk.c         # shared iterative query stack lifecycle
+│   ├── query_walk.c         # shared iterative stacks, node sets, and vectors
 │   ├── query_walk.h
 │   ├── radix_algebra.c      # bounded mixed-radix nonnegativity proof
 │   ├── radix_algebra.h
