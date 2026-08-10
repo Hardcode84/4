@@ -1239,6 +1239,10 @@ cursor traversal, equality projection, and the projection-cache lifecycle.
 `bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
 `bounds_integer.c` owns exact integer and divisibility proofs; equality-component
 admission and projection remain caller policy in `bounds.c`.
+`bounds_residue.c` owns target-modulus residue queries, including
+proof-independent rational cancellation and branch-sensitive Piecewise
+evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
+scaling.
 Canonical alias creation, relation endpoint admission, and query proof policy
 remain in `bounds.c`, which passes canonical nodes or trusted symbols to the
 leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
@@ -1401,8 +1405,7 @@ layout, load factor, and allocation remain consumer-owned.
   alignment, and is zeroed before the expression is published. Bitfacts,
   stride, residue, and interval queries start at 16 frames. `bounds_integer.c`
   runs exact integer proofs with 16 inline frames and scratch growth.
-  Definedness, predicate, and
-  AND-assumption walks start at 32 frames.
+  Definedness, predicate, and AND-assumption walks start at 32 frames.
 
   The structural driver owns push/pop, growth, and optional LIFO abort. Its
   `run` entry owns one scratch mark; memo-first consumers use the mark-free
@@ -1415,6 +1418,14 @@ layout, load factor, and allocation remain consumer-owned.
   mark and die at its restore. The central cache is generation-scoped and
   owner-keyed; forks share its query state while those keys isolate bounds
   owners and generations.
+
+  `bounds_residue.c` keeps the requested modulus in each typed frame. ADD
+  coefficients are reduced before recursive queries, equal representatives are
+  grouped in scratch storage, and reachable Piecewise branches run in bounds
+  forks. Its proof-independent mode consults only structural and stored facts.
+  `bounds_stride.c` joins ADD and Piecewise operands with gcd, scales linear
+  products without overflowing the retained stride, and maps literal `Mod`
+  through the gcd of dividend stride and modulus.
 
   `bounds_query.c` owns that opaque central state and its lifecycle. Interval,
   bitfacts, residue, and stride entries use keys containing the kind, bounds
@@ -1773,7 +1784,7 @@ This enables rules like:
   contiguous known low zero bits imply divisibility by `2^k`.
 - `ixs_check` uses these facts to prove mask equalities/inequalities and
   power-of-two predicates. Simplification should consume them only through
-  conservative helpers such as `ixs_bounds_is_pow2_positive` and
+  conservative helpers such as `ixs_bounds_get_bitfacts` and
   `ixs_bounds_is_known_divisible`.
 
 **Algebraic rewrites** (no bounds needed):
@@ -3128,6 +3139,10 @@ ixsimpl/
 │   ├── bounds_range.h
 │   ├── bounds_relation.c    # exact-component cursor and equality projection
 │   ├── bounds_relation.h
+│   ├── bounds_residue.c     # target-modulus and branch-sensitive residue proof
+│   ├── bounds_residue.h
+│   ├── bounds_stride.c      # phase-free expression stride proof
+│   ├── bounds_stride.h
 │   ├── division_algebra.c   # signed truncating-division certificates
 │   ├── division_algebra.h
 │   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality

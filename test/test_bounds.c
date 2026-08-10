@@ -1923,7 +1923,7 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
   held = false;
   ixs_arena_set_fail_after(&bounds.query_state_arena, 0);
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
-  CHECK(!ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue));
+  CHECK(!bounds_known_residue(&bounds, expr, 8, &residue));
   CHECK(bounds.oom);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
@@ -1931,8 +1931,7 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
                            IXS_ARENA_FAILURE_DISABLED);
   bounds.oom = false;
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
-  CHECK(ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue) &&
-        residue == 3);
+  CHECK(bounds_known_residue(&bounds, expr, 8, &residue) && residue == 3);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
 
@@ -1940,15 +1939,14 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
    * the first ADD-group allocation after the tracked root has started. */
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 1);
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
-  CHECK(!ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue));
+  CHECK(!bounds_known_residue(&bounds, expr, 8, &residue));
   CHECK(bounds.oom);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   bounds.oom = false;
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
-  CHECK(ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue) &&
-        residue == 3);
+  CHECK(bounds_known_residue(&bounds, expr, 8, &residue) && residue == 3);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
 

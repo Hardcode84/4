@@ -23,7 +23,9 @@ else()
         src/bounds_query.c
         src/bounds_range.c
         src/bounds_relation.c
+        src/bounds_residue.c
         src/bounds_store.c
+        src/bounds_stride.c
         src/ctx.c
         src/division_algebra.c
         src/expand.c

@@ -10,6 +10,8 @@
 #include "bounds_assume.h"
 #include "bounds_bitfacts.h"
 #include "bounds_integer.h"
+#include "bounds_residue.h"
+#include "bounds_stride.h"
 #include "interval.h"
 #include "node.h"
 #include "relation_algebra.h"
@@ -165,9 +167,6 @@ IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_quotient_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
-IXS_STATIC bool ixs_bounds_known_residue_probe(ixs_bounds *b, ixs_node *expr,
-                                               uint64_t modulus,
-                                               uint64_t *residue);
 #endif
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
@@ -207,11 +206,12 @@ IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
                                            int64_t modulus);
-IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
-                                     uint64_t modulus, uint64_t *out);
-IXS_STATIC bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
-                                                 uint64_t modulus,
-                                                 uint64_t *out);
+IXS_STATIC ixs_node *bounds_condition_assumption(ixs_bounds *bounds,
+                                                 ixs_node *condition,
+                                                 bool value,
+                                                 struct ixs_node_impl *storage);
+IXS_STATIC ixs_check_result bounds_condition_truth(ixs_bounds *bounds,
+                                                   ixs_node *condition);
 
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
