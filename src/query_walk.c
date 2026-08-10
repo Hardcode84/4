@@ -7,6 +7,27 @@
 #include <stdint.h>
 #include <string.h>
 
+IXS_STATIC bool ixs_query_node_vector_push(ixs_arena *arena, ixs_node ***nodes,
+                                           size_t *count, size_t *capacity,
+                                           ixs_node *node,
+                                           size_t initial_capacity) {
+  if (*count >= *capacity) {
+    size_t new_capacity = *capacity ? *capacity * 2u : initial_capacity;
+    ixs_node **grown;
+    assert(initial_capacity != 0u);
+    if (new_capacity <= *capacity || new_capacity > SIZE_MAX / sizeof(**nodes))
+      return false;
+    grown = ixs_arena_grow(arena, *nodes, *capacity * sizeof(**nodes),
+                           new_capacity * sizeof(**nodes), sizeof(void *));
+    if (!grown)
+      return false;
+    *nodes = grown;
+    *capacity = new_capacity;
+  }
+  (*nodes)[(*count)++] = node;
+  return true;
+}
+
 IXS_STATIC ixs_query_walk_step ixs_query_walk_push(ixs_query_walk *walk,
                                                    ixs_node *expr) {
   size_t capacity;

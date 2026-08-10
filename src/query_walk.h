@@ -82,6 +82,11 @@ typedef struct {
 IXS_STATIC void *ixs_query_node_memo_get(ixs_query_node_memo *memo,
                                          ixs_node *node, bool create);
 
+IXS_STATIC bool ixs_query_node_vector_push(ixs_arena *arena, ixs_node ***nodes,
+                                           size_t *count, size_t *capacity,
+                                           ixs_node *node,
+                                           size_t initial_capacity);
+
 /* CAP is positive and INLINE receives an actual nonempty array.  Push doubles
  * dynamic pointer-aligned storage, zeroes the complete frame, then publishes
  * expr; growth may relocate every frame.

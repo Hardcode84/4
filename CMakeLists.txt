@@ -16,6 +16,7 @@ else()
         src/additive_row.c
         src/arena.c
         src/bounds.c
+        src/bounds_assume.c
         src/bounds_difference.c
         src/bounds_query.c
         src/bounds_range.c

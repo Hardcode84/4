@@ -7,6 +7,7 @@
 #include "internal.h"
 
 #include "algebra_status.h"
+#include "bounds_assume.h"
 #include "interval.h"
 #include "node.h"
 #include "relation_algebra.h"
@@ -62,7 +63,7 @@ typedef struct {
   bool equality_disabled;
 } ixs_bounds_cache_entry;
 
-typedef struct {
+typedef struct ixs_bounds {
   ixs_ctx *ctx;        /* optional; enables expression canonical aliases */
   ixs_ctx *store_ctx;  /* stable owner while ctx is temporarily disabled */
   ixs_var_bound *vars; /* arena-allocated growable array */
@@ -200,12 +201,10 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src);
 /* Discard query results after a failed read while preserving semantic facts. */
 IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom);
 
-/* Extract variable bounds from one validated CMP assumption. */
-IXS_STATIC bool ixs_bounds_add_assumption(ixs_bounds *b, ixs_node *assumption);
-
-/* Store an explicit interval for an arbitrary expression node. */
-IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
-                                    ixs_interval iv);
+/* Upper proof-policy seams used by assumption ingestion. */
+IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr);
+IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
+                                            ixs_node *rhs, int64_t offset);
 
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
@@ -239,17 +238,6 @@ IXS_STATIC ixs_check_result ixs_bounds_check_congruent(ixs_bounds *b,
                                                        int64_t residue);
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
                                                      ixs_node *expr);
-
-typedef enum {
-  IXS_BOUNDS_BUILD_OK,
-  IXS_BOUNDS_BUILD_INVALID,
-  IXS_BOUNDS_BUILD_LIMIT,
-  IXS_BOUNDS_BUILD_OOM
-} ixs_bounds_build_status;
-
-IXS_STATIC ixs_bounds_build_status
-ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
-                     ixs_node *const *assumptions, size_t n_assumptions);
 
 /* Check a normalized CMP node (lhs op 0) against current bounds.
  * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or

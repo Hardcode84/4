@@ -1224,14 +1224,21 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 `bounds_store.c` owns retained variable records, expression ranges, nonzero
 facts, name and expression indexes, modular-inverse watchers, and their raw
-mutation operations. `bounds_difference.c` owns the directed constraint graph,
+mutation operations. `bounds_assume.c` owns predicate validation and iterative
+AND flattening, comparison fact recognition, nonzero publication, affine and
+proportional range publication, and modular-inverse watcher refinement. It
+validates a complete predicate tree before publishing any leaf. General
+comparisons retain their bounded definedness and range rechecks inside the
+current query hold; invalid input, proof limits, contradiction, and allocation
+failure keep their existing result channels. `bounds_difference.c` owns the
+directed constraint graph,
 its index, feasibility potentials, and interval-propagation worklists. It calls
 only store, exact-relation, and neutral arithmetic APIs; it does not re-enter
 bounds proof or simplification policy. `bounds_relation.c` owns exact-component
 cursor traversal, equality projection, and the projection-cache lifecycle.
-Canonicalization, predicate ingestion, relation endpoint admission, and proof
-policy remain in `bounds.c`, which passes canonical nodes or trusted symbols to
-the leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
+Canonical alias creation, relation endpoint admission, and query proof policy
+remain in `bounds.c`, which passes canonical nodes or trusted symbols to the
+leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
 Piecewise range-cache lifecycle. Full store invalidation refreshes the central
 query owner, clears range caches, then clears relation projections; each leaf
 component writes only its owned fields.
@@ -3099,8 +3106,10 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
-│   ├── bounds.c             # fact policy, propagation, and query coordination
+│   ├── bounds.c             # query policy and aggregate coordination
 │   ├── bounds.h             # aggregate private bounds state
+│   ├── bounds_assume.c      # assumption validation and fact refinement
+│   ├── bounds_assume.h
 │   ├── bounds_difference.c  # directed constraints and interval propagation
 │   ├── bounds_difference.h
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle
