@@ -140,6 +140,8 @@ static bool qa_parts(qa_query *query, ixs_node *atom, ixs_node **numerator,
                                        denominator);
     if (status == IXS_QUOTIENT_PARTS_OOM)
       query->oom = true;
+    /* Representability rejects only this floor pivot; another row pivot may
+     * still supply a complete certificate. */
     if (status != IXS_QUOTIENT_PARTS_MATCH)
       return false;
   } else {

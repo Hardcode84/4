@@ -1269,6 +1269,36 @@ static void test_subs_multi(void) {
     ixs_node *r = ixs_subs_multi(ctx, x, 2, targets, repls);
     CHECK(r == y);
   }
+
+  /* Duplicate targets keep the first replacement. */
+  {
+    ixs_node *targets[] = {x, x};
+    ixs_node *repls[] = {y, z};
+    ixs_node *expr = ixs_add(ctx, x, ixs_int(ctx, 1));
+    CHECK(ixs_subs_multi(ctx, expr, 2, targets, repls) ==
+          ixs_add(ctx, y, ixs_int(ctx, 1)));
+  }
+
+#ifdef IXS_TEST_INTERNAL
+  /* Outermost mode removes a nested target globally, including a shared
+   * occurrence reached outside the selected outer target. */
+  {
+    ixs_node *outer = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+    ixs_node *mod = ixs_mod(ctx, x, ixs_int(ctx, 3));
+    ixs_node *targets[] = {outer, x};
+    ixs_node *repls[] = {y, z};
+    ixs_node *expr = ixs_add(ctx, outer, mod);
+    ixs_node *expected = ixs_add(ctx, y, mod);
+    ixs_session_binding binding;
+    ixs_ctx *bound = ixs_session_bind(&binding, IXS_TEST_SESSION(ctx));
+    bool unrepresentable = true;
+    ixs_node *r = simp_subs_multi_outermost(bound, expr, 2, targets, repls,
+                                            &unrepresentable);
+    ixs_session_unbind(&binding);
+    CHECK(!unrepresentable);
+    CHECK(r == expected);
+  }
+#endif
 }
 
 static unsigned substitution_legacy_memo_slot(const ixs_node *node) {
@@ -3125,6 +3155,37 @@ static void test_fact_backed_affine_truncating_remainder(void) {
   CHECK(batch[0] == expected);
   CHECK(batch[1] == optimized_expected);
 
+  /* A valid remainder child is not projected through an independently
+   * partial sibling: SOURCE definedness covers the complete input DAG. */
+  {
+    ixs_node *z = ixs_sym(ctx, "affine_partial_sibling");
+    ixs_node *partial = ixs_div(ctx, ixs_int(ctx, 1), z);
+    ixs_node *partial_source = ixs_add(ctx, source, partial);
+    ixs_node *partial_optimized = ixs_add(ctx, optimized_source, partial);
+    ixs_node *partial_batch[2] = {partial_source, partial_optimized};
+    CHECK(test_ixs_simplify_facts(crossing, partial_source) == partial_source);
+    test_ixs_simplify_batch_facts(crossing, partial_batch, 2);
+    CHECK(partial_batch[0] == partial_source);
+    CHECK(partial_batch[1] == partial_optimized);
+  }
+
+  /* Removing rounds alone is not a simplification when the exact signed
+   * remainder form has a larger reachable DAG. */
+  {
+    ixs_node *x = ixs_sym(ctx, "affine_nonreducing_piecewise");
+    ixs_node *argument = ixs_div(ctx, x, ixs_int(ctx, 3));
+    ixs_node *values[2] = {ixs_floor(ctx, argument), ixs_ceil(ctx, argument)};
+    ixs_node *conditions[2] = {ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+                               ixs_true(ctx)};
+    ixs_node *piecewise = ixs_pw(ctx, 2, values, conditions);
+    ixs_facts *bounded = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_pred(
+        bounded, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, -100))));
+    CHECK(ixs_facts_assume_pred(
+        bounded, ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 100))));
+    CHECK(test_ixs_simplify_facts(bounded, piecewise) == piecewise);
+  }
+
   {
     ixs_node *raw = ixs_sym(ctx, "shared_truncating_raw");
     ixs_node *inner_argument =
@@ -3196,9 +3257,25 @@ static void test_fact_backed_affine_truncating_remainder(void) {
         ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, 0)), ixs_true(ctx)};
     ixs_node *negative_expected = ixs_pw(ctx, 2, negative_remainder_values,
                                          negative_remainder_conditions);
+    ixs_node *unproved_zero = ixs_sym(ctx, "affine_unproved_divisor_zero");
+    ixs_node *unproved_source = ixs_add(ctx, unproved_zero, negative_source);
+    ixs_node *unproved_quotient =
+        ixs_add(ctx, unproved_zero, negative_quotient);
+    ixs_node *unproved_batch[2] = {unproved_source, unproved_quotient};
+    ixs_facts *unproved_divisor = ixs_facts_create(ctx);
     ixs_facts *negative_divisor = ixs_facts_create(ctx);
     ixs_node *negative_result;
     ixs_node *substituted;
+
+    CHECK(ixs_facts_assume_pred(
+        unproved_divisor,
+        ixs_cmp(ctx, unproved_zero, IXS_CMP_EQ, ixs_int(ctx, 0))));
+    CHECK(test_ixs_simplify_facts(unproved_divisor, unproved_source) ==
+          negative_source);
+    test_ixs_simplify_batch_facts(unproved_divisor, unproved_batch, 2);
+    CHECK(unproved_batch[0] == negative_source);
+    CHECK(unproved_batch[1] == negative_quotient);
+
     CHECK(ixs_facts_assume_pred(
         negative_divisor, ixs_cmp(ctx, n, IXS_CMP_GE, ixs_int(ctx, -20))));
     CHECK(ixs_facts_assume_pred(negative_divisor,

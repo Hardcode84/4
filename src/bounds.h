@@ -29,6 +29,13 @@ typedef struct {
 typedef struct ixs_difference_constraint ixs_difference_constraint;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
+/* Scratch-local pointer set shared by iterative proof components. */
+typedef struct {
+  ixs_node **slots;
+  size_t capacity;
+  size_t count;
+} query_node_set;
+
 typedef struct {
   ixs_difference_constraint *incoming;
   ixs_difference_constraint *outgoing;
@@ -198,7 +205,32 @@ IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
 IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b);
 
 /* True while nested proof queries have not reported a transport failure. */
+typedef enum {
+  IXS_BOUNDS_TRANSPORT_CLEAN,
+  IXS_BOUNDS_TRANSPORT_LIMITED,
+  IXS_BOUNDS_TRANSPORT_OOM,
+  IXS_BOUNDS_TRANSPORT_INVALID
+} ixs_bounds_transport_status;
+
+typedef struct {
+  size_t limit_blocks;
+  size_t invalid_blocks;
+  uint64_t generation;
+  bool oom;
+  ixs_bounds_transport_status inherited;
+} ixs_bounds_transport_snapshot;
+
+IXS_STATIC ixs_bounds_transport_snapshot
+ixs_bounds_query_transport_snapshot(const ixs_bounds *b);
+IXS_STATIC ixs_bounds_transport_status ixs_bounds_query_transport_since(
+    const ixs_bounds *b, ixs_bounds_transport_snapshot snapshot);
 IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b);
+
+IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
+                                      ixs_node *node, bool *inserted);
+IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node);
 
 /* Release bounds-owned contextless query workspace; arena-backed bounds
  * storage remains owned by the caller. */

@@ -4,6 +4,7 @@
 #include "additive_row.h"
 
 #include "simplify.h"
+#include <string.h>
 
 /* Canonical row recognition is allocation-free and O(1). */
 IXS_STATIC bool ixs_additive_row_unit_value(ixs_node *expr, ixs_node **term,
@@ -48,71 +49,130 @@ IXS_STATIC bool ixs_additive_row_unit_pair(ixs_node *expr, ixs_node **positive,
   return true;
 }
 
-static ixs_node *additive_row_build(ixs_ctx *ctx, const ixs_addterm *terms,
-                                    uint32_t nterms) {
+static ixs_node *additive_row_build(ixs_ctx *ctx, ixs_node *constant,
+                                    const ixs_addterm *terms, uint32_t nterms) {
   if (nterms == 0)
-    return ctx->node_zero;
-  if (nterms == 1)
+    return constant;
+  if (nterms == 1 && ixs_node_is_zero(constant))
     return ixs_node_is_one(terms[0].coeff)
                ? terms[0].term
                : simp_mul(ctx, terms[0].coeff, terms[0].term);
-  return ixs_node_add(ctx, ctx->node_zero, nterms, terms);
+  return ixs_node_add(ctx, constant, nterms, terms);
 }
 
 /* Transform-cache hits are expected O(1); a miss rebuilds T immediate terms. */
-IXS_STATIC ixs_additive_row_status ixs_additive_row_without_constant(
+IXS_STATIC ixs_algebra_status ixs_additive_row_without_constant(
     ixs_ctx *ctx, ixs_node *expr, ixs_node **result) {
   ixs_node *node;
   if (expr->tag != IXS_ADD || expr->u.add.nterms == 0)
-    return IXS_ADDITIVE_ROW_NO_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
   node = ixs_node_transform_cache_lookup(ctx, expr,
                                          IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST);
   if (!node) {
-    node = additive_row_build(ctx, expr->u.add.terms, expr->u.add.nterms);
+    node = additive_row_build(ctx, ctx->node_zero, expr->u.add.terms,
+                              expr->u.add.nterms);
     if (!node)
-      return IXS_ADDITIVE_ROW_OOM;
+      return IXS_ALGEBRA_OOM;
     if (ixs_node_is_sentinel(node))
-      return IXS_ADDITIVE_ROW_NO_MATCH;
+      return IXS_ALGEBRA_NO_MATCH;
     ixs_node_transform_cache_store(ctx, expr,
                                    IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST, node);
   }
   *result = node;
-  return IXS_ADDITIVE_ROW_MATCH;
+  return IXS_ALGEBRA_MATCH;
 }
 
 /* Try-builds make unrepresentable arithmetic a diagnostic-free shape miss. */
-static ixs_additive_row_status additive_row_difference(ixs_ctx *ctx,
-                                                       ixs_node *lhs,
-                                                       ixs_node *rhs,
-                                                       ixs_node **difference) {
+static ixs_algebra_status additive_row_difference(ixs_ctx *ctx, ixs_node *lhs,
+                                                  ixs_node *rhs,
+                                                  ixs_node **difference) {
   ixs_node *negative;
   bool unrepresentable;
   if (ixs_node_is_zero(rhs)) {
     *difference = lhs;
-    return IXS_ADDITIVE_ROW_MATCH;
-  }
-  if (ixs_node_is_zero(lhs)) {
-    *difference = rhs;
-    return IXS_ADDITIVE_ROW_MATCH;
+    return IXS_ALGEBRA_MATCH;
   }
   negative = ixs_node_int(ctx, -1);
   if (!negative)
-    return IXS_ADDITIVE_ROW_OOM;
+    return IXS_ALGEBRA_OOM;
   negative = simp_try_mul(ctx, negative, rhs, &unrepresentable);
   if (!negative)
-    return unrepresentable ? IXS_ADDITIVE_ROW_NO_MATCH : IXS_ADDITIVE_ROW_OOM;
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
   *difference = simp_try_add(ctx, lhs, negative, &unrepresentable);
   if (!*difference)
-    return unrepresentable ? IXS_ADDITIVE_ROW_NO_MATCH : IXS_ADDITIVE_ROW_OOM;
-  return ixs_node_is_sentinel(*difference) ? IXS_ADDITIVE_ROW_NO_MATCH
-                                           : IXS_ADDITIVE_ROW_MATCH;
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
+  return ixs_node_is_sentinel(*difference) ? IXS_ALGEBRA_INVALID
+                                           : IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status
+ixs_additive_row_split_round(ixs_ctx *ctx, ixs_node *value, bool ceiling,
+                             ixs_node **argument, ixs_node **residual) {
+  ixs_node *round = NULL;
+  ixs_node *candidate_residual;
+  ixs_addterm *terms;
+  ixs_arena_mark mark;
+  ixs_tag tag = ceiling ? IXS_CEIL : IXS_FLOOR;
+  bool unrepresentable = false;
+  uint32_t i, round_index = UINT32_MAX;
+  if (!ctx || !value || !argument || !residual)
+    return IXS_ALGEBRA_INVALID;
+  if (value->tag == tag) {
+    *argument = value->u.unary.arg;
+    *residual = ctx->node_zero;
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (value->tag != IXS_ADD)
+    return IXS_ALGEBRA_NO_MATCH;
+  for (i = 0; i < value->u.add.nterms; i++) {
+    int64_t p, q;
+    ixs_node *term = value->u.add.terms[i].term;
+    ixs_node_get_rat(value->u.add.terms[i].coeff, &p, &q);
+    if (term->tag != tag || p != 1 || q != 1)
+      continue;
+    if (round)
+      return IXS_ALGEBRA_NO_MATCH;
+    round = term;
+    round_index = i;
+  }
+  if (!round)
+    return IXS_ALGEBRA_NO_MATCH;
+  mark = ixs_arena_save(&ctx->scratch);
+  terms = ixs_arena_alloc(&ctx->scratch,
+                          (value->u.add.nterms - 1u) * sizeof(*terms),
+                          sizeof(void *));
+  if (!terms && value->u.add.nterms != 1u)
+    goto oom;
+  /* Removing one known term preserves the canonical order of both slices. */
+  if (round_index)
+    memcpy(terms, value->u.add.terms, round_index * sizeof(*terms));
+  if (round_index + 1u < value->u.add.nterms)
+    memcpy(terms + round_index, value->u.add.terms + round_index + 1u,
+           (value->u.add.nterms - round_index - 1u) * sizeof(*terms));
+  candidate_residual =
+      value->u.add.nterms == 2u && ixs_node_is_zero(value->u.add.coeff) &&
+              !ixs_node_is_one(terms[0].coeff)
+          ? simp_try_mul(ctx, terms[0].coeff, terms[0].term, &unrepresentable)
+          : additive_row_build(ctx, value->u.add.coeff, terms,
+                               value->u.add.nterms - 1u);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!candidate_residual)
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(candidate_residual))
+    return IXS_ALGEBRA_INVALID;
+  *argument = round->u.unary.arg;
+  *residual = candidate_residual;
+  return IXS_ALGEBRA_MATCH;
+oom:
+  ixs_arena_restore(&ctx->scratch, mark);
+  return IXS_ALGEBRA_OOM;
 }
 
 /* The source ADD is sorted and has no zero coefficients. Stable sign
  * partitioning preserves canonical order, so each side is hash-consed once.
  * Partitioning is O(T) time and O(T) scratch; constructing lhs-rhs first
  * inherits the simplifier's O(T^2) worst case. No expression DAG is walked. */
-IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
+IXS_STATIC ixs_algebra_status ixs_additive_row_relation(
     ixs_ctx *ctx, ixs_arena *scratch, ixs_node *lhs, ixs_node *rhs,
     ixs_node **positive, ixs_node **negative, int64_t *offset) {
   ixs_arena_mark mark;
@@ -121,15 +181,14 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   size_t bytes;
   uint32_t positive_count = 0, negative_count = 0, i;
   int64_t constant, q;
-  ixs_additive_row_status status;
+  ixs_algebra_status status;
   status = additive_row_difference(ctx, lhs, rhs, &difference);
-  if (status != IXS_ADDITIVE_ROW_MATCH || difference->tag != IXS_ADD ||
+  if (status != IXS_ALGEBRA_MATCH || difference->tag != IXS_ADD ||
       difference->u.add.nterms < 2)
-    return status == IXS_ADDITIVE_ROW_MATCH ? IXS_ADDITIVE_ROW_NO_MATCH
-                                            : status;
+    return status == IXS_ALGEBRA_MATCH ? IXS_ALGEBRA_NO_MATCH : status;
   ixs_node_get_rat(difference->u.add.coeff, &constant, &q);
   if (q != 1)
-    return IXS_ADDITIVE_ROW_NO_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
   mark = ixs_arena_save(scratch);
   bytes = (size_t)difference->u.add.nterms * sizeof(*terms);
   if (bytes / sizeof(*terms) != difference->u.add.nterms ||
@@ -159,8 +218,10 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   }
   if (positive_count == 0 || negative_count == 0)
     goto no_match;
-  positive_result = additive_row_build(ctx, positive_terms, positive_count);
-  negative_result = additive_row_build(ctx, negative_terms, negative_count);
+  positive_result =
+      additive_row_build(ctx, ctx->node_zero, positive_terms, positive_count);
+  negative_result =
+      additive_row_build(ctx, ctx->node_zero, negative_terms, negative_count);
   if (!positive_result || !negative_result)
     goto oom;
   /* A one-term side may become an unrepresentable simplifier sentinel. */
@@ -178,13 +239,13 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   }
   *positive = positive_result;
   *negative = negative_result;
-  status = IXS_ADDITIVE_ROW_MATCH;
+  status = IXS_ALGEBRA_MATCH;
   goto cleanup;
 oom:
-  status = IXS_ADDITIVE_ROW_OOM;
+  status = IXS_ALGEBRA_OOM;
   goto cleanup;
 no_match:
-  status = IXS_ADDITIVE_ROW_NO_MATCH;
+  status = IXS_ALGEBRA_NO_MATCH;
 cleanup:
   ixs_arena_restore(scratch, mark);
   return status;

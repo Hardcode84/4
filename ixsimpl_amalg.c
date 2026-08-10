@@ -14,6 +14,7 @@
 #include "additive_row.h"
 
 #include "simplify.h"
+#include <string.h>
 
 /* Canonical row recognition is allocation-free and O(1). */
 IXS_STATIC bool ixs_additive_row_unit_value(ixs_node *expr, ixs_node **term,
@@ -58,71 +59,130 @@ IXS_STATIC bool ixs_additive_row_unit_pair(ixs_node *expr, ixs_node **positive,
   return true;
 }
 
-static ixs_node *additive_row_build(ixs_ctx *ctx, const ixs_addterm *terms,
-                                    uint32_t nterms) {
+static ixs_node *additive_row_build(ixs_ctx *ctx, ixs_node *constant,
+                                    const ixs_addterm *terms, uint32_t nterms) {
   if (nterms == 0)
-    return ctx->node_zero;
-  if (nterms == 1)
+    return constant;
+  if (nterms == 1 && ixs_node_is_zero(constant))
     return ixs_node_is_one(terms[0].coeff)
                ? terms[0].term
                : simp_mul(ctx, terms[0].coeff, terms[0].term);
-  return ixs_node_add(ctx, ctx->node_zero, nterms, terms);
+  return ixs_node_add(ctx, constant, nterms, terms);
 }
 
 /* Transform-cache hits are expected O(1); a miss rebuilds T immediate terms. */
-IXS_STATIC ixs_additive_row_status ixs_additive_row_without_constant(
+IXS_STATIC ixs_algebra_status ixs_additive_row_without_constant(
     ixs_ctx *ctx, ixs_node *expr, ixs_node **result) {
   ixs_node *node;
   if (expr->tag != IXS_ADD || expr->u.add.nterms == 0)
-    return IXS_ADDITIVE_ROW_NO_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
   node = ixs_node_transform_cache_lookup(ctx, expr,
                                          IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST);
   if (!node) {
-    node = additive_row_build(ctx, expr->u.add.terms, expr->u.add.nterms);
+    node = additive_row_build(ctx, ctx->node_zero, expr->u.add.terms,
+                              expr->u.add.nterms);
     if (!node)
-      return IXS_ADDITIVE_ROW_OOM;
+      return IXS_ALGEBRA_OOM;
     if (ixs_node_is_sentinel(node))
-      return IXS_ADDITIVE_ROW_NO_MATCH;
+      return IXS_ALGEBRA_NO_MATCH;
     ixs_node_transform_cache_store(ctx, expr,
                                    IXS_NODE_TRANSFORM_ADD_WITHOUT_CONST, node);
   }
   *result = node;
-  return IXS_ADDITIVE_ROW_MATCH;
+  return IXS_ALGEBRA_MATCH;
 }
 
 /* Try-builds make unrepresentable arithmetic a diagnostic-free shape miss. */
-static ixs_additive_row_status additive_row_difference(ixs_ctx *ctx,
-                                                       ixs_node *lhs,
-                                                       ixs_node *rhs,
-                                                       ixs_node **difference) {
+static ixs_algebra_status additive_row_difference(ixs_ctx *ctx, ixs_node *lhs,
+                                                  ixs_node *rhs,
+                                                  ixs_node **difference) {
   ixs_node *negative;
   bool unrepresentable;
   if (ixs_node_is_zero(rhs)) {
     *difference = lhs;
-    return IXS_ADDITIVE_ROW_MATCH;
-  }
-  if (ixs_node_is_zero(lhs)) {
-    *difference = rhs;
-    return IXS_ADDITIVE_ROW_MATCH;
+    return IXS_ALGEBRA_MATCH;
   }
   negative = ixs_node_int(ctx, -1);
   if (!negative)
-    return IXS_ADDITIVE_ROW_OOM;
+    return IXS_ALGEBRA_OOM;
   negative = simp_try_mul(ctx, negative, rhs, &unrepresentable);
   if (!negative)
-    return unrepresentable ? IXS_ADDITIVE_ROW_NO_MATCH : IXS_ADDITIVE_ROW_OOM;
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
   *difference = simp_try_add(ctx, lhs, negative, &unrepresentable);
   if (!*difference)
-    return unrepresentable ? IXS_ADDITIVE_ROW_NO_MATCH : IXS_ADDITIVE_ROW_OOM;
-  return ixs_node_is_sentinel(*difference) ? IXS_ADDITIVE_ROW_NO_MATCH
-                                           : IXS_ADDITIVE_ROW_MATCH;
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
+  return ixs_node_is_sentinel(*difference) ? IXS_ALGEBRA_INVALID
+                                           : IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status
+ixs_additive_row_split_round(ixs_ctx *ctx, ixs_node *value, bool ceiling,
+                             ixs_node **argument, ixs_node **residual) {
+  ixs_node *round = NULL;
+  ixs_node *candidate_residual;
+  ixs_addterm *terms;
+  ixs_arena_mark mark;
+  ixs_tag tag = ceiling ? IXS_CEIL : IXS_FLOOR;
+  bool unrepresentable = false;
+  uint32_t i, round_index = UINT32_MAX;
+  if (!ctx || !value || !argument || !residual)
+    return IXS_ALGEBRA_INVALID;
+  if (value->tag == tag) {
+    *argument = value->u.unary.arg;
+    *residual = ctx->node_zero;
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (value->tag != IXS_ADD)
+    return IXS_ALGEBRA_NO_MATCH;
+  for (i = 0; i < value->u.add.nterms; i++) {
+    int64_t p, q;
+    ixs_node *term = value->u.add.terms[i].term;
+    ixs_node_get_rat(value->u.add.terms[i].coeff, &p, &q);
+    if (term->tag != tag || p != 1 || q != 1)
+      continue;
+    if (round)
+      return IXS_ALGEBRA_NO_MATCH;
+    round = term;
+    round_index = i;
+  }
+  if (!round)
+    return IXS_ALGEBRA_NO_MATCH;
+  mark = ixs_arena_save(&ctx->scratch);
+  terms = ixs_arena_alloc(&ctx->scratch,
+                          (value->u.add.nterms - 1u) * sizeof(*terms),
+                          sizeof(void *));
+  if (!terms && value->u.add.nterms != 1u)
+    goto oom;
+  /* Removing one known term preserves the canonical order of both slices. */
+  if (round_index)
+    memcpy(terms, value->u.add.terms, round_index * sizeof(*terms));
+  if (round_index + 1u < value->u.add.nterms)
+    memcpy(terms + round_index, value->u.add.terms + round_index + 1u,
+           (value->u.add.nterms - round_index - 1u) * sizeof(*terms));
+  candidate_residual =
+      value->u.add.nterms == 2u && ixs_node_is_zero(value->u.add.coeff) &&
+              !ixs_node_is_one(terms[0].coeff)
+          ? simp_try_mul(ctx, terms[0].coeff, terms[0].term, &unrepresentable)
+          : additive_row_build(ctx, value->u.add.coeff, terms,
+                               value->u.add.nterms - 1u);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!candidate_residual)
+    return unrepresentable ? IXS_ALGEBRA_UNREPRESENTABLE : IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(candidate_residual))
+    return IXS_ALGEBRA_INVALID;
+  *argument = round->u.unary.arg;
+  *residual = candidate_residual;
+  return IXS_ALGEBRA_MATCH;
+oom:
+  ixs_arena_restore(&ctx->scratch, mark);
+  return IXS_ALGEBRA_OOM;
 }
 
 /* The source ADD is sorted and has no zero coefficients. Stable sign
  * partitioning preserves canonical order, so each side is hash-consed once.
  * Partitioning is O(T) time and O(T) scratch; constructing lhs-rhs first
  * inherits the simplifier's O(T^2) worst case. No expression DAG is walked. */
-IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
+IXS_STATIC ixs_algebra_status ixs_additive_row_relation(
     ixs_ctx *ctx, ixs_arena *scratch, ixs_node *lhs, ixs_node *rhs,
     ixs_node **positive, ixs_node **negative, int64_t *offset) {
   ixs_arena_mark mark;
@@ -131,15 +191,14 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   size_t bytes;
   uint32_t positive_count = 0, negative_count = 0, i;
   int64_t constant, q;
-  ixs_additive_row_status status;
+  ixs_algebra_status status;
   status = additive_row_difference(ctx, lhs, rhs, &difference);
-  if (status != IXS_ADDITIVE_ROW_MATCH || difference->tag != IXS_ADD ||
+  if (status != IXS_ALGEBRA_MATCH || difference->tag != IXS_ADD ||
       difference->u.add.nterms < 2)
-    return status == IXS_ADDITIVE_ROW_MATCH ? IXS_ADDITIVE_ROW_NO_MATCH
-                                            : status;
+    return status == IXS_ALGEBRA_MATCH ? IXS_ALGEBRA_NO_MATCH : status;
   ixs_node_get_rat(difference->u.add.coeff, &constant, &q);
   if (q != 1)
-    return IXS_ADDITIVE_ROW_NO_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
   mark = ixs_arena_save(scratch);
   bytes = (size_t)difference->u.add.nterms * sizeof(*terms);
   if (bytes / sizeof(*terms) != difference->u.add.nterms ||
@@ -169,8 +228,10 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   }
   if (positive_count == 0 || negative_count == 0)
     goto no_match;
-  positive_result = additive_row_build(ctx, positive_terms, positive_count);
-  negative_result = additive_row_build(ctx, negative_terms, negative_count);
+  positive_result =
+      additive_row_build(ctx, ctx->node_zero, positive_terms, positive_count);
+  negative_result =
+      additive_row_build(ctx, ctx->node_zero, negative_terms, negative_count);
   if (!positive_result || !negative_result)
     goto oom;
   /* A one-term side may become an unrepresentable simplifier sentinel. */
@@ -188,13 +249,13 @@ IXS_STATIC ixs_additive_row_status ixs_additive_row_relation(
   }
   *positive = positive_result;
   *negative = negative_result;
-  status = IXS_ADDITIVE_ROW_MATCH;
+  status = IXS_ALGEBRA_MATCH;
   goto cleanup;
 oom:
-  status = IXS_ADDITIVE_ROW_OOM;
+  status = IXS_ALGEBRA_OOM;
   goto cleanup;
 no_match:
-  status = IXS_ADDITIVE_ROW_NO_MATCH;
+  status = IXS_ALGEBRA_NO_MATCH;
 cleanup:
   ixs_arena_restore(scratch, mark);
   return status;
@@ -437,6 +498,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
  */
 #include "bounds.h"
 #include "additive_row.h"
+#include "division_algebra.h"
 #include "expand.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
@@ -878,10 +940,56 @@ static bool bounds_query_is_tracking(const ixs_bounds *b) {
   return b && (b->query_tracking_depth != 0 || b->query_state_borrowed);
 }
 
+static ixs_bounds_transport_status
+bounds_query_transport_status(const ixs_bounds *b) {
+  bounds_query_outcome outcome =
+      b && bounds_query_is_tracking(b) && b->query_state
+          ? b->query_state->transport_outcome
+          : BOUNDS_QUERY_OUTCOME_PENDING;
+  if (!b || b->contradiction || outcome == BOUNDS_QUERY_OUTCOME_INVALID)
+    return IXS_BOUNDS_TRANSPORT_INVALID;
+  if (b->oom || outcome == BOUNDS_QUERY_OUTCOME_OOM)
+    return IXS_BOUNDS_TRANSPORT_OOM;
+  if (outcome == BOUNDS_QUERY_OUTCOME_LIMITED)
+    return IXS_BOUNDS_TRANSPORT_LIMITED;
+  return IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
 IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b) {
-  return b && !b->oom && !b->contradiction &&
-         (!bounds_query_is_tracking(b) || !b->query_state ||
-          b->query_state->transport_outcome == BOUNDS_QUERY_OUTCOME_PENDING);
+  return bounds_query_transport_status(b) == IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+IXS_STATIC ixs_bounds_transport_snapshot
+ixs_bounds_query_transport_snapshot(const ixs_bounds *b) {
+  ixs_bounds_transport_snapshot result;
+  result.limit_blocks = b && b->query_state ? b->query_state->limit_blocks : 0;
+  result.invalid_blocks =
+      b && b->query_state ? b->query_state->invalid_blocks : 0;
+  result.generation = b && b->query_state ? b->query_state->generation : 0;
+  result.oom = b && b->oom;
+  result.inherited = bounds_query_transport_status(b);
+  return result;
+}
+
+IXS_STATIC ixs_bounds_transport_status ixs_bounds_query_transport_since(
+    const ixs_bounds *b, ixs_bounds_transport_snapshot snapshot) {
+  bool new_generation =
+      b && b->query_state && b->query_state->generation != snapshot.generation;
+  if (!b || b->contradiction ||
+      snapshot.inherited == IXS_BOUNDS_TRANSPORT_INVALID ||
+      (b->query_state && (new_generation ? b->query_state->invalid_blocks != 0
+                                         : b->query_state->invalid_blocks !=
+                                               snapshot.invalid_blocks)))
+    return IXS_BOUNDS_TRANSPORT_INVALID;
+  if ((!snapshot.oom && b->oom) ||
+      snapshot.inherited == IXS_BOUNDS_TRANSPORT_OOM)
+    return IXS_BOUNDS_TRANSPORT_OOM;
+  if (snapshot.inherited == IXS_BOUNDS_TRANSPORT_LIMITED ||
+      (b->query_state && (new_generation ? b->query_state->limit_blocks != 0
+                                         : b->query_state->limit_blocks !=
+                                               snapshot.limit_blocks)))
+    return IXS_BOUNDS_TRANSPORT_LIMITED;
+  return IXS_BOUNDS_TRANSPORT_CLEAN;
 }
 
 static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
@@ -2549,16 +2657,16 @@ static ixs_interval bounds_invert_affine(ixs_interval iv, int64_t scale_p,
 static void add_shifted_add_range(ixs_bounds *b, ixs_node *expr,
                                   ixs_interval iv) {
   ixs_node *base;
-  ixs_additive_row_status status;
+  ixs_algebra_status status;
   int64_t cp, cq, np, nq;
   ixs_interval offset, shifted;
 
   if (!b->ctx)
     return;
   status = ixs_additive_row_without_constant(b->ctx, expr, &base);
-  if (status == IXS_ADDITIVE_ROW_OOM)
+  if (status == IXS_ALGEBRA_OOM)
     b->oom = true;
-  if (status != IXS_ADDITIVE_ROW_MATCH || base == expr)
+  if (status != IXS_ALGEBRA_MATCH || base == expr)
     return;
   ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
   if (!ixs_rat_neg(cp, cq, &np, &nq))
@@ -2742,16 +2850,16 @@ static bool extract_cmp_node_equality(ixs_node *cmp, ixs_node **a,
 static bool bounds_extract_cmp_exact_relation(ixs_bounds *b, ixs_node *cmp,
                                               ixs_node **lhs, ixs_node **rhs,
                                               int64_t *offset) {
-  ixs_additive_row_status status;
+  ixs_algebra_status status;
 
   if (!b || !b->ctx || !cmp || cmp->tag != IXS_CMP ||
       cmp->u.binary.cmp_op != IXS_CMP_EQ || !lhs || !rhs || !offset)
     return false;
   status = ixs_additive_row_relation(b->ctx, b->scratch, cmp->u.binary.lhs,
                                      cmp->u.binary.rhs, lhs, rhs, offset);
-  if (status == IXS_ADDITIVE_ROW_OOM)
+  if (status == IXS_ALGEBRA_OOM)
     b->oom = true;
-  return status == IXS_ADDITIVE_ROW_MATCH;
+  return status == IXS_ALGEBRA_MATCH;
 }
 
 static bool sym_name_matches(ixs_node *n, const char *name) {
@@ -8057,25 +8165,16 @@ static ixs_interval bounds_get_proportional_range(ixs_bounds *b,
                              offset_q);
 }
 
-typedef enum {
-  BOUNDS_TRUNCATING_RANGE_NO_MATCH,
-  BOUNDS_TRUNCATING_RANGE_MATCH,
-  BOUNDS_TRUNCATING_RANGE_LIMITED,
-  BOUNDS_TRUNCATING_RANGE_INVALID,
-  BOUNDS_TRUNCATING_RANGE_OOM
-} bounds_truncating_range_status;
-
-static bounds_truncating_range_status bounds_get_truncating_remainder_range(
+static ixs_algebra_status bounds_get_truncating_remainder_range(
     ixs_bounds *b, ixs_node *expr, bool expression_defined, ixs_interval *out);
 
-static void
-bounds_note_truncating_range_status(ixs_bounds *b,
-                                    bounds_truncating_range_status status) {
-  if (status == BOUNDS_TRUNCATING_RANGE_OOM)
+static void bounds_note_truncating_range_status(ixs_bounds *b,
+                                                ixs_algebra_status status) {
+  if (status == IXS_ALGEBRA_OOM)
     b->oom = true;
-  else if (status == BOUNDS_TRUNCATING_RANGE_INVALID)
+  else if (status == IXS_ALGEBRA_INVALID)
     bounds_query_note_invalid(b->query_state);
-  else if (status == BOUNDS_TRUNCATING_RANGE_LIMITED)
+  else if (status == IXS_ALGEBRA_LIMITED)
     bounds_query_note_limit(b->query_state);
 }
 
@@ -8263,11 +8362,11 @@ static inline ixs_interval bounds_get_add(ixs_bounds *b, ixs_node *expr) {
   if (!b->oom && b->ctx && b->nexprs != 0 &&
       !ixs_node_is_zero(expr->u.add.coeff)) {
     ixs_node *base;
-    ixs_additive_row_status status =
+    ixs_algebra_status status =
         ixs_additive_row_without_constant(b->ctx, expr, &base);
-    if (status == IXS_ADDITIVE_ROW_OOM) {
+    if (status == IXS_ALGEBRA_OOM) {
       b->oom = true;
-    } else if (status == IXS_ADDITIVE_ROW_MATCH && base != expr) {
+    } else if (status == IXS_ALGEBRA_MATCH && base != expr) {
       ixs_interval base_iv = ixs_bounds_get(b, base);
       ixs_interval offset = ixs_bounds_get(b, expr->u.add.coeff);
       result = iv_intersect(result, iv_add(base_iv, offset));
@@ -9931,7 +10030,7 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   ixs_radix_algebra_result radix_result;
   ixs_check_result interval_result;
   ixs_check_result mod_result, congruence_result, bit_result;
-  bounds_truncating_range_status truncating_status;
+  ixs_algebra_status truncating_status;
 
   if (!cmp)
     return IXS_CHECK_UNKNOWN;
@@ -9977,7 +10076,7 @@ static ixs_check_result bounds_check_raw(ixs_bounds *b, ixs_node *cmp) {
   iv = ixs_bounds_get(b, cmp->u.binary.lhs);
   truncating_status = bounds_get_truncating_remainder_range(
       b, cmp->u.binary.lhs, /*expression_defined=*/true, &truncating_remainder);
-  if (truncating_status == BOUNDS_TRUNCATING_RANGE_MATCH)
+  if (truncating_status == IXS_ALGEBRA_MATCH)
     iv = iv_intersect(iv, truncating_remainder);
   else
     bounds_note_truncating_range_status(b, truncating_status);
@@ -12378,12 +12477,6 @@ typedef struct {
   size_t seen_capacity;
 } facts_worklist;
 
-typedef struct {
-  ixs_node **slots;
-  size_t capacity;
-  size_t count;
-} query_node_set;
-
 typedef union {
   void *align;
   unsigned char bytes[IXS_ARENA_DEFAULT_SIZE];
@@ -12546,8 +12639,8 @@ static bool query_node_set_grow(ixs_arena *arena, query_node_set *set) {
   return true;
 }
 
-static bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
-                                  ixs_node *node, bool *inserted) {
+IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
+                                      ixs_node *node, bool *inserted) {
   size_t index;
   if (!set->capacity || set->count >= set->capacity / 2u) {
     if (!query_node_set_grow(arena, set))
@@ -12566,9 +12659,9 @@ static bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
   return true;
 }
 
-static bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
-                                  size_t *count, size_t *capacity,
-                                  ixs_node *node) {
+IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
+                                      size_t *count, size_t *capacity,
+                                      ixs_node *node) {
   if (*count >= *capacity) {
     size_t new_capacity = *capacity ? *capacity * 2u : FACT_WORK_INIT_CAP;
     ixs_node **grown;
@@ -13198,7 +13291,7 @@ cleanup:
 
 static ixs_node *
 facts_simplify_truncating_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
-                                     ixs_node *expr,
+                                     ixs_node *source, ixs_node *root,
                                      ixs_fact_query_status *status);
 
 static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
@@ -13264,8 +13357,8 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
   result.status = IXS_FACT_QUERY_COMPLETE;
   if (!limited && value && !ixs_node_is_sentinel(value) &&
       ixs_node_contains_rounding(value) && ixs_node_contains_piecewise(value))
-    value = facts_simplify_truncating_remainders(ctx, &facts->bounds, value,
-                                                 &result.status);
+    value = facts_simplify_truncating_remainders(ctx, &facts->bounds, expr,
+                                                 value, &result.status);
   if (!limited && result.status == IXS_FACT_QUERY_COMPLETE && value &&
       !ixs_node_is_sentinel(value))
     value = simp_normalize_rational_carrier(ctx, &facts->bounds, value);
@@ -13296,6 +13389,7 @@ cleanup:
 }
 
 static bool facts_simplify_batch_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
+                                            ixs_node *const *sources,
                                             ixs_node **exprs, size_t n,
                                             ixs_fact_query_status *status) {
   size_t i;
@@ -13311,8 +13405,8 @@ static bool facts_simplify_batch_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
         return false;
       continue;
     }
-    exprs[i] = facts_simplify_truncating_remainders(ctx, bounds, exprs[i],
-                                                    &item_status);
+    exprs[i] = facts_simplify_truncating_remainders(ctx, bounds, sources[i],
+                                                    exprs[i], &item_status);
     if (query_held)
       ixs_bounds_query_hold_end(bounds);
     if (item_status != IXS_FACT_QUERY_COMPLETE) {
@@ -13334,15 +13428,19 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   ixs_node **originals = NULL;
   bool ok;
   bool old_oom;
-  bool scratch_saved = false;
   size_t i;
   ixs_fact_query_status status = IXS_FACT_QUERY_INVALID;
 
   if (!facts_bind(facts, &binding, &ctx))
     return status;
   facts_read_query_begin(&read_scope, &facts->bounds, ctx, "simplify batch");
+  mark = ixs_arena_save(&ctx->scratch);
   if (n > 0 && !exprs) {
     ixs_ctx_push_error(ctx, "simplify batch: NULL batch with nonzero count");
+    goto cleanup;
+  }
+  if (n > SIZE_MAX / sizeof(*originals)) {
+    status = IXS_FACT_QUERY_OOM;
     goto cleanup;
   }
   if (!facts_ready(facts)) {
@@ -13359,8 +13457,6 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
     goto cleanup;
   }
 
-  mark = ixs_arena_save(&ctx->scratch);
-  scratch_saved = true;
   if (n > 0) {
     originals =
         ixs_arena_alloc(&ctx->scratch, n * sizeof(*originals), sizeof(void *));
@@ -13373,8 +13469,8 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   old_oom = facts->bounds.oom;
   ok = simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds);
   if (ok)
-    ok =
-        facts_simplify_batch_remainders(ctx, &facts->bounds, exprs, n, &status);
+    ok = facts_simplify_batch_remainders(ctx, &facts->bounds, originals, exprs,
+                                         n, &status);
   if (ok) {
     for (i = 0; i < n; i++) {
       exprs[i] = simp_normalize_rational_carrier(ctx, &facts->bounds, exprs[i]);
@@ -13406,8 +13502,7 @@ cleanup:
   status = facts_read_query_finish(&read_scope, status);
   if (status != IXS_FACT_QUERY_COMPLETE && originals)
     memcpy(exprs, originals, n * sizeof(*originals));
-  if (scratch_saved)
-    ixs_arena_restore(&ctx->scratch, mark);
+  ixs_arena_restore(&ctx->scratch, mark);
   ixs_session_unbind(&binding);
   return status;
 }
@@ -14620,26 +14715,6 @@ static equivalence_build_status equivalence_build_sub(equivalence_state *state,
   return equivalence_build_add(state, lhs, negative, result);
 }
 
-static equivalence_build_status
-equivalence_build_div_const(equivalence_state *state, ixs_node *expr,
-                            ixs_node *divisor, ixs_node **result) {
-  bool unrepresentable = false;
-  if (!expr || !divisor)
-    return EQUIVALENCE_BUILD_NO_MATCH;
-  *result = simp_try_div(state->ctx, expr, divisor, &unrepresentable);
-  if (unrepresentable) {
-    state->arithmetic_unrepresentable = true;
-    return EQUIVALENCE_BUILD_NO_MATCH;
-  }
-  if (!*result) {
-    state->oom = true;
-    return EQUIVALENCE_BUILD_OOM;
-  }
-  if (ixs_node_is_sentinel(*result))
-    return EQUIVALENCE_BUILD_NO_MATCH;
-  return EQUIVALENCE_BUILD_OK;
-}
-
 static ixs_check_result equivalence_difference(equivalence_state *state,
                                                ixs_node *lhs, ixs_node *rhs) {
   struct ixs_node_impl nonzero;
@@ -15140,7 +15215,7 @@ static bool bounds_refine_integral_interval(ixs_bounds *bounds, ixs_node *expr,
                                             bool expression_defined,
                                             ixs_interval *interval) {
   ixs_interval truncating_remainder;
-  bounds_truncating_range_status truncating_status;
+  ixs_algebra_status truncating_status;
   uint64_t stride;
   uint64_t residue;
   int64_t aligned;
@@ -15149,7 +15224,7 @@ static bool bounds_refine_integral_interval(ixs_bounds *bounds, ixs_node *expr,
 
   truncating_status = bounds_get_truncating_remainder_range(
       bounds, expr, expression_defined, &truncating_remainder);
-  if (truncating_status == BOUNDS_TRUNCATING_RANGE_MATCH)
+  if (truncating_status == IXS_ALGEBRA_MATCH)
     *interval = iv_intersect(*interval, truncating_remainder);
   else
     bounds_note_truncating_range_status(bounds, truncating_status);
@@ -16080,74 +16155,16 @@ equivalence_ordered_comparisons(equivalence_state *state, ixs_node *lhs,
   return equivalence_ordered_congruence_forms(state, lhs, rhs);
 }
 
-static bool equivalence_proves_zero_cmp(equivalence_state *state, ixs_node *lhs,
-                                        ixs_cmp_op op) {
-  struct ixs_node_impl cmp;
-  bool result;
-  memset(&cmp, 0, sizeof(cmp));
-  cmp.tag = IXS_CMP;
-  cmp.u.binary.lhs = lhs;
-  cmp.u.binary.rhs = state->ctx->node_zero;
-  cmp.u.binary.cmp_op = op;
-  result = ixs_bounds_check(state->bounds, &cmp) == IXS_CHECK_TRUE;
-  if (state->bounds->oom)
+static void equivalence_note_algebra_status(equivalence_state *state,
+                                            ixs_algebra_status status) {
+  if (status == IXS_ALGEBRA_UNREPRESENTABLE)
+    state->arithmetic_unrepresentable = true;
+  else if (status == IXS_ALGEBRA_LIMITED)
+    state->limited = true;
+  else if (status == IXS_ALGEBRA_INVALID)
+    state->invalid = true;
+  else if (status == IXS_ALGEBRA_OOM)
     state->oom = true;
-  return result;
-}
-
-typedef struct {
-  ixs_node *target;
-  ixs_node *replacement;
-} equivalence_substitution;
-
-typedef struct {
-  equivalence_substitution *items;
-  size_t count;
-  size_t capacity;
-} equivalence_substitutions;
-
-static bool
-equivalence_substitutions_push(ixs_arena *arena,
-                               equivalence_substitutions *substitutions,
-                               ixs_node *target, ixs_node *replacement) {
-  if (substitutions->count >= substitutions->capacity) {
-    size_t new_capacity = substitutions->capacity ? substitutions->capacity * 2u
-                                                  : FACT_WORK_INIT_CAP;
-    equivalence_substitution *grown;
-    if (new_capacity <= substitutions->capacity ||
-        new_capacity > SIZE_MAX / sizeof(*substitutions->items))
-      return false;
-    grown = ixs_arena_grow(
-        arena, substitutions->items,
-        substitutions->capacity * sizeof(*substitutions->items),
-        new_capacity * sizeof(*substitutions->items), sizeof(void *));
-    if (!grown)
-      return false;
-    substitutions->items = grown;
-    substitutions->capacity = new_capacity;
-  }
-  substitutions->items[substitutions->count].target = target;
-  substitutions->items[substitutions->count].replacement = replacement;
-  substitutions->count++;
-  return true;
-}
-
-static bool query_node_set_contains(const query_node_set *set, ixs_node *node) {
-  size_t index;
-  if (!set->capacity)
-    return false;
-  index = node->hash & (set->capacity - 1u);
-  while (set->slots[index] && set->slots[index] != node)
-    index = (index + 1u) & (set->capacity - 1u);
-  return set->slots[index] != NULL;
-}
-
-static bool equivalence_remainder_domain_proven(equivalence_state *state,
-                                                ixs_node *node) {
-  bool proven = ixs_bounds_check_defined(state->bounds, node) == IXS_CHECK_TRUE;
-  if (state->bounds->oom)
-    state->oom = true;
-  return proven;
 }
 
 static bool equivalence_remainder_integer_proven(equivalence_state *state,
@@ -16159,89 +16176,22 @@ static bool equivalence_remainder_integer_proven(equivalence_state *state,
   return proven;
 }
 
-static bool equivalence_build_same_sign(equivalence_state *state,
-                                        ixs_node *numerator,
-                                        ixs_node *denominator,
-                                        ixs_node **same_sign) {
-  ixs_node *numerator_nonnegative =
-      simp_cmp(state->ctx, numerator, IXS_CMP_GE, state->ctx->node_zero);
-  ixs_node *numerator_nonpositive =
-      simp_cmp(state->ctx, numerator, IXS_CMP_LE, state->ctx->node_zero);
-  ixs_node *denominator_positive =
-      simp_cmp(state->ctx, denominator, IXS_CMP_GT, state->ctx->node_zero);
-  ixs_node *denominator_negative =
-      simp_cmp(state->ctx, denominator, IXS_CMP_LT, state->ctx->node_zero);
-  ixs_node *both_nonnegative;
-  ixs_node *both_nonpositive;
-  if (!numerator_nonnegative || !numerator_nonpositive ||
-      !denominator_positive || !denominator_negative) {
-    state->oom = true;
-    return false;
-  }
-  if (ixs_node_is_sentinel(numerator_nonnegative) ||
-      ixs_node_is_sentinel(numerator_nonpositive) ||
-      ixs_node_is_sentinel(denominator_positive) ||
-      ixs_node_is_sentinel(denominator_negative))
-    return false;
-  both_nonnegative =
-      simp_and(state->ctx, numerator_nonnegative, denominator_positive);
-  both_nonpositive =
-      simp_and(state->ctx, numerator_nonpositive, denominator_negative);
-  if (!both_nonnegative || !both_nonpositive) {
-    state->oom = true;
-    return false;
-  }
-  if (ixs_node_is_sentinel(both_nonnegative) ||
-      ixs_node_is_sentinel(both_nonpositive))
-    return false;
-  *same_sign = simp_or(state->ctx, both_nonnegative, both_nonpositive);
-  if (!*same_sign) {
-    state->oom = true;
-    return false;
-  }
-  return !ixs_node_is_sentinel(*same_sign);
-}
-
 static bool equivalence_split_affine_round(equivalence_state *state,
-                                           ixs_node *value, ixs_tag tag,
+                                           ixs_node *value, bool ceiling,
                                            ixs_node **argument,
                                            ixs_node **residual) {
-  ixs_node *round = NULL;
-  uint32_t i;
-  if (value->tag == tag) {
-    *argument = value->u.unary.arg;
-    *residual = state->ctx->node_zero;
-    return true;
-  }
-  if (value->tag != IXS_ADD)
-    return false;
-  for (i = 0; i < value->u.add.nterms; i++) {
-    ixs_node *term = value->u.add.terms[i].term;
-    int64_t p;
-    int64_t q;
-    ixs_node_get_rat(value->u.add.terms[i].coeff, &p, &q);
-    if (term->tag != tag || p != 1 || q != 1)
-      continue;
-    if (round)
-      return false;
-    round = term;
-  }
-  if (!round)
-    return false;
-  *argument = round->u.unary.arg;
-  if (equivalence_build_sub(state, value, round, residual) !=
-      EQUIVALENCE_BUILD_OK)
-    return false;
-  return !ixs_node_is_sentinel(*residual);
+  ixs_algebra_status status = ixs_additive_row_split_round(
+      state->ctx, value, ceiling, argument, residual);
+  equivalence_note_algebra_status(state, status);
+  return status == IXS_ALGEBRA_MATCH;
 }
 
 static ixs_check_result
 equivalence_affine_round_context(equivalence_state *state, ixs_node *lhs,
                                  ixs_node *rhs, unsigned depth) {
-  const ixs_tag tags[2] = {IXS_FLOOR, IXS_CEIL};
   size_t i;
 
-  for (i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+  for (i = 0; i < 2u; i++) {
     ixs_node *lhs_argument;
     ixs_node *lhs_residual;
     ixs_node *rhs_argument;
@@ -16249,9 +16199,9 @@ equivalence_affine_round_context(equivalence_state *state, ixs_node *lhs,
     ixs_node *lhs_shifted;
     ixs_node *rhs_shifted;
 
-    if (!equivalence_split_affine_round(state, lhs, tags[i], &lhs_argument,
+    if (!equivalence_split_affine_round(state, lhs, i != 0u, &lhs_argument,
                                         &lhs_residual) ||
-        !equivalence_split_affine_round(state, rhs, tags[i], &rhs_argument,
+        !equivalence_split_affine_round(state, rhs, i != 0u, &rhs_argument,
                                         &rhs_residual) ||
         (ixs_node_is_zero(lhs_residual) && ixs_node_is_zero(rhs_residual)) ||
         !equivalence_remainder_integer_proven(state, lhs_residual) ||
@@ -16272,824 +16222,49 @@ equivalence_affine_round_context(equivalence_state *state, ixs_node *lhs,
   return IXS_CHECK_UNKNOWN;
 }
 
-static bool equivalence_match_piecewise_truncating_round(
-    equivalence_state *state, ixs_node *node, unsigned depth,
-    ixs_node **quotient, bool *matched) {
-  ixs_node *floor_argument;
-  ixs_node *floor_residual;
-  ixs_node *ceil_argument;
-  ixs_node *ceil_residual;
-  ixs_node *same_sign;
-  ixs_node *numerator;
-  ixs_node *denominator;
-  ixs_node *argument;
-  ixs_quotient_parts_status quotient_status;
-  ixs_check_result guard_equivalent;
-  /* Guard matching is an optional proof refinement. Restrict it to the outer
-   * equivalence query so the one nested subproof below is a static C recursion
-   * boundary rather than a function of expression depth. */
-  if (depth != 0u || node->u.pw.ncases != 2u ||
-      !ixs_node_is_known_true(node->u.pw.cases[1].cond))
-    return true;
-  if (!equivalence_split_affine_round(state, node->u.pw.cases[0].value,
-                                      IXS_FLOOR, &floor_argument,
-                                      &floor_residual) ||
-      !equivalence_split_affine_round(state, node->u.pw.cases[1].value,
-                                      IXS_CEIL, &ceil_argument, &ceil_residual))
-    return !state->oom;
-  if (floor_argument != ceil_argument || floor_residual != ceil_residual ||
-      !equivalence_remainder_domain_proven(state, floor_residual) ||
-      !equivalence_remainder_integer_proven(state, floor_residual))
-    return true;
-  if (equivalence_build_add(state, floor_argument, floor_residual, &argument) !=
-          EQUIVALENCE_BUILD_OK ||
-      ixs_node_is_sentinel(argument))
-    return true;
-  quotient_status =
-      simp_exact_quotient_parts(state->ctx, argument, &numerator, &denominator);
-  if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
-    state->oom = true;
-    return false;
-  }
-  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
-      !equivalence_build_same_sign(state, numerator, denominator, &same_sign))
-    return !state->oom;
-  if (!equivalence_remainder_domain_proven(state, node->u.pw.cases[0].cond) ||
-      !equivalence_remainder_domain_proven(state, same_sign))
-    return !state->oom;
-  guard_equivalent =
-      equivalence_core(state, node->u.pw.cases[0].cond, same_sign, depth + 1u);
-  if (guard_equivalent != IXS_CHECK_TRUE)
-    return true;
-  *quotient = argument;
-  *matched = true;
-  return true;
-}
-
-static bool equivalence_match_truncating_round(equivalence_state *state,
-                                               ixs_node *node, unsigned depth,
-                                               ixs_node **quotient,
-                                               bool *matched) {
-  ixs_node *argument;
-  *matched = false;
-  if (node->tag == IXS_TRUNC) {
-    *quotient = node->u.unary.arg;
-    *matched = true;
-    return true;
-  }
-  if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL) {
-    argument = node->u.unary.arg;
-    if ((node->tag == IXS_FLOOR &&
-         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_GE)) ||
-        (node->tag == IXS_CEIL &&
-         !equivalence_proves_zero_cmp(state, argument, IXS_CMP_LE)))
-      return true;
-    *quotient = argument;
-    *matched = true;
-    return true;
-  }
-  if (node->tag == IXS_PIECEWISE)
-    return equivalence_match_piecewise_truncating_round(state, node, depth,
-                                                        quotient, matched);
-  return true;
-}
-
-static bool equivalence_truncating_parts_proven(equivalence_state *state,
-                                                ixs_node *node,
-                                                ixs_node *quotient,
-                                                ixs_node *numerator,
-                                                ixs_node *denominator) {
-  return equivalence_remainder_domain_proven(state, node) &&
-         equivalence_remainder_domain_proven(state, quotient) &&
-         equivalence_remainder_domain_proven(state, numerator) &&
-         equivalence_remainder_domain_proven(state, denominator) &&
-         equivalence_remainder_integer_proven(state, numerator) &&
-         equivalence_remainder_integer_proven(state, denominator);
-}
-
-static bool equivalence_build_nonnegative_remainder(equivalence_state *state,
-                                                    ixs_node *numerator,
-                                                    ixs_node *denominator,
-                                                    bool denominator_positive,
-                                                    bool denominator_negative,
-                                                    ixs_node **remainder) {
-  ixs_node *negative_denominator;
-  ixs_node *absolute_denominator;
-
-  if (denominator_positive) {
-    *remainder = simp_mod(state->ctx, numerator, denominator);
-  } else {
-    if (equivalence_build_neg(state, denominator, &negative_denominator) !=
-            EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(negative_denominator))
-      return false;
-    if (denominator_negative) {
-      *remainder = simp_mod(state->ctx, numerator, negative_denominator);
-    } else {
-      absolute_denominator =
-          simp_max(state->ctx, denominator, negative_denominator);
-      if (!absolute_denominator) {
-        state->oom = true;
-        return false;
-      }
-      if (ixs_node_is_sentinel(absolute_denominator))
-        return false;
-      *remainder = simp_mod(state->ctx, numerator, absolute_denominator);
-    }
-  }
-  if (!*remainder) {
-    state->oom = true;
-    return false;
-  }
-  return !ixs_node_is_sentinel(*remainder) &&
-         equivalence_remainder_domain_proven(state, *remainder) &&
-         equivalence_remainder_integer_proven(state, *remainder);
-}
-
-static bool equivalence_build_signed_remainder(equivalence_state *state,
-                                               ixs_node *numerator,
-                                               ixs_node *denominator,
-                                               ixs_node **remainder) {
-  ixs_node *numerator_nonnegative_cmp;
-  ixs_node *positive_modulo;
-  ixs_node *negative_numerator;
-  ixs_node *negative_modulo;
-  ixs_node *negative_remainder;
-  ixs_node *values[2];
-  ixs_node *conditions[2];
-  bool numerator_nonnegative =
-      equivalence_proves_zero_cmp(state, numerator, IXS_CMP_GE);
-  bool numerator_nonpositive;
-  bool denominator_positive;
-  bool denominator_negative;
-
-  numerator_nonpositive =
-      !numerator_nonnegative &&
-      equivalence_proves_zero_cmp(state, numerator, IXS_CMP_LE);
-  denominator_positive =
-      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_GT);
-  denominator_negative =
-      !denominator_positive &&
-      equivalence_proves_zero_cmp(state, denominator, IXS_CMP_LT);
-
-  if (numerator_nonnegative) {
-    if (!equivalence_build_nonnegative_remainder(
-            state, numerator, denominator, denominator_positive,
-            denominator_negative, remainder))
-      return false;
-  } else {
-    if (equivalence_build_neg(state, numerator, &negative_numerator) !=
-            EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(negative_numerator))
-      return false;
-    if (!equivalence_build_nonnegative_remainder(
-            state, negative_numerator, denominator, denominator_positive,
-            denominator_negative, &negative_modulo))
-      return false;
-    if (equivalence_build_neg(state, negative_modulo, &negative_remainder) !=
-            EQUIVALENCE_BUILD_OK ||
-        ixs_node_is_sentinel(negative_remainder))
-      return false;
-    if (numerator_nonpositive) {
-      *remainder = negative_remainder;
-    } else {
-      if (!equivalence_build_nonnegative_remainder(
-              state, numerator, denominator, denominator_positive,
-              denominator_negative, &positive_modulo))
-        return false;
-      numerator_nonnegative_cmp =
-          simp_cmp(state->ctx, numerator, IXS_CMP_GE, state->ctx->node_zero);
-      if (!positive_modulo || !numerator_nonnegative_cmp) {
-        state->oom = true;
-        return false;
-      }
-      if (ixs_node_is_sentinel(positive_modulo) ||
-          ixs_node_is_sentinel(numerator_nonnegative_cmp))
-        return false;
-      values[0] = positive_modulo;
-      values[1] = negative_remainder;
-      conditions[0] = numerator_nonnegative_cmp;
-      conditions[1] = state->ctx->node_true;
-      *remainder = simp_pw(state->ctx, 2u, values, conditions);
-    }
-  }
-  if (!*remainder) {
-    state->oom = true;
-    return false;
-  }
-  if (ixs_node_is_sentinel(*remainder))
-    return false;
-  return equivalence_remainder_domain_proven(state, *remainder) &&
-         equivalence_remainder_integer_proven(state, *remainder);
-}
-
-static bool equivalence_build_truncating_replacement(equivalence_state *state,
-                                                     ixs_node *node,
-                                                     unsigned depth,
-                                                     ixs_node **replacement,
-                                                     bool *matched) {
-  ixs_node *quotient;
-  ixs_node *numerator;
-  ixs_node *denominator;
-  ixs_node *remainder;
-  ixs_node *difference;
-  ixs_quotient_parts_status quotient_status;
-
-  *replacement = NULL;
-  if (!equivalence_match_truncating_round(state, node, depth, &quotient,
-                                          matched) ||
-      !*matched)
-    return !state->oom;
-  quotient_status =
-      simp_exact_quotient_parts(state->ctx, quotient, &numerator, &denominator);
-  if (quotient_status == IXS_QUOTIENT_PARTS_OOM) {
-    state->oom = true;
-    return false;
-  }
-  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH ||
-      !equivalence_truncating_parts_proven(state, node, quotient, numerator,
-                                           denominator) ||
-      !equivalence_build_signed_remainder(state, numerator, denominator,
-                                          &remainder)) {
-    *matched = false;
-    return !state->oom;
-  }
-  /* q = trunc(N/D), R = N - D*q, hence q = (N - R)/D. */
-  if (equivalence_build_sub(state, numerator, remainder, &difference) !=
-          EQUIVALENCE_BUILD_OK ||
-      ixs_node_is_sentinel(difference)) {
-    *matched = false;
-    return !state->oom;
-  }
-  if (equivalence_build_div_const(state, difference, denominator,
-                                  replacement) != EQUIVALENCE_BUILD_OK ||
-      ixs_node_is_sentinel(*replacement) ||
-      !equivalence_remainder_domain_proven(state, *replacement)) {
-    *replacement = NULL;
-    *matched = false;
-    return !state->oom;
-  }
-  return true;
-}
-
-/* A matched replacement becomes an outer-selection candidate and therefore
- * hides its children. An unmatched Piecewise is also opaque by contract;
- * unmatched scalar rounding nodes remain traversable. */
-static bool equivalence_collect_truncating_candidate(
-    equivalence_state *state, ixs_node *node, unsigned depth,
-    bool piecewise_only, equivalence_substitutions *substitutions,
-    bool *descend) {
-  ixs_arena *arena = &state->ctx->scratch;
-  ixs_node *replacement;
-  bool candidate =
-      node->tag == IXS_PIECEWISE ||
-      (!piecewise_only && (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
-                           node->tag == IXS_TRUNC));
-  bool matched;
-
-  *descend = true;
-  if (!candidate)
-    return true;
-  if (!equivalence_build_truncating_replacement(state, node, depth,
-                                                &replacement, &matched))
-    return false;
-  if (matched) {
-    if (!equivalence_substitutions_push(arena, substitutions, node,
-                                        replacement)) {
-      state->oom = true;
-      return false;
-    }
-    *descend = false;
-    return true;
-  }
-  *descend = node->tag != IXS_PIECEWISE;
-  return true;
-}
-
-/* Candidate discovery visits each rounding-bearing node in the two query DAGs
- * once. Piecewise children are opaque to discovery even when malformed. */
-static bool equivalence_collect_truncating_substitutions(
-    equivalence_state *state, ixs_node *lhs, ixs_node *rhs, unsigned depth,
-    bool piecewise_only, equivalence_substitutions *substitutions) {
-  ixs_arena *arena = &state->ctx->scratch;
-  query_node_set visited;
-  ixs_node **stack = NULL;
-  size_t stack_count = 0;
-  size_t stack_capacity = 0;
-
-  memset(&visited, 0, sizeof(visited));
-  if ((ixs_node_contains_rounding(rhs) &&
-       !query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
-                              rhs)) ||
-      (ixs_node_contains_rounding(lhs) &&
-       !query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
-                              lhs)))
-    goto oom;
-  while (stack_count > 0) {
-    ixs_node *node = stack[--stack_count];
-    uint32_t nchildren;
-    uint32_t i;
-    bool descend;
-    bool inserted;
-    if (!ixs_node_contains_rounding(node))
-      continue;
-    if (!query_node_set_insert(arena, &visited, node, &inserted))
-      goto oom;
-    if (!inserted)
-      continue;
-    if (state->visited != SIZE_MAX)
-      state->visited++;
-    if (!equivalence_collect_truncating_candidate(
-            state, node, depth, piecewise_only, substitutions, &descend))
-      return false;
-    if (!descend)
-      continue;
-    if (!defined_child_count(node, &nchildren))
-      return false;
-    for (i = nchildren; i > 0; i--)
-      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
-                                 defined_child_at(node, i - 1u)))
-        goto oom;
-  }
-  return true;
-
-oom:
-  state->oom = true;
-  return false;
-}
-
-/* Mark every candidate reachable below another candidate in one multi-source
- * traversal. Shared sub-DAGs are visited once, so selection is O(N + C)
- * expected for N descendant nodes and C candidates instead of O(C^2 * N). */
-static bool equivalence_select_outermost_substitutions(
-    equivalence_state *state, equivalence_substitutions *substitutions) {
-  ixs_arena *arena = &state->ctx->scratch;
-  query_node_set candidates;
-  query_node_set descendants;
-  query_node_set excluded;
-  ixs_node **stack = NULL;
-  size_t stack_count = 0;
-  size_t stack_capacity = 0;
-  size_t output = 0;
-  size_t i;
-
-  memset(&candidates, 0, sizeof(candidates));
-  memset(&descendants, 0, sizeof(descendants));
-  memset(&excluded, 0, sizeof(excluded));
-  for (i = 0; i < substitutions->count; i++) {
-    ixs_node *target = substitutions->items[i].target;
-    uint32_t nchildren;
-    uint32_t child;
-    bool inserted;
-    if (!query_node_set_insert(arena, &candidates, target, &inserted))
-      goto oom;
-    if (!inserted)
-      continue;
-    if (!defined_child_count(target, &nchildren))
-      return false;
-    /* Seed children, not candidate roots. Expression DAGs are acyclic, so a
-     * source cannot reach and exclude itself; only an enclosing match can. */
-    for (child = nchildren; child > 0; child--)
-      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
-                                 defined_child_at(target, child - 1u)))
-        goto oom;
-  }
-
-  while (stack_count > 0) {
-    ixs_node *node = stack[--stack_count];
-    uint32_t nchildren;
-    uint32_t child;
-    bool inserted;
-    if (!query_node_set_insert(arena, &descendants, node, &inserted))
-      goto oom;
-    if (!inserted)
-      continue;
-    if (query_node_set_contains(&candidates, node) &&
-        !query_node_set_insert(arena, &excluded, node, &inserted))
-      goto oom;
-    if (!defined_child_count(node, &nchildren))
-      return false;
-    for (child = nchildren; child > 0; child--)
-      if (!query_node_stack_push(arena, &stack, &stack_count, &stack_capacity,
-                                 defined_child_at(node, child - 1u)))
-        goto oom;
-  }
-
-  for (i = 0; i < substitutions->count; i++) {
-    if (query_node_set_contains(&excluded, substitutions->items[i].target))
-      continue;
-    if (output != i)
-      substitutions->items[output] = substitutions->items[i];
-    output++;
-  }
-  substitutions->count = output;
-  return true;
-
-oom:
-  state->oom = true;
-  return false;
-}
-
-static bool
-equivalence_apply_substitutions(equivalence_state *state, ixs_node *root,
-                                const equivalence_substitutions *substitutions,
-                                ixs_node **result) {
-  ixs_node **targets;
-  ixs_node **replacements;
-  size_t count = substitutions->count;
-  size_t i;
-  if (count == 0) {
-    *result = root;
-    return true;
-  }
-  if (count > UINT32_MAX || count > SIZE_MAX / sizeof(*targets)) {
-    state->oom = true;
-    return false;
-  }
-  targets = ixs_arena_alloc(&state->ctx->scratch, count * sizeof(*targets),
-                            sizeof(void *));
-  replacements = ixs_arena_alloc(&state->ctx->scratch,
-                                 count * sizeof(*replacements), sizeof(void *));
-  if (!targets || !replacements) {
-    state->oom = true;
-    return false;
-  }
-  for (i = 0; i < count; i++) {
-    targets[i] = substitutions->items[i].target;
-    replacements[i] = substitutions->items[i].replacement;
-  }
-  *result =
-      simp_subs_multi(state->ctx, root, (uint32_t)count, targets, replacements);
-  if (!*result) {
-    state->oom = true;
-    return false;
-  }
-  return !ixs_node_is_sentinel(*result);
-}
-
-/* Semantic projection is private to proof queries. It does not change the
- * caller's expression or expose truncation relations as an API. Modular
- * arithmetic remains in the generic constant-delta proof. */
 static bool equivalence_project_truncating_rounds(
-    equivalence_state *state, ixs_node *lhs, ixs_node *rhs, unsigned depth,
-    bool piecewise_only, ixs_node **projected_lhs, ixs_node **projected_rhs) {
-  ixs_arena_mark mark;
-  equivalence_substitutions substitutions;
-  ixs_node *nodes[2] = {lhs, rhs};
-  bool projected = false;
-
-  *projected_lhs = lhs;
-  *projected_rhs = rhs;
-  if (!ixs_node_contains_rounding(lhs) && !ixs_node_contains_rounding(rhs))
-    return false;
-  mark = ixs_arena_save(&state->ctx->scratch);
-  memset(&substitutions, 0, sizeof(substitutions));
-  if (!equivalence_collect_truncating_substitutions(
-          state, lhs, rhs, depth, piecewise_only, &substitutions) ||
-      substitutions.count == 0 ||
-      !equivalence_select_outermost_substitutions(state, &substitutions) ||
-      substitutions.count == 0 ||
-      !equivalence_apply_substitutions(state, lhs, &substitutions, &nodes[0]) ||
-      !equivalence_apply_substitutions(state, rhs, &substitutions, &nodes[1]))
-    goto cleanup;
-  *projected_lhs = nodes[0];
-  *projected_rhs = nodes[1];
-  projected = true;
-
-cleanup:
-  ixs_arena_restore(&state->ctx->scratch, mark);
-  return projected;
+    equivalence_state *state, ixs_node *source_lhs, ixs_node *root_lhs,
+    ixs_node *source_rhs, ixs_node *root_rhs, unsigned depth,
+    ixs_node **projected_lhs, ixs_node **projected_rhs) {
+  ixs_division_projection_result result = ixs_division_algebra_project(
+      state->ctx, state->bounds, source_lhs, root_lhs, source_rhs, root_rhs,
+      depth == 0u ? IXS_DIVISION_PROJECT_ALL
+                  : IXS_DIVISION_PROJECT_DIRECT_ONLY);
+  equivalence_note_algebra_status(state, result.status);
+  *projected_lhs = result.lhs;
+  *projected_rhs = result.rhs;
+  return result.status == IXS_ALGEBRA_MATCH;
 }
 
-static bool bounds_truncating_round_quotient(ixs_node *round,
-                                             ixs_node **quotient) {
-  if (round->tag == IXS_TRUNC) {
-    *quotient = round->u.unary.arg;
-    return true;
-  }
-  if (round->tag != IXS_PIECEWISE || round->u.pw.ncases != 2u ||
-      !ixs_node_is_known_true(round->u.pw.cases[1].cond) ||
-      round->u.pw.cases[0].value->tag != IXS_FLOOR ||
-      round->u.pw.cases[1].value->tag != IXS_CEIL)
-    return false;
-  *quotient = round->u.pw.cases[0].value->u.unary.arg;
-  return round->u.pw.cases[1].value->u.unary.arg == *quotient;
-}
-
-static bounds_truncating_range_status
-bounds_truncating_round_proven(ixs_bounds *b, ixs_node *round,
-                               ixs_node *quotient, ixs_node *numerator,
-                               ixs_node *denominator, bool expression_defined) {
-  equivalence_state state;
-  ixs_node *same_sign;
-  bool proven = false;
-  size_t limit_blocks = b->query_state ? b->query_state->limit_blocks : 0u;
-  size_t invalid_blocks = b->query_state ? b->query_state->invalid_blocks : 0u;
-  bounds_truncating_range_status status;
-
-  equivalence_state_init(&state, b->ctx, b);
-  if (round->tag != IXS_TRUNC &&
-      (!equivalence_build_same_sign(&state, numerator, denominator,
-                                    &same_sign) ||
-       state.invalid || state.oom || same_sign != round->u.pw.cases[0].cond))
-    goto cleanup;
-  if (ixs_bounds_check_integer_valued(b, numerator) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(b, denominator) != IXS_CHECK_TRUE)
-    goto cleanup;
-  proven = expression_defined ||
-           (ixs_bounds_check_defined(b, numerator) == IXS_CHECK_TRUE &&
-            ixs_bounds_check_defined(b, denominator) == IXS_CHECK_TRUE &&
-            ixs_bounds_check_defined(b, quotient) == IXS_CHECK_TRUE);
-
-cleanup:
-  if (state.oom || b->oom)
-    status = BOUNDS_TRUNCATING_RANGE_OOM;
-  else if (state.invalid || bounds_query_invalid_since(b, invalid_blocks))
-    status = BOUNDS_TRUNCATING_RANGE_INVALID;
-  else if (state.limited || bounds_query_limited_since(b, limit_blocks))
-    status = BOUNDS_TRUNCATING_RANGE_LIMITED;
-  else
-    status = proven ? BOUNDS_TRUNCATING_RANGE_MATCH
-                    : BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  equivalence_state_destroy(&state);
-  return status;
-}
-
-static bounds_truncating_range_status
-bounds_truncating_remainder_shift(ixs_bounds *b, ixs_node *expr,
-                                  ixs_node *round, ixs_node *numerator,
-                                  ixs_node *denominator, int64_t *shift_p) {
-  ixs_node *product = simp_mul(b->ctx, denominator, round);
-  ixs_node *remainder = product ? simp_sub(b->ctx, numerator, product) : NULL;
-  ixs_node *shift = remainder ? simp_sub(b->ctx, expr, remainder) : NULL;
-  int64_t shift_q;
-
-  if (!product || !remainder || !shift)
-    return BOUNDS_TRUNCATING_RANGE_OOM;
-  if (ixs_node_is_sentinel(product) || ixs_node_is_sentinel(remainder) ||
-      ixs_node_is_sentinel(shift))
-    return BOUNDS_TRUNCATING_RANGE_INVALID;
-  if (!ixs_node_is_const(shift))
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  ixs_node_get_rat(shift, shift_p, &shift_q);
-  return shift_q == 1 ? BOUNDS_TRUNCATING_RANGE_MATCH
-                      : BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-}
-
-static bounds_truncating_range_status
-bounds_truncating_denominator_radius(ixs_bounds *b, ixs_node *denominator,
-                                     uint64_t *radius) {
-  size_t limit_blocks = b->query_state ? b->query_state->limit_blocks : 0u;
-  size_t invalid_blocks = b->query_state ? b->query_state->invalid_blocks : 0u;
-  ixs_interval range = ixs_bounds_get(b, denominator);
-  int64_t lo;
-  int64_t hi;
-  uint64_t magnitude;
-
-  if (b->oom)
-    return BOUNDS_TRUNCATING_RANGE_OOM;
-  if (bounds_query_invalid_since(b, invalid_blocks))
-    return BOUNDS_TRUNCATING_RANGE_INVALID;
-  if (bounds_query_limited_since(b, limit_blocks))
-    return BOUNDS_TRUNCATING_RANGE_LIMITED;
-  if (!range.valid || range.lo_inf || range.hi_inf)
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  lo = ixs_rat_ceil(range.lo_p, range.lo_q);
-  hi = ixs_rat_floor(range.hi_p, range.hi_q);
-  if (lo > hi)
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  magnitude = bounds_int64_magnitude(lo);
-  if (bounds_int64_magnitude(hi) > magnitude)
-    magnitude = bounds_int64_magnitude(hi);
-  if (magnitude == 0)
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  *radius = magnitude - 1u;
-  return *radius <= (uint64_t)INT64_MAX ? BOUNDS_TRUNCATING_RANGE_MATCH
-                                        : BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-}
-
-static bounds_truncating_range_status
-bounds_try_truncating_remainder_range(ixs_bounds *b, ixs_node *expr,
-                                      ixs_node *round, bool expression_defined,
-                                      ixs_interval *out) {
-  ixs_node *quotient;
-  ixs_node *numerator;
-  ixs_node *denominator;
-  ixs_interval remainder_range;
-  ixs_interval shift_range;
-  int64_t shift_p;
-  uint64_t radius;
-  ixs_quotient_parts_status quotient_status;
-  bounds_truncating_range_status status;
-
-  if (!bounds_truncating_round_quotient(round, &quotient))
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  quotient_status =
-      simp_exact_quotient_parts(b->ctx, quotient, &numerator, &denominator);
-  if (quotient_status == IXS_QUOTIENT_PARTS_OOM)
-    return BOUNDS_TRUNCATING_RANGE_OOM;
-  if (quotient_status != IXS_QUOTIENT_PARTS_MATCH)
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  status = bounds_truncating_round_proven(b, round, quotient, numerator,
-                                          denominator, expression_defined);
-  if (status != BOUNDS_TRUNCATING_RANGE_MATCH)
-    return status;
-  status = bounds_truncating_remainder_shift(b, expr, round, numerator,
-                                             denominator, &shift_p);
-  if (status != BOUNDS_TRUNCATING_RANGE_MATCH)
-    return status;
-  status = bounds_truncating_denominator_radius(b, denominator, &radius);
-  if (status != BOUNDS_TRUNCATING_RANGE_MATCH)
-    return status;
-
-  remainder_range = ixs_interval_range(-(int64_t)radius, 1, (int64_t)radius, 1);
-  shift_range = ixs_interval_exact(shift_p, 1);
-  remainder_range = iv_add(remainder_range, shift_range);
-  if (!remainder_range.valid)
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-  *out = remainder_range;
-  return BOUNDS_TRUNCATING_RANGE_MATCH;
-}
-
-/* Recognize only the immediate canonical R = N - D * trunc(N / D) shape.
- * Do not walk the numerator DAG: this is on the hot interval path and may be
- * queried independently for every generated packet.  The existing intrinsic
- * range cache owns the result for the original ADD node. */
-static bounds_truncating_range_status bounds_get_truncating_remainder_range(
+static ixs_algebra_status bounds_get_truncating_remainder_range(
     ixs_bounds *b, ixs_node *expr, bool expression_defined, ixs_interval *out) {
-  uint32_t i;
-  bounds_truncating_range_status status;
-
-  if (!b || !b->ctx || !expr || expr->tag != IXS_ADD || !out ||
-      !ixs_node_contains_rounding(expr))
-    return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    ixs_node *term = expr->u.add.terms[i].term;
-    uint32_t factor;
-    if (term->tag == IXS_PIECEWISE || term->tag == IXS_TRUNC) {
-      status = bounds_try_truncating_remainder_range(b, expr, term,
-                                                     expression_defined, out);
-      if (status != BOUNDS_TRUNCATING_RANGE_NO_MATCH)
-        return status;
-    }
-    if (term->tag != IXS_MUL)
-      continue;
-    for (factor = 0; factor < term->u.mul.nfactors; factor++) {
-      const ixs_mulfactor *candidate = &term->u.mul.factors[factor];
-      if (candidate->exp == 1 && (candidate->base->tag == IXS_PIECEWISE ||
-                                  candidate->base->tag == IXS_TRUNC)) {
-        status = bounds_try_truncating_remainder_range(b, expr, candidate->base,
-                                                       expression_defined, out);
-        if (status != BOUNDS_TRUNCATING_RANGE_NO_MATCH)
-          return status;
-      }
-    }
-  }
-  return BOUNDS_TRUNCATING_RANGE_NO_MATCH;
-}
-
-typedef struct {
-  size_t nodes;
-  size_t rounds;
-} facts_truncating_cost;
-
-static bool facts_measure_truncating_cost(ixs_ctx *ctx, ixs_node *root,
-                                          facts_truncating_cost *cost,
-                                          ixs_fact_query_status *status) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
-  query_node_set visited;
-  ixs_node **stack = NULL;
-  size_t nstack = 0;
-  size_t stack_capacity = 0;
-  bool ok = false;
-
-  cost->nodes = 0;
-  cost->rounds = 0;
-  memset(&visited, 0, sizeof(visited));
-  if (!root) {
-    *status = IXS_FACT_QUERY_INVALID;
-    goto cleanup;
-  }
-  if (!query_node_stack_push(&ctx->scratch, &stack, &nstack, &stack_capacity,
-                             root)) {
-    *status = IXS_FACT_QUERY_OOM;
-    goto cleanup;
-  }
-  while (nstack > 0) {
-    ixs_node *node = stack[--nstack];
-    uint32_t nchildren;
-    uint32_t i;
-    bool inserted;
-    if (!node ||
-        !query_node_set_insert(&ctx->scratch, &visited, node, &inserted)) {
-      *status = node ? IXS_FACT_QUERY_OOM : IXS_FACT_QUERY_INVALID;
-      goto cleanup;
-    }
-    if (!inserted)
-      continue;
-    if (!defined_child_count(node, &nchildren)) {
-      *status = IXS_FACT_QUERY_INVALID;
-      goto cleanup;
-    }
-    if (cost->nodes != SIZE_MAX)
-      cost->nodes++;
-    if (node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
-        node->tag == IXS_TRUNC) {
-      if (cost->rounds != SIZE_MAX)
-        cost->rounds++;
-    }
-    for (i = 0; i < nchildren; i++) {
-      if (!query_node_stack_push(&ctx->scratch, &stack, &nstack,
-                                 &stack_capacity, defined_child_at(node, i))) {
-        *status = IXS_FACT_QUERY_OOM;
-        goto cleanup;
-      }
-    }
-  }
-  ok = true;
-
-cleanup:
-  ixs_arena_restore(&ctx->scratch, mark);
-  return ok;
+  if (!b->ctx)
+    return IXS_ALGEBRA_NO_MATCH;
+  ixs_division_range_result result =
+      ixs_division_algebra_range(b->ctx, b, expr, expr, expression_defined);
+  if (result.status == IXS_ALGEBRA_MATCH)
+    *out = result.range;
+  return result.status;
 }
 
 static ixs_node *
 facts_simplify_truncating_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
-                                     ixs_node *expr,
+                                     ixs_node *source, ixs_node *root,
                                      ixs_fact_query_status *status) {
-  equivalence_state state;
-  facts_truncating_cost original_cost;
-  facts_truncating_cost candidate_cost;
-  ixs_node *projected;
-  ixs_node *unused;
-  ixs_node *candidate;
-  ixs_node *result = NULL;
-  bool simplify_limited = false;
-
+  ixs_division_projection_result result = ixs_division_algebra_project(
+      ctx, bounds, source, root, ctx->node_zero, ctx->node_zero,
+      IXS_DIVISION_PROJECT_PIECEWISE_REDUCING);
   *status = IXS_FACT_QUERY_COMPLETE;
-
-  equivalence_state_init(&state, ctx, bounds);
-  if (!equivalence_project_truncating_rounds(&state, expr, ctx->node_zero, 0,
-                                             true, &projected, &unused)) {
-    if (state.oom)
-      *status = IXS_FACT_QUERY_OOM;
-    else if (state.invalid)
-      *status = IXS_FACT_QUERY_INVALID;
-    else if (state.limited)
-      *status = IXS_FACT_QUERY_LIMITED;
-    result = *status == IXS_FACT_QUERY_COMPLETE ? expr : NULL;
-    goto cleanup;
-  }
-  if (state.oom) {
+  if (result.status == IXS_ALGEBRA_OOM)
     *status = IXS_FACT_QUERY_OOM;
-    goto cleanup;
-  }
-  if (state.invalid) {
+  else if (result.status == IXS_ALGEBRA_INVALID)
     *status = IXS_FACT_QUERY_INVALID;
-    goto cleanup;
-  }
-  if (state.limited) {
+  else if (result.status == IXS_ALGEBRA_LIMITED)
     *status = IXS_FACT_QUERY_LIMITED;
-    goto cleanup;
-  }
-  if (projected == expr) {
-    result = expr;
-    goto cleanup;
-  }
-  candidate =
-      simp_simplify_bounds_status(ctx, projected, bounds, &simplify_limited);
-  if (simplify_limited) {
-    *status = IXS_FACT_QUERY_LIMITED;
-    goto cleanup;
-  }
-  if (!candidate) {
-    *status = IXS_FACT_QUERY_OOM;
-    goto cleanup;
-  }
-  if (ixs_node_is_sentinel(candidate)) {
-    *status = IXS_FACT_QUERY_INVALID;
-    goto cleanup;
-  }
-  if (candidate == expr) {
-    result = expr;
-    goto cleanup;
-  }
-  if (!facts_measure_truncating_cost(ctx, expr, &original_cost, status) ||
-      !facts_measure_truncating_cost(ctx, candidate, &candidate_cost, status))
-    goto cleanup;
-  if (candidate_cost.rounds >= original_cost.rounds ||
-      candidate_cost.nodes >= original_cost.nodes) {
-    result = expr;
-    goto cleanup;
-  }
-  result = candidate;
-
-cleanup:
-  equivalence_state_destroy(&state);
-  return result;
+  if (*status != IXS_FACT_QUERY_COMPLETE)
+    return NULL;
+  return result.status == IXS_ALGEBRA_MATCH ? result.lhs : root;
 }
-
 static bool equivalence_flatten_logic(equivalence_state *state, ixs_node *root,
                                       ixs_tag tag, ixs_node ***terms,
                                       size_t *nterms, size_t *terms_capacity) {
@@ -17919,7 +17094,7 @@ static ixs_check_result equivalence_projected(equivalence_state *state,
   ixs_node *projected_rhs;
   ixs_check_result result;
 
-  if (!equivalence_project_truncating_rounds(state, lhs, rhs, depth, false,
+  if (!equivalence_project_truncating_rounds(state, lhs, lhs, rhs, rhs, depth,
                                              &projected_lhs, &projected_rhs))
     return IXS_CHECK_UNKNOWN;
   if (projected_lhs == projected_rhs)
@@ -17941,23 +17116,6 @@ typedef struct {
   size_t count;
   uint64_t remaining;
 } equivalence_piecewise_domain;
-
-static ixs_cmp_op equivalence_reverse_cmp(ixs_cmp_op op) {
-  switch (op) {
-  case IXS_CMP_GT:
-    return IXS_CMP_LT;
-  case IXS_CMP_GE:
-    return IXS_CMP_LE;
-  case IXS_CMP_LT:
-    return IXS_CMP_GT;
-  case IXS_CMP_LE:
-    return IXS_CMP_GE;
-  case IXS_CMP_EQ:
-  case IXS_CMP_NE:
-    return op;
-  }
-  return op;
-}
 
 static ixs_node *equivalence_piecewise_affine_symbol(ixs_node *expr) {
   if (expr->tag == IXS_SYM)
@@ -17986,7 +17144,7 @@ static bool equivalence_piecewise_affine_guard(ixs_node *condition,
     affine = condition->u.binary.lhs;
   } else if (ixs_node_is_zero(condition->u.binary.lhs)) {
     affine = condition->u.binary.rhs;
-    *op = equivalence_reverse_cmp(*op);
+    *op = flip_cmp(*op);
   } else {
     return false;
   }
@@ -18715,7 +17873,7 @@ static void constant_difference_try_projection(
   ixs_node *nodes[2] = {lhs, rhs};
 
   equivalence_state_init(&projection, ctx, bounds);
-  if (equivalence_project_truncating_rounds(&projection, lhs, rhs, 0, false,
+  if (equivalence_project_truncating_rounds(&projection, lhs, lhs, rhs, rhs, 0,
                                             &nodes[0], &nodes[1]) &&
       !projection.limited && !projection.invalid && !projection.oom) {
     bool projected_invalid = false;
@@ -19467,15 +18625,15 @@ facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
       goto cleanup;
     result_residual = scope.ctx->node_zero;
   } else if (expr->tag == IXS_ADD) {
-    ixs_additive_row_status status;
+    ixs_algebra_status status;
     ixs_node_get_rat(expr->u.add.coeff, &result_constant, &q);
     if (q != 1)
       goto cleanup;
     status =
         ixs_additive_row_without_constant(scope.ctx, expr, &result_residual);
-    if (status != IXS_ADDITIVE_ROW_MATCH) {
-      scope.status = status == IXS_ADDITIVE_ROW_OOM ? IXS_FACT_QUERY_OOM
-                                                    : IXS_FACT_QUERY_INVALID;
+    if (status != IXS_ALGEBRA_MATCH) {
+      scope.status = status == IXS_ALGEBRA_OOM ? IXS_FACT_QUERY_OOM
+                                               : IXS_FACT_QUERY_INVALID;
       goto cleanup;
     }
   } else {
@@ -20177,7 +19335,7 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   bool defined_limited = false;
   bool query_held = false;
   ixs_check_result integer_valued;
-  bounds_truncating_range_status truncating_status;
+  ixs_algebra_status truncating_status;
   ixs_range_query_result result;
   memset(&result, 0, sizeof(result));
   result.status = IXS_FACT_QUERY_INVALID;
@@ -20223,12 +19381,11 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   truncating_status = bounds_get_truncating_remainder_range(
       &facts->bounds, expr, /*expression_defined=*/false,
       &truncating_remainder);
-  if (truncating_status == BOUNDS_TRUNCATING_RANGE_MATCH)
+  if (truncating_status == IXS_ALGEBRA_MATCH)
     iv = iv_intersect(iv, truncating_remainder);
-  else if (truncating_status != BOUNDS_TRUNCATING_RANGE_NO_MATCH) {
-    result.status = truncating_status == BOUNDS_TRUNCATING_RANGE_OOM
-                        ? IXS_FACT_QUERY_OOM
-                    : truncating_status == BOUNDS_TRUNCATING_RANGE_INVALID
+  else if (truncating_status >= IXS_ALGEBRA_LIMITED) {
+    result.status = truncating_status == IXS_ALGEBRA_OOM ? IXS_FACT_QUERY_OOM
+                    : truncating_status == IXS_ALGEBRA_INVALID
                         ? IXS_FACT_QUERY_INVALID
                         : IXS_FACT_QUERY_LIMITED;
     goto cleanup;
@@ -21196,6 +20353,543 @@ ixs_tag ixs_node_tag(const ixs_node *node) { return (ixs_tag)node->tag; }
 int64_t ixs_node_int_val(const ixs_node *node) { return node->u.ival; }
 
 uint32_t ixs_node_hash(const ixs_node *node) { return node->hash; }
+
+/* ==================================================================== */
+/* division_algebra.c                                                 */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "division_algebra.h"
+
+#include "additive_row.h"
+#include "simplify.h"
+#include <string.h>
+
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  ixs_algebra_status status;
+  ixs_bounds_transport_snapshot transport;
+} da_query;
+
+typedef struct {
+  ixs_node *numerator, *denominator;
+} da_certificate;
+
+static bool da_stopped(const da_query *query) {
+  return query->status >= IXS_ALGEBRA_LIMITED;
+}
+
+static bool da_note_status(da_query *query, ixs_algebra_status status) {
+  if (status != IXS_ALGEBRA_MATCH && status > query->status)
+    query->status = status;
+  return status == IXS_ALGEBRA_MATCH;
+}
+
+static void da_capture_transport(da_query *query) {
+  ixs_bounds_transport_status status =
+      ixs_bounds_query_transport_since(query->bounds, query->transport);
+  /* Both enum tails encode LIMITED < OOM < INVALID. */
+  if (status != IXS_BOUNDS_TRANSPORT_CLEAN)
+    da_note_status(query, (ixs_algebra_status)(status + 2u));
+}
+
+typedef enum { DA_ADD, DA_MUL, DA_DIV } da_op;
+
+static ixs_node *da_node(da_query *query, ixs_node *node,
+                         bool unrepresentable) {
+  if (unrepresentable) {
+    da_note_status(query, IXS_ALGEBRA_UNREPRESENTABLE);
+  } else if (!node)
+    da_note_status(query, IXS_ALGEBRA_OOM);
+  else if (ixs_node_is_sentinel(node))
+    da_note_status(query, IXS_ALGEBRA_INVALID);
+  return da_stopped(query) ? NULL : node;
+}
+
+static ixs_node *da_build(da_query *query, da_op op, ixs_node *lhs,
+                          ixs_node *rhs) {
+  bool unrepresentable = false;
+  ixs_node *result =
+      op == DA_ADD   ? simp_try_add(query->ctx, lhs, rhs, &unrepresentable)
+      : op == DA_MUL ? simp_try_mul(query->ctx, lhs, rhs, &unrepresentable)
+                     : simp_try_div(query->ctx, lhs, rhs, &unrepresentable);
+  return da_node(query, result, unrepresentable);
+}
+
+static ixs_node *da_neg(da_query *query, ixs_node *value) {
+  ixs_node *minus_one = da_node(query, ixs_node_int(query->ctx, -1), false);
+  return minus_one ? da_build(query, DA_MUL, minus_one, value) : NULL;
+}
+
+static ixs_node *da_sub(da_query *query, ixs_node *lhs, ixs_node *rhs) {
+  ixs_node *negative = da_neg(query, rhs);
+  return negative ? da_build(query, DA_ADD, lhs, negative) : NULL;
+}
+
+static bool da_property(da_query *query, ixs_node *node, bool integer) {
+  ixs_check_result result =
+      integer ? ixs_bounds_check_integer_valued(query->bounds, node)
+              : ixs_bounds_check_defined(query->bounds, node);
+  da_capture_transport(query);
+  return result == IXS_CHECK_TRUE && !da_stopped(query);
+}
+
+static void da_sign_normalize(ixs_node **node, ixs_cmp_op *op);
+
+static ixs_node *da_cmp_canonical(da_query *query, ixs_node *node,
+                                  ixs_cmp_op op) {
+  da_sign_normalize(&node, &op);
+  return da_node(query, simp_cmp(query->ctx, node, op, query->ctx->node_zero),
+                 false);
+}
+
+static ixs_check_result da_cmp_zero(da_query *query, ixs_node *node,
+                                    ixs_cmp_op op) {
+  ixs_node *cmp = da_cmp_canonical(query, node, op);
+  ixs_check_result result =
+      cmp ? ixs_bounds_check(query->bounds, cmp) : IXS_CHECK_UNKNOWN;
+  da_capture_transport(query);
+  return da_stopped(query) ? IXS_CHECK_UNKNOWN : result;
+}
+
+static void da_sign_normalize(ixs_node **node, ixs_cmp_op *op) {
+  if ((*node)->tag == IXS_MUL && (*node)->u.mul.nfactors == 1u &&
+      (*node)->u.mul.factors[0].exp == 1) {
+    int64_t p, q;
+    ixs_node_get_rat((*node)->u.mul.coeff, &p, &q);
+    /* GT/GE/LT/LE are 0/1/2/3, so xor 2 flips the inequality direction. */
+    if (p < 0 && *op <= IXS_CMP_LE)
+      *op = (ixs_cmp_op)((unsigned)*op ^ 2u);
+    *node = (*node)->u.mul.factors[0].base;
+  }
+}
+
+static bool da_guard_leaf(ixs_node *node, ixs_node *value, ixs_cmp_op op) {
+  ixs_node *lhs;
+  ixs_cmp_op actual;
+  if (node->tag != IXS_CMP || !ixs_node_is_zero(node->u.binary.rhs))
+    return false;
+  lhs = node->u.binary.lhs;
+  actual = node->u.binary.cmp_op;
+  da_sign_normalize(&lhs, &actual);
+  da_sign_normalize(&value, &op);
+  return lhs == value && actual == op;
+}
+
+static bool da_guard_pair(ixs_node *node, ixs_node *numerator,
+                          ixs_node *denominator, bool positive) {
+  ixs_cmp_op n_op = positive ? IXS_CMP_GE : IXS_CMP_LE;
+  ixs_cmp_op d_op = positive ? IXS_CMP_GT : IXS_CMP_LT;
+  if (node->tag != IXS_AND || node->u.assoc.nargs != 2u)
+    return false;
+  return (da_guard_leaf(node->u.assoc.args[0], numerator, n_op) &&
+          da_guard_leaf(node->u.assoc.args[1], denominator, d_op)) ||
+         (da_guard_leaf(node->u.assoc.args[1], numerator, n_op) &&
+          da_guard_leaf(node->u.assoc.args[0], denominator, d_op));
+}
+
+/* Accept only the exact two-clause sign protocol, or the clause/atom left
+ * after a proved denominator sign. Structural numerator comparisons preserve
+ * the strict boundary and reject extra predicates without solver re-entry. */
+static bool da_guard_matches(da_query *query, ixs_node *actual,
+                             ixs_node *numerator, ixs_node *denominator) {
+  /* The total Piecewise already proves its first condition total. */
+  if (actual->tag == IXS_OR && actual->u.assoc.nargs == 2u &&
+      ((da_guard_pair(actual->u.assoc.args[0], numerator, denominator, true) &&
+        da_guard_pair(actual->u.assoc.args[1], numerator, denominator,
+                      false)) ||
+       (da_guard_pair(actual->u.assoc.args[1], numerator, denominator, true) &&
+        da_guard_pair(actual->u.assoc.args[0], numerator, denominator, false))))
+    return true;
+  if (da_cmp_zero(query, denominator, IXS_CMP_GT) == IXS_CHECK_TRUE)
+    return da_guard_leaf(actual, numerator, IXS_CMP_GE) ||
+           da_guard_pair(actual, numerator, denominator, true);
+  if (da_cmp_zero(query, denominator, IXS_CMP_LT) == IXS_CHECK_TRUE)
+    return da_guard_leaf(actual, numerator, IXS_CMP_LE) ||
+           da_guard_pair(actual, numerator, denominator, false);
+  return false;
+}
+
+static ixs_node *da_piecewise_argument(da_query *query, ixs_node *round) {
+  ixs_node *floor_argument, *floor_residual;
+  ixs_node *ceil_argument, *ceil_residual;
+  if (round->u.pw.ncases != 2u ||
+      !ixs_node_is_known_true(round->u.pw.cases[1].cond) ||
+      !da_note_status(query, ixs_additive_row_split_round(
+                                 query->ctx, round->u.pw.cases[0].value, false,
+                                 &floor_argument, &floor_residual)) ||
+      !da_note_status(query, ixs_additive_row_split_round(
+                                 query->ctx, round->u.pw.cases[1].value, true,
+                                 &ceil_argument, &ceil_residual)) ||
+      floor_argument != ceil_argument || floor_residual != ceil_residual ||
+      !da_property(query, floor_residual, false) ||
+      !da_property(query, floor_residual, true))
+    return NULL;
+  return da_build(query, DA_ADD, floor_argument, floor_residual);
+}
+
+static bool da_round_parts(da_query *query, ixs_node *round,
+                           bool allow_piecewise, da_certificate *certificate) {
+  ixs_node *argument = NULL;
+  ixs_quotient_parts_status parts_status;
+  if (round->tag == IXS_TRUNC) {
+    argument = round->u.unary.arg;
+  } else if (round->tag == IXS_FLOOR || round->tag == IXS_CEIL) {
+    argument = round->u.unary.arg;
+    if (da_cmp_zero(query, argument,
+                    round->tag == IXS_FLOOR ? IXS_CMP_GE : IXS_CMP_LE) !=
+        IXS_CHECK_TRUE)
+      return false;
+  } else if (allow_piecewise && round->tag == IXS_PIECEWISE) {
+    argument = da_piecewise_argument(query, round);
+  } else {
+    return false;
+  }
+  if (!argument)
+    return false;
+  parts_status = simp_exact_quotient_parts(
+      query->ctx, argument, &certificate->numerator, &certificate->denominator);
+  if (parts_status != IXS_QUOTIENT_PARTS_MATCH) {
+    da_note_status(query, parts_status == IXS_QUOTIENT_PARTS_OOM
+                              ? IXS_ALGEBRA_OOM
+                          : parts_status == IXS_QUOTIENT_PARTS_UNREPRESENTABLE
+                              ? IXS_ALGEBRA_UNREPRESENTABLE
+                              : IXS_ALGEBRA_NO_MATCH);
+    return false;
+  }
+  if (!da_property(query, round, false) ||
+      !da_property(query, certificate->numerator, true) ||
+      !da_property(query, certificate->denominator, true))
+    return false;
+  /* A total rounding node transports the shared quotient argument's complete
+   * domain, including numerator definedness and a nonzero denominator. */
+  if (round->tag == IXS_PIECEWISE) {
+    ixs_node *actual = round->u.pw.cases[0].cond;
+    if (!da_guard_matches(query, actual, certificate->numerator,
+                          certificate->denominator))
+      return false;
+  }
+  return true;
+}
+
+static ixs_node *da_mod_branch(da_query *query, ixs_node *numerator,
+                               ixs_node *modulus, bool negative) {
+  if (negative)
+    numerator = da_neg(query, numerator);
+  numerator =
+      numerator
+          ? da_node(query, simp_mod(query->ctx, numerator, modulus), false)
+          : NULL;
+  return negative && numerator ? da_neg(query, numerator) : numerator;
+}
+
+static ixs_node *da_signed_remainder(da_query *query,
+                                     da_certificate *certificate) {
+  ixs_node *numerator = certificate->numerator;
+  ixs_node *denominator = certificate->denominator;
+  ixs_node *magnitude = denominator;
+  ixs_node *negative_denominator = NULL;
+  ixs_node *positive, *negative, *guard;
+  ixs_check_result denominator_positive =
+      da_cmp_zero(query, denominator, IXS_CMP_GT);
+  ixs_check_result numerator_sign;
+
+  if (denominator_positive != IXS_CHECK_TRUE) {
+    negative_denominator = da_neg(query, denominator);
+    if (!negative_denominator)
+      return NULL;
+    magnitude =
+        denominator_positive == IXS_CHECK_FALSE
+            ? negative_denominator
+            : da_node(query,
+                      simp_max(query->ctx, denominator, negative_denominator),
+                      false);
+  }
+  numerator_sign = da_cmp_zero(query, numerator, IXS_CMP_GE);
+  if (numerator_sign != IXS_CHECK_UNKNOWN)
+    return da_mod_branch(query, numerator, magnitude,
+                         numerator_sign == IXS_CHECK_FALSE);
+  numerator_sign = da_cmp_zero(query, numerator, IXS_CMP_LE);
+  if (numerator_sign == IXS_CHECK_TRUE)
+    return da_mod_branch(query, numerator, magnitude, true);
+  negative = da_stopped(query)
+                 ? NULL
+                 : da_mod_branch(query, numerator, magnitude, true);
+  positive =
+      negative ? da_mod_branch(query, numerator, magnitude, false) : NULL;
+  guard = positive ? da_cmp_canonical(query, numerator, IXS_CMP_GE) : NULL;
+  if (guard) {
+    ixs_node *values[2] = {positive, negative};
+    ixs_node *conditions[2] = {guard, query->ctx->node_true};
+    guard = da_node(query, simp_pw(query->ctx, 2u, values, conditions), false);
+  }
+  /* Certificate operands are total integers and magnitude is positive. Mod,
+   * negation, and the exhaustive sign Piecewise preserve that contract. */
+  return guard;
+}
+
+static ixs_node *da_replacement(da_query *query, ixs_node *round,
+                                bool allow_piecewise) {
+  da_certificate certificate;
+  ixs_node *remainder;
+  if (!da_round_parts(query, round, allow_piecewise, &certificate))
+    return NULL;
+  remainder = da_signed_remainder(query, &certificate);
+  remainder =
+      remainder ? da_sub(query, certificate.numerator, remainder) : NULL;
+  /* The total source round already proves this exact quotient's domain. */
+  return remainder ? da_build(query, DA_DIV, remainder, certificate.denominator)
+                   : NULL;
+}
+
+static bool da_candidate(ixs_node *node, ixs_division_projection_mode mode) {
+  return (node->tag == IXS_PIECEWISE &&
+          mode != IXS_DIVISION_PROJECT_DIRECT_ONLY) ||
+         ((node->tag == IXS_FLOOR || node->tag == IXS_CEIL ||
+           node->tag == IXS_TRUNC) &&
+          mode != IXS_DIVISION_PROJECT_PIECEWISE_REDUCING);
+}
+
+typedef struct {
+  ixs_node **targets, **replacements;
+  size_t count, capacity, nodes;
+} da_walk;
+
+static bool da_push_substitution(da_query *query, da_walk *walk,
+                                 ixs_node *target, ixs_node *replacement) {
+  if (walk->count == walk->capacity) {
+    size_t next = walk->capacity ? walk->capacity * 2u : 64u;
+    ixs_node **storage;
+    if (next <= walk->capacity || next > SIZE_MAX / (2u * sizeof(*storage)))
+      goto oom;
+    storage = ixs_arena_alloc(&query->ctx->scratch,
+                              next * 2u * sizeof(*storage), sizeof(void *));
+    if (!storage)
+      goto oom;
+    if (walk->count) {
+      memcpy(storage, walk->targets, walk->count * sizeof(*storage));
+      memcpy(storage + next, walk->replacements,
+             walk->count * sizeof(*storage));
+    }
+    walk->targets = storage;
+    walk->replacements = storage + next;
+    walk->capacity = next;
+  }
+  walk->targets[walk->count] = target;
+  walk->replacements[walk->count++] = replacement;
+  return true;
+oom:
+  da_note_status(query, IXS_ALGEBRA_OOM);
+  return false;
+}
+
+/* The shared pointer set makes projection and cost measurement expected
+ * O(N + E + C). A matched node hides descendants reached only through it. */
+static bool da_walk_roots(da_query *query, ixs_node *lhs, ixs_node *rhs,
+                          ixs_division_projection_mode mode, bool project,
+                          da_walk *walk) {
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t count = 0, capacity = 0;
+  memset(&visited, 0, sizeof(visited));
+  memset(walk, 0, sizeof(*walk));
+  if (!query_node_stack_push(&query->ctx->scratch, &stack, &count, &capacity,
+                             rhs) ||
+      !query_node_stack_push(&query->ctx->scratch, &stack, &count, &capacity,
+                             lhs))
+    goto oom;
+  while (count > 0u) {
+    ixs_node *node = stack[--count];
+    bool inserted;
+    uint32_t children, i;
+    if (project && !ixs_node_contains_rounding(node))
+      continue;
+    if (!query_node_set_insert(&query->ctx->scratch, &visited, node, &inserted))
+      goto oom;
+    if (!inserted)
+      continue;
+    if (walk->nodes != SIZE_MAX)
+      walk->nodes++;
+    if (project && da_candidate(node, mode)) {
+      ixs_node *replacement =
+          da_replacement(query, node, mode != IXS_DIVISION_PROJECT_DIRECT_ONLY);
+      if (da_stopped(query) ||
+          (replacement &&
+           !da_push_substitution(query, walk, node, replacement)))
+        return false;
+      if (replacement)
+        continue;
+    }
+    if (project && node->tag == IXS_PIECEWISE)
+      continue;
+    children = ixs_node_nchildren(node);
+    for (i = children; i > 0u; i--)
+      if (!query_node_stack_push(&query->ctx->scratch, &stack, &count,
+                                 &capacity, ixs_node_child(node, i - 1u)))
+        goto oom;
+  }
+  return true;
+oom:
+  da_note_status(query, IXS_ALGEBRA_OOM);
+  return false;
+}
+
+static ixs_node *da_reduce_projection(da_query *query, ixs_node *root,
+                                      ixs_node *projected) {
+  da_walk original, candidate;
+  bool limited = false;
+  projected = simp_simplify_bounds_status(query->ctx, projected, query->bounds,
+                                          &limited);
+  da_capture_transport(query);
+  if (!da_stopped(query)) {
+    if (limited)
+      da_note_status(query, IXS_ALGEBRA_LIMITED);
+    else
+      projected = da_node(query, projected, false);
+  }
+  if (!projected || da_stopped(query) ||
+      !da_walk_roots(query, root, query->ctx->node_zero,
+                     IXS_DIVISION_PROJECT_PIECEWISE_REDUCING, false,
+                     &original) ||
+      !da_walk_roots(query, projected, query->ctx->node_zero,
+                     IXS_DIVISION_PROJECT_PIECEWISE_REDUCING, false,
+                     &candidate))
+    return NULL;
+  /* Construction adds no rounding operator and removes the selected outer
+   * round; strict node shrink is the independent non-growth admission rule. */
+  return candidate.nodes < original.nodes ? projected : root;
+}
+
+IXS_STATIC ixs_division_projection_result ixs_division_algebra_project(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *source_lhs, ixs_node *root_lhs,
+    ixs_node *source_rhs, ixs_node *root_rhs,
+    ixs_division_projection_mode mode) {
+  ixs_division_projection_result result = {IXS_ALGEBRA_NO_MATCH, root_lhs,
+                                           root_rhs};
+  da_query query = {.ctx = ctx, .bounds = bounds};
+  ixs_arena_mark mark;
+  da_walk projection;
+  bool unrepresentable;
+  if (!ctx || !bounds || !source_lhs || !root_lhs || !source_rhs || !root_rhs ||
+      mode > IXS_DIVISION_PROJECT_PIECEWISE_REDUCING)
+    result.status = IXS_ALGEBRA_INVALID;
+  if (result.status != IXS_ALGEBRA_NO_MATCH ||
+      (!ixs_node_contains_rounding(root_lhs) &&
+       !ixs_node_contains_rounding(root_rhs)))
+    return result;
+  query.transport = ixs_bounds_query_transport_snapshot(bounds);
+  if (!da_property(&query, source_lhs, false) ||
+      !da_property(&query, source_rhs, false)) {
+    result.status = query.status;
+    return result;
+  }
+  mark = ixs_arena_save(&ctx->scratch);
+  if (!da_walk_roots(&query, root_lhs, root_rhs, mode, true, &projection) ||
+      projection.count == 0u)
+    goto cleanup;
+  if (projection.count > UINT32_MAX) {
+    da_note_status(&query, IXS_ALGEBRA_OOM);
+    goto cleanup;
+  }
+  result.lhs = simp_subs_multi_outermost(
+      ctx, root_lhs, (uint32_t)projection.count, projection.targets,
+      projection.replacements, &unrepresentable);
+  result.lhs = da_node(&query, result.lhs, unrepresentable);
+  if (result.lhs && mode == IXS_DIVISION_PROJECT_PIECEWISE_REDUCING) {
+    result.lhs = da_reduce_projection(&query, root_lhs, result.lhs);
+    result.rhs = root_rhs;
+  } else {
+    result.rhs = result.lhs ? simp_subs_multi_outermost(
+                                  ctx, root_rhs, (uint32_t)projection.count,
+                                  projection.targets, projection.replacements,
+                                  &unrepresentable)
+                            : NULL;
+    result.rhs = da_node(&query, result.rhs, unrepresentable);
+  }
+  if (result.lhs && result.rhs &&
+      (mode != IXS_DIVISION_PROJECT_PIECEWISE_REDUCING ||
+       result.lhs != root_lhs))
+    result.status = IXS_ALGEBRA_MATCH;
+
+cleanup:
+  if (result.status != IXS_ALGEBRA_MATCH) {
+    result.status = query.status;
+    result.lhs = root_lhs;
+    result.rhs = root_rhs;
+  }
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+static bool da_range_for_round(da_query *query, ixs_node *expr, ixs_node *round,
+                               ixs_interval *range) {
+  da_certificate certificate;
+  ixs_node *product, *raw_remainder, *signed_remainder, *shift;
+  ixs_interval remainder_range;
+  int64_t shift_p, shift_q;
+  if (!da_round_parts(query, round, true, &certificate))
+    return false;
+  product = da_build(query, DA_MUL, certificate.denominator, round);
+  raw_remainder =
+      product ? da_sub(query, certificate.numerator, product) : NULL;
+  shift = raw_remainder ? da_sub(query, expr, raw_remainder) : NULL;
+  if (!shift || !ixs_node_is_const(shift))
+    return false;
+  ixs_node_get_rat(shift, &shift_p, &shift_q);
+  if (shift_q != 1)
+    return false;
+  signed_remainder = da_signed_remainder(query, &certificate);
+  if (!signed_remainder)
+    return false;
+  remainder_range = ixs_bounds_get(query->bounds, signed_remainder);
+  da_capture_transport(query);
+  *range = iv_add(remainder_range, ixs_interval_exact(shift_p, 1));
+  return range->valid && !da_stopped(query);
+}
+
+IXS_STATIC ixs_division_range_result
+ixs_division_algebra_range(ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *source,
+                           ixs_node *root, bool source_defined) {
+  ixs_division_range_result result = {IXS_ALGEBRA_NO_MATCH, {0}};
+  da_query query = {.ctx = ctx, .bounds = bounds};
+  ixs_node *round = NULL;
+  uint32_t i;
+  if (!ctx || !bounds || !source || !root) {
+    result.status = IXS_ALGEBRA_INVALID;
+    return result;
+  }
+  if (root->tag != IXS_ADD || !ixs_node_contains_rounding(root))
+    return result;
+  query.transport = ixs_bounds_query_transport_snapshot(bounds);
+  if (!source_defined && !da_property(&query, source, false)) {
+    result.status = query.status;
+    return result;
+  }
+  for (i = 0; i < root->u.add.nterms; i++) {
+    ixs_node *term = root->u.add.terms[i].term;
+    uint32_t factor = 0;
+    do {
+      ixs_node *candidate =
+          factor == 0u ? term : term->u.mul.factors[factor - 1u].base;
+      bool eligible =
+          (factor == 0u || term->u.mul.factors[factor - 1u].exp == 1) &&
+          (candidate->tag == IXS_TRUNC || candidate->tag == IXS_PIECEWISE);
+      if (eligible && round && round != candidate)
+        return result;
+      if (eligible)
+        round = candidate;
+      factor++;
+    } while (term->tag == IXS_MUL && factor <= term->u.mul.nfactors);
+  }
+  if (round && da_range_for_round(&query, root, round, &result.range))
+    result.status = IXS_ALGEBRA_MATCH;
+  else
+    result.status = query.status;
+  return result;
+}
 
 /* ==================================================================== */
 /* expand.c                                                           */
@@ -26394,6 +26088,8 @@ static bool qa_parts(qa_query *query, ixs_node *atom, ixs_node **numerator,
                                        denominator);
     if (status == IXS_QUOTIENT_PARTS_OOM)
       query->oom = true;
+    /* Representability rejects only this floor pivot; another row pivot may
+     * still supply a complete certificate. */
     if (status != IXS_QUOTIENT_PARTS_MATCH)
       return false;
   } else {
@@ -35445,9 +35141,9 @@ typedef struct {
 
 typedef struct {
   ixs_ctx *ctx;
-  uint32_t nsubs;
-  ixs_node *const *targets;
-  ixs_node *const *replacements;
+  ixs_node *target;
+  ixs_node *replacement;
+  subs_memo targets;
   subs_memo memo;
   subs_frame *frames;
   size_t depth;
@@ -35509,12 +35205,15 @@ static bool subs_memo_grow(subs_memo *memo) {
   return true;
 }
 
-static bool subs_memo_insert(subs_memo *memo, ixs_node *key, ixs_node *value) {
+static bool subs_memo_insert(subs_memo *memo, ixs_node *key, ixs_node *value,
+                             bool first_wins) {
   subs_memo_slot *slot;
   bool found;
 
   slot = subs_memo_find(memo, key, &found);
   if (found) {
+    if (first_wins)
+      return true;
     assert(slot->value == NULL && value != NULL);
     if (slot->value != NULL || value == NULL)
       return false;
@@ -35592,15 +35291,13 @@ static bool subs_ensure_children(subs_query *query, size_t count) {
   return true;
 }
 
-static ixs_node *subs_direct_match(ixs_node *expr, uint32_t nsubs,
-                                   ixs_node *const *targets,
-                                   ixs_node *const *replacements) {
-  uint32_t i;
-  for (i = 0; i < nsubs; i++) {
-    if (expr == targets[i])
-      return replacements[i];
-  }
-  return NULL;
+static ixs_node *subs_direct_match(subs_query *query, ixs_node *expr) {
+  subs_memo_slot *slot;
+  bool found;
+  if (query->target)
+    return expr == query->target ? query->replacement : NULL;
+  slot = subs_memo_find(&query->targets, expr, &found);
+  return found ? slot->value : NULL;
 }
 
 static bool subs_leaf_tag(ixs_tag tag) {
@@ -35731,6 +35428,69 @@ static bool subs_child_at(ixs_node *expr, uint64_t ordinal, ixs_node **child) {
   default:
     return false;
   }
+}
+
+/* Remove every target reachable below another target. This global filter is
+ * stronger than ordinary simultaneous substitution: a shared inner target is
+ * left untouched even when it is also reachable outside the outer target. */
+static bool subs_exclude_nested_targets(subs_query *query, uint32_t nsubs,
+                                        ixs_node *const *targets) {
+  uint32_t i;
+  for (i = 0; i < nsubs; i++) {
+    uint64_t child = 0;
+    ixs_node *node;
+    while (subs_child_at(targets[i], child++, &node))
+      if (!subs_stack_push(query, node))
+        return false;
+  }
+  while (query->depth != 0) {
+    ixs_node *node = query->frames[--query->depth].expr;
+    subs_memo_slot *slot;
+    bool found;
+    uint64_t child = 0;
+    ixs_node *next;
+    slot = subs_memo_find(&query->memo, node, &found);
+    if (found)
+      continue;
+    if (!subs_memo_insert(&query->memo, node, query->ctx->node_zero, false))
+      return false;
+    slot = subs_memo_find(&query->targets, node, &found);
+    if (found)
+      slot->value = NULL;
+    while (subs_child_at(node, child++, &next))
+      if (!subs_stack_push(query, next))
+        return false;
+  }
+  memset(query->memo.slots, 0,
+         query->memo.capacity * sizeof(*query->memo.slots));
+  query->memo.count = 0;
+  return true;
+}
+
+static bool subs_prepare_targets(subs_query *query, uint32_t nsubs,
+                                 ixs_node *const *targets,
+                                 ixs_node *const *replacements,
+                                 bool outermost) {
+  uint32_t i;
+  if (nsubs == 1u) {
+    query->target = targets[0];
+    query->replacement = replacements[0];
+    return true;
+  }
+  query->targets.slots = ixs_arena_alloc(
+      &query->ctx->scratch,
+      SUBS_MEMO_INITIAL_CAP * sizeof(*query->targets.slots), sizeof(void *));
+  if (!query->targets.slots)
+    return false;
+  memset(query->targets.slots, 0,
+         SUBS_MEMO_INITIAL_CAP * sizeof(*query->targets.slots));
+  query->targets.capacity = SUBS_MEMO_INITIAL_CAP;
+  query->targets.arena = &query->ctx->scratch;
+  /* Duplicate public targets keep the first replacement. */
+  for (i = 0; i < nsubs; i++)
+    if (!subs_memo_insert(&query->targets, targets[i], replacements[i], true))
+      return false;
+  return !outermost || subs_exclude_nested_targets(query, nsubs, targets);
 }
 
 static ixs_node *subs_rebuild_add(subs_query *query, ixs_node *expr) {
@@ -35887,8 +35647,7 @@ static bool subs_terminal_result(subs_query *query, ixs_node *expr,
     *result = expr;
     return true;
   }
-  *result = subs_direct_match(expr, query->nsubs, query->targets,
-                              query->replacements);
+  *result = subs_direct_match(query, expr);
   if (*result)
     return true;
   if (subs_leaf_tag(expr->tag) || !subs_node_rebuildable(expr)) {
@@ -35921,12 +35680,12 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
         continue;
       }
       if (subs_terminal_result(query, expr, &terminal)) {
-        if (!subs_memo_insert(&query->memo, expr, terminal))
+        if (!subs_memo_insert(&query->memo, expr, terminal, false))
           return NULL;
         query->depth--;
         continue;
       }
-      if (!subs_memo_insert(&query->memo, expr, NULL))
+      if (!subs_memo_insert(&query->memo, expr, NULL, false))
         return NULL;
       frame->entered = true;
       continue;
@@ -35953,7 +35712,7 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
 
     {
       ixs_node *result = subs_rebuild(query, expr);
-      if (!result || !subs_memo_insert(&query->memo, expr, result))
+      if (!result || !subs_memo_insert(&query->memo, expr, result, false))
         return NULL;
       query->depth--;
     }
@@ -35961,38 +35720,65 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
   return subs_memo_value(&query->memo, root);
 }
 
+/* Speculative algebra may use any smart constructor while rebuilding. Roll
+ * back only its explicit arithmetic-overflow diagnostics; other sentinels are
+ * producer or domain failures and remain fail-loud. */
+static bool subs_rollback_arithmetic_errors(ixs_ctx *ctx, ixs_arena_mark mark,
+                                            const char **errors, size_t nerrors,
+                                            size_t errors_cap) {
+  size_t i;
+  if (ctx->nerrors == nerrors)
+    return false;
+  for (i = nerrors; i < ctx->nerrors; i++)
+    if (strncmp(ctx->errors[i], "rational overflow in ",
+                sizeof("rational overflow in ") - 1u) != 0)
+      return false;
+  ixs_arena_restore(&ctx->diag, mark);
+  ctx->errors = errors;
+  ctx->nerrors = nerrors;
+  ctx->errors_cap = errors_cap;
+  return true;
+}
+
+static void subs_note_sentinel(ixs_node *node, ixs_node **parse_error,
+                               ixs_node **domain_error) {
+  if (node->tag == IXS_PARSE_ERROR)
+    *parse_error = node;
+  else if (node->tag == IXS_ERROR)
+    *domain_error = node;
+}
+
+/* One target stays a scalar comparison. Multiple targets build one first-wins
+ * scratch hash. Target matching and DAG traversal are expected O(N + E + C);
+ * canonical ADD/MUL rebuild retains its O(children^2) worst case. */
 static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                              ixs_node *const *targets,
-                             ixs_node *const *replacements) {
+                             ixs_node *const *replacements, bool outermost,
+                             bool *unrepresentable) {
   uint32_t i;
   ixs_node *parse_error = NULL;
   ixs_node *domain_error = NULL;
   ixs_node *result;
-  ixs_arena_mark mark;
+  ixs_arena_mark mark, diag_mark;
+  const char **saved_errors = NULL;
+  size_t saved_nerrors = 0, saved_errors_cap = 0;
   subs_query query;
   subs_memo_slot initial_memo[SUBS_MEMO_INITIAL_CAP];
   subs_frame initial_frames[SUBS_STACK_INITIAL_CAP];
   ixs_node *initial_children[SUBS_CHILD_INITIAL_CAP];
 
+  if (unrepresentable)
+    *unrepresentable = false;
   if (!expr)
     return NULL;
   if (nsubs > 0 && (!targets || !replacements))
     return NULL;
-  if (expr->tag == IXS_PARSE_ERROR)
-    parse_error = expr;
-  else if (expr->tag == IXS_ERROR)
-    domain_error = expr;
+  subs_note_sentinel(expr, &parse_error, &domain_error);
   for (i = 0; i < nsubs; i++) {
     if (!targets[i] || !replacements[i])
       return NULL;
-    if (targets[i]->tag == IXS_PARSE_ERROR)
-      parse_error = targets[i];
-    else if (targets[i]->tag == IXS_ERROR)
-      domain_error = targets[i];
-    if (replacements[i]->tag == IXS_PARSE_ERROR)
-      parse_error = replacements[i];
-    else if (replacements[i]->tag == IXS_ERROR)
-      domain_error = replacements[i];
+    subs_note_sentinel(targets[i], &parse_error, &domain_error);
+    subs_note_sentinel(replacements[i], &parse_error, &domain_error);
   }
   if (parse_error)
     return parse_error;
@@ -36009,9 +35795,6 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   memset(&query, 0, sizeof(query));
   memset(initial_memo, 0, sizeof(initial_memo));
   query.ctx = ctx;
-  query.nsubs = nsubs;
-  query.targets = targets;
-  query.replacements = replacements;
   query.memo.slots = initial_memo;
   query.memo.capacity = SUBS_MEMO_INITIAL_CAP;
   query.memo.arena = &ctx->scratch;
@@ -36019,20 +35802,56 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   query.frame_capacity = SUBS_STACK_INITIAL_CAP;
   query.children = initial_children;
   query.child_capacity = SUBS_CHILD_INITIAL_CAP;
+  if (!subs_prepare_targets(&query, nsubs, targets, replacements, outermost)) {
+    result = NULL;
+    goto cleanup;
+  }
+  if (unrepresentable) {
+    diag_mark = ixs_arena_save(&ctx->diag);
+    saved_errors = ctx->errors;
+    saved_nerrors = ctx->nerrors;
+    saved_errors_cap = ctx->errors_cap;
+  }
   result = subs_iterative(&query, expr);
+  if (unrepresentable &&
+      subs_rollback_arithmetic_errors(ctx, diag_mark, saved_errors,
+                                      saved_nerrors, saved_errors_cap)) {
+    /* A later scratch failure outranks the arithmetic miss. */
+    *unrepresentable = result != NULL;
+    result = NULL;
+  } else if (unrepresentable && result && ixs_node_is_sentinel(result) &&
+             ctx->nerrors == saved_nerrors) {
+    /* A speculative smart constructor returned an error sentinel but could
+     * not record its diagnostic. Treat that diagnostic allocation as OOM. */
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+    result = NULL;
+  }
+cleanup:
   ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement) {
-  return subs_common(ctx, expr, 1, &target, &replacement);
+  return subs_common(ctx, expr, 1, &target, &replacement, false, NULL);
 }
 
 IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,
                                      ixs_node *const *replacements) {
-  return subs_common(ctx, expr, nsubs, targets, replacements);
+  return subs_common(ctx, expr, nsubs, targets, replacements, false, NULL);
+}
+
+IXS_STATIC ixs_node *simp_subs_multi_outermost(ixs_ctx *ctx, ixs_node *expr,
+                                               uint32_t nsubs,
+                                               ixs_node *const *targets,
+                                               ixs_node *const *replacements,
+                                               bool *unrepresentable) {
+  return subs_common(ctx, expr, nsubs, targets, replacements, true,
+                     unrepresentable);
 }
 
 /* ------------------------------------------------------------------ */
@@ -36420,7 +36239,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     ixs_node *term_numerator;
     ixs_node *term_denominator;
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
     if (!scaled)
       return IXS_QUOTIENT_PARTS_OOM;
     if (ixs_node_is_sentinel(scaled))
@@ -36434,7 +36253,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     denom = term_denominator;
     num = simp_try_add(ctx, num, term_numerator, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
     if (!num)
       return IXS_QUOTIENT_PARTS_OOM;
     if (ixs_node_is_sentinel(num))
@@ -36447,7 +36266,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     constant_numerator =
         simp_try_mul(ctx, expr->u.add.coeff, denom, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
   }
   if (!constant_numerator)
     return IXS_QUOTIENT_PARTS_OOM;
@@ -36457,7 +36276,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     bool unrepresentable = false;
     num = simp_try_add(ctx, num, constant_numerator, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
   }
   if (!num)
     return IXS_QUOTIENT_PARTS_OOM;

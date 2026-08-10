@@ -17,6 +17,7 @@ else()
         src/arena.c
         src/bounds.c
         src/ctx.c
+        src/division_algebra.c
         src/expand.c
         src/import.c
         src/interval.c

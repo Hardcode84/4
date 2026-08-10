@@ -5231,9 +5231,9 @@ typedef struct {
 
 typedef struct {
   ixs_ctx *ctx;
-  uint32_t nsubs;
-  ixs_node *const *targets;
-  ixs_node *const *replacements;
+  ixs_node *target;
+  ixs_node *replacement;
+  subs_memo targets;
   subs_memo memo;
   subs_frame *frames;
   size_t depth;
@@ -5295,12 +5295,15 @@ static bool subs_memo_grow(subs_memo *memo) {
   return true;
 }
 
-static bool subs_memo_insert(subs_memo *memo, ixs_node *key, ixs_node *value) {
+static bool subs_memo_insert(subs_memo *memo, ixs_node *key, ixs_node *value,
+                             bool first_wins) {
   subs_memo_slot *slot;
   bool found;
 
   slot = subs_memo_find(memo, key, &found);
   if (found) {
+    if (first_wins)
+      return true;
     assert(slot->value == NULL && value != NULL);
     if (slot->value != NULL || value == NULL)
       return false;
@@ -5378,15 +5381,13 @@ static bool subs_ensure_children(subs_query *query, size_t count) {
   return true;
 }
 
-static ixs_node *subs_direct_match(ixs_node *expr, uint32_t nsubs,
-                                   ixs_node *const *targets,
-                                   ixs_node *const *replacements) {
-  uint32_t i;
-  for (i = 0; i < nsubs; i++) {
-    if (expr == targets[i])
-      return replacements[i];
-  }
-  return NULL;
+static ixs_node *subs_direct_match(subs_query *query, ixs_node *expr) {
+  subs_memo_slot *slot;
+  bool found;
+  if (query->target)
+    return expr == query->target ? query->replacement : NULL;
+  slot = subs_memo_find(&query->targets, expr, &found);
+  return found ? slot->value : NULL;
 }
 
 static bool subs_leaf_tag(ixs_tag tag) {
@@ -5517,6 +5518,69 @@ static bool subs_child_at(ixs_node *expr, uint64_t ordinal, ixs_node **child) {
   default:
     return false;
   }
+}
+
+/* Remove every target reachable below another target. This global filter is
+ * stronger than ordinary simultaneous substitution: a shared inner target is
+ * left untouched even when it is also reachable outside the outer target. */
+static bool subs_exclude_nested_targets(subs_query *query, uint32_t nsubs,
+                                        ixs_node *const *targets) {
+  uint32_t i;
+  for (i = 0; i < nsubs; i++) {
+    uint64_t child = 0;
+    ixs_node *node;
+    while (subs_child_at(targets[i], child++, &node))
+      if (!subs_stack_push(query, node))
+        return false;
+  }
+  while (query->depth != 0) {
+    ixs_node *node = query->frames[--query->depth].expr;
+    subs_memo_slot *slot;
+    bool found;
+    uint64_t child = 0;
+    ixs_node *next;
+    slot = subs_memo_find(&query->memo, node, &found);
+    if (found)
+      continue;
+    if (!subs_memo_insert(&query->memo, node, query->ctx->node_zero, false))
+      return false;
+    slot = subs_memo_find(&query->targets, node, &found);
+    if (found)
+      slot->value = NULL;
+    while (subs_child_at(node, child++, &next))
+      if (!subs_stack_push(query, next))
+        return false;
+  }
+  memset(query->memo.slots, 0,
+         query->memo.capacity * sizeof(*query->memo.slots));
+  query->memo.count = 0;
+  return true;
+}
+
+static bool subs_prepare_targets(subs_query *query, uint32_t nsubs,
+                                 ixs_node *const *targets,
+                                 ixs_node *const *replacements,
+                                 bool outermost) {
+  uint32_t i;
+  if (nsubs == 1u) {
+    query->target = targets[0];
+    query->replacement = replacements[0];
+    return true;
+  }
+  query->targets.slots = ixs_arena_alloc(
+      &query->ctx->scratch,
+      SUBS_MEMO_INITIAL_CAP * sizeof(*query->targets.slots), sizeof(void *));
+  if (!query->targets.slots)
+    return false;
+  memset(query->targets.slots, 0,
+         SUBS_MEMO_INITIAL_CAP * sizeof(*query->targets.slots));
+  query->targets.capacity = SUBS_MEMO_INITIAL_CAP;
+  query->targets.arena = &query->ctx->scratch;
+  /* Duplicate public targets keep the first replacement. */
+  for (i = 0; i < nsubs; i++)
+    if (!subs_memo_insert(&query->targets, targets[i], replacements[i], true))
+      return false;
+  return !outermost || subs_exclude_nested_targets(query, nsubs, targets);
 }
 
 static ixs_node *subs_rebuild_add(subs_query *query, ixs_node *expr) {
@@ -5673,8 +5737,7 @@ static bool subs_terminal_result(subs_query *query, ixs_node *expr,
     *result = expr;
     return true;
   }
-  *result = subs_direct_match(expr, query->nsubs, query->targets,
-                              query->replacements);
+  *result = subs_direct_match(query, expr);
   if (*result)
     return true;
   if (subs_leaf_tag(expr->tag) || !subs_node_rebuildable(expr)) {
@@ -5707,12 +5770,12 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
         continue;
       }
       if (subs_terminal_result(query, expr, &terminal)) {
-        if (!subs_memo_insert(&query->memo, expr, terminal))
+        if (!subs_memo_insert(&query->memo, expr, terminal, false))
           return NULL;
         query->depth--;
         continue;
       }
-      if (!subs_memo_insert(&query->memo, expr, NULL))
+      if (!subs_memo_insert(&query->memo, expr, NULL, false))
         return NULL;
       frame->entered = true;
       continue;
@@ -5739,7 +5802,7 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
 
     {
       ixs_node *result = subs_rebuild(query, expr);
-      if (!result || !subs_memo_insert(&query->memo, expr, result))
+      if (!result || !subs_memo_insert(&query->memo, expr, result, false))
         return NULL;
       query->depth--;
     }
@@ -5747,38 +5810,65 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
   return subs_memo_value(&query->memo, root);
 }
 
+/* Speculative algebra may use any smart constructor while rebuilding. Roll
+ * back only its explicit arithmetic-overflow diagnostics; other sentinels are
+ * producer or domain failures and remain fail-loud. */
+static bool subs_rollback_arithmetic_errors(ixs_ctx *ctx, ixs_arena_mark mark,
+                                            const char **errors, size_t nerrors,
+                                            size_t errors_cap) {
+  size_t i;
+  if (ctx->nerrors == nerrors)
+    return false;
+  for (i = nerrors; i < ctx->nerrors; i++)
+    if (strncmp(ctx->errors[i], "rational overflow in ",
+                sizeof("rational overflow in ") - 1u) != 0)
+      return false;
+  ixs_arena_restore(&ctx->diag, mark);
+  ctx->errors = errors;
+  ctx->nerrors = nerrors;
+  ctx->errors_cap = errors_cap;
+  return true;
+}
+
+static void subs_note_sentinel(ixs_node *node, ixs_node **parse_error,
+                               ixs_node **domain_error) {
+  if (node->tag == IXS_PARSE_ERROR)
+    *parse_error = node;
+  else if (node->tag == IXS_ERROR)
+    *domain_error = node;
+}
+
+/* One target stays a scalar comparison. Multiple targets build one first-wins
+ * scratch hash. Target matching and DAG traversal are expected O(N + E + C);
+ * canonical ADD/MUL rebuild retains its O(children^2) worst case. */
 static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
                              ixs_node *const *targets,
-                             ixs_node *const *replacements) {
+                             ixs_node *const *replacements, bool outermost,
+                             bool *unrepresentable) {
   uint32_t i;
   ixs_node *parse_error = NULL;
   ixs_node *domain_error = NULL;
   ixs_node *result;
-  ixs_arena_mark mark;
+  ixs_arena_mark mark, diag_mark;
+  const char **saved_errors = NULL;
+  size_t saved_nerrors = 0, saved_errors_cap = 0;
   subs_query query;
   subs_memo_slot initial_memo[SUBS_MEMO_INITIAL_CAP];
   subs_frame initial_frames[SUBS_STACK_INITIAL_CAP];
   ixs_node *initial_children[SUBS_CHILD_INITIAL_CAP];
 
+  if (unrepresentable)
+    *unrepresentable = false;
   if (!expr)
     return NULL;
   if (nsubs > 0 && (!targets || !replacements))
     return NULL;
-  if (expr->tag == IXS_PARSE_ERROR)
-    parse_error = expr;
-  else if (expr->tag == IXS_ERROR)
-    domain_error = expr;
+  subs_note_sentinel(expr, &parse_error, &domain_error);
   for (i = 0; i < nsubs; i++) {
     if (!targets[i] || !replacements[i])
       return NULL;
-    if (targets[i]->tag == IXS_PARSE_ERROR)
-      parse_error = targets[i];
-    else if (targets[i]->tag == IXS_ERROR)
-      domain_error = targets[i];
-    if (replacements[i]->tag == IXS_PARSE_ERROR)
-      parse_error = replacements[i];
-    else if (replacements[i]->tag == IXS_ERROR)
-      domain_error = replacements[i];
+    subs_note_sentinel(targets[i], &parse_error, &domain_error);
+    subs_note_sentinel(replacements[i], &parse_error, &domain_error);
   }
   if (parse_error)
     return parse_error;
@@ -5795,9 +5885,6 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   memset(&query, 0, sizeof(query));
   memset(initial_memo, 0, sizeof(initial_memo));
   query.ctx = ctx;
-  query.nsubs = nsubs;
-  query.targets = targets;
-  query.replacements = replacements;
   query.memo.slots = initial_memo;
   query.memo.capacity = SUBS_MEMO_INITIAL_CAP;
   query.memo.arena = &ctx->scratch;
@@ -5805,20 +5892,56 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   query.frame_capacity = SUBS_STACK_INITIAL_CAP;
   query.children = initial_children;
   query.child_capacity = SUBS_CHILD_INITIAL_CAP;
+  if (!subs_prepare_targets(&query, nsubs, targets, replacements, outermost)) {
+    result = NULL;
+    goto cleanup;
+  }
+  if (unrepresentable) {
+    diag_mark = ixs_arena_save(&ctx->diag);
+    saved_errors = ctx->errors;
+    saved_nerrors = ctx->nerrors;
+    saved_errors_cap = ctx->errors_cap;
+  }
   result = subs_iterative(&query, expr);
+  if (unrepresentable &&
+      subs_rollback_arithmetic_errors(ctx, diag_mark, saved_errors,
+                                      saved_nerrors, saved_errors_cap)) {
+    /* A later scratch failure outranks the arithmetic miss. */
+    *unrepresentable = result != NULL;
+    result = NULL;
+  } else if (unrepresentable && result && ixs_node_is_sentinel(result) &&
+             ctx->nerrors == saved_nerrors) {
+    /* A speculative smart constructor returned an error sentinel but could
+     * not record its diagnostic. Treat that diagnostic allocation as OOM. */
+    ixs_arena_restore(&ctx->diag, diag_mark);
+    ctx->errors = saved_errors;
+    ctx->nerrors = saved_nerrors;
+    ctx->errors_cap = saved_errors_cap;
+    result = NULL;
+  }
+cleanup:
   ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
 
 IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
                                ixs_node *replacement) {
-  return subs_common(ctx, expr, 1, &target, &replacement);
+  return subs_common(ctx, expr, 1, &target, &replacement, false, NULL);
 }
 
 IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,
                                      ixs_node *const *replacements) {
-  return subs_common(ctx, expr, nsubs, targets, replacements);
+  return subs_common(ctx, expr, nsubs, targets, replacements, false, NULL);
+}
+
+IXS_STATIC ixs_node *simp_subs_multi_outermost(ixs_ctx *ctx, ixs_node *expr,
+                                               uint32_t nsubs,
+                                               ixs_node *const *targets,
+                                               ixs_node *const *replacements,
+                                               bool *unrepresentable) {
+  return subs_common(ctx, expr, nsubs, targets, replacements, true,
+                     unrepresentable);
 }
 
 /* ------------------------------------------------------------------ */
@@ -6206,7 +6329,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     ixs_node *term_numerator;
     ixs_node *term_denominator;
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
     if (!scaled)
       return IXS_QUOTIENT_PARTS_OOM;
     if (ixs_node_is_sentinel(scaled))
@@ -6220,7 +6343,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     denom = term_denominator;
     num = simp_try_add(ctx, num, term_numerator, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
     if (!num)
       return IXS_QUOTIENT_PARTS_OOM;
     if (ixs_node_is_sentinel(num))
@@ -6233,7 +6356,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     constant_numerator =
         simp_try_mul(ctx, expr->u.add.coeff, denom, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
   }
   if (!constant_numerator)
     return IXS_QUOTIENT_PARTS_OOM;
@@ -6243,7 +6366,7 @@ static ixs_quotient_parts_status exact_quotient_parts(ixs_ctx *ctx,
     bool unrepresentable = false;
     num = simp_try_add(ctx, num, constant_numerator, &unrepresentable);
     if (unrepresentable)
-      return IXS_QUOTIENT_PARTS_NO_MATCH;
+      return IXS_QUOTIENT_PARTS_UNREPRESENTABLE;
   }
   if (!num)
     return IXS_QUOTIENT_PARTS_OOM;

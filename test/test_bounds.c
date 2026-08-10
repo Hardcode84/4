@@ -10,6 +10,7 @@
 
 #include "additive_row.h"
 #include "bounds.h"
+#include "division_algebra.h"
 #include "interval.h"
 #include "node.h"
 #include "radix_algebra.h"
@@ -792,15 +793,22 @@ static void test_additive_row_ownership_and_extrema(void) {
   errors = ixs_ctx_nerrors(ctx);
   ixs_arena_set_fail_after(&scratch, 0);
   CHECK(ixs_additive_row_relation(ctx, &scratch, lhs, y, &positive, &negative,
-                                  &offset) == IXS_ADDITIVE_ROW_OOM);
+                                  &offset) == IXS_ALGEBRA_OOM);
   CHECK(positive == y && negative == z && offset == 37);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
   ixs_arena_set_fail_after(&scratch, IXS_ARENA_FAILURE_DISABLED);
   CHECK(ixs_additive_row_relation(ctx, &scratch, lhs, y, &positive, &negative,
-                                  &offset) == IXS_ADDITIVE_ROW_MATCH);
+                                  &offset) == IXS_ALGEBRA_MATCH);
   CHECK(ixs_same_node(positive, lhs));
   CHECK(ixs_same_node(negative, y));
+  CHECK(offset == 0);
+
+  CHECK(ixs_additive_row_relation(ctx, &scratch, ixs_int(ctx, 0),
+                                  ixs_sub(ctx, x, y), &positive, &negative,
+                                  &offset) == IXS_ALGEBRA_MATCH);
+  CHECK(ixs_same_node(positive, y));
+  CHECK(ixs_same_node(negative, x));
   CHECK(offset == 0);
 
   errors = ixs_ctx_nerrors(ctx);
@@ -813,12 +821,160 @@ static void test_additive_row_ownership_and_extrema(void) {
   offset = 37;
   CHECK(ixs_additive_row_relation(ctx, &scratch, coefficient_min,
                                   ixs_int(ctx, 0), &positive, &negative,
-                                  &offset) == IXS_ADDITIVE_ROW_NO_MATCH);
+                                  &offset) == IXS_ALGEBRA_NO_MATCH);
   CHECK(positive == y && negative == z && offset == 37);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
   ixs_arena_destroy(&scratch);
   ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_division_projection_unrepresentable_is_local(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "division_projection_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *round = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *root =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MAX), x), round);
+  ixs_node *trunc = ixs_trunc(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *mod_root = ixs_mod(
+      ctx, ixs_add(ctx, ixs_int(ctx, INT64_MAX), ixs_sub(ctx, round, trunc)),
+      ixs_rat(ctx, INT64_MAX - 1, INT64_MAX));
+  ixs_division_projection_result result;
+  ixs_arena_mark diag_before, diag_after;
+  size_t errors;
+
+  CHECK(ctx && x && zero && round && root && trunc && mod_root);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, x, IXS_CMP_GE, zero)));
+  result = ixs_division_algebra_project(ctx, &bounds, root, root, zero, zero,
+                                        IXS_DIVISION_PROJECT_ALL);
+  CHECK(result.status == IXS_ALGEBRA_UNREPRESENTABLE);
+  CHECK(result.lhs == root && result.rhs == zero);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  result = ixs_division_algebra_project(ctx, &bounds, mod_root, mod_root, zero,
+                                        zero, IXS_DIVISION_PROJECT_ALL);
+  CHECK(result.status == IXS_ALGEBRA_UNREPRESENTABLE);
+  CHECK(result.lhs == mod_root && result.rhs == zero);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  diag_before = ixs_arena_save(&ctx->diag);
+  ixs_arena_set_fail_after(&ctx->diag, 1u);
+  result = ixs_division_algebra_project(ctx, &bounds, mod_root, mod_root, zero,
+                                        zero, IXS_DIVISION_PROJECT_ALL);
+  ixs_arena_set_fail_after(&ctx->diag, IXS_ARENA_FAILURE_DISABLED);
+  diag_after = ixs_arena_save(&ctx->diag);
+  CHECK(result.status == IXS_ALGEBRA_OOM);
+  CHECK(result.lhs == mod_root && result.rhs == zero);
+  CHECK(diag_after.chunk == diag_before.chunk &&
+        diag_after.used == diag_before.used);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  result = ixs_division_algebra_project(ctx, &bounds, round, round, zero, zero,
+                                        IXS_DIVISION_PROJECT_ALL);
+  CHECK(result.status == IXS_ALGEBRA_MATCH);
+  CHECK(result.lhs != round && result.rhs == zero);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_division_projection_transport_precedence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "division_precedence_x");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *floor_q = ixs_floor(ctx, ixs_div(ctx, x, two));
+  ixs_node *trunc_q = ixs_trunc(ctx, ixs_div(ctx, x, two));
+  ixs_node *dividend =
+      ixs_add(ctx, ixs_int(ctx, INT64_MAX), ixs_sub(ctx, floor_q, trunc_q));
+  ixs_node *overflow_mod =
+      ixs_mod(ctx, dividend, ixs_rat(ctx, INT64_MAX - 1, INT64_MAX));
+  ixs_node *wide_args[128];
+  ixs_node *wide;
+  ixs_node *root;
+  ixs_division_projection_result result;
+  size_t errors;
+  uint32_t i;
+
+  wide_args[0] = ixs_int(ctx, 1);
+  for (i = 1; i < 128u; i++)
+    wide_args[i] = ixs_mod(ctx, x, ixs_int(ctx, (int64_t)i + 1));
+  wide = ixs_max_many(ctx, 128u, wide_args);
+  root = ixs_mod(ctx, overflow_mod, wide);
+  CHECK(ctx && root);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds,
+                                  ixs_cmp(ctx, x, IXS_CMP_GE, ctx->node_zero)));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, ixs_mod(ctx, x, two), IXS_CMP_EQ, ctx->node_zero)));
+  errors = ixs_ctx_nerrors(ctx);
+
+  /* The wide sibling exhausts scratch after the earlier arithmetic miss. */
+  ixs_arena_set_fail_after(&ctx->scratch, 179u);
+  result =
+      ixs_division_algebra_project(ctx, &bounds, root, root, ctx->node_zero,
+                                   ctx->node_zero, IXS_DIVISION_PROJECT_ALL);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(result.status == IXS_ALGEBRA_OOM);
+  CHECK(result.lhs == root && result.rhs == ctx->node_zero);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+
+  result =
+      ixs_division_algebra_project(ctx, &bounds, root, root, ctx->node_zero,
+                                   ctx->node_zero, IXS_DIVISION_PROJECT_ALL);
+  CHECK(result.status == IXS_ALGEBRA_UNREPRESENTABLE);
+  CHECK(result.lhs == root && result.rhs == ctx->node_zero);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_division_range_unrepresentable_falls_back(void) {
+  const int64_t constant = INT64_MAX / 2 + 1;
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "division_range_unrepresentable_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *quotient =
+      ixs_trunc(ctx, ixs_add(ctx, ixs_int(ctx, constant),
+                             ixs_div(ctx, x, ixs_int(ctx, 2))));
+  ixs_node *expr = ixs_sub(ctx, ixs_div(ctx, quotient, ixs_int(ctx, 2)),
+                           ixs_int(ctx, constant / 2));
+  ixs_node *x_is_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_division_range_result division_range;
+  ixs_range_result range;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  size_t errors;
+
+  CHECK(ctx && expr && x_is_zero && facts);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds, x_is_zero));
+  errors = ixs_ctx_nerrors(ctx);
+  division_range = ixs_division_algebra_range(ctx, &bounds, expr, expr, true);
+  CHECK(division_range.status == IXS_ALGEBRA_UNREPRESENTABLE);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+
+  /* A local construction miss must not hide the ordinary exact interval. */
+  CHECK(ixs_facts_assume_pred(facts, x_is_zero));
+  CHECK(test_ixs_range_facts(facts, expr, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 0 && range.upper_q == 1);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
   ixs_ctx_destroy(ctx);
 }
 
@@ -8823,6 +8979,12 @@ static void test_public_truncating_remainder_equivalence(void) {
   static const char wave_negative_next[] =
       "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), "
       "(1 + x) <= 0 & d < 0), (ceiling((1 + x)/d), True))";
+  static const char negative_atom_zero[] =
+      "16*x - 16*d*Piecewise((floor(x/d), x <= 0), "
+      "(ceiling(x/d), True))";
+  static const char negative_atom_next[] =
+      "16 + 16*x - 16*d*Piecewise((floor((1 + x)/d), (1 + x) <= 0), "
+      "(ceiling((1 + x)/d), True))";
   static const char floor_quotient[] = "floor(x/d)";
   static const char ceiling_quotient[] = "ceiling(x/d)";
   static const char positive_remainder_quotient[] = "(x - Mod(x, 4))/d";
@@ -8862,6 +9024,8 @@ static void test_public_truncating_remainder_equivalence(void) {
   ixs_node *next = parse_bounds_expr(ctx, scaled_next);
   ixs_node *negative_zero = parse_bounds_expr(ctx, wave_negative_zero);
   ixs_node *negative_next = parse_bounds_expr(ctx, wave_negative_next);
+  ixs_node *negative_atom0 = parse_bounds_expr(ctx, negative_atom_zero);
+  ixs_node *negative_atom1 = parse_bounds_expr(ctx, negative_atom_next);
   ixs_node *floor = parse_bounds_expr(ctx, floor_quotient);
   ixs_node *ceiling = parse_bounds_expr(ctx, ceiling_quotient);
   ixs_node *positive_quotient =
@@ -8890,8 +9054,9 @@ static void test_public_truncating_remainder_equivalence(void) {
   ixs_facts *nonintegral = ixs_facts_create(ctx);
   int64_t delta;
 
-  CHECK(ctx && zero && next && negative_zero && negative_next && floor &&
-        ceiling && positive_quotient && negative_quotient && wrong0 && wrong1 &&
+  CHECK(ctx && zero && next && negative_zero && negative_next &&
+        negative_atom0 && negative_atom1 && floor && ceiling &&
+        positive_quotient && negative_quotient && wrong0 && wrong1 &&
         overlap0 && overlap1 && uncovered0 && uncovered1 && nonintegral0 &&
         nonintegral1 && sixteen);
 
@@ -8944,6 +9109,12 @@ static void test_public_truncating_remainder_equivalence(void) {
   delta = 0;
   CHECK(test_ixs_constant_difference_facts(negative_divisor, negative_next,
                                            negative_zero, &delta));
+  CHECK(delta == 16);
+  CHECK(test_ixs_equivalent_facts(negative_divisor, negative_atom1,
+                                  ixs_add(ctx, negative_atom0, sixteen)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_constant_difference_facts(negative_divisor, negative_atom1,
+                                           negative_atom0, &delta));
   CHECK(delta == 16);
   CHECK(test_ixs_equivalent_facts(negative_divisor, ceiling,
                                   positive_quotient) == IXS_CHECK_TRUE);
@@ -11476,6 +11647,9 @@ int main(void) {
   test_bounds_difference_fork();
   test_bounds_exact_fork();
   test_additive_row_ownership_and_extrema();
+  test_division_projection_unrepresentable_is_local();
+  test_division_projection_transport_precedence();
+  test_division_range_unrepresentable_falls_back();
   test_mod_inverse_watchers_fixed_point_and_work();
   test_mod_inverse_watcher_fork_oom_is_atomic();
 

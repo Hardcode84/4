@@ -1836,16 +1836,66 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   Immediate canonical additive-row mechanics are owned by the private
   `src/additive_row.c` component. Allocation-free recognizers recover a single
   unit equation or two opposite unit terms. The cached constant-drop transform
-  rebuilds only the immediate sorted terms. Exact relation partitioning first
-  constructs `lhs-rhs`, then separates its positive and negative coefficients
-  without disturbing canonical term order; an `INT64_MIN` constant reverses
-  the endpoints so its stored offset remains representable. Arithmetic that
-  cannot be represented is a local no-match, allocation failure is OOM, and no
+  rebuilds only the immediate sorted terms. A shared affine-round split finds
+  one coefficient-one `floor` or `ceil` term and constructs its exact residual;
+  both signed division recognition and affine context equivalence use that
+  operation. Exact relation partitioning first constructs `lhs-rhs`, then
+  separates its positive and negative coefficients without disturbing
+  canonical term order; an `INT64_MIN` constant reverses the endpoints so its
+  stored offset remains representable. Arithmetic that cannot be represented
+  has an explicit `UNREPRESENTABLE` result, allocation failure is OOM, and no
   component operation performs a bounds query or changes definedness policy.
-  Recognition and cache hits are O(1), while constant-drop cache misses and
-  relation sign partitioning are O(T). Constructing the relation residual
-  inherits the simplifier's O(T^2) worst case; partitioning uses O(T) query
-  scratch.
+  Recognition and cache hits are O(1), while constant-drop cache misses,
+  affine-round splitting, and relation sign partitioning are O(T).
+  Constructing the relation residual inherits the simplifier's O(T^2) worst
+  case; partitioning uses O(T) query scratch.
+
+  Signed truncating division is implemented by the private
+  `src/division_algebra.c` component around the exact relation `N = D*Q + R`.
+  Its exact quotient-parts parser is shared with positive-divisor quotient
+  algebra and reports representability misses separately from allocation.
+  A certificate admits direct `trunc(N/D)`, a `floor` or `ceil` whose argument
+  sign makes it truncation, or the canonical two-arm `floor`/`ceil` Piecewise
+  protocol. The Piecewise matcher accepts only the complete same-sign guard or
+  the exact clause selected by a proven denominator sign. Rational scaling of
+  a zero comparison is removed before matching; strict numerator cuts and
+  extra, overlapping, or non-exhaustive predicates remain unsupported. Guard
+  matching is finite and structural and adds no equivalence recursion edge.
+
+  Every certificate proves the original round, quotient argument, numerator,
+  and denominator defined, and proves `N` and `D` integer-valued. Proof
+  projection also receives the pre-normalized source roots and requires those
+  roots defined over the complete incoming fact domain. A normalized root may
+  therefore expose a relation for simplification, but cannot erase a source
+  partiality obligation. An independently partial sibling blocks an otherwise
+  valid local certificate; the projector does not weaken this to per-candidate
+  definedness. For known signs the component constructs only the needed branch
+  of the signed remainder; otherwise it uses
+  `Piecewise((Mod(N,abs(D)), N >= 0), (-Mod(-N,abs(D)), True))`. Optional
+  unrepresentable construction is a local candidate miss; if no candidate
+  matches, the aggregate result reports that miss to the caller. Invalid
+  state, proof limits, and OOM retain distinct query outcomes.
+
+  Projection discovers candidates with an iterative, growable reachable-DAG
+  walk. Outermost multi-substitution then removes every candidate nested below
+  another candidate; this global filter is required for shared diamonds because
+  replacement expressions are not recursively substituted. Candidate storage
+  has no semantic cap. Fact simplification accepts a projected form only when
+  its reachable node count strictly decreases. Certificate construction adds
+  no rounding operator and removes the selected outer round, while nested
+  rounds already present in `N` or `D` remain shared. The immediate
+  remainder-range path admits one direct `trunc` or canonical truncating
+  Piecewise atom in an ADD, reconstructs its exact integer shift once, and
+  intersects the signed radius implied by `D`.
+  Candidate discovery, descendant filtering, and cost walks are expected
+  O(N + E + C) for distinct nodes, edges, and candidates. Substitution lookup
+  and DAG traversal have the same bound, while canonical ADD/MUL reconstruction
+  retains the simplifier's O(children^2) worst case. The 1050-candidate proof
+  regression guards the growable path and absence of a semantic cap. Immediate
+  range shape recognition is O(T + F); its one exact-shift reconstruction
+  inherits the simplifier's O(T^2) worst case before the documented bounds
+  queries. No operation scans retained context state or uses expression-depth
+  recursion.
 
   Positive-divisor quotient/remainder equality is implemented by the private
   `src/quotient_algebra.c` component. It constructs and simplifies `lhs-rhs`
@@ -2362,8 +2412,12 @@ ixs_node *ixs_subs(ixs_session *s, ixs_node *expr,
 // Simultaneous multi-target substitution.  Replaces targets[i] with
 // replacements[i] in a single walk.  No replacement is recursed into,
 // so {A->B, B->C} on A+B yields B+C, not C+C.  Duplicate targets:
-// first matching entry wins.  Thin wrapper around the same engine as
-// ixs_subs (nsubs=1 delegates here).
+// first matching entry wins.  One target uses a direct pointer comparison;
+// multiple targets build a query-scratch hash table once.  Target lookup and
+// reachable-DAG traversal are expected O(N + E + C) for N nodes, E edges, and
+// C targets, with O(N + C) scratch. Canonical ADD/MUL reconstruction retains
+// its O(children^2) worst case. Thin wrapper around the same engine as ixs_subs
+// (nsubs=1 delegates here).
 ixs_node *ixs_subs_multi(ixs_session *s, ixs_node *expr, uint32_t nsubs,
                          ixs_node *const *targets,
                          ixs_node *const *replacements);
@@ -2904,6 +2958,7 @@ ixsimpl/
 ├── src/
 │   ├── additive_row.c       # canonical additive-row operations
 │   ├── additive_row.h
+│   ├── algebra_status.h     # shared private algebra result ordering
 │   ├── arena.c              # arena allocator
 │   ├── arena.h
 │   ├── rational.c           # exact rational arithmetic
@@ -2918,11 +2973,13 @@ ixsimpl/
 │   ├── expand.h
 │   ├── bounds.c             # bound storage, propagation, assumption extraction
 │   ├── bounds.h
-│   ├── quotient_algebra.c  # bounded Euclidean sparse-row equality
+│   ├── division_algebra.c   # signed truncating-division certificates
+│   ├── division_algebra.h
+│   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality
 │   ├── quotient_algebra.h
-│   ├── radix_algebra.c     # bounded mixed-radix nonnegativity proof
+│   ├── radix_algebra.c      # bounded mixed-radix nonnegativity proof
 │   ├── radix_algebra.h
-│   ├── relation_algebra.c  # indexed exact additive relations
+│   ├── relation_algebra.c   # indexed exact additive relations
 │   ├── relation_algebra.h
 │   ├── interval.c           # interval arithmetic
 │   ├── interval.h

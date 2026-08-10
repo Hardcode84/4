@@ -124,10 +124,16 @@ IXS_STATIC ixs_node *simp_subs(ixs_ctx *ctx, ixs_node *expr, ixs_node *target,
 IXS_STATIC ixs_node *simp_subs_multi(ixs_ctx *ctx, ixs_node *expr,
                                      uint32_t nsubs, ixs_node *const *targets,
                                      ixs_node *const *replacements);
+IXS_STATIC ixs_node *simp_subs_multi_outermost(ixs_ctx *ctx, ixs_node *expr,
+                                               uint32_t nsubs,
+                                               ixs_node *const *targets,
+                                               ixs_node *const *replacements,
+                                               bool *unrepresentable);
 
 typedef enum {
   IXS_QUOTIENT_PARTS_NO_MATCH,
   IXS_QUOTIENT_PARTS_MATCH,
+  IXS_QUOTIENT_PARTS_UNREPRESENTABLE,
   IXS_QUOTIENT_PARTS_OOM
 } ixs_quotient_parts_status;
 
