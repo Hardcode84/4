@@ -5,6 +5,7 @@
 #include "additive_row.h"
 #include "division_algebra.h"
 #include "expand.h"
+#include "low_bits_algebra.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
 #include "simplify.h"
@@ -10867,14 +10868,29 @@ static ixs_check_result bounds_check_defined_detail(ixs_bounds *b,
   return result;
 }
 
-static ixs_check_result bounds_check_defined_status(ixs_bounds *b,
-                                                    ixs_node *expr, bool *oom) {
-  return bounds_check_defined_detail(b, expr, oom, NULL);
-}
-
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
                                                      ixs_node *expr) {
-  return bounds_check_defined_status(b, expr, NULL);
+  return bounds_check_defined_detail(b, expr, NULL, NULL);
+}
+
+IXS_STATIC ixs_algebra_status ixs_bounds_check_integer_domain(ixs_bounds *b,
+                                                              ixs_node *expr) {
+  ixs_check_result check;
+  ixs_bounds_transport_snapshot snapshot =
+      ixs_bounds_query_transport_snapshot(b);
+  ixs_bounds_transport_status transport;
+  bool oom = false, limited = false;
+  check = bounds_check_defined_detail(b, expr, &oom, &limited);
+  if (check == IXS_CHECK_TRUE)
+    check = ixs_bounds_check_integer_valued(b, expr);
+  transport = ixs_bounds_query_transport_since(b, snapshot);
+  if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return IXS_ALGEBRA_INVALID;
+  if (oom || transport == IXS_BOUNDS_TRANSPORT_OOM)
+    return IXS_ALGEBRA_OOM;
+  if (limited || transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    return IXS_ALGEBRA_LIMITED;
+  return check == IXS_CHECK_TRUE ? IXS_ALGEBRA_MATCH : IXS_ALGEBRA_NO_MATCH;
 }
 
 static ixs_bounds_build_status assumption_invalid(ixs_bounds *b,
@@ -15965,537 +15981,66 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
   return IXS_CHECK_UNKNOWN;
 }
 
-typedef struct {
-  ixs_node *key;
-  ixs_node *value;
-  bool complete;
-} equivalence_low_bits_memo_entry;
-
-typedef struct {
-  equivalence_low_bits_memo_entry *entries;
-  size_t capacity;
-  size_t count;
-} equivalence_low_bits_memo;
-
-typedef struct {
-  equivalence_state *equivalence;
-  equivalence_low_bits_memo memo;
-  unsigned bits;
-} equivalence_low_bits_state;
-
-typedef struct {
-  ixs_node *node;
-  uint32_t next_child;
-  uint32_t child_count;
-  bool started;
-  bool propagates;
-} equivalence_low_bits_frame;
-
-typedef struct {
-  equivalence_low_bits_frame *items;
-  size_t count;
-  size_t capacity;
-} equivalence_low_bits_stack;
-
-static bool
-equivalence_low_bits_stopped(const equivalence_low_bits_state *state) {
-  const equivalence_state *equivalence = state->equivalence;
-  return equivalence->limited || equivalence->invalid || equivalence->oom ||
-         equivalence->bounds->oom;
-}
-
-static void
-equivalence_low_bits_note_invalid(equivalence_low_bits_state *state) {
-  state->equivalence->invalid = true;
-  bounds_query_note_invalid(state->equivalence->bounds->query_state);
-}
-
-static void
-equivalence_low_bits_capture_transport(equivalence_low_bits_state *state,
-                                       size_t limit_blocks,
-                                       size_t invalid_blocks) {
-  ixs_bounds *bounds = state->equivalence->bounds;
-  if (bounds_query_limited_since(bounds, limit_blocks))
-    state->equivalence->limited = true;
-  if (bounds_query_invalid_since(bounds, invalid_blocks))
-    state->equivalence->invalid = true;
-  if (bounds->oom)
-    state->equivalence->oom = true;
-}
-
-static bool
-equivalence_low_bits_domain_proven(equivalence_low_bits_state *state,
-                                   ixs_node *expr) {
-  ixs_bounds *bounds = state->equivalence->bounds;
-  size_t limit_blocks =
-      bounds->query_state ? bounds->query_state->limit_blocks : 0u;
-  size_t invalid_blocks =
-      bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
-  bool defined_oom = false;
-  bool defined_limited = false;
-  ixs_check_result defined =
-      bounds_check_defined_detail(bounds, expr, &defined_oom, &defined_limited);
-  ixs_check_result integer;
-
-  if (defined_oom)
-    state->equivalence->oom = true;
-  if (defined_limited)
-    state->equivalence->limited = true;
-  equivalence_low_bits_capture_transport(state, limit_blocks, invalid_blocks);
-  if (defined != IXS_CHECK_TRUE || equivalence_low_bits_stopped(state))
-    return false;
-
-  limit_blocks = bounds->query_state ? bounds->query_state->limit_blocks : 0u;
-  invalid_blocks =
-      bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
-  integer = ixs_bounds_check_integer_valued(bounds, expr);
-  equivalence_low_bits_capture_transport(state, limit_blocks, invalid_blocks);
-  return integer == IXS_CHECK_TRUE && !equivalence_low_bits_stopped(state);
-}
-
-static bool equivalence_low_bits_integer_literal(ixs_node *node) {
-  int64_t numerator;
-  int64_t denominator;
-  if (!node || (node->tag != IXS_INT && node->tag != IXS_RAT))
-    return false;
-  ixs_node_get_rat(node, &numerator, &denominator);
-  (void)numerator;
-  return denominator == 1;
-}
-
-static bool equivalence_low_bits_literal_divisible(ixs_node *node,
-                                                   unsigned bits) {
-  uint64_t mask;
-  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
-    return false;
-  if (bits == 0u)
-    return true;
-  if (bits >= 63u)
-    return false;
-  mask = (UINT64_C(1) << bits) - UINT64_C(1);
-  return ((uint64_t)node->u.ival & mask) == 0;
-}
-
-static equivalence_low_bits_memo_entry *
-equivalence_low_bits_memo_slot(equivalence_low_bits_memo *memo,
-                               ixs_node *node) {
-  size_t index;
-  if (!memo->capacity)
-    return NULL;
-  index = bounds_hash_ptr(node) & (memo->capacity - 1u);
-  while (memo->entries[index].key && memo->entries[index].key != node)
-    index = (index + 1u) & (memo->capacity - 1u);
-  return &memo->entries[index];
-}
-
-/* The query-local pointer table stays below half load. Growth is expected
- * O(1) amortized, so each supported DAG node is normalized once. */
-static bool equivalence_low_bits_memo_grow(equivalence_low_bits_state *state) {
-  equivalence_low_bits_memo *memo = &state->memo;
-  ixs_ctx *ctx = state->equivalence->ctx;
-  size_t new_capacity =
-      memo->capacity ? memo->capacity * 2u : FACT_WORK_INIT_CAP;
-  equivalence_low_bits_memo_entry *entries;
-  size_t i;
-
-  if (new_capacity <= memo->capacity ||
-      new_capacity > SIZE_MAX / sizeof(*entries)) {
-    equivalence_low_bits_note_invalid(state);
-    return false;
-  }
-  entries = ixs_arena_alloc(&ctx->scratch, new_capacity * sizeof(*entries),
-                            sizeof(void *));
-  if (!entries) {
-    state->equivalence->oom = true;
-    return false;
-  }
-  memset(entries, 0, new_capacity * sizeof(*entries));
-  for (i = 0; i < memo->capacity; i++) {
-    if (memo->entries[i].key) {
-      size_t index =
-          bounds_hash_ptr(memo->entries[i].key) & (new_capacity - 1u);
-      while (entries[index].key)
-        index = (index + 1u) & (new_capacity - 1u);
-      entries[index] = memo->entries[i];
-    }
-  }
-  memo->entries = entries;
-  memo->capacity = new_capacity;
-  return true;
-}
-
-static equivalence_low_bits_memo_entry *
-equivalence_low_bits_memo_ensure(equivalence_low_bits_state *state,
-                                 ixs_node *node) {
-  equivalence_low_bits_memo *memo = &state->memo;
-  equivalence_low_bits_memo_entry *entry =
-      equivalence_low_bits_memo_slot(memo, node);
-  if (entry && entry->key)
-    return entry;
-  if (!memo->capacity || memo->count >= memo->capacity / 2u) {
-    if (!equivalence_low_bits_memo_grow(state))
-      return NULL;
-  }
-  entry = equivalence_low_bits_memo_slot(memo, node);
-  if (!entry) {
-    equivalence_low_bits_note_invalid(state);
-    return NULL;
-  }
-  if (!entry->key) {
-    entry->key = node;
-    memo->count++;
-  }
-  return entry;
-}
-
-static bool equivalence_low_bits_stack_push(equivalence_low_bits_state *state,
-                                            equivalence_low_bits_stack *stack,
-                                            ixs_node *node) {
-  if (stack->count >= stack->capacity) {
-    ixs_ctx *ctx = state->equivalence->ctx;
-    size_t new_capacity =
-        stack->capacity ? stack->capacity * 2u : FACT_WORK_INIT_CAP;
-    equivalence_low_bits_frame *items;
-    if (new_capacity <= stack->capacity ||
-        new_capacity > SIZE_MAX / sizeof(*items)) {
-      equivalence_low_bits_note_invalid(state);
-      return false;
-    }
-    items = ixs_arena_grow(
-        &ctx->scratch, stack->items, stack->capacity * sizeof(*stack->items),
-        new_capacity * sizeof(*stack->items), sizeof(void *));
-    if (!items) {
-      state->equivalence->oom = true;
-      return false;
-    }
-    stack->items = items;
-    stack->capacity = new_capacity;
-  }
-  memset(&stack->items[stack->count], 0, sizeof(*stack->items));
-  stack->items[stack->count].node = node;
-  stack->count++;
-  return true;
-}
-
-static bool equivalence_low_bits_propagates(equivalence_low_bits_state *state,
-                                            ixs_node *node,
-                                            uint32_t *child_count) {
-  uint32_t i;
-  *child_count = 0;
-  switch (node->tag) {
-  case IXS_ADD:
-    if (!equivalence_low_bits_integer_literal(node->u.add.coeff) ||
-        !equivalence_low_bits_domain_proven(state, node))
-      return false;
-    for (i = 0; i < node->u.add.nterms; i++) {
-      if (!equivalence_low_bits_integer_literal(node->u.add.terms[i].coeff) ||
-          !equivalence_low_bits_domain_proven(state, node->u.add.terms[i].term))
-        return false;
-    }
-    *child_count = node->u.add.nterms;
-    return true;
-  case IXS_MUL:
-    if (!equivalence_low_bits_integer_literal(node->u.mul.coeff) ||
-        !equivalence_low_bits_domain_proven(state, node))
-      return false;
-    for (i = 0; i < node->u.mul.nfactors; i++) {
-      if (node->u.mul.factors[i].exp <= 0 ||
-          !equivalence_low_bits_domain_proven(state,
-                                              node->u.mul.factors[i].base))
-        return false;
-    }
-    *child_count = node->u.mul.nfactors;
-    return true;
-  case IXS_MOD:
-    if (!equivalence_low_bits_literal_divisible(node->u.binary.rhs,
-                                                state->bits) ||
-        !equivalence_low_bits_domain_proven(state, node) ||
-        !equivalence_low_bits_domain_proven(state, node->u.binary.lhs))
-      return false;
-    *child_count = 1u;
-    return true;
-  case IXS_XOR:
-  case IXS_AND:
-  case IXS_OR:
-    if (!equivalence_low_bits_domain_proven(state, node))
-      return false;
-    for (i = 0; i < node->u.assoc.nargs; i++) {
-      if (!equivalence_low_bits_domain_proven(state, node->u.assoc.args[i]))
-        return false;
-    }
-    *child_count = node->u.assoc.nargs;
-    return true;
-  default:
-    return false;
-  }
-}
-
-static ixs_node *equivalence_low_bits_child(ixs_node *node, uint32_t child) {
-  switch (node->tag) {
-  case IXS_ADD:
-    return node->u.add.terms[child].term;
-  case IXS_MUL:
-    return node->u.mul.factors[child].base;
-  case IXS_MOD:
-    return node->u.binary.lhs;
-  case IXS_XOR:
-  case IXS_AND:
-  case IXS_OR:
-    return node->u.assoc.args[child];
-  default:
-    return NULL;
-  }
-}
-
-static ixs_node *
-equivalence_low_bits_memo_value(equivalence_low_bits_state *state,
-                                ixs_node *node) {
-  equivalence_low_bits_memo_entry *entry =
-      equivalence_low_bits_memo_slot(&state->memo, node);
-  assert(entry && entry->key == node && entry->complete);
-  return entry->value;
-}
-
-static ixs_node *
-equivalence_low_bits_rebuild_substituted(equivalence_low_bits_state *state,
-                                         ixs_node *node, uint32_t child_count) {
-  ixs_ctx *ctx = state->equivalence->ctx;
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
-  ixs_node **targets = NULL;
-  ixs_node **replacements = NULL;
-  ixs_node *result = node;
-  size_t bytes = (size_t)child_count * sizeof(*targets);
-  uint32_t i;
-  bool changed = false;
-
-  if (child_count != 0u && bytes / sizeof(*targets) != (size_t)child_count) {
-    equivalence_low_bits_note_invalid(state);
-    return NULL;
-  }
-  targets = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-  replacements = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-  if ((!targets || !replacements) && child_count != 0u) {
-    state->equivalence->oom = true;
-    result = NULL;
-    goto cleanup;
-  }
-  for (i = 0; i < child_count; i++) {
-    targets[i] = equivalence_low_bits_child(node, i);
-    replacements[i] = equivalence_low_bits_memo_value(state, targets[i]);
-    changed = changed || replacements[i] != targets[i];
-  }
-  if (changed)
-    result = simp_subs_multi(ctx, node, child_count, targets, replacements);
-  if (!result)
-    state->equivalence->oom = true;
-  else if (ixs_node_is_sentinel(result)) {
-    equivalence_low_bits_note_invalid(state);
-    result = NULL;
-  }
-
-cleanup:
-  ixs_arena_restore(&ctx->scratch, mark);
-  return result;
-}
-
-static ixs_node *
-equivalence_low_bits_rebuild_assoc(equivalence_low_bits_state *state,
-                                   ixs_node *node, uint32_t child_count) {
-  ixs_ctx *ctx = state->equivalence->ctx;
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
-  ixs_node **args = NULL;
-  ixs_node *result = node;
-  size_t bytes = (size_t)child_count * sizeof(*args);
-  uint32_t i;
-  bool changed = false;
-
-  if (child_count != 0u && bytes / sizeof(*args) != (size_t)child_count) {
-    equivalence_low_bits_note_invalid(state);
-    return NULL;
-  }
-  args = ixs_arena_alloc(&ctx->scratch, bytes, sizeof(void *));
-  if (!args && child_count != 0u) {
-    state->equivalence->oom = true;
-    result = NULL;
-    goto cleanup;
-  }
-  for (i = 0; i < child_count; i++) {
-    ixs_node *child = equivalence_low_bits_child(node, i);
-    args[i] = equivalence_low_bits_memo_value(state, child);
-    changed = changed || args[i] != child;
-  }
-  if (!changed)
-    goto cleanup;
-  if (node->tag == IXS_XOR)
-    result = simp_xor_many(ctx, child_count, args);
-  else if (node->tag == IXS_AND)
-    result = simp_and_many(ctx, child_count, args);
-  else
-    result = simp_or_many(ctx, child_count, args);
-  if (!result)
-    state->equivalence->oom = true;
-  else if (ixs_node_is_sentinel(result)) {
-    equivalence_low_bits_note_invalid(state);
-    result = NULL;
-  }
-
-cleanup:
-  ixs_arena_restore(&ctx->scratch, mark);
-  return result;
-}
-
-static ixs_node *
-equivalence_low_bits_rebuild(equivalence_low_bits_state *state,
-                             const equivalence_low_bits_frame *frame) {
-  if (!frame->propagates)
-    return frame->node;
-  if (frame->node->tag == IXS_MOD)
-    return equivalence_low_bits_memo_value(state, frame->node->u.binary.lhs);
-  if (frame->node->tag == IXS_ADD || frame->node->tag == IXS_MUL)
-    return equivalence_low_bits_rebuild_substituted(state, frame->node,
-                                                    frame->child_count);
-  return equivalence_low_bits_rebuild_assoc(state, frame->node,
-                                            frame->child_count);
-}
-
-/* Iterative post-order normalization visits each supported DAG node once.
- * Memo, stack, and immediate-child workspace grow with checked sizes. ADD and
- * MUL rebuilding is O(children^2) in the worst case because canonical direct
- * substitutions match only immediate children; all other walk work is
- * expected O(nodes + edges). */
-static ixs_node *
-equivalence_low_bits_normalize(equivalence_low_bits_state *state,
-                               ixs_node *root) {
-  equivalence_low_bits_stack stack;
-  equivalence_low_bits_memo_entry *entry;
-
-  memset(&stack, 0, sizeof(stack));
-  entry = equivalence_low_bits_memo_ensure(state, root);
-  if (!entry || !equivalence_low_bits_stack_push(state, &stack, root))
-    return NULL;
-  while (stack.count > 0u && !equivalence_low_bits_stopped(state)) {
-    equivalence_low_bits_frame *frame = &stack.items[stack.count - 1u];
-    ixs_node *child;
-    ixs_node *result;
-
-    entry = equivalence_low_bits_memo_slot(&state->memo, frame->node);
-    assert(entry && entry->key == frame->node);
-    if (entry->complete) {
-      stack.count--;
-      continue;
-    }
-    if (!frame->started) {
-      frame->propagates = equivalence_low_bits_propagates(state, frame->node,
-                                                          &frame->child_count);
-      frame->started = true;
-      if (equivalence_low_bits_stopped(state))
-        break;
-    }
-    if (frame->propagates && frame->next_child < frame->child_count) {
-      child = equivalence_low_bits_child(frame->node, frame->next_child);
-      entry = equivalence_low_bits_memo_slot(&state->memo, child);
-      if (entry && entry->key) {
-        assert(entry->complete);
-        if (!entry->complete) {
-          equivalence_low_bits_note_invalid(state);
-          break;
-        }
-        frame->next_child++;
-        continue;
-      }
-      if (!equivalence_low_bits_memo_ensure(state, child) ||
-          !equivalence_low_bits_stack_push(state, &stack, child))
-        break;
-      continue;
-    }
-    result = equivalence_low_bits_rebuild(state, frame);
-    if (!result)
-      break;
-    entry = equivalence_low_bits_memo_slot(&state->memo, frame->node);
-    assert(entry && entry->key == frame->node);
-    entry->value = result;
-    entry->complete = true;
-    stack.count--;
-  }
-  entry = equivalence_low_bits_memo_slot(&state->memo, root);
-  if (equivalence_low_bits_stopped(state) || !entry || !entry->complete)
-    return NULL;
-  return entry->value;
-}
-
-static bool equivalence_low_bits_outer_modulus(ixs_node *lhs, ixs_node *rhs,
-                                               unsigned *bits) {
+static bool equivalence_low_bits_modulus(ixs_node *lhs, ixs_node *rhs,
+                                         unsigned *bits) {
   uint64_t modulus;
-  unsigned count = 0u;
-  if (!lhs || !rhs || !bits || lhs->tag != IXS_MOD || rhs->tag != IXS_MOD ||
-      !lhs->u.binary.rhs || !rhs->u.binary.rhs ||
-      lhs->u.binary.rhs->tag != IXS_INT || rhs->u.binary.rhs->tag != IXS_INT ||
-      lhs->u.binary.rhs->u.ival <= 0 ||
-      lhs->u.binary.rhs->u.ival != rhs->u.binary.rhs->u.ival)
+  *bits = 0u;
+  if (!lhs || !rhs || lhs->tag != IXS_MOD || rhs->tag != IXS_MOD ||
+      lhs->u.binary.rhs->tag != IXS_INT ||
+      rhs->u.binary.rhs != lhs->u.binary.rhs || lhs->u.binary.rhs->u.ival <= 0)
     return false;
   modulus = (uint64_t)lhs->u.binary.rhs->u.ival;
   if ((modulus & (modulus - UINT64_C(1))) != 0u)
     return false;
-  while (modulus > UINT64_C(1)) {
+  while (modulus > 1u) {
     modulus >>= 1u;
-    count++;
+    (*bits)++;
   }
-  *bits = count;
   return true;
 }
 
-/* This is deliberately the last exact-equality rule. It receives the original
- * pair because simplification can erase only one matching outer Mod. Those Mod
- * nodes permit quotient-ring normalization of their dividends, but only a
- * successful exact proof is observable; a failed sufficient proof stays
- * UNKNOWN. */
-static ixs_check_result equivalence_low_bits(equivalence_state *equivalence,
+static bool equivalence_low_bits_domain(equivalence_state *state,
+                                        ixs_node *node) {
+  ixs_algebra_status status =
+      ixs_bounds_check_integer_domain(state->bounds, node);
+  equivalence_note_algebra_status(state, status);
+  return status == IXS_ALGEBRA_MATCH;
+}
+
+/* The original outer operations own the domain certificate. Projection never
+ * substitutes a normalized root for that source obligation. */
+static ixs_check_result equivalence_low_bits(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
-  ixs_arena_mark mark;
-  equivalence_low_bits_state state;
-  ixs_node *normalized_lhs;
-  ixs_node *normalized_rhs;
+  ixs_algebra_status status;
+  ixs_node *projected_lhs;
+  ixs_node *projected_rhs;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool saved_unrepresentable;
   unsigned bits;
-
-  if (!equivalence_low_bits_outer_modulus(lhs, rhs, &bits))
-    return IXS_CHECK_UNKNOWN;
-  mark = ixs_arena_save(&equivalence->ctx->scratch);
-  memset(&state, 0, sizeof(state));
-  state.equivalence = equivalence;
-  state.bits = bits;
-  if (!equivalence_low_bits_domain_proven(&state, lhs) ||
-      !equivalence_low_bits_domain_proven(&state, rhs) ||
-      !equivalence_low_bits_domain_proven(&state, lhs->u.binary.lhs) ||
-      !equivalence_low_bits_domain_proven(&state, rhs->u.binary.lhs))
-    goto cleanup;
-
-  normalized_lhs = equivalence_low_bits_normalize(&state, lhs->u.binary.lhs);
-  normalized_rhs = equivalence_low_bits_normalize(&state, rhs->u.binary.lhs);
-  if (!normalized_lhs || !normalized_rhs ||
-      equivalence_low_bits_stopped(&state) ||
-      !equivalence_low_bits_domain_proven(&state, normalized_lhs) ||
-      !equivalence_low_bits_domain_proven(&state, normalized_rhs))
-    goto cleanup;
-  if (normalized_lhs == normalized_rhs) {
-    result = IXS_CHECK_TRUE;
-    goto cleanup;
-  }
-  {
-    bool saved_unrepresentable = equivalence->arithmetic_unrepresentable;
-    equivalence->arithmetic_unrepresentable = false;
-    result = equivalence_bounded_core(equivalence, normalized_lhs,
-                                      normalized_rhs, depth + 1u);
-    equivalence->arithmetic_unrepresentable =
-        saved_unrepresentable || equivalence->arithmetic_unrepresentable;
-  }
-  if (result != IXS_CHECK_TRUE)
-    result = IXS_CHECK_UNKNOWN;
-
-cleanup:
-  ixs_arena_restore(&equivalence->ctx->scratch, mark);
-  return result;
+  if (!equivalence_low_bits_modulus(lhs, rhs, &bits) ||
+      !equivalence_low_bits_domain(state, lhs) ||
+      !equivalence_low_bits_domain(state, rhs) ||
+      !equivalence_low_bits_domain(state, lhs->u.binary.lhs) ||
+      !equivalence_low_bits_domain(state, rhs->u.binary.lhs))
+    return result;
+  status = ixs_low_bits_algebra_project(state->ctx, state->bounds,
+                                        lhs->u.binary.lhs, rhs->u.binary.lhs,
+                                        bits, &projected_lhs, &projected_rhs);
+  equivalence_note_algebra_status(state, status);
+  if (status != IXS_ALGEBRA_MATCH ||
+      !equivalence_low_bits_domain(state, projected_lhs) ||
+      !equivalence_low_bits_domain(state, projected_rhs))
+    return result;
+  if (projected_lhs == projected_rhs)
+    return IXS_CHECK_TRUE;
+  saved_unrepresentable = state->arithmetic_unrepresentable;
+  state->arithmetic_unrepresentable = false;
+  result =
+      equivalence_bounded_core(state, projected_lhs, projected_rhs, depth + 1u);
+  state->arithmetic_unrepresentable =
+      saved_unrepresentable || state->arithmetic_unrepresentable;
+  return result == IXS_CHECK_TRUE ? result : IXS_CHECK_UNKNOWN;
 }
 
 static ixs_check_result equivalence_core(equivalence_state *state,

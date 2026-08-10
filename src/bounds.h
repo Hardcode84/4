@@ -6,6 +6,7 @@
 
 #include "internal.h"
 
+#include "algebra_status.h"
 #include "interval.h"
 #include "node.h"
 #include "relation_algebra.h"
@@ -225,6 +226,9 @@ ixs_bounds_query_transport_snapshot(const ixs_bounds *b);
 IXS_STATIC ixs_bounds_transport_status ixs_bounds_query_transport_since(
     const ixs_bounds *b, ixs_bounds_transport_snapshot snapshot);
 IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b);
+/* Exact total-integer query used by typed algebra components. */
+IXS_STATIC ixs_algebra_status ixs_bounds_check_integer_domain(ixs_bounds *b,
+                                                              ixs_node *expr);
 
 IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
                                       ixs_node *node, bool *inserted);

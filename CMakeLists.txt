@@ -21,6 +21,7 @@ else()
         src/expand.c
         src/import.c
         src/interval.c
+        src/low_bits_algebra.c
         src/node.c
         src/parser.c
         src/print.c

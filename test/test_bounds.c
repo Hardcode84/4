@@ -12,6 +12,7 @@
 #include "bounds.h"
 #include "division_algebra.h"
 #include "interval.h"
+#include "low_bits_algebra.h"
 #include "node.h"
 #include "radix_algebra.h"
 #include "simplify.h"
@@ -9433,6 +9434,63 @@ static ixs_node *test_low_bit_wrap(ixs_ctx *ctx, ixs_node *value,
   return ixs_mod(ctx, value, ixs_int(ctx, modulus));
 }
 
+static void test_low_bits_algebra_status_and_opaque_edges(void) {
+  const int64_t modulus = INT64_C(4294967296);
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "low_bits_component_x");
+  ixs_node *wrapped = test_low_bit_wrap(ctx, x, modulus);
+  ixs_node *opaque_wrapped =
+      ixs_floor(ctx, ixs_div(ctx, wrapped, ixs_int(ctx, 3)));
+  ixs_node *opaque_plain = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 3)));
+  ixs_node *lhs = ixs_add(ctx, wrapped, opaque_wrapped);
+  ixs_node *rhs = ixs_add(ctx, x, opaque_plain);
+  ixs_node *expected_lhs = ixs_add(ctx, x, opaque_wrapped);
+  ixs_node *overflow = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, INT64_MAX), x),
+                               test_low_bit_wrap(ctx, x, 16));
+  ixs_node *projected_lhs = NULL;
+  ixs_node *projected_rhs = NULL;
+  ixs_algebra_status status;
+
+  CHECK(ctx && x && wrapped && opaque_wrapped && opaque_plain && lhs && rhs &&
+        expected_lhs && overflow);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+
+  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
+                                        &projected_lhs, &projected_rhs);
+  CHECK(status == IXS_ALGEBRA_MATCH);
+  CHECK(projected_lhs == expected_lhs && projected_rhs == rhs);
+  CHECK(projected_lhs != projected_rhs);
+
+  ixs_ctx_clear_errors(ctx);
+  status = ixs_low_bits_algebra_project(ctx, &bounds, overflow, x, 4u,
+                                        &projected_lhs, &projected_rhs);
+  CHECK(status == IXS_ALGEBRA_INVALID);
+  CHECK(projected_lhs == overflow && projected_rhs == x);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  if (ixs_ctx_nerrors(ctx) != 0u)
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "rational overflow in add") != NULL);
+
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(&ctx->scratch, 0u);
+  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
+                                        &projected_lhs, &projected_rhs);
+  ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(status == IXS_ALGEBRA_OOM);
+  CHECK(projected_lhs == lhs && projected_rhs == rhs);
+  CHECK(ixs_ctx_nerrors(ctx) == 0u);
+  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
+                                        &projected_lhs, &projected_rhs);
+  CHECK(status == IXS_ALGEBRA_MATCH);
+  CHECK(projected_lhs == expected_lhs && projected_rhs == rhs);
+
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_equivalence_low_bit_normalization(void) {
   const int64_t modulus = INT64_C(4294967296);
   ixs_ctx *ctx = ixs_ctx_create();
@@ -11818,6 +11876,7 @@ int main(void) {
   test_public_remainder_projection_large_candidate_set();
   test_public_remainder_projection_shared_diamond();
   test_total_equivalence_new_proof_oom();
+  test_low_bits_algebra_status_and_opaque_edges();
   test_public_equivalence_low_bit_normalization();
   test_public_equivalence_low_bit_rejections();
   test_public_equivalence_low_bit_growable_walk();

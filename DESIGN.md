@@ -1998,28 +1998,37 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   expression DAG and exact residuals use the weighted equality forest rather
   than inequality adjacency or context-wide scans.
 
-  After those exact strategies miss, a private final rule handles two original
-  outer `Mod` nodes with the same positive, representable power-of-two literal
-  modulus. It proves the outer operations and both dividends defined and
-  integer-valued over the complete fact domain, then normalizes the dividends
-  in the corresponding power-of-two quotient ring. The walk propagates through
-  integer-coefficient `ADD`, integer-coefficient `MUL` with only positive
-  powers, numeric `XOR`/`AND`/`OR`, and a nested literal `Mod` whose modulus is
-  divisible by the outer modulus. Other nodes, including rounding,
+  After those exact strategies miss, the private `src/low_bits_algebra.c`
+  component handles two original outer `Mod` nodes with the same positive,
+  representable power-of-two literal modulus. The bounds adapter proves the
+  original outer operations and both original dividends defined and
+  integer-valued over the complete fact domain; normalized roots never replace
+  those source obligations. The component then projects the dividends through
+  the typed ring `Z/(2^k)`. It propagates through integer-coefficient `ADD`,
+  integer-coefficient `MUL` with only positive powers, numeric `XOR`/`AND`/`OR`,
+  and a nested literal `Mod` whose modulus is divisible by the outer modulus.
+  Every supported node and immediate child is independently re-proved total
+  and integer-valued, and the adapter re-proves both projected roots. Other
+  nodes, including rounding,
   `Piecewise`, extrema, predicates, rational coefficients, reciprocal powers,
   and dynamic or incompatible `Mod`, remain opaque. Pointer-identical opaque
   subtrees can still participate in a successful exact proof. The rule sees
   the original pair because fact-backed simplification can remove only one of
   the matching outer operations.
 
-  Low-bit normalization is iterative and uses growable query-local scratch for
-  its stack and expected-O(1) pointer memo. It visits each supported DAG node
-  once, with expected O(nodes + edges) walk work and no context-wide scan or
-  semantic node/depth cutoff. Rebuilding canonical `ADD` and `MUL` nodes by
-  immediate-child substitution is O(children^2) in the worst case. Allocation,
-  checked-size, transport, or bounded exact-subproof failure returns
-  `UNKNOWN`. The rule can establish only `TRUE`; it never derives `FALSE` from
-  low-bit normalization.
+  Low-bit normalization is iterative and uses a growable query-local,
+  expected-O(1) pointer memo whose temporary parent links replace a recursive
+  stack. It visits each supported DAG node once, with expected O(nodes + edges)
+  walk work and no context-wide scan or semantic node/depth cutoff. Rebuilding
+  is scoped to one supported parent: every immediate child, including an
+  unchanged opaque child, is a substitution target. A hash-consed inner `Mod`
+  therefore cannot leak through an opaque occurrence elsewhere in the DAG.
+  Canonical rebuilding inherits the simplifier's O(children^2) worst case.
+  Query limits and OOM remain distinct transport statuses; invalid bounds
+  state and diagnostic constructor overflow remain `INVALID`. The total
+  projector itself has no representability miss. Failed sufficient proofs
+  return `UNKNOWN`. The rule can establish only `TRUE`; it never derives
+  `FALSE` from low-bit normalization.
 
   Congruence is deliberately not a generic equality rule: a divisible
   residual delta does not prove arbitrary comparisons or `x == 0`. A nonzero
@@ -2983,6 +2992,8 @@ ixsimpl/
 │   ├── relation_algebra.h
 │   ├── interval.c           # interval arithmetic
 │   ├── interval.h
+│   ├── low_bits_algebra.c   # power-of-two quotient-ring projection
+│   ├── low_bits_algebra.h
 │   ├── print.c              # output formatters
 │   ├── print.h
 │   ├── import.c             # cross-store structural import
