@@ -346,10 +346,12 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                uint32_t nterms, int64_t const_p,
                                int64_t const_q);
+static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
+                                   ixs_cmp_op op);
 static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                   uint32_t nterms, int64_t const_p,
-                                  int64_t const_q, bool allow_wide,
-                                  ixs_node **result);
+                                  int64_t const_q, ixs_bounds *bnds,
+                                  bool allow_wide, ixs_node **result);
 static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
                                        uint32_t nterms, int64_t const_p,
                                        int64_t const_q);
@@ -555,7 +557,7 @@ static int add_try_rewrites(ixs_ctx *ctx, add_accum *acc, ixs_node **result) {
   if (*result)
     return 1;
   status = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
-                                  acc->const_q, false, result);
+                                  acc->const_q, NULL, false, result);
   if (status != 0)
     return status;
   *result = xor_difference_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
@@ -1222,13 +1224,22 @@ typedef struct {
   int64_t coefficient_q;
 } floor_mod_cancel_plan;
 
-static int floor_mod_cancel_plan_init(ixs_ctx *ctx, ixs_addterm *term,
+static int floor_mod_cancel_plan_init(ixs_ctx *ctx, ixs_bounds *bnds,
+                                      ixs_addterm *term,
                                       floor_mod_cancel_plan *plan) {
   ixs_node *ci_outer;
   ixs_node *quotient;
   int status = mod_parts_from_addterm(ctx, term, &plan->mod);
   if (status <= 0)
     return status;
+  /* This identity requires Euclidean Mod, whose divisor is positive. Keep an
+   * unknown symbolic divisor in the source DAG so later facts can either prove
+   * its domain or collapse it to a domain error. */
+  if (ixs_node_classify_mod_divisor(plan->mod.modulus) !=
+      IXS_MOD_DIVISOR_POSITIVE) {
+    if (!bnds || !bounds_proves_zero_cmp(bnds, plan->mod.modulus, IXS_CMP_GT))
+      return bnds && bnds->oom ? -1 : 0;
+  }
 
   ixs_node_get_rat(term->coeff, &plan->coefficient_p, &plan->coefficient_q);
   ci_outer = simp_mul(ctx, term->coeff, plan->mod.outer);
@@ -1528,12 +1539,13 @@ cleanup:
   return result;
 }
 
-static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
-                                    uint32_t nterms, uint32_t i,
-                                    size_t *inspected, bool allow_wide) {
+static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_bounds *bnds,
+                                    ixs_addterm *terms, uint32_t nterms,
+                                    uint32_t i, size_t *inspected,
+                                    bool allow_wide) {
   uint32_t j;
   floor_mod_cancel_plan plan;
-  int status = floor_mod_cancel_plan_init(ctx, &terms[i], &plan);
+  int status = floor_mod_cancel_plan_init(ctx, bnds, &terms[i], &plan);
 
   if (status <= 0)
     return status;
@@ -1555,9 +1567,9 @@ static int cancel_floor_mod_at_impl(ixs_ctx *ctx, ixs_addterm *terms,
 }
 
 /* Cancellation probes never own user-visible diagnostics. */
-static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
-                               uint32_t nterms, uint32_t i, size_t *inspected,
-                               bool allow_wide) {
+static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_bounds *bnds,
+                               ixs_addterm *terms, uint32_t nterms, uint32_t i,
+                               size_t *inspected, bool allow_wide) {
   ixs_node *term = terms[i].term;
   ixs_arena_mark diag_mark;
   const char **saved_errors;
@@ -1573,8 +1585,8 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
   saved_errors = ctx->errors;
   saved_nerrors = ctx->nerrors;
   saved_errors_cap = ctx->errors_cap;
-  result =
-      cancel_floor_mod_at_impl(ctx, terms, nterms, i, inspected, allow_wide);
+  result = cancel_floor_mod_at_impl(ctx, bnds, terms, nterms, i, inspected,
+                                    allow_wide);
 
   ixs_arena_restore(&ctx->diag, diag_mark);
   ctx->errors = saved_errors;
@@ -1589,8 +1601,8 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_addterm *terms,
  * residual is a compact positive-ratio product. */
 static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                   uint32_t nterms, int64_t const_p,
-                                  int64_t const_q, bool allow_wide,
-                                  ixs_node **result) {
+                                  int64_t const_q, ixs_bounds *bnds,
+                                  bool allow_wide, ixs_node **result) {
   bool found = false;
   uint32_t i;
   size_t inspected = 0;
@@ -1598,7 +1610,8 @@ static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
   *result = NULL;
 
   for (i = 0; i < nterms; i++) {
-    int rc = cancel_floor_mod_at(ctx, terms, nterms, i, &inspected, allow_wide);
+    int rc = cancel_floor_mod_at(ctx, bnds, terms, nterms, i, &inspected,
+                                 allow_wide);
     if (rc < 0)
       return -1;
     if (rc > 0)
@@ -1615,9 +1628,11 @@ static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
   return *result ? 1 : -1;
 }
 
-/* Wide nested-factor scans run once per completed rewrite, not per term added.
- */
-static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
+/* Facts-aware nested-factor scans run once per completed rewrite, not per term
+ * added. This is also where a proof of a symbolic modulus's positivity can
+ * discharge the source-domain obligation retained by construction. */
+static ixs_node *cancel_floor_mod_node(ixs_ctx *ctx, ixs_bounds *bnds,
+                                       ixs_node *add) {
   ixs_arena_mark mark;
   ixs_addterm *terms;
   ixs_node *result;
@@ -1625,11 +1640,24 @@ static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
   int status;
   uint32_t i;
 
-  if (!add || add->tag != IXS_ADD || add->u.add.nterms <= 2u)
+  if (!add || add->tag != IXS_ADD)
     return add;
   for (i = 0; i < add->u.add.nterms; i++) {
     ixs_node *term = add->u.add.terms[i].term;
-    if (term->tag == IXS_MUL && find_pow1_factor(term, IXS_MOD) >= 0)
+    ixs_node *mod = NULL;
+    bool nested = false;
+    if (term->tag == IXS_MOD) {
+      mod = term;
+    } else if (term->tag == IXS_MUL) {
+      int32_t index = find_pow1_factor(term, IXS_MOD);
+      if (index >= 0) {
+        mod = term->u.mul.factors[index].base;
+        nested = true;
+      }
+    }
+    if (mod && ((nested && add->u.add.nterms > 2u) ||
+                (bnds && ixs_node_classify_mod_divisor(mod->u.binary.rhs) ==
+                             IXS_MOD_DIVISOR_UNKNOWN)))
       break;
   }
   if (i == add->u.add.nterms)
@@ -1644,7 +1672,7 @@ static ixs_node *cancel_wide_floor_mod_node(ixs_ctx *ctx, ixs_node *add) {
   memcpy(terms, add->u.add.terms, add->u.add.nterms * sizeof(*terms));
   ixs_node_get_rat(add->u.add.coeff, &const_p, &const_q);
   status = cancel_floor_mod_pairs(ctx, terms, add->u.add.nterms, const_p,
-                                  const_q, true, &result);
+                                  const_q, bnds, true, &result);
   ixs_arena_restore(&ctx->scratch, mark);
   if (status < 0)
     return NULL;
@@ -6885,7 +6913,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   if (!result)
     return NULL;
   result = cancel_congruent_mod_difference(ctx, bnds, result);
-  result = cancel_wide_floor_mod_node(ctx, result);
+  result = cancel_floor_mod_node(ctx, bnds, result);
   if (!result || floor_candidates < 2u)
     return result;
   return cancel_equal_floor_difference(ctx, bnds, result);

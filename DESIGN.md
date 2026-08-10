@@ -992,6 +992,7 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D symbolic)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
+                     when m is a positive literal or proven positive by facts
 F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
                      when m is a positive integer literal,
                      F/(C*m) is an exact rational greater than one,
@@ -1001,6 +1002,11 @@ F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
 c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
 ```
+
+An unknown symbolic `m` keeps the complete floor/Mod pair in the source DAG.
+The identity is valid only in the positive-divisor domain, so construction must
+not erase that obligation. Assumption-aware simplification returns an invalid
+result once facts prove `m <= 0`; an unknown sign remains unchanged.
 
 Bounds-aware elimination accepts symbolic integer moduli: proofs of `m > 0`,
 `x >= 0`, and `x-m < 0` reduce `Mod(x,m)` to `x`. Interval propagation also

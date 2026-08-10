@@ -3925,7 +3925,7 @@ static void test_subs_power_overflow(void) {
   }
 }
 
-/* m*floor(E/m) + Mod(E, m) = E: integer and symbolic moduli. */
+/* m*floor(E/m) + Mod(E, m) = E for positive literal moduli. */
 static void test_floor_mod_cancel(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3985,7 +3985,7 @@ static void test_floor_mod_cancel(void) {
   CHECK(ixs_node_tag(e) == IXS_ADD);
 }
 
-/* Floor-Mod cancellation with symbolic modulus: m*floor(E/m) + Mod(E, m). */
+/* Symbolic divisors retain the floor-Mod source-domain obligation. */
 static void test_floor_mod_cancel_symbolic(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -3993,23 +3993,52 @@ static void test_floor_mod_cancel_symbolic(void) {
   ixs_node *L = ixs_sym(ctx, "L");
   ixs_node *M = ixs_sym(ctx, "M");
   ixs_node *half_K = ixs_div(ctx, K, ixs_int(ctx, 2));
+  ixs_facts *unknown = ixs_facts_create(ctx);
+  ixs_facts *positive = ixs_facts_create(ctx);
+  ixs_facts *zero = ixs_facts_create(ctx);
+  ixs_facts *negative = ixs_facts_create(ctx);
 
-  /* K/2 * floor(x / (K/2)) + Mod(x, K/2) -> x */
+  /* An unknown symbolic divisor keeps the source-domain witness. */
   ixs_node *fl = ixs_floor(ctx, ixs_div(ctx, x, half_K));
   ixs_node *e = ixs_add(ctx, ixs_mul(ctx, half_K, fl), ixs_mod(ctx, x, half_K));
-  CHECK(e == x);
+  CHECK(e && ixs_node_tag(e) == IXS_ADD);
+  CHECK(test_ixs_check_defined_facts(unknown, e) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_facts_assume_pred(positive,
+                              ixs_cmp(ctx, K, IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(test_ixs_simplify_facts(positive, e) == x);
+  CHECK(ixs_facts_assume_pred(zero,
+                              ixs_cmp(ctx, K, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_defined_facts(zero, e) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_simplify_facts(zero, e) == NULL);
+  CHECK(ixs_facts_assume_pred(negative,
+                              ixs_cmp(ctx, K, IXS_CMP_EQ, ixs_int(ctx, -2))));
+  CHECK(test_ixs_check_defined_facts(negative, e) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_simplify_facts(negative, e) == NULL);
 
-  /* With constant offset: K/2*floor((x+5)/(K/2)) + Mod(x+5, K/2) -> x+5 */
+  /* A partial symbolic divisor is retained and poisons eagerly once its own
+   * denominator is proven zero. */
+  {
+    ixs_node *divisor = ixs_div(ctx, ixs_int(ctx, 1), K);
+    ixs_node *partial = ixs_add(
+        ctx, ixs_mul(ctx, divisor, ixs_floor(ctx, ixs_div(ctx, x, divisor))),
+        ixs_mod(ctx, x, divisor));
+    CHECK(partial && ixs_node_tag(partial) == IXS_ADD);
+    CHECK(test_ixs_check_defined_facts(unknown, partial) == IXS_CHECK_UNKNOWN);
+    CHECK(test_ixs_check_defined_facts(zero, partial) == IXS_CHECK_FALSE);
+    CHECK(test_ixs_simplify_facts(zero, partial) == NULL);
+  }
+
+  /* Offsets do not make an unknown divisor safe to erase. */
   {
     ixs_node *x5 = ixs_add(ctx, x, ixs_int(ctx, 5));
     ixs_node *fl5 = ixs_floor(ctx, ixs_div(ctx, x5, half_K));
     e = ixs_add(ctx, ixs_mul(ctx, half_K, fl5), ixs_mod(ctx, x5, half_K));
-    CHECK(e == x5);
+    CHECK(e && ixs_node_tag(e) == IXS_ADD);
   }
 
-  /* Difference of two pairs:
+  /* A difference of two unknown-domain pairs also stays explicit:
    * K/2*floor((x+A)/(K/2)) + Mod(x+A, K/2)
-   * - K/2*floor((x+B)/(K/2)) - Mod(x+B, K/2) -> A - B */
+   * - K/2*floor((x+B)/(K/2)) - Mod(x+B, K/2). */
   {
     ixs_node *xA = ixs_add(ctx, x, ixs_int(ctx, 100));
     ixs_node *xB = ixs_add(ctx, x, ixs_int(ctx, 60));
@@ -4020,27 +4049,26 @@ static void test_floor_mod_cancel_symbolic(void) {
         ctx, ixs_mul(ctx, half_K, ixs_floor(ctx, ixs_div(ctx, xB, half_K))),
         ixs_mod(ctx, xB, half_K));
     e = ixs_sub(ctx, pair_A, pair_B);
-    CHECK(e && ixs_node_tag(e) == IXS_INT && ixs_node_int_val(e) == 40);
+    CHECK(e && ixs_node_tag(e) == IXS_ADD);
   }
 
-  /* 3*L*K*floor(x/K) + 3*L*Mod(x,K) -> 3*L*x */
+  /* An outer multiplier does not discharge K's domain. */
   {
     ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
     ixs_node *outer = ixs_mul(ctx, ixs_int(ctx, 3), L);
     e = ixs_add(ctx, ixs_mul(ctx, ixs_mul(ctx, outer, K), flK),
                 ixs_mul(ctx, outer, ixs_mod(ctx, x, K)));
-    CHECK(e == ixs_mul(ctx, outer, x));
+    CHECK(e && ixs_node_tag(e) == IXS_ADD);
   }
 
   /* Wide ADDs defer the nested-factor scan to explicit simplification. */
   {
     ixs_node *flK = ixs_floor(ctx, ixs_div(ctx, x, K));
     ixs_node *outer = ixs_mul(ctx, ixs_int(ctx, 3), L);
-    ixs_node *expected = ixs_add(ctx, M, ixs_mul(ctx, outer, x));
     e = ixs_add(ctx, M, ixs_mul(ctx, ixs_mul(ctx, outer, K), flK));
     e = ixs_add(ctx, e, ixs_mul(ctx, outer, ixs_mod(ctx, x, K)));
     CHECK(ixs_node_tag(e) == IXS_ADD);
-    CHECK(ixs_simplify(ctx, e, NULL, 0) == expected);
+    CHECK(ixs_node_tag(ixs_simplify(ctx, e, NULL, 0)) == IXS_ADD);
   }
 
   /* 64*s*floor(x/256) + 32*s*Mod(floor(x/128),2)
@@ -4421,10 +4449,12 @@ static void test_opposite_mul_add_cancel(void) {
   }
 }
 
-/* Flatten MUL-over-ADD exposes floor terms for cancel_floor_mod_pairs.
+/* Flatten MUL-over-ADD exposes floor terms for cancel_floor_mod_pairs when the
+ * modulus is a positive literal.
  * K*(floor(A/m) - floor(B/m)) + c*Mod(A,m) - c*Mod(B,m)
  * distributes to K*floor(A/m) - K*floor(B/m) + Mod terms,
- * then floor-Mod identity fires: c*Mod(X,m) + c*m*floor(X/m) = c*X. */
+ * then floor-Mod identity fires: c*Mod(X,m) + c*m*floor(X/m) = c*X. Unknown
+ * symbolic moduli remain explicit. */
 static void test_flatten_mul_add_floor_mod(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *K = ixs_sym(ctx, "K");
@@ -4450,7 +4480,7 @@ static void test_flatten_mul_add_floor_mod(void) {
                                   ixs_mul(ctx, ixs_int(ctx, -4), mod1)),
                           ixs_mul(ctx, k32, floor_diff));
     r = ixs_simplify(ctx, e, NULL, 0);
-    CHECK(r == ixs_int(ctx, 512));
+    CHECK(r && ixs_node_tag(r) == IXS_ADD);
   }
 
   /* Same with a single pair: Mod(A, m) + m*floor(A/m) = A,
@@ -4460,7 +4490,7 @@ static void test_flatten_mul_add_floor_mod(void) {
     ixs_node *fl = ixs_floor(ctx, ixs_div(ctx, x, m));
     ixs_node *e = ixs_add(ctx, ixs_mod(ctx, x, m), ixs_mul(ctx, m, fl));
     r = ixs_simplify(ctx, e, NULL, 0);
-    CHECK(r == x);
+    CHECK(r && ixs_node_tag(r) == IXS_ADD);
   }
 
   /* Negative: no Mod present, distribution should NOT fire,
