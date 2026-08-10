@@ -11,6 +11,7 @@
 #include "additive_row.h"
 #include "bounds.h"
 #include "bounds_query.h"
+#include "bounds_store.h"
 #include "division_algebra.h"
 #include "interval.h"
 #include "low_bits_algebra.h"
@@ -995,7 +996,7 @@ static void test_bounds_modrem(void) {
                                         IXS_CMP_EQ, ixs_int(ctx, 3)));
 
   int64_t mod, rem;
-  CHECK(ixs_bounds_get_modrem(&b, x->u.name, &mod, &rem));
+  CHECK(bounds_store_get_modrem(&b, x->u.name, &mod, &rem));
   CHECK(mod == 8);
   CHECK(rem == 3);
 
@@ -1014,7 +1015,7 @@ static void test_bounds_modrem_zero(void) {
                                         IXS_CMP_EQ, ixs_int(ctx, 0)));
 
   int64_t mod, rem;
-  CHECK(ixs_bounds_get_modrem(&b, x->u.name, &mod, &rem));
+  CHECK(bounds_store_get_modrem(&b, x->u.name, &mod, &rem));
   CHECK(mod == 4);
   CHECK(rem == 0);
 
@@ -1029,7 +1030,7 @@ static void test_bounds_no_modrem(void) {
 
   int64_t mod, rem;
   ixs_node *x = ixs_sym(ctx, "x");
-  CHECK(!ixs_bounds_get_modrem(&b, x->u.name, &mod, &rem));
+  CHECK(!bounds_store_get_modrem(&b, x->u.name, &mod, &rem));
 
   ixs_bounds_destroy(&b);
   ixs_ctx_destroy(ctx);

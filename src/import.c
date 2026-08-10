@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "hash.h"
 #include "node.h"
 #include "simplify.h"
 
@@ -33,18 +34,10 @@ typedef enum {
   IMPORT_DIRECT_OOM
 } import_direct_result;
 
-static size_t import_hash_ptr(const void *ptr) {
-  uint64_t x = (uint64_t)(uintptr_t)ptr;
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
 static import_entry *import_memo_slot(import_entry *entries, size_t cap,
                                       const ixs_node *src) {
   size_t mask = cap - 1u;
-  size_t idx = import_hash_ptr(src) & mask;
+  size_t idx = ixs_hash_ptr(src) & mask;
   while (entries[idx].src && entries[idx].src != src)
     idx = (idx + 1u) & mask;
   return &entries[idx];

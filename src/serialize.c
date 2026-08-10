@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 ixsimpl contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "hash.h"
 #include "node.h"
 
 #include "rational.h"
@@ -150,20 +151,12 @@ static bool size_add_ok(size_t a, size_t b, size_t *out) {
   return true;
 }
 
-static size_t serial_hash_ptr(const void *ptr) {
-  uint64_t x = (uint64_t)(uintptr_t)ptr;
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
 static bool serial_error(ixs_ctx *ctx, const char *msg);
 
 static serial_entry *serial_memo_slot(serial_entry *entries, size_t cap,
                                       const ixs_node *node) {
   size_t mask = cap - 1u;
-  size_t idx = serial_hash_ptr(node) & mask;
+  size_t idx = ixs_hash_ptr(node) & mask;
   while (entries[idx].node && entries[idx].node != node)
     idx = (idx + 1u) & mask;
   return &entries[idx];

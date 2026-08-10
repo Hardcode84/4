@@ -3,6 +3,7 @@
  */
 #include "relation_algebra.h"
 
+#include "hash.h"
 #include "rational.h"
 
 #include <assert.h>
@@ -117,18 +118,10 @@ IXS_STATIC void ixs_relation_algebra_init(ixs_relation_algebra *algebra,
   algebra->arena = arena;
 }
 
-static size_t relation_hash_pointer(const void *pointer) {
-  uint64_t value = (uint64_t)(uintptr_t)pointer;
-  value ^= value >> 33;
-  value *= UINT64_C(0xff51afd7ed558ccd);
-  value ^= value >> 33;
-  return (size_t)value;
-}
-
 static size_t relation_endpoint_slot(const size_t *index, size_t capacity,
                                      const ixs_relation_endpoint *endpoints,
                                      const ixs_node *expr) {
-  size_t slot = relation_hash_pointer(expr) & (capacity - 1u);
+  size_t slot = ixs_hash_ptr(expr) & (capacity - 1u);
   while (index[slot] && endpoints[index[slot] - 1u].expr != expr)
     slot = (slot + 1u) & (capacity - 1u);
   return slot;
@@ -152,8 +145,8 @@ ixs_relation_algebra_find_endpoint(const ixs_relation_algebra *algebra,
 }
 
 static size_t relation_edge_hash(ixs_node *lhs, ixs_node *rhs, int64_t offset) {
-  uint64_t value = (uint64_t)relation_hash_pointer(lhs);
-  value ^= (uint64_t)relation_hash_pointer(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
+  uint64_t value = (uint64_t)ixs_hash_ptr(lhs);
+  value ^= (uint64_t)ixs_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) +
            (value << 6) + (value >> 2);
   value ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (value << 6) +
            (value >> 2);

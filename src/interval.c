@@ -3,6 +3,83 @@
  */
 #include "interval.h"
 
+IXS_STATIC bool ixs_interval_equal(ixs_interval a, ixs_interval b) {
+  return a.lo_p == b.lo_p && a.lo_q == b.lo_q && a.hi_p == b.hi_p &&
+         a.hi_q == b.hi_q && a.lo_inf == b.lo_inf && a.hi_inf == b.hi_inf &&
+         a.valid == b.valid;
+}
+
+IXS_STATIC int64_t ixs_integer_congruence_residue(int64_t value,
+                                                  int64_t modulus) {
+  int64_t residue = value % modulus;
+  return residue < 0 ? residue + modulus : residue;
+}
+
+IXS_STATIC bool ixs_integer_align_congruence_up(int64_t value, int64_t modulus,
+                                                int64_t remainder,
+                                                int64_t *result) {
+  int64_t current, delta;
+  if (modulus <= 0 || remainder < 0 || remainder >= modulus || !result)
+    return false;
+  current = ixs_integer_congruence_residue(value, modulus);
+  delta = remainder >= current ? remainder - current
+                               : modulus - (current - remainder);
+  return ixs_safe_add(value, delta, result);
+}
+
+IXS_STATIC bool ixs_integer_align_congruence_down(int64_t value,
+                                                  int64_t modulus,
+                                                  int64_t remainder,
+                                                  int64_t *result) {
+  int64_t current, delta;
+  if (modulus <= 0 || remainder < 0 || remainder >= modulus || !result)
+    return false;
+  current = ixs_integer_congruence_residue(value, modulus);
+  delta = current >= remainder ? current - remainder
+                               : modulus - (remainder - current);
+  return ixs_safe_sub(value, delta, result);
+}
+
+IXS_STATIC bool ixs_interval_lower_at_least(const ixs_interval *iv, int64_t p,
+                                            int64_t q) {
+  return iv->valid && !iv->lo_inf && ixs_rat_cmp(iv->lo_p, iv->lo_q, p, q) >= 0;
+}
+
+IXS_STATIC ixs_interval ixs_interval_intersect_congruence(ixs_interval iv,
+                                                          int64_t modulus,
+                                                          int64_t remainder) {
+  int64_t aligned;
+  if (!iv.valid || modulus <= 0)
+    return iv;
+  if (!iv.lo_inf &&
+      ixs_integer_align_congruence_up(ixs_rat_ceil(iv.lo_p, iv.lo_q), modulus,
+                                      remainder, &aligned)) {
+    iv.lo_p = aligned;
+    iv.lo_q = 1;
+  }
+  if (!iv.hi_inf &&
+      ixs_integer_align_congruence_down(ixs_rat_floor(iv.hi_p, iv.hi_q),
+                                        modulus, remainder, &aligned)) {
+    iv.hi_p = aligned;
+    iv.hi_q = 1;
+  }
+  return iv;
+}
+
+IXS_STATIC bool ixs_interval_has_congruent_integer(const ixs_interval *iv,
+                                                   int64_t modulus,
+                                                   int64_t remainder) {
+  int64_t lo, hi, first;
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || modulus <= 0)
+    return true;
+  lo = ixs_rat_ceil(iv->lo_p, iv->lo_q);
+  hi = ixs_rat_floor(iv->hi_p, iv->hi_q);
+  if (lo > hi)
+    return false;
+  return ixs_integer_align_congruence_up(lo, modulus, remainder, &first) &&
+         first <= hi;
+}
+
 IXS_STATIC void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp,
                                   int64_t *rq) {
   bool neg = (ap < 0) != ixs_rat_is_neg(bp);

@@ -84,7 +84,7 @@ IXS_STATIC bool ixs_safe_neg(int64_t a, int64_t *r) {
  * Binary GCD. Handles INT64_MIN by treating magnitudes as unsigned.
  * gcd(0, 0) = 0. Result is always >= 0.
  */
-static uint64_t to_unsigned_mag(int64_t x) {
+IXS_STATIC uint64_t ixs_int64_magnitude(int64_t x) {
   if (x >= 0)
     return (uint64_t)x;
   /* x == INT64_MIN: magnitude is 2^63 = (uint64_t)INT64_MAX + 1 */
@@ -96,8 +96,8 @@ static int64_t u64_to_i64_clamped(uint64_t u) {
 }
 
 IXS_STATIC int64_t ixs_gcd(int64_t a, int64_t b) {
-  uint64_t u = to_unsigned_mag(a);
-  uint64_t v = to_unsigned_mag(b);
+  uint64_t u = ixs_int64_magnitude(a);
+  uint64_t v = ixs_int64_magnitude(b);
   unsigned shift;
 
   if (u == 0)
@@ -350,8 +350,8 @@ IXS_STATIC int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
   {
     /* Compute lhs128 = ap*bq and rhs128 = bp*aq as signed 128-bit values,
      * represented as (sign, hi, lo) where value = sign * (hi*2^64 + lo). */
-    uint64_t al = to_unsigned_mag(ap), bl = to_unsigned_mag(bq);
-    uint64_t cl = to_unsigned_mag(bp), dl = to_unsigned_mag(aq);
+    uint64_t al = ixs_int64_magnitude(ap), bl = ixs_int64_magnitude(bq);
+    uint64_t cl = ixs_int64_magnitude(bp), dl = ixs_int64_magnitude(aq);
     int lhs_sign = ((ap < 0) != (bq < 0)) ? -1 : 1;
     int rhs_sign = ((bp < 0) != (aq < 0)) ? -1 : 1;
     if (ap == 0)
@@ -396,4 +396,80 @@ IXS_STATIC int ixs_rat_cmp(int64_t ap, int64_t aq, int64_t bp, int64_t bq) {
 
     return lhs_sign > 0 ? mag_cmp : -mag_cmp;
   }
+}
+IXS_STATIC bool ixs_u64_is_pow2(uint64_t value) {
+  return value != 0 && (value & (value - 1u)) == 0;
+}
+
+IXS_STATIC bool ixs_int64_is_positive_pow2(int64_t value) {
+  return value > 0 && ixs_u64_is_pow2((uint64_t)value);
+}
+
+IXS_STATIC uint64_t ixs_int64_normalize_residue(int64_t value,
+                                                uint64_t modulus) {
+  uint64_t remainder;
+  if (value >= 0)
+    return (uint64_t)value % modulus;
+  remainder = ixs_int64_magnitude(value) % modulus;
+  return remainder == 0 ? 0 : modulus - remainder;
+}
+
+IXS_STATIC uint64_t ixs_u64_gcd(uint64_t a, uint64_t b) {
+  while (b != 0) {
+    uint64_t next = a % b;
+    a = b;
+    b = next;
+  }
+  return a;
+}
+
+IXS_STATIC uint64_t ixs_u64_add_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  return (a + b) % modulus;
+}
+
+IXS_STATIC uint64_t ixs_u64_sub_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  a %= modulus;
+  b %= modulus;
+  return a >= b ? a - b : modulus - (b - a);
+}
+
+/* modulus is at most 2^63, so doubling two normalized operands cannot
+ * overflow uint64_t. */
+IXS_STATIC uint64_t ixs_u64_mul_mod(uint64_t a, uint64_t b, uint64_t modulus) {
+  uint64_t result = 0;
+  a %= modulus;
+  while (b != 0) {
+    if ((b & 1u) != 0)
+      result = ixs_u64_add_mod(result, a, modulus);
+    b >>= 1;
+    if (b != 0)
+      a = ixs_u64_add_mod(a, a, modulus);
+  }
+  return result;
+}
+
+/* Extended Euclid keeps coefficients as residues to avoid signed overflow. */
+IXS_STATIC bool ixs_u64_mod_inverse(uint64_t value, uint64_t modulus,
+                                    uint64_t *inverse) {
+  uint64_t r, new_r, t, new_t;
+  if (!inverse || modulus <= 1u)
+    return false;
+  r = modulus;
+  new_r = value % modulus;
+  t = 0;
+  new_t = 1u;
+  while (new_r != 0) {
+    uint64_t quotient = r / new_r;
+    uint64_t next_r = r % new_r;
+    uint64_t product = ixs_u64_mul_mod(quotient, new_t, modulus);
+    uint64_t next_t = ixs_u64_sub_mod(t, product, modulus);
+    r = new_r;
+    new_r = next_r;
+    t = new_t;
+    new_t = next_t;
+  }
+  if (r != 1u)
+    return false;
+  *inverse = t;
+  return true;
 }

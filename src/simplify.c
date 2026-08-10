@@ -4,6 +4,7 @@
 #include "simplify.h"
 #include "bounds.h"
 #include "bounds_query.h"
+#include "bounds_store.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,12 +102,6 @@ static inline ixs_node *make_const(ixs_ctx *ctx, int64_t p, int64_t q) {
   if (q == 1)
     return ixs_node_int(ctx, p);
   return ixs_node_rat(ctx, p, q);
-}
-
-static bool uint64_pow2(uint64_t v) { return v != 0 && (v & (v - 1u)) == 0; }
-
-static bool int64_positive_pow2(int64_t v) {
-  return v > 0 && uint64_pow2((uint64_t)v);
 }
 
 /*
@@ -1744,7 +1739,7 @@ static ixs_node *xor_delta_expr(ixs_ctx *ctx, ixs_node *selector, int64_t delta,
   } else {
     mag = delta;
   }
-  if (!int64_positive_pow2(mag))
+  if (!ixs_int64_is_positive_pow2(mag))
     return NULL;
 
   mask_node = ixs_node_int(ctx, mag);
@@ -1787,7 +1782,8 @@ static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
       bit = (uint64_t)(delta < 0 ? -delta : delta);
       if (bit > (uint64_t)(INT64_MAX / 2))
         continue;
-      if (!node_is_known_total_integer(toggle_operand) || !uint64_pow2(bit) ||
+      if (!node_is_known_total_integer(toggle_operand) ||
+          !ixs_u64_is_pow2(bit) ||
           !bit_known_zero_without_assumptions(ctx, toggle_operand, bit))
         continue;
 
@@ -2624,7 +2620,7 @@ static int64_t floor_term_effective_denom(ixs_bounds *bnds,
   if (bnds && ixs_node_is_integer_valued(term->term)) {
     int64_t sym_mod, sym_rem;
     if (term->term->tag == IXS_SYM &&
-        ixs_bounds_get_modrem(bnds, term->term->u.name, &sym_mod, &sym_rem) &&
+        bounds_store_get_modrem(bnds, term->term->u.name, &sym_mod, &sym_rem) &&
         sym_rem == 0 && sym_mod > 0) {
       int64_t prod;
       if (ixs_safe_mul(atp, sym_mod, &prod))
@@ -3153,7 +3149,7 @@ static ixs_node *rule_floor_shift_xor(ixs_ctx *ctx, ixs_bounds *bnds,
     return n;
   ixs_node_get_rat(x->u.mul.coeff, &p, &q);
   xor_node = x->u.mul.factors[0].base;
-  if (p != 1 || q <= 1 || !uint64_pow2((uint64_t)q) ||
+  if (p != 1 || q <= 1 || !ixs_u64_is_pow2((uint64_t)q) ||
       xor_node->u.assoc.nargs == 0 || !xor_node->u.assoc.args)
     return n;
   for (i = 0; i < xor_node->u.assoc.nargs; i++) {
@@ -6533,7 +6529,7 @@ static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
     /* x == rem (mod m) with m % M == 0  =>  Mod(x, M) == rem % M */
     if (l->tag == IXS_SYM) {
       int64_t sym_mod, sym_rem;
-      if (ixs_bounds_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
+      if (bounds_store_get_modrem(bnds, l->u.name, &sym_mod, &sym_rem) &&
           sym_mod % r->u.ival == 0)
         return ixs_node_int(ctx, sym_rem % r->u.ival);
     }
@@ -6973,7 +6969,7 @@ static ixs_node *cancel_scaled_xor_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
   /* Multiplication by a positive power of two is an exact bit shift, hence
    * xor(q*a_i) == q*xor(a_i).  No analogous rewrite is valid for an arbitrary
    * common integer factor. */
-  if (q <= 1 || !uint64_pow2((uint64_t)q) || nargs == 0 ||
+  if (q <= 1 || !ixs_u64_is_pow2((uint64_t)q) || nargs == 0 ||
       !xor_node->u.assoc.args || nargs > SIZE_MAX / sizeof(*args))
     return mul;
 
@@ -7355,7 +7351,7 @@ IXS_STATIC ixs_node *simp_simplify(ixs_ctx *ctx, ixs_node *expr,
       SIMP_ASSUMPTION_CACHE_NOTE(cache, hits);
       m = ixs_arena_save(&ctx->scratch);
       active_bounds = &cache->bounds;
-      active_bounds->scratch = &ctx->scratch;
+      bounds_store_retarget_scratch(active_bounds, &ctx->scratch);
       old_oom = active_bounds->oom;
       cached_read = true;
       goto simplify;

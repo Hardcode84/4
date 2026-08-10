@@ -1222,6 +1222,30 @@ failure still propagate.
 Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
 
+`bounds_store.c` owns retained variable records, expression ranges, nonzero
+facts, name and expression indexes, modular-inverse watchers, and their raw
+mutation operations. Canonicalization, predicate ingestion, difference
+propagation, and proof policy remain in `bounds.c` and pass canonical node or
+symbol identities into the store. `bounds_range.c` owns the empty-result,
+direct interval, and Piecewise range-cache lifecycle. `bounds_relation.c` owns
+the equality-projection cache lifecycle. Full store invalidation refreshes the
+central query owner, clears range caches, then clears relation projections;
+each leaf component writes only its owned fields.
+
+`bounds.c` orchestrates aggregate initialization, fork, and destruction.
+Initialization orders query state, dense variable storage, relation state, and
+the direct range cache. A fork's allocation-bearing payload order is query
+state, dense variables and their index, difference indexes, modular-inverse
+watchers, exact relations, expression storage and its index, then nonzero
+facts. Each stage consumes state published by its predecessors, and a failed
+fork is discarded as one aggregate.
+
+Pure integer congruence residue, alignment, and interval-intersection helpers
+live with interval arithmetic in `interval.c`. `rational.c` owns exact
+rational arithmetic plus checked unsigned modular multiplication and inverse.
+The header-only `hash.h` pointer mixer is shared by hot identity indexes; table
+layout, load factor, and allocation remain consumer-owned.
+
 - **Variable storage**: Per-variable bounds live in a growable array on the
   scratch arena (starts at 16 slots, doubles on overflow). An open-addressed
   dense-index table keyed by interned name pointer provides expected O(1)
@@ -1386,8 +1410,8 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   under an active hold borrows central state with a distinct owner. Its
   embedded arenas start empty, and `query_state_arena` stays empty while state
   is borrowed. Direct range and relation-projection caches remain separate.
-  `bounds.c` invalidates the empty-result cache, refreshes the query owner, then
-  clears the direct interval cache and relation-projection cache/count; the
+  `bounds_store.c` refreshes the central query owner, then asks
+  `bounds_range.c` and `bounds_relation.c` to invalidate their caches. The
   query component does not initiate store invalidation.
 
   Consumers own transfer values, cache finish policy, mapping typed transport
@@ -3026,8 +3050,9 @@ ixsimpl/
 │   ├── algebra_status.h     # shared private algebra result ordering
 │   ├── arena.c              # arena allocator
 │   ├── arena.h
-│   ├── rational.c           # exact rational arithmetic
+│   ├── rational.c           # exact rational and modular arithmetic
 │   ├── rational.h
+│   ├── hash.h               # shared hot pointer-identity mixer
 │   ├── node.c               # node creation, hash-consing, canonical forms
 │   ├── node.h
 │   ├── parser.c             # recursive descent parser
@@ -3036,10 +3061,16 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
-│   ├── bounds.c             # bound storage, propagation, assumption extraction
-│   ├── bounds.h
+│   ├── bounds.c             # fact policy, propagation, and query coordination
+│   ├── bounds.h             # aggregate private bounds state
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle
 │   ├── bounds_query.h
+│   ├── bounds_store.c       # retained fact records, indexes, and mutation
+│   ├── bounds_store.h
+│   ├── bounds_range.c       # direct and Piecewise range-cache lifecycle
+│   ├── bounds_range.h
+│   ├── bounds_relation.c    # equality-projection cache lifecycle
+│   ├── bounds_relation.h
 │   ├── division_algebra.c   # signed truncating-division certificates
 │   ├── division_algebra.h
 │   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality
@@ -3050,7 +3081,7 @@ ixsimpl/
 │   ├── radix_algebra.h
 │   ├── relation_algebra.c   # indexed exact additive relations
 │   ├── relation_algebra.h
-│   ├── interval.c           # interval arithmetic
+│   ├── interval.c           # interval and integer-congruence arithmetic
 │   ├── interval.h
 │   ├── low_bits_algebra.c   # power-of-two quotient-ring projection
 │   ├── low_bits_algebra.h

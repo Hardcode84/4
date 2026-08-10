@@ -101,6 +101,30 @@ static inline ixs_interval ixs_interval_range(int64_t lo_p, int64_t lo_q,
   return iv;
 }
 
+IXS_STATIC bool ixs_interval_equal(ixs_interval lhs, ixs_interval rhs);
+/* modulus must be positive. */
+IXS_STATIC int64_t ixs_integer_congruence_residue(int64_t value,
+                                                  int64_t modulus);
+/* modulus must be positive and remainder canonical: 0 <= remainder < modulus.
+ */
+IXS_STATIC bool ixs_integer_align_congruence_up(int64_t value, int64_t modulus,
+                                                int64_t remainder,
+                                                int64_t *result);
+IXS_STATIC bool ixs_integer_align_congruence_down(int64_t value,
+                                                  int64_t modulus,
+                                                  int64_t remainder,
+                                                  int64_t *result);
+IXS_STATIC bool ixs_interval_lower_at_least(const ixs_interval *interval,
+                                            int64_t p, int64_t q);
+/* modulus must be positive and remainder canonical: 0 <= remainder < modulus.
+ */
+IXS_STATIC ixs_interval ixs_interval_intersect_congruence(ixs_interval interval,
+                                                          int64_t modulus,
+                                                          int64_t remainder);
+IXS_STATIC bool ixs_interval_has_congruent_integer(const ixs_interval *interval,
+                                                   int64_t modulus,
+                                                   int64_t remainder);
+
 /* Widen one endpoint to +/-infinity based on the sign of the product. */
 IXS_STATIC void iv_endpoint_widen(int64_t ap, int64_t bp, int64_t *rp,
                                   int64_t *rq);

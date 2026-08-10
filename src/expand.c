@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "expand.h"
+#include "hash.h"
 #include "node.h"
 #include "simplify.h"
 
@@ -40,19 +41,11 @@ static bool expand_cacheable(const ixs_node *expr) {
          expr->tag != IXS_RAT && expr->tag != IXS_SYM;
 }
 
-static size_t expand_hash_ptr(const void *ptr) {
-  uint64_t x = (uint64_t)(uintptr_t)ptr;
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
 static expand_memo_entry *expand_memo_slot(expand_memo_entry *entries,
                                            size_t capacity,
                                            const ixs_node *source) {
   size_t mask = capacity - 1u;
-  size_t slot = expand_hash_ptr(source) & mask;
+  size_t slot = ixs_hash_ptr(source) & mask;
   while (entries[slot].source && entries[slot].source != source)
     slot = (slot + 1u) & mask;
   return &entries[slot];

@@ -59,4 +59,23 @@ IXS_STATIC bool ixs_safe_sub(int64_t a, int64_t b, int64_t *r);
 IXS_STATIC bool ixs_safe_mul(int64_t a, int64_t b, int64_t *r);
 IXS_STATIC bool ixs_safe_neg(int64_t a, int64_t *r);
 
+IXS_STATIC uint64_t ixs_int64_magnitude(int64_t value);
+IXS_STATIC bool ixs_u64_is_pow2(uint64_t value);
+IXS_STATIC bool ixs_int64_is_positive_pow2(int64_t value);
+/* Normalize, add, subtract, and multiply require a nonzero modulus.  Add also
+ * requires operands below a modulus no greater than 2^63.  Multiply requires
+ * modulus <= 2^63.  Inverse requires 1 < modulus <= 2^63 and returns false
+ * when the value and modulus are not coprime. */
+IXS_STATIC uint64_t ixs_int64_normalize_residue(int64_t value,
+                                                uint64_t modulus);
+IXS_STATIC uint64_t ixs_u64_gcd(uint64_t lhs, uint64_t rhs);
+IXS_STATIC uint64_t ixs_u64_add_mod(uint64_t lhs, uint64_t rhs,
+                                    uint64_t modulus);
+IXS_STATIC uint64_t ixs_u64_sub_mod(uint64_t lhs, uint64_t rhs,
+                                    uint64_t modulus);
+IXS_STATIC uint64_t ixs_u64_mul_mod(uint64_t lhs, uint64_t rhs,
+                                    uint64_t modulus);
+IXS_STATIC bool ixs_u64_mod_inverse(uint64_t value, uint64_t modulus,
+                                    uint64_t *inverse);
+
 #endif /* IXS_RATIONAL_H */

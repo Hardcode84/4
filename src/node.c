@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "node.h"
+#include "hash.h"
+
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -571,20 +573,12 @@ IXS_STATIC int ixs_node_cmp(ixs_ctx *ctx, const ixs_node *a,
 
 #define IXS_NODE_TRANSFORM_CACHE_INIT_CAP 256u
 
-static size_t node_transform_hash_ptr(const void *ptr) {
-  uint64_t x = (uint64_t)(uintptr_t)ptr;
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
 /* Load stays at or below 75%, so lookup and insertion are expected O(1). */
 static size_t
 node_transform_cache_index(const ixs_node_transform_cache_entry *entries,
                            size_t cap, const ixs_node *source) {
   size_t mask = cap - 1u;
-  size_t index = node_transform_hash_ptr(source) & mask;
+  size_t index = ixs_hash_ptr(source) & mask;
   while (entries[index].source && entries[index].source != source)
     index = (index + 1u) & mask;
   return index;
