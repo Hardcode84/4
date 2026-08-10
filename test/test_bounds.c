@@ -10,6 +10,7 @@
 
 #include "additive_row.h"
 #include "bounds.h"
+#include "bounds_query.h"
 #include "division_algebra.h"
 #include "interval.h"
 #include "low_bits_algebra.h"
@@ -1227,8 +1228,6 @@ static void check_bounds_mutual_query_budget_and_cache(const char *prefix,
   ixs_range_result range;
   size_t visits;
   size_t stride_visits;
-  size_t range_pw_case_visits;
-  size_t range_pw_limit_blocks;
   size_t cache_hits;
   size_t cycle_blocks;
   size_t limit_blocks;
@@ -1260,16 +1259,12 @@ static void check_bounds_mutual_query_budget_and_cache(const char *prefix,
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == INT64_C(4294967040) &&
         range.upper_q == 1);
-  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits,
-                         &range_pw_case_visits, &range_pw_limit_blocks,
-                         &cache_hits, &cycle_blocks, &limit_blocks,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits, &cache_hits,
+                         &cycle_blocks, &limit_blocks, &active_count, &nesting);
   CHECK(visits > 0 && visits < 256u);
   /* Stride queries share this counter and cache.  Without memoization, the
    * shared Piecewise DAG above doubles the stride work at every level. */
   CHECK(stride_visits > 0 && stride_visits < 256u);
-  CHECK(range_pw_case_visits == 0);
-  CHECK(range_pw_limit_blocks == 0);
   CHECK(cache_hits > 0);
   CHECK(cycle_blocks == 0);
   CHECK(limit_blocks == 0);
@@ -1280,24 +1275,18 @@ static void check_bounds_mutual_query_budget_and_cache(const char *prefix,
    * queries. */
   value = test_ixs_simplify_facts(facts, ixs_mod(ctx, value, modulus));
   CHECK(value != NULL);
-  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits,
-                         &range_pw_case_visits, &range_pw_limit_blocks,
-                         &cache_hits, &cycle_blocks, &limit_blocks,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits, &cache_hits,
+                         &cycle_blocks, &limit_blocks, &active_count, &nesting);
   CHECK(visits > 0);
   CHECK(active_count == 0 && nesting == 0);
 
   CHECK(ixs_bounds_query_cycle_probe(&facts->bounds, x));
-  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits,
-                         &range_pw_case_visits, &range_pw_limit_blocks,
-                         &cache_hits, &cycle_blocks, &limit_blocks,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits, &cache_hits,
+                         &cycle_blocks, &limit_blocks, &active_count, &nesting);
   /* Visits count work entries/cache misses.  The re-entry finds the
    * incomplete memo slot in O(1) and is therefore not a second visit. */
   CHECK(visits == 1);
   CHECK(cycle_blocks == 1);
-  CHECK(range_pw_case_visits == 0);
-  CHECK(range_pw_limit_blocks == 0);
   CHECK(limit_blocks == 0);
   CHECK(active_count == 0 && nesting == 0);
 
@@ -1320,8 +1309,6 @@ static void check_bounds_piecewise_congruence_depth_envelope(unsigned depth) {
   ixs_range_result range;
   size_t visits;
   size_t stride_visits;
-  size_t range_pw_case_visits;
-  size_t range_pw_limit_blocks;
   size_t cache_hits;
   size_t cycle_blocks;
   size_t limit_blocks;
@@ -1347,15 +1334,11 @@ static void check_bounds_piecewise_congruence_depth_envelope(unsigned depth) {
   CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == INT64_C(4294967040) &&
         range.upper_q == 1);
-  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits,
-                         &range_pw_case_visits, &range_pw_limit_blocks,
-                         &cache_hits, &cycle_blocks, &limit_blocks,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits, &cache_hits,
+                         &cycle_blocks, &limit_blocks, &active_count, &nesting);
   CHECK(visits > 0 && stride_visits > 0 && cache_hits > 0);
   CHECK(cycle_blocks == 0);
   CHECK(limit_blocks == 0);
-  CHECK(range_pw_case_visits == 0);
-  CHECK(range_pw_limit_blocks == 0);
   CHECK(active_count == 0 && nesting == 0);
 
   ixs_ctx_destroy(ctx);
@@ -1409,8 +1392,6 @@ static void test_bounds_flat_piecewise_keeps_case_limit(void) {
   ixs_range_result range;
   size_t visits;
   size_t stride_visits;
-  size_t range_pw_case_visits;
-  size_t range_pw_limit_blocks;
   size_t cache_hits;
   size_t cycle_blocks;
   size_t limit_blocks;
@@ -1430,11 +1411,8 @@ static void test_bounds_flat_piecewise_keeps_case_limit(void) {
   CHECK(test_ixs_range_facts(facts, x, &range));
   CHECK(range.has_lower && range.lower_p == 7 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 7 && range.upper_q == 1);
-  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits,
-                         &range_pw_case_visits, &range_pw_limit_blocks,
-                         &cache_hits, &cycle_blocks, &limit_blocks,
-                         &active_count, &nesting);
-  CHECK(range_pw_case_visits == 0 && range_pw_limit_blocks == 0);
+  ixs_bounds_query_stats(&facts->bounds, &visits, &stride_visits, &cache_hits,
+                         &cycle_blocks, &limit_blocks, &active_count, &nesting);
   CHECK(active_count == 0 && nesting == 0);
 
   ixs_ctx_destroy(ctx);
@@ -1540,7 +1518,6 @@ static void test_bounds_contextless_query_arena_lifecycle_and_fork(void) {
   ixs_bounds grandchild;
   ixs_bounds_query_state *state;
   ixs_node *root = make_nested_query_root(ctx, "contextless_query");
-  size_t range_pw_case_visits;
   size_t visits;
   size_t cycle_blocks;
   size_t active_count;
@@ -1550,29 +1527,34 @@ static void test_bounds_contextless_query_arena_lifecycle_and_fork(void) {
 
   CHECK(ctx && root && ixs_node_contains_nested_piecewise(root));
   CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
-  CHECK(bounds.query_arena.current == NULL && bounds.query_state == NULL);
+  CHECK(bounds.query_state_arena.current == NULL &&
+        bounds.query_arena.current == NULL && bounds.query_state == NULL);
 
-  ixs_arena_set_fail_after(&bounds.query_arena, 0);
+  ixs_arena_set_fail_after(&bounds.query_state_arena, 0);
   CHECK(!ixs_bounds_query_hold_begin(&bounds, root, &held));
   CHECK(!held && bounds.oom && bounds.query_state == NULL);
-  ixs_arena_set_fail_after(&bounds.query_arena, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_set_fail_after(&bounds.query_state_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
 
   bounds.oom = false;
   CHECK(ixs_bounds_query_hold_begin(&bounds, root, &held) && held);
   CHECK(bounds.query_state != NULL && bounds.query_state_owner &&
-        !bounds.query_state_borrowed && bounds.query_arena.current != NULL);
+        !bounds.query_state_borrowed &&
+        bounds.query_state_arena.current != NULL &&
+        bounds.query_arena.current == NULL);
   state = bounds.query_state;
   ixs_bounds_query_hold_end(&bounds);
   held = false;
   CHECK(bounds.query_state == state && bounds.query_tracking_depth == 0);
 
-  ixs_arena_set_fail_after(&bounds.query_arena, 0);
+  ixs_arena_set_fail_after(&bounds.query_state_arena, 0);
   CHECK(!ixs_bounds_query_cycle_probe(&bounds, root));
   CHECK(bounds.oom && bounds.query_tracking_depth == 0);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, &active_count,
+                         &nesting);
   CHECK(active_count == 0 && nesting == 0);
-  ixs_arena_set_fail_after(&bounds.query_arena, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_set_fail_after(&bounds.query_state_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
   bounds.oom = false;
   CHECK(ixs_bounds_query_cycle_probe(&bounds, root));
   CHECK(bounds.query_tracking_depth == 0);
@@ -1582,25 +1564,27 @@ static void test_bounds_contextless_query_arena_lifecycle_and_fork(void) {
   CHECK(ixs_bounds_fork(&forked, &bounds));
   CHECK(forked.query_state == state && !forked.query_state_owner &&
         forked.query_state_borrowed && forked.query_tracking_depth == 0 &&
+        forked.query_state_arena.current == NULL &&
         forked.query_arena.current == NULL);
   CHECK(bounds.query_owner != forked.query_owner);
   CHECK(ixs_bounds_fork(&grandchild, &forked));
   CHECK(grandchild.query_state == state && !grandchild.query_state_owner &&
         grandchild.query_state_borrowed &&
         grandchild.query_tracking_depth == 0 &&
+        grandchild.query_state_arena.current == NULL &&
         grandchild.query_arena.current == NULL);
   CHECK(grandchild.query_owner != bounds.query_owner &&
         grandchild.query_owner != forked.query_owner);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, &active_count,
+                         &nesting);
   CHECK(active_count == 0 && nesting == 1u);
   CHECK(ixs_bounds_query_cycle_probe(&grandchild, root));
   CHECK(grandchild.query_tracking_depth == 0 &&
         forked.query_tracking_depth == 0 && bounds.query_tracking_depth == 1);
-  ixs_bounds_query_stats(&bounds, &visits, NULL, &range_pw_case_visits, NULL,
-                         NULL, &cycle_blocks, NULL, &active_count, &nesting);
-  CHECK(visits == 1u && cycle_blocks == 1u && range_pw_case_visits == 0 &&
-        active_count == 0 && nesting == 1u);
+  ixs_bounds_query_stats(&bounds, &visits, NULL, NULL, &cycle_blocks, NULL,
+                         &active_count, &nesting);
+  CHECK(visits == 1u && cycle_blocks == 1u && active_count == 0 &&
+        nesting == 1u);
   ixs_bounds_destroy(&grandchild);
   CHECK(ixs_bounds_query_hold_begin(&forked, root, &fork_held) && fork_held);
   ixs_bounds_query_hold_end(&forked);
@@ -1610,6 +1594,68 @@ static void test_bounds_contextless_query_arena_lifecycle_and_fork(void) {
   ixs_bounds_query_hold_end(&bounds);
   held = false;
   ixs_bounds_destroy(&bounds);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_contextless_query_state_survives_transient_restore(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *root = make_nested_query_root(ctx, "query_state_lifetime");
+  ixs_node *x = ixs_sym(ctx, "query_state_lifetime_x");
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_node *guarded_values[2] = {ixs_floor(ctx, reciprocal), ixs_int(ctx, 0)};
+  ixs_node *guarded_conditions[2] = {
+      ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0)), ixs_true(ctx)};
+  ixs_node *guarded = ixs_pw(ctx, 2, guarded_values, guarded_conditions);
+  ixs_arena_mark mark;
+  void *active_overwrite;
+  void *cache_overwrite;
+  size_t visits_before;
+  size_t visits_after;
+  bool held = false;
+
+  CHECK(ctx && root && reciprocal && guarded);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
+  bounds.ctx = ctx;
+  CHECK(ixs_bounds_query_hold_begin(&bounds, root, &held) && held);
+  CHECK(ixs_bounds_check_defined(&bounds, reciprocal) == IXS_CHECK_UNKNOWN);
+  ixs_bounds_query_stats(&bounds, &visits_before, NULL, NULL, NULL, NULL, NULL,
+                         NULL);
+  CHECK(visits_before != 0);
+
+  mark = ixs_arena_save(&bounds.query_arena);
+  active_overwrite = ixs_arena_alloc(
+      &bounds.query_arena, 16u * sizeof(bounds_query_key), sizeof(void *));
+  cache_overwrite =
+      ixs_arena_alloc(&bounds.query_arena,
+                      256u * sizeof(bounds_query_cache_entry), sizeof(void *));
+  CHECK(active_overwrite && cache_overwrite);
+  if (active_overwrite)
+    memset(active_overwrite, 0, 16u * sizeof(bounds_query_key));
+  if (cache_overwrite)
+    memset(cache_overwrite, 0, 256u * sizeof(bounds_query_cache_entry));
+  CHECK(ixs_bounds_check_defined(&bounds, reciprocal) == IXS_CHECK_UNKNOWN);
+  ixs_bounds_query_stats(&bounds, &visits_after, NULL, NULL, NULL, NULL, NULL,
+                         NULL);
+  CHECK(visits_after == visits_before);
+  ixs_arena_restore(&bounds.query_arena, mark);
+
+  ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+
+  CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
+  bounds.ctx = ctx;
+  CHECK(ixs_bounds_query_hold_begin(&bounds, root, &held) && held);
+  ixs_arena_set_fail_after(&bounds.query_arena, 0);
+  CHECK(ixs_bounds_check_integer_domain(&bounds, guarded) == IXS_ALGEBRA_OOM);
+  CHECK(!bounds.oom && ixs_bounds_query_transport_clean(&bounds));
+  ixs_arena_set_fail_after(&bounds.query_arena, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_bounds_check_integer_domain(&bounds, guarded) == IXS_ALGEBRA_MATCH);
+  ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
   ixs_ctx_destroy(ctx);
 }
 
@@ -1631,21 +1677,21 @@ static void test_bounds_query_hold_grows_and_unwinds(void) {
     entered = false;
   }
   CHECK(!entered && held_count == 1024u && !bounds.oom);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &limit_blocks, &active_count, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, &limit_blocks,
+                         &active_count, &nesting);
   CHECK(limit_blocks == 0 && active_count == 0 && nesting == held_count);
   while (held_count > 0) {
     ixs_bounds_query_hold_end(&bounds);
     held_count--;
   }
   CHECK(bounds.query_tracking_depth == 0);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &limit_blocks, &active_count, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, &limit_blocks,
+                         &active_count, &nesting);
   CHECK(active_count == 0 && nesting == 0);
 
   CHECK(ixs_bounds_query_hold_begin(&bounds, root, &entered) && entered);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &limit_blocks, NULL, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, &limit_blocks, NULL,
+                         &nesting);
   CHECK(limit_blocks == 0 && nesting == 1u);
   ixs_bounds_query_hold_end(&bounds);
   ixs_bounds_destroy(&bounds);
@@ -1685,7 +1731,7 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
   CHECK(ixs_bounds_add_assumption(&bounds, congruence));
   CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
   CHECK(ixs_relation_algebra_edge_count(&bounds.relations) != 0);
-  /* Contextless ownership keeps the query cache in query_arena.  The
+  /* Contextless ownership keeps the central cache in query_state_arena. The
    * expression context is needed only by structural congruence queries and
    * is installed after assumption ingestion so their scratch storage stays
    * independent. */
@@ -1708,13 +1754,14 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
-  ixs_arena_set_fail_after(&bounds.query_arena, 0);
+  ixs_arena_set_fail_after(&bounds.query_state_arena, 0);
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
   CHECK(!ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue));
   CHECK(bounds.oom);
   ixs_bounds_query_hold_end(&bounds);
   held = false;
-  ixs_arena_set_fail_after(&bounds.query_arena, IXS_ARENA_FAILURE_DISABLED);
+  ixs_arena_set_fail_after(&bounds.query_state_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
   bounds.oom = false;
   CHECK(ixs_bounds_query_hold_begin(&bounds, expr, &held) && held);
   CHECK(ixs_bounds_known_residue_probe(&bounds, expr, 8, &residue) &&
@@ -1747,8 +1794,8 @@ static void test_bounds_query_transport_poison_and_residue_retry(void) {
   CHECK(ixs_bounds_query_transport_probe(
       &bounds, expr, IXS_BOUNDS_TEST_TRANSPORT_VALUE, &observed));
   CHECK(observed == IXS_BOUNDS_TEST_TRANSPORT_VALUE);
-  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&bounds, NULL, NULL, NULL, NULL, NULL, &active_count,
+                         &nesting);
   CHECK(bounds.query_tracking_depth == 0 && active_count == 0 && nesting == 0);
 
   ixs_bounds_destroy(&bounds);
@@ -1762,8 +1809,8 @@ static void check_nested_query_tracking_clean(ixs_ctx *ctx, ixs_facts *facts) {
   size_t nesting;
   CHECK(ctx->bounds_query_state != NULL && facts->bounds.query_state != NULL);
   CHECK(facts->bounds.query_tracking_depth == 0);
-  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         NULL, &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL,
+                         &active_count, &nesting);
   CHECK(active_count == 0 && nesting == 0);
 }
 
@@ -1886,8 +1933,8 @@ static void test_bounds_query_cache_rejects_stack_probes(void) {
   CHECK(test_ixs_range_facts(facts, root, &range));
   CHECK(range.has_lower && range.lower_p == 5 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 5 && range.upper_q == 1);
-  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         NULL, &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL,
+                         &active_count, &nesting);
   CHECK(active_count == 0 && nesting == 0);
 
   ixs_ctx_destroy(ctx);
@@ -2464,8 +2511,8 @@ static void test_bounds_check_wave_radix_floor_sums(void) {
   CHECK(ixs_facts_assume_pred(facts, domain));
   CHECK(test_ixs_check_facts(facts, asmbuf_query) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_facts(facts, asmbuf_query) == IXS_CHECK_TRUE);
-  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         NULL, &active_count, &nesting);
+  ixs_bounds_query_stats(&facts->bounds, NULL, NULL, NULL, NULL, NULL,
+                         &active_count, &nesting);
   CHECK(facts->bounds.query_tracking_depth == 0 && active_count == 0 &&
         nesting == 0);
 
@@ -2474,8 +2521,8 @@ static void test_bounds_check_wave_radix_floor_sums(void) {
   CHECK(test_ixs_check_facts(oom_facts, asmbuf_query) == IXS_CHECK_UNKNOWN);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   ixs_ctx_clear_errors(ctx);
-  ixs_bounds_query_stats(&oom_facts->bounds, NULL, NULL, NULL, NULL, NULL, NULL,
-                         NULL, &active_count, &nesting);
+  ixs_bounds_query_stats(&oom_facts->bounds, NULL, NULL, NULL, NULL, NULL,
+                         &active_count, &nesting);
   CHECK(oom_facts->bounds.query_tracking_depth == 0 && active_count == 0 &&
         nesting == 0);
   CHECK(test_ixs_check_facts(oom_facts, asmbuf_query) == IXS_CHECK_TRUE);
@@ -11095,8 +11142,8 @@ static void test_public_facts_closed_batch_contract(void) {
   CHECK(ctx->bounds_query_state != NULL);
   observed = nested_rejected->bounds;
   observed.query_state = ctx->bounds_query_state;
-  ixs_bounds_query_stats(&observed, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                         &active_count, &nesting);
+  ixs_bounds_query_stats(&observed, NULL, NULL, NULL, NULL, NULL, &active_count,
+                         &nesting);
   CHECK(observed.query_tracking_depth == 0 && active_count == 0 &&
         nesting == 0);
 
@@ -11284,12 +11331,16 @@ static void test_fact_query_arena_session_teardown(void) {
         first->bounds.query_arena.spare != NULL);
   CHECK(second->bounds.query_arena.current != NULL ||
         second->bounds.query_arena.spare != NULL);
+  CHECK(first->bounds.query_state_arena.current == NULL &&
+        second->bounds.query_state_arena.current == NULL);
 
   ixs_session_reset(&session);
   CHECK(first->impl == NULL && first->epoch == 0 &&
+        first->bounds.query_state_arena.current == NULL &&
         first->bounds.query_arena.current == NULL &&
         first->bounds.query_arena.spare == NULL);
   CHECK(second->impl == NULL && second->epoch == 0 &&
+        second->bounds.query_state_arena.current == NULL &&
         second->bounds.query_arena.current == NULL &&
         second->bounds.query_arena.spare == NULL);
   result = (ixs_check_predicate_facts)(first, pred);
@@ -11301,9 +11352,11 @@ static void test_fact_query_arena_session_teardown(void) {
   CHECK(result == IXS_CHECK_UNKNOWN);
   CHECK(after_reset->bounds.query_arena.current != NULL ||
         after_reset->bounds.query_arena.spare != NULL);
+  CHECK(after_reset->bounds.query_state_arena.current == NULL);
 
   ixs_session_destroy(&session);
   CHECK(after_reset->impl == NULL && after_reset->epoch == 0 &&
+        after_reset->bounds.query_state_arena.current == NULL &&
         after_reset->bounds.query_arena.current == NULL &&
         after_reset->bounds.query_arena.spare == NULL);
   result = (ixs_check_predicate_facts)(after_reset, pred);
@@ -11730,6 +11783,7 @@ int main(void) {
   test_bounds_flat_piecewise_keeps_case_limit();
   test_bounds_query_state_lazy_oom_and_lifecycle();
   test_bounds_contextless_query_arena_lifecycle_and_fork();
+  test_contextless_query_state_survives_transient_restore();
   test_bounds_query_hold_grows_and_unwinds();
   test_bounds_query_transport_poison_and_residue_retry();
   test_nested_piecewise_public_query_tracking();

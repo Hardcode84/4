@@ -498,6 +498,7 @@ IXS_STATIC void *ixs_arena_grow(ixs_arena *a, void *ptr, size_t old_size,
  */
 #include "bounds.h"
 #include "additive_row.h"
+#include "bounds_query.h"
 #include "division_algebra.h"
 #include "expand.h"
 #include "low_bits_algebra.h"
@@ -588,8 +589,6 @@ typedef struct {
 #define BOUNDS_CACHE_CAP 32u
 #define BOUNDS_CACHE_DISABLED ((size_t)-1)
 #define FACT_WORK_INIT_CAP 64u
-#define BOUNDS_QUERY_ACTIVE_INIT_CAP 16u
-#define BOUNDS_QUERY_CACHE_INIT_CAP 256u
 
 /* lhs - rhs <= offset, equivalently the directed edge rhs -> lhs. Edge
  * objects are immutable after publication. Variable indices remain valid
@@ -658,49 +657,6 @@ typedef enum {
   BOUNDS_EQUALITY_RECORD_OOM
 } bounds_equality_record_status;
 
-typedef enum {
-  BOUNDS_QUERY_EMPTY,
-  BOUNDS_QUERY_INTERVAL,
-  BOUNDS_QUERY_BITFACTS,
-  BOUNDS_QUERY_RESIDUE,
-  BOUNDS_QUERY_STRIDE
-} bounds_query_kind;
-
-/* VALUE and NO_FACT are semantic outcomes.  LIMITED, INVALID, and OOM are
- * transport failures: once observed they poison the whole current query
- * generation, so no parent can publish or reuse a partial semantic miss. */
-typedef enum {
-  BOUNDS_QUERY_OUTCOME_PENDING,
-  BOUNDS_QUERY_OUTCOME_VALUE,
-  BOUNDS_QUERY_OUTCOME_NO_FACT,
-  BOUNDS_QUERY_OUTCOME_CYCLE,
-  BOUNDS_QUERY_OUTCOME_LIMITED,
-  BOUNDS_QUERY_OUTCOME_INVALID,
-  BOUNDS_QUERY_OUTCOME_OOM
-} bounds_query_outcome;
-
-typedef struct {
-  bounds_query_kind kind;
-  uint64_t owner;
-  ixs_node *expr;
-  uint64_t argument;
-  bool equality_disabled;
-} bounds_query_key;
-
-typedef struct {
-  bounds_query_key key;
-  uint64_t generation;
-  bounds_query_outcome outcome;
-  bool complete;
-  bool success;
-  union {
-    ixs_interval interval;
-    ixs_bitfacts bitfacts;
-    uint64_t residue;
-    uint64_t stride;
-  } result;
-} bounds_query_cache_entry;
-
 typedef struct {
   size_t endpoint_index;
   size_t defined_component;
@@ -716,50 +672,6 @@ typedef struct {
   bool defined_without_equality_complete;
   bool occupied;
 } bounds_equality_projection_cache_entry;
-
-struct ixs_bounds_query_state {
-  ixs_arena *arena;
-  bounds_query_key *active;
-  bounds_query_cache_entry *cache;
-  size_t active_count;
-  size_t active_capacity;
-  size_t cache_count;
-  size_t cache_capacity;
-  size_t nesting;
-  size_t visits;
-  size_t stride_visits;
-  size_t range_pw_case_visits;
-  size_t range_pw_limit_blocks;
-  size_t cache_hits;
-  size_t cycle_blocks;
-  size_t limit_blocks;
-  size_t invalid_blocks;
-  size_t equality_walks;
-  size_t equality_endpoint_visits;
-  size_t equality_edge_visits;
-  size_t equality_defined_checks;
-  size_t equality_intrinsic_evaluations;
-  bool range_pw_budget_armed;
-  bounds_query_outcome transport_outcome;
-  uint64_t generation;
-  uint64_t next_owner;
-};
-
-typedef enum {
-  BOUNDS_QUERY_ENTER_STARTED,
-  BOUNDS_QUERY_ENTER_CACHED,
-  BOUNDS_QUERY_ENTER_CYCLE,
-  BOUNDS_QUERY_ENTER_LIMIT,
-  BOUNDS_QUERY_ENTER_INVALID,
-  BOUNDS_QUERY_ENTER_OOM
-} bounds_query_enter_result;
-
-typedef struct {
-  ixs_bounds *bounds;
-  ixs_bounds_query_state *state;
-  bounds_query_key key;
-  bool active;
-} bounds_query_scope;
 
 static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
                                                const char *second);
@@ -797,370 +709,6 @@ bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
                                  int64_t *delta);
 static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
                                            ixs_node *rhs, int64_t *delta);
-
-static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
-  return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
-         lhs.expr == rhs.expr && lhs.argument == rhs.argument &&
-         lhs.equality_disabled == rhs.equality_disabled;
-}
-
-static void bounds_query_reset(ixs_bounds_query_state *state) {
-  assert(state->active_count == 0);
-  state->active_count = 0;
-  state->visits = 0;
-  state->stride_visits = 0;
-  state->range_pw_case_visits = 0;
-  state->range_pw_limit_blocks = 0;
-  state->cache_hits = 0;
-  state->cycle_blocks = 0;
-  state->limit_blocks = 0;
-  state->invalid_blocks = 0;
-  state->equality_walks = 0;
-  state->equality_endpoint_visits = 0;
-  state->equality_edge_visits = 0;
-  state->equality_defined_checks = 0;
-  state->equality_intrinsic_evaluations = 0;
-  state->range_pw_budget_armed = false;
-  state->transport_outcome = BOUNDS_QUERY_OUTCOME_PENDING;
-  state->cache_count = 0;
-  state->generation++;
-  if (state->generation == 0) {
-    if (state->cache)
-      memset(state->cache, 0, state->cache_capacity * sizeof(*state->cache));
-    state->generation = 1;
-  }
-}
-
-static unsigned bounds_query_transport_rank(bounds_query_outcome outcome) {
-  switch (outcome) {
-  case BOUNDS_QUERY_OUTCOME_LIMITED:
-    return 1u;
-  case BOUNDS_QUERY_OUTCOME_OOM:
-    return 2u;
-  case BOUNDS_QUERY_OUTCOME_INVALID:
-    return 3u;
-  default:
-    return 0u;
-  }
-}
-
-static void bounds_query_note_transport(ixs_bounds_query_state *state,
-                                        bounds_query_outcome outcome) {
-  if (state && bounds_query_transport_rank(outcome) >
-                   bounds_query_transport_rank(state->transport_outcome))
-    state->transport_outcome = outcome;
-}
-
-static void bounds_query_note_limit(ixs_bounds_query_state *state) {
-  if (!state)
-    return;
-  if (state->limit_blocks != SIZE_MAX)
-    state->limit_blocks++;
-  bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_LIMITED);
-}
-
-static void bounds_query_note_invalid(ixs_bounds_query_state *state) {
-  if (!state)
-    return;
-  if (state->invalid_blocks != SIZE_MAX)
-    state->invalid_blocks++;
-  bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_INVALID);
-}
-
-static bool bounds_query_limited_since(const ixs_bounds *bounds,
-                                       size_t limit_blocks) {
-  return bounds && bounds->query_state &&
-         (limit_blocks == SIZE_MAX ||
-          bounds->query_state->limit_blocks != limit_blocks);
-}
-
-static bool bounds_query_invalid_since(const ixs_bounds *bounds,
-                                       size_t invalid_blocks) {
-  return bounds && bounds->query_state &&
-         (invalid_blocks == SIZE_MAX ||
-          bounds->query_state->invalid_blocks != invalid_blocks);
-}
-
-static void bounds_query_counter_increment(size_t *counter) {
-  if (*counter != SIZE_MAX)
-    (*counter)++;
-}
-
-static uint64_t bounds_query_new_owner(ixs_bounds_query_state *state) {
-  /* A generation admits only finitely many visits/nested holds, so owner reuse
-   * within one generation would require more than 2^64 bounded operations.
-   * Generation wrap separately clears every memo slot in bounds_query_reset. */
-  state->next_owner++;
-  if (state->next_owner == 0)
-    state->next_owner++;
-  return state->next_owner;
-}
-
-static bool bounds_query_ensure(ixs_bounds *b) {
-  ixs_bounds_query_state *state;
-  ixs_arena *arena;
-  if (!b || b->oom)
-    return false;
-  if (b->query_state)
-    return true;
-  if (b->store_ctx && b->store_ctx->bounds_query_state) {
-    state = b->store_ctx->bounds_query_state;
-  } else if (b->store_ctx) {
-    state =
-        ixs_arena_alloc(&b->store_ctx->arena, sizeof(*state), sizeof(void *));
-  } else {
-    state = ixs_arena_alloc(&b->query_arena, sizeof(*state), sizeof(void *));
-  }
-  if (!state) {
-    b->oom = true;
-    return false;
-  }
-  if (!b->store_ctx || !b->store_ctx->bounds_query_state) {
-    memset(state, 0, sizeof(*state));
-    arena = b->store_ctx ? &b->store_ctx->arena : &b->query_arena;
-    state->arena = arena;
-    state->next_owner = 1;
-    if (b->store_ctx)
-      b->store_ctx->bounds_query_state = state;
-  } else {
-    (void)bounds_query_new_owner(state);
-  }
-  b->query_state = state;
-  b->query_owner = state->next_owner;
-  b->query_state_owner = !b->store_ctx;
-  b->query_state_borrowed = false;
-  return true;
-}
-
-static void bounds_query_refresh_owner(ixs_bounds *b) {
-  if (!b || !b->query_state)
-    return;
-  b->query_owner = bounds_query_new_owner(b->query_state);
-}
-
-static bool bounds_query_is_tracking(const ixs_bounds *b) {
-  return b && (b->query_tracking_depth != 0 || b->query_state_borrowed);
-}
-
-static ixs_bounds_transport_status
-bounds_query_transport_status(const ixs_bounds *b) {
-  bounds_query_outcome outcome =
-      b && bounds_query_is_tracking(b) && b->query_state
-          ? b->query_state->transport_outcome
-          : BOUNDS_QUERY_OUTCOME_PENDING;
-  if (!b || b->contradiction || outcome == BOUNDS_QUERY_OUTCOME_INVALID)
-    return IXS_BOUNDS_TRANSPORT_INVALID;
-  if (b->oom || outcome == BOUNDS_QUERY_OUTCOME_OOM)
-    return IXS_BOUNDS_TRANSPORT_OOM;
-  if (outcome == BOUNDS_QUERY_OUTCOME_LIMITED)
-    return IXS_BOUNDS_TRANSPORT_LIMITED;
-  return IXS_BOUNDS_TRANSPORT_CLEAN;
-}
-
-IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b) {
-  return bounds_query_transport_status(b) == IXS_BOUNDS_TRANSPORT_CLEAN;
-}
-
-IXS_STATIC ixs_bounds_transport_snapshot
-ixs_bounds_query_transport_snapshot(const ixs_bounds *b) {
-  ixs_bounds_transport_snapshot result;
-  result.limit_blocks = b && b->query_state ? b->query_state->limit_blocks : 0;
-  result.invalid_blocks =
-      b && b->query_state ? b->query_state->invalid_blocks : 0;
-  result.generation = b && b->query_state ? b->query_state->generation : 0;
-  result.oom = b && b->oom;
-  result.inherited = bounds_query_transport_status(b);
-  return result;
-}
-
-IXS_STATIC ixs_bounds_transport_status ixs_bounds_query_transport_since(
-    const ixs_bounds *b, ixs_bounds_transport_snapshot snapshot) {
-  bool new_generation =
-      b && b->query_state && b->query_state->generation != snapshot.generation;
-  if (!b || b->contradiction ||
-      snapshot.inherited == IXS_BOUNDS_TRANSPORT_INVALID ||
-      (b->query_state && (new_generation ? b->query_state->invalid_blocks != 0
-                                         : b->query_state->invalid_blocks !=
-                                               snapshot.invalid_blocks)))
-    return IXS_BOUNDS_TRANSPORT_INVALID;
-  if ((!snapshot.oom && b->oom) ||
-      snapshot.inherited == IXS_BOUNDS_TRANSPORT_OOM)
-    return IXS_BOUNDS_TRANSPORT_OOM;
-  if (snapshot.inherited == IXS_BOUNDS_TRANSPORT_LIMITED ||
-      (b->query_state && (new_generation ? b->query_state->limit_blocks != 0
-                                         : b->query_state->limit_blocks !=
-                                               snapshot.limit_blocks)))
-    return IXS_BOUNDS_TRANSPORT_LIMITED;
-  return IXS_BOUNDS_TRANSPORT_CLEAN;
-}
-
-static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
-                                             const ixs_node *root) {
-  return b && (bounds_query_is_tracking(b) ||
-               ixs_node_contains_nested_piecewise(root) ||
-               ixs_relation_algebra_edge_count(&b->relations) != 0);
-}
-
-static const ixs_node *bounds_query_select_root(const ixs_bounds *b,
-                                                ixs_node *const *nodes,
-                                                size_t nnodes) {
-  size_t i;
-  if (!nodes || nnodes == 0)
-    return NULL;
-  if (bounds_query_is_tracking(b))
-    return nodes[0];
-  if (b && ixs_relation_algebra_edge_count(&b->relations) != 0)
-    return nodes[0];
-  for (i = 0; i < nnodes; i++) {
-    size_t endpoint_index;
-    if (ixs_node_contains_nested_piecewise(nodes[i]) ||
-        (b && ixs_relation_algebra_edge_count(&b->relations) != 0 &&
-         bounds_find_equality_endpoint(b, nodes[i], &endpoint_index)))
-      return nodes[i];
-  }
-  return nodes[0];
-}
-
-IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
-                                            bool *entered) {
-  ixs_bounds_query_state *state;
-  assert(entered != NULL);
-  *entered = false;
-  if (!bounds_query_root_needs_tracking(b, root))
-    return true;
-  if (!bounds_query_ensure(b))
-    return false;
-  state = b->query_state;
-  if (state->nesting == 0) {
-    bounds_query_reset(state);
-    state->range_pw_budget_armed = ixs_node_contains_nested_piecewise(root);
-  } else if (ixs_node_contains_nested_piecewise(root)) {
-    state->range_pw_budget_armed = true;
-  }
-  if (state->nesting == SIZE_MAX || b->query_tracking_depth == SIZE_MAX) {
-    b->oom = true;
-    return false;
-  }
-  state->nesting++;
-  b->query_tracking_depth++;
-  *entered = true;
-  return true;
-}
-
-IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b) {
-  ixs_bounds_query_state *state;
-  assert(b != NULL && b->query_tracking_depth != 0);
-  state = b->query_state;
-  assert(state != NULL && state->nesting != 0);
-  b->query_tracking_depth--;
-  state->nesting--;
-}
-
-static bool bounds_query_grow_active(ixs_bounds *b,
-                                     ixs_bounds_query_state *state) {
-  bounds_query_key *grown;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-
-  if (state->active_count < state->active_capacity)
-    return true;
-  capacity = state->active_capacity ? state->active_capacity * 2u
-                                    : BOUNDS_QUERY_ACTIVE_INIT_CAP;
-  if (capacity < state->active_capacity ||
-      state->active_capacity > SIZE_MAX / sizeof(*state->active) ||
-      capacity > SIZE_MAX / sizeof(*state->active)) {
-    b->oom = true;
-    return false;
-  }
-  old_bytes = state->active_capacity * sizeof(*state->active);
-  new_bytes = capacity * sizeof(*state->active);
-  grown = ixs_arena_grow(state->arena, state->active, old_bytes, new_bytes,
-                         sizeof(void *));
-  if (!grown) {
-    b->oom = true;
-    return false;
-  }
-  state->active = grown;
-  state->active_capacity = capacity;
-  return true;
-}
-
-static size_t bounds_query_key_hash(bounds_query_key key) {
-  uint64_t mixed = key.owner ^ key.argument ^ ((uint64_t)key.kind << 56);
-  if (key.equality_disabled)
-    mixed ^= UINT64_C(0x9e3779b97f4a7c15);
-  mixed ^= (uint64_t)((uintptr_t)key.expr >> 3);
-  mixed ^= mixed >> 33;
-  mixed *= UINT64_C(0xff51afd7ed558ccd);
-  mixed ^= mixed >> 33;
-  return (size_t)mixed;
-}
-
-static bounds_query_cache_entry *
-bounds_query_cache_find(ixs_bounds_query_state *state, bounds_query_key key,
-                        bool *found) {
-  size_t slot;
-  if (!state->cache_capacity) {
-    *found = false;
-    return NULL;
-  }
-  slot = bounds_query_key_hash(key) & (state->cache_capacity - 1u);
-  while (state->cache[slot].generation == state->generation) {
-    if (bounds_query_key_equal(state->cache[slot].key, key)) {
-      *found = true;
-      return &state->cache[slot];
-    }
-    slot = (slot + 1u) & (state->cache_capacity - 1u);
-  }
-  *found = false;
-  return &state->cache[slot];
-}
-
-static bool bounds_query_grow_cache(ixs_bounds *b,
-                                    ixs_bounds_query_state *state) {
-  bounds_query_cache_entry *grown;
-  size_t capacity;
-  size_t bytes;
-  size_t i;
-
-  capacity = state->cache_capacity ? state->cache_capacity * 2u
-                                   : BOUNDS_QUERY_CACHE_INIT_CAP;
-  if (capacity < state->cache_capacity ||
-      capacity > SIZE_MAX / sizeof(*state->cache)) {
-    b->oom = true;
-    return false;
-  }
-  bytes = capacity * sizeof(*state->cache);
-  grown = ixs_arena_alloc(state->arena, bytes, sizeof(void *));
-  if (!grown) {
-    b->oom = true;
-    return false;
-  }
-  memset(grown, 0, bytes);
-  for (i = 0; i < state->cache_capacity; i++) {
-    bounds_query_cache_entry entry = state->cache[i];
-    size_t slot;
-    if (entry.generation != state->generation)
-      continue;
-    slot = bounds_query_key_hash(entry.key) & (capacity - 1u);
-    while (grown[slot].generation == state->generation)
-      slot = (slot + 1u) & (capacity - 1u);
-    grown[slot] = entry;
-  }
-  state->cache = grown;
-  state->cache_capacity = capacity;
-  return true;
-}
-
-static bool bounds_query_prepare_cache_insert(ixs_bounds *b,
-                                              ixs_bounds_query_state *state) {
-  if (!state->cache_capacity ||
-      state->cache_count + 1u >
-          state->cache_capacity - state->cache_capacity / 4u)
-    return bounds_query_grow_cache(b, state);
-  return true;
-}
 
 static size_t bounds_equality_projection_cache_hash(size_t endpoint_index) {
   uint64_t mixed = (uint64_t)endpoint_index;
@@ -1285,272 +833,6 @@ static bool bounds_equality_projection_cache_reserve(ixs_bounds *b,
   return true;
 }
 
-static bounds_query_enter_result
-bounds_query_begin(ixs_bounds *b, bounds_query_kind kind, ixs_node *expr,
-                   uint64_t argument, bounds_query_scope *scope,
-                   bounds_query_cache_entry **cached) {
-  ixs_bounds_query_state *state;
-  bounds_query_key key;
-  bounds_query_cache_entry *entry;
-  bool found;
-
-  memset(scope, 0, sizeof(*scope));
-  *cached = NULL;
-  if (!b || !expr || (expr->properties & IXS_NODE_PROPERTY_VALID) == 0) {
-    if (b)
-      bounds_query_note_invalid(b->query_state);
-    return BOUNDS_QUERY_ENTER_INVALID;
-  }
-  if (!bounds_query_ensure(b)) {
-    bounds_query_note_transport(b->query_state, BOUNDS_QUERY_OUTCOME_OOM);
-    return BOUNDS_QUERY_ENTER_OOM;
-  }
-  state = b->query_state;
-  if (state->nesting == 0)
-    bounds_query_reset(state);
-  if (b->oom)
-    bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_OOM);
-  switch (state->transport_outcome) {
-  case BOUNDS_QUERY_OUTCOME_LIMITED:
-    return BOUNDS_QUERY_ENTER_LIMIT;
-  case BOUNDS_QUERY_OUTCOME_INVALID:
-    return BOUNDS_QUERY_ENTER_INVALID;
-  case BOUNDS_QUERY_OUTCOME_OOM:
-    return BOUNDS_QUERY_ENTER_OOM;
-  default:
-    break;
-  }
-  key.kind = kind;
-  key.owner = b->query_owner;
-  key.expr = expr;
-  key.argument = argument;
-  key.equality_disabled = b->equality_disabled_depth != 0;
-  entry = bounds_query_cache_find(state, key, &found);
-  if (found) {
-    /* STARTED entries remain incomplete until their LIFO scope finishes, so
-     * an incomplete current-generation entry is exactly an active cycle.
-     * This keeps the hot-path recursion guard expected O(1); the active vector
-     * exists only for finish-order assertions and diagnostics. */
-    if (!entry->complete) {
-      bounds_query_counter_increment(&state->cycle_blocks);
-      return BOUNDS_QUERY_ENTER_CYCLE;
-    }
-    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE ||
-        entry->outcome == BOUNDS_QUERY_OUTCOME_NO_FACT) {
-      bounds_query_counter_increment(&state->cache_hits);
-      *cached = entry;
-      return BOUNDS_QUERY_ENTER_CACHED;
-    }
-  }
-  if (state->nesting == SIZE_MAX || state->visits == SIZE_MAX) {
-    b->oom = true;
-    bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_OOM);
-    return BOUNDS_QUERY_ENTER_OOM;
-  }
-  state->visits++;
-  if (kind == BOUNDS_QUERY_STRIDE)
-    state->stride_visits++;
-  if (!bounds_query_grow_active(b, state)) {
-    bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_OOM);
-    return BOUNDS_QUERY_ENTER_OOM;
-  }
-  if (!found) {
-    if (!bounds_query_prepare_cache_insert(b, state)) {
-      bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_OOM);
-      return BOUNDS_QUERY_ENTER_OOM;
-    }
-    entry = bounds_query_cache_find(state, key, &found);
-    assert(!found);
-    if (found) {
-      bounds_query_note_invalid(state);
-      return BOUNDS_QUERY_ENTER_INVALID;
-    }
-    state->cache_count++;
-  }
-  memset(entry, 0, sizeof(*entry));
-  entry->key = key;
-  entry->generation = state->generation;
-  entry->outcome = BOUNDS_QUERY_OUTCOME_PENDING;
-  state->active[state->active_count++] = key;
-  state->nesting++;
-  scope->bounds = b;
-  scope->state = state;
-  scope->key = key;
-  scope->active = true;
-  return BOUNDS_QUERY_ENTER_STARTED;
-}
-
-static bounds_query_cache_entry *bounds_query_finish(bounds_query_scope *scope,
-                                                     bool success) {
-  ixs_bounds_query_state *state;
-  bounds_query_cache_entry *entry;
-  bool found;
-  if (!scope || !scope->active)
-    return NULL;
-  state = scope->state;
-  assert(state->active_count != 0 &&
-         bounds_query_key_equal(state->active[state->active_count - 1u],
-                                scope->key));
-  entry = bounds_query_cache_find(state, scope->key, &found);
-  assert(found && entry && !entry->complete);
-  if (scope->bounds->oom)
-    bounds_query_note_transport(state, BOUNDS_QUERY_OUTCOME_OOM);
-  entry->complete = true;
-  entry->outcome =
-      state->transport_outcome == BOUNDS_QUERY_OUTCOME_PENDING
-          ? success ? BOUNDS_QUERY_OUTCOME_VALUE : BOUNDS_QUERY_OUTCOME_NO_FACT
-          : state->transport_outcome;
-  entry->success = entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE;
-  if (state->active_count != 0)
-    state->active_count--;
-  if (state->nesting != 0)
-    state->nesting--;
-  scope->active = false;
-  return entry;
-}
-
-#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
-                                       size_t *stride_visits,
-                                       size_t *range_pw_case_visits,
-                                       size_t *range_pw_limit_blocks,
-                                       size_t *cache_hits, size_t *cycle_blocks,
-                                       size_t *limit_blocks,
-                                       size_t *active_count, size_t *nesting) {
-  const ixs_bounds_query_state *state = b ? b->query_state : NULL;
-  if (visits)
-    *visits = state ? state->visits : 0;
-  if (stride_visits)
-    *stride_visits = state ? state->stride_visits : 0;
-  if (range_pw_case_visits)
-    *range_pw_case_visits = state ? state->range_pw_case_visits : 0;
-  if (range_pw_limit_blocks)
-    *range_pw_limit_blocks = state ? state->range_pw_limit_blocks : 0;
-  if (cache_hits)
-    *cache_hits = state ? state->cache_hits : 0;
-  if (cycle_blocks)
-    *cycle_blocks = state ? state->cycle_blocks : 0;
-  if (limit_blocks)
-    *limit_blocks = state ? state->limit_blocks : 0;
-  if (active_count)
-    *active_count = state ? state->active_count : 0;
-  if (nesting)
-    *nesting = state ? state->nesting : 0;
-}
-
-IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr) {
-  bounds_query_scope outer;
-  bounds_query_scope reentered;
-  bounds_query_cache_entry *cached;
-  bounds_query_enter_result outer_status;
-  bounds_query_enter_result reentered_status;
-  bool held = false;
-
-  if (!b || !expr || !ixs_bounds_query_hold_begin(b, expr, &held))
-    return false;
-  outer_status =
-      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, &outer, &cached);
-  if (outer_status != BOUNDS_QUERY_ENTER_STARTED)
-    goto cleanup;
-  reentered_status = bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0,
-                                        &reentered, &cached);
-  (void)bounds_query_finish(&outer, false);
-  if (held)
-    ixs_bounds_query_hold_end(b);
-  return reentered_status == BOUNDS_QUERY_ENTER_CYCLE;
-
-cleanup:
-  if (held)
-    ixs_bounds_query_hold_end(b);
-  return false;
-}
-
-IXS_STATIC bool
-ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
-                                 ixs_bounds_test_transport injected,
-                                 ixs_bounds_test_transport *observed) {
-  struct ixs_node_impl invalid_node;
-  bounds_query_scope outer;
-  bounds_query_scope invalid_scope;
-  bounds_query_cache_entry *cached = NULL;
-  bounds_query_cache_entry *entry = NULL;
-  bounds_query_enter_result enter;
-  bool held = false;
-  bool result = false;
-
-  if (!b || !expr || !observed ||
-      !ixs_bounds_query_hold_begin(b, expr, &held) || !held)
-    return false;
-  enter =
-      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, &outer, &cached);
-  if (enter != BOUNDS_QUERY_ENTER_STARTED)
-    goto cleanup;
-
-  switch (injected) {
-  case IXS_BOUNDS_TEST_TRANSPORT_VALUE:
-    break;
-  case IXS_BOUNDS_TEST_TRANSPORT_LIMITED:
-    bounds_query_note_limit(b->query_state);
-    break;
-  case IXS_BOUNDS_TEST_TRANSPORT_INVALID:
-    memset(&invalid_node, 0, sizeof(invalid_node));
-    invalid_node.tag = IXS_SYM;
-    enter = bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, &invalid_node, 0,
-                               &invalid_scope, &cached);
-    if (enter != BOUNDS_QUERY_ENTER_INVALID)
-      goto cleanup;
-    break;
-  default:
-    goto cleanup;
-  }
-
-  entry = bounds_query_finish(&outer, true);
-  if (!entry || !entry->complete)
-    goto cleanup;
-  switch (entry->outcome) {
-  case BOUNDS_QUERY_OUTCOME_VALUE:
-    *observed = IXS_BOUNDS_TEST_TRANSPORT_VALUE;
-    break;
-  case BOUNDS_QUERY_OUTCOME_LIMITED:
-    *observed = IXS_BOUNDS_TEST_TRANSPORT_LIMITED;
-    break;
-  case BOUNDS_QUERY_OUTCOME_INVALID:
-    *observed = IXS_BOUNDS_TEST_TRANSPORT_INVALID;
-    break;
-  default:
-    goto cleanup;
-  }
-  result = true;
-
-cleanup:
-  if (outer.active)
-    (void)bounds_query_finish(&outer, false);
-  if (held)
-    ixs_bounds_query_hold_end(b);
-  return result;
-}
-#endif
-
-static bool bounds_query_should_track(const ixs_bounds *b,
-                                      const ixs_node *expr) {
-  return bounds_query_is_tracking(b) && expr &&
-         (expr->properties & IXS_NODE_PROPERTY_VALID) != 0;
-}
-
-static bool bounds_query_take_range_visit(ixs_bounds *b,
-                                          const ixs_node *piecewise) {
-  ixs_bounds_query_state *state;
-  if (!bounds_query_is_tracking(b) || !b->query_state)
-    return true;
-  state = b->query_state;
-  if (ixs_node_contains_nested_piecewise(piecewise))
-    state->range_pw_budget_armed = true;
-  if (!state->range_pw_budget_armed)
-    return true;
-  bounds_query_counter_increment(&state->range_pw_case_visits);
-  return true;
-}
-
 static void bounds_empty_cache_invalidate(ixs_bounds *b) {
   if (b)
     b->empty_cache_valid = false;
@@ -1640,7 +922,7 @@ static bool bounds_cacheable_expr(ixs_node *expr) {
 }
 
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
-  ixs_arena_init(&b->query_arena, IXS_ARENA_DEFAULT_SIZE);
+  bounds_query_init(b);
   b->ctx = NULL;
   b->store_ctx = NULL;
   b->scratch = scratch;
@@ -1680,8 +962,6 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->empty_cache_valid = false;
   b->empty_cache_value = false;
   b->oom = false;
-  b->query_state = NULL;
-  b->query_owner = 0;
   b->equality_projection_cache = NULL;
   b->equality_projection_cache_count = 0;
   b->equality_projection_cache_capacity = 0;
@@ -1691,13 +971,10 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nmod_inverse_watchers = 0;
   b->mod_inverse_watcher_cap = 0;
   b->mod_inverse_watch_visits = 0;
-  b->query_tracking_depth = 0;
   b->equality_disabled_depth = 0;
   b->predicate_equivalence_depth = 0;
   b->exact_proof_call_depth = 0;
   b->interval_evaluating = false;
-  b->query_state_owner = false;
-  b->query_state_borrowed = false;
   b->equality_projection_cache_transient = true;
   b->semantic_changed = NULL;
   if (b->vars)
@@ -1716,41 +993,23 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
 
 static void bounds_projection_cache_reset_storage(ixs_bounds *b,
                                                   bool transient) {
-  assert(b != NULL);
-  assert(b->query_tracking_depth == 0);
-  assert(!b->query_state_owner && !b->query_state_borrowed);
-  ixs_arena_destroy_transient(&b->query_arena);
-  ixs_arena_init(&b->query_arena, IXS_ARENA_DEFAULT_SIZE);
+  bounds_query_reset_arena(b);
   b->equality_projection_cache = NULL;
   b->equality_projection_cache_count = 0;
   b->equality_projection_cache_capacity = 0;
   b->equality_projection_cache_transient = transient;
 }
 
-/* Context-owned query state lives in the context arena.  Contextless state
- * lives in this bounds object's dedicated arena, so scratch restores cannot
- * invalidate growable recursion and memo buffers. */
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
   if (!b)
     return;
-  assert(b->query_tracking_depth == 0);
-  assert(!b->query_state_borrowed ||
-         (b->query_state && b->query_state->nesting != 0));
-  assert(!b->query_state_owner ||
-         (b->query_state && b->query_state->arena == &b->query_arena &&
-          b->query_state->nesting == 0 && b->query_state->active_count == 0));
-  ixs_arena_destroy_transient(&b->query_arena);
-  b->query_state = NULL;
-  b->query_owner = 0;
+  bounds_query_destroy(b);
   b->equality_projection_cache = NULL;
   b->equality_projection_cache_count = 0;
   b->equality_projection_cache_capacity = 0;
-  b->query_tracking_depth = 0;
   b->equality_disabled_depth = 0;
   b->predicate_equivalence_depth = 0;
   b->exact_proof_call_depth = 0;
-  b->query_state_owner = false;
-  b->query_state_borrowed = false;
   b->equality_projection_cache_transient = false;
 }
 
@@ -1853,18 +1112,10 @@ static bool bounds_fork_expr_state(ixs_bounds *dst, const ixs_bounds *src) {
   return true;
 }
 
-static void bounds_query_assign_fork_owner(ixs_bounds *dst) {
-  if (!dst->query_state) {
-    dst->query_owner = 0;
-    return;
-  }
-  dst->query_owner = bounds_query_new_owner(dst->query_state);
-}
-
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   if (!dst || !src || src->oom)
     return false;
-  ixs_arena_init(&dst->query_arena, IXS_ARENA_DEFAULT_SIZE);
+  bounds_query_init(dst);
   dst->ctx = src->ctx;
   dst->store_ctx = src->store_ctx;
   dst->scratch = src->scratch;
@@ -1908,32 +1159,17 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->empty_cache_valid = false;
   dst->empty_cache_value = false;
   dst->oom = false;
-  /* A fork allocated from the source scratch cannot outlive that scratch.
-   * While a source hold is active, the same lifetime rule also keeps the
-   * source-owned query arena alive, so borrowing its guard/budget is safe.
-   * Outside an active hold the fork starts with no state and lazily acquires
-   * context-owned state or its own dedicated arena. */
-  assert(dst->scratch == src->scratch);
-  assert(!bounds_query_is_tracking(src) ||
-         (src->query_state && src->query_state->nesting != 0));
-  dst->query_state = bounds_query_is_tracking(src) ? src->query_state : NULL;
+  bounds_query_inherit_fork(dst, src);
   dst->equality_projection_cache = NULL;
   dst->equality_projection_cache_count = 0;
   dst->equality_projection_cache_capacity = 0;
-  dst->query_tracking_depth = 0;
   dst->equality_disabled_depth = src->equality_disabled_depth;
   /* A fork made by a nested query remains inside the source predicate probe;
    * inheriting the guard prevents the fork from reopening the same cycle. */
   dst->predicate_equivalence_depth = src->predicate_equivalence_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
   dst->interval_evaluating = false;
-  dst->query_state_owner = false;
-  dst->query_state_borrowed = dst->query_state != NULL;
   dst->equality_projection_cache_transient = true;
-  if (dst->query_state)
-    bounds_query_assign_fork_owner(dst);
-  else
-    dst->query_owner = 0;
   dst->semantic_changed = NULL;
   if (!bounds_fork_index_state(dst, src) ||
       !bounds_fork_mod_inverse_state(dst, src) ||
@@ -1951,7 +1187,7 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   return true;
 
 failed:
-  ixs_arena_destroy_transient(&dst->query_arena);
+  bounds_query_destroy(dst);
   return false;
 }
 
@@ -3722,7 +2958,7 @@ bounds_equality_require_defined(ixs_bounds *b, ixs_node *expr) {
   if (!defined_limited)
     return BOUNDS_EQUALITY_WALK_NONE;
   if (bounds_query_is_tracking(b))
-    bounds_query_note_limit(b->query_state);
+    bounds_query_note_limit(b);
   return BOUNDS_EQUALITY_WALK_LIMITED;
 }
 
@@ -3730,8 +2966,7 @@ static bounds_equality_walk_status
 bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
                           const bounds_equality_walk_entry *current,
                           const ixs_relation_edge **edge_ptr,
-                          bool require_defined,
-                          ixs_bounds_query_state *query_state) {
+                          bool require_defined) {
   const ixs_relation_edge *next;
   ixs_node *neighbor;
   size_t neighbor_endpoint;
@@ -3741,8 +2976,6 @@ bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
   bounds_equality_record_status record_status;
   bounds_equality_walk_status defined_status;
 
-  if (query_state)
-    bounds_query_counter_increment(&query_state->equality_edge_visits);
   if (ixs_relation_algebra_edge_neighbor(&b->relations, current->endpoint_index,
                                          *edge_ptr, &neighbor_endpoint, &step,
                                          &next) != IXS_RELATION_QUERY_FOUND ||
@@ -3760,7 +2993,7 @@ bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
       return defined_status;
   }
   if (!ixs_relation_offset_add(current->offset, step, &neighbor_offset)) {
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
     return BOUNDS_EQUALITY_WALK_INVALID;
   }
   record_status =
@@ -3768,7 +3001,7 @@ bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
   if (record_status == BOUNDS_EQUALITY_RECORD_OOM)
     return BOUNDS_EQUALITY_WALK_OOM;
   if (record_status == BOUNDS_EQUALITY_RECORD_CONFLICT) {
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
     return BOUNDS_EQUALITY_WALK_INVALID;
   }
   if (record_status == BOUNDS_EQUALITY_RECORD_INVALID)
@@ -3782,7 +3015,6 @@ static bounds_equality_walk_status
 bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
                                   bounds_equality_walk *walk,
                                   bool require_defined) {
-  ixs_bounds_query_state *query_state = NULL;
   size_t head = 0;
   size_t root_endpoint;
   bounds_equality_record_status record_status;
@@ -3793,10 +3025,6 @@ bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
   if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
       !bounds_find_equality_endpoint(b, expr, &root_endpoint))
     return BOUNDS_EQUALITY_WALK_NONE;
-  if (bounds_query_is_tracking(b)) {
-    query_state = b->query_state;
-    bounds_query_counter_increment(&query_state->equality_walks);
-  }
   if (require_defined) {
     status = bounds_equality_require_defined(b, expr);
     if (status != BOUNDS_EQUALITY_WALK_VALID)
@@ -3815,11 +3043,9 @@ bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
     bounds_equality_walk_entry current = walk->entries[head++];
     const ixs_relation_edge *edge =
         ixs_relation_algebra_first_edge(&b->relations, current.endpoint_index);
-    if (query_state)
-      bounds_query_counter_increment(&query_state->equality_endpoint_visits);
     while (edge) {
-      status = bounds_equality_walk_edge(b, walk, &current, &edge,
-                                         require_defined, query_state);
+      status =
+          bounds_equality_walk_edge(b, walk, &current, &edge, require_defined);
       if (status == BOUNDS_EQUALITY_WALK_NONE)
         continue;
       if (status != BOUNDS_EQUALITY_WALK_VALID)
@@ -3893,7 +3119,7 @@ bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
     if (!ixs_relation_offset_add(
             lhs_cached->defined_offset,
             ixs_relation_offset_negate(rhs_cached->defined_offset), offset)) {
-      bounds_query_note_invalid(b->query_state);
+      bounds_query_note_invalid(b);
       return BOUNDS_EQUALITY_WALK_INVALID;
     }
     return BOUNDS_EQUALITY_WALK_VALID;
@@ -5546,7 +4772,7 @@ bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, success);
-    if (entry && entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
       entry->result.bitfacts = bits;
     else
       success = false;
@@ -6547,9 +5773,9 @@ static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
                                 NULL);
   if (step == IXS_QUERY_WALK_OOM || b->oom) {
     b->oom = true;
-    bounds_query_note_transport(b->query_state, BOUNDS_QUERY_OUTCOME_OOM);
+    bounds_query_note_oom(b);
   } else if (step == IXS_QUERY_WALK_STOP) {
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
   } else {
     result = query.child_result;
   }
@@ -6607,8 +5833,9 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
   bounds_equality_walk_status status;
   bounds_equality_projection_cache_entry *cached;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(b);
   size_t endpoint_index;
-  size_t limit_blocks = b->query_state ? b->query_state->limit_blocks : 0u;
   size_t i;
 
   if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
@@ -6621,7 +5848,7 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
     return bounds_check_integer_valued_without_equality(b, expr);
   if (status != BOUNDS_EQUALITY_WALK_VALID) {
     if (status == BOUNDS_EQUALITY_WALK_INVALID)
-      bounds_query_note_invalid(b->query_state);
+      bounds_query_note_invalid(b);
     bounds_equality_walk_destroy(b, &walk);
     return IXS_CHECK_UNKNOWN;
   }
@@ -6632,9 +5859,6 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
   for (i = 0; i < walk.count; i++) {
     ixs_check_result current =
         bounds_check_integer_valued_without_equality(b, walk.entries[i].node);
-    if (bounds_query_is_tracking(b))
-      bounds_query_counter_increment(
-          &b->query_state->equality_intrinsic_evaluations);
     if (b->oom) {
       result = IXS_CHECK_UNKNOWN;
       break;
@@ -6647,7 +5871,7 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
       result = current;
     }
   }
-  if (bounds_query_limited_since(b, limit_blocks)) {
+  if (bounds_query_limited_since(b, transport)) {
     result = IXS_CHECK_UNKNOWN;
   } else if (!b->oom) {
     for (i = 0; i < walk.count; i++) {
@@ -7098,7 +6322,7 @@ static void bounds_residue_close(bounds_residue_query *query,
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, success);
-    if (entry && entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
       entry->result.residue = residue;
     else
       success = false;
@@ -7975,9 +7199,9 @@ static void bounds_note_truncating_range_status(ixs_bounds *b,
   if (status == IXS_ALGEBRA_OOM)
     b->oom = true;
   else if (status == IXS_ALGEBRA_INVALID)
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
   else if (status == IXS_ALGEBRA_LIMITED)
-    bounds_query_note_limit(b->query_state);
+    bounds_query_note_limit(b);
 }
 
 typedef struct {
@@ -8868,10 +8092,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       covered = true;
       break;
     }
-    if (!bounds_query_take_range_visit(b, expr)) {
-      failed = true;
-      break;
-    }
     if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
       failed = true;
       break;
@@ -9032,9 +8252,6 @@ bounds_equality_range_collect_peer(ixs_bounds *b,
   bounds_equality_projection_cache_entry *entry;
   int comparison;
 
-  if (bounds_query_is_tracking(b))
-    bounds_query_counter_increment(
-        &b->query_state->equality_intrinsic_evaluations);
   if (b->oom)
     return false;
   entry =
@@ -9051,7 +8268,7 @@ bounds_equality_range_collect_peer(ixs_bounds *b,
         !bounds_projection_bound_cmp(peer.lo_p, peer.lo_q, walk_entry->offset,
                                      state->lower.p, state->lower.q,
                                      state->lower.peer_offset, &comparison)) {
-      bounds_query_note_invalid(b->query_state);
+      bounds_query_note_invalid(b);
       return false;
     }
     if (!state->lower.present || comparison > 0) {
@@ -9066,7 +8283,7 @@ bounds_equality_range_collect_peer(ixs_bounds *b,
         !bounds_projection_bound_cmp(peer.hi_p, peer.hi_q, walk_entry->offset,
                                      state->upper.p, state->upper.q,
                                      state->upper.peer_offset, &comparison)) {
-      bounds_query_note_invalid(b->query_state);
+      bounds_query_note_invalid(b);
       return false;
     }
     if (!state->upper.present || comparison < 0) {
@@ -9101,7 +8318,7 @@ static void bounds_equality_range_validate(ixs_bounds *b,
                                    state->lower.peer_offset, state->upper.p,
                                    state->upper.q, state->upper.peer_offset,
                                    &comparison)) {
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
     state->publish = false;
     return;
   }
@@ -9153,8 +8370,9 @@ static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
                                        true,
                                        false};
   ixs_interval result;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(b);
   size_t endpoint_index;
-  size_t limit_blocks = b->query_state ? b->query_state->limit_blocks : 0u;
 
   if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
     return intrinsic;
@@ -9166,7 +8384,7 @@ static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
     return intrinsic;
   if (status != BOUNDS_EQUALITY_WALK_VALID) {
     if (status == BOUNDS_EQUALITY_WALK_INVALID)
-      bounds_query_note_invalid(b->query_state);
+      bounds_query_note_invalid(b);
     bounds_equality_walk_destroy(b, &walk);
     return ixs_interval_unknown();
   }
@@ -9175,7 +8393,7 @@ static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
     return ixs_interval_unknown();
   }
   bounds_equality_range_collect_peers(b, &walk, &state);
-  if (bounds_query_limited_since(b, limit_blocks))
+  if (bounds_query_limited_since(b, transport))
     state.publish = false;
   bounds_equality_range_validate(b, &state);
   result = bounds_equality_range_publish(b, &walk, endpoint_index, intrinsic,
@@ -9211,7 +8429,7 @@ static ixs_interval bounds_get_tracked_one(ixs_bounds *b, ixs_node *expr) {
     return ixs_interval_unknown();
   result = bounds_get_query_impl(b, expr);
   entry = bounds_query_finish(&scope, result.valid);
-  if (entry && entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+  if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
     entry->result.interval = result;
   else
     result = ixs_interval_unknown();
@@ -9288,7 +8506,7 @@ static void bounds_interval_close(bounds_interval_query *query,
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, result.valid);
-    if (entry && entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
       entry->result.interval = result;
     else
       result = ixs_interval_unknown();
@@ -10926,21 +10144,16 @@ static bool bounds_defined_cache_publish(ixs_bounds *b, ixs_node *expr,
 }
 
 typedef struct {
-  size_t limit_blocks;
+  ixs_bounds_transport_snapshot transport;
   size_t cycle_blocks;
-  size_t invalid_blocks;
   bool tracking;
 } bounds_defined_query_snapshot;
 
 static bounds_defined_query_snapshot
 bounds_defined_query_observe(ixs_bounds *b) {
   bounds_defined_query_snapshot snapshot;
-  snapshot.limit_blocks =
-      b && b->query_state ? b->query_state->limit_blocks : 0u;
-  snapshot.cycle_blocks =
-      b && b->query_state ? b->query_state->cycle_blocks : 0u;
-  snapshot.invalid_blocks =
-      b && b->query_state ? b->query_state->invalid_blocks : 0u;
+  snapshot.transport = ixs_bounds_query_transport_snapshot(b);
+  snapshot.cycle_blocks = bounds_query_cycle_count(b);
   snapshot.tracking = bounds_query_is_tracking(b);
   return snapshot;
 }
@@ -10953,15 +10166,15 @@ static bool bounds_defined_query_failed(ixs_bounds *b, defined_state *state,
   bool query_cycle;
   bool query_invalid;
   if (state->limited && snapshot.tracking)
-    bounds_query_note_limit(b->query_state);
+    bounds_query_note_limit(b);
   if (state->invalid && snapshot.tracking)
-    bounds_query_note_invalid(b->query_state);
+    bounds_query_note_invalid(b);
   query_limited = snapshot.tracking && result == IXS_CHECK_UNKNOWN &&
-                  bounds_query_limited_since(b, snapshot.limit_blocks);
-  query_cycle = snapshot.tracking && b->query_state &&
-                b->query_state->cycle_blocks != snapshot.cycle_blocks;
-  query_invalid = snapshot.tracking && b->query_state &&
-                  b->query_state->invalid_blocks != snapshot.invalid_blocks;
+                  bounds_query_limited_since(b, snapshot.transport);
+  query_cycle =
+      snapshot.tracking && bounds_query_cycle_count(b) != snapshot.cycle_blocks;
+  query_invalid =
+      snapshot.tracking && bounds_query_invalid_since(b, snapshot.transport);
   if (oom)
     *oom = state->oom || b->oom;
   if (limited)
@@ -10977,7 +10190,6 @@ static ixs_check_result bounds_check_defined_detail(ixs_bounds *b,
   defined_state state;
   bounds_defined_query_snapshot snapshot = bounds_defined_query_observe(b);
   ixs_check_result result;
-  size_t endpoint_index;
   if (oom)
     *oom = false;
   if (limited)
@@ -10989,9 +10201,6 @@ static ixs_check_result bounds_check_defined_detail(ixs_bounds *b,
     return IXS_CHECK_TRUE;
   if (bounds_defined_cache_lookup(b, expr, &result))
     return result;
-  if (snapshot.tracking && b->query_state &&
-      bounds_find_equality_endpoint(b, expr, &endpoint_index))
-    bounds_query_counter_increment(&b->query_state->equality_defined_checks);
   defined_state_init(&state, b->ctx, b);
   result = defined_eval(&state, b, expr, 0);
   if (bounds_defined_query_failed(b, &state, result, snapshot, oom, limited))
@@ -11415,9 +10624,7 @@ typedef struct {
   ixs_ctx *ctx;
   const char *query;
   ixs_bounds_query_state *query_state;
-  uint64_t generation;
-  size_t limit_blocks;
-  size_t invalid_blocks;
+  ixs_bounds_transport_snapshot transport;
   size_t nerrors;
   bool old_oom;
   bool tracking_entered;
@@ -11433,26 +10640,9 @@ static void facts_read_query_begin(facts_read_query_scope *scope,
   scope->ctx = ctx;
   scope->query = query;
   scope->old_oom = bounds->oom;
-  if (bounds_query_ensure(bounds)) {
-    ixs_bounds_query_state *state = bounds->query_state;
-    if (state->nesting == 0)
-      bounds_query_reset(state);
-    if (state->nesting == SIZE_MAX ||
-        bounds->query_tracking_depth == SIZE_MAX) {
-      bounds->oom = true;
-    } else {
-      state->nesting++;
-      bounds->query_tracking_depth++;
-      scope->tracking_entered = true;
-    }
-  }
+  (void)bounds_query_force_hold_begin(bounds, &scope->tracking_entered);
   scope->query_state = bounds->query_state;
-  scope->generation =
-      bounds->query_state ? bounds->query_state->generation : 0u;
-  scope->limit_blocks =
-      bounds->query_state ? bounds->query_state->limit_blocks : 0u;
-  scope->invalid_blocks =
-      bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
+  scope->transport = ixs_bounds_query_transport_snapshot(bounds);
   scope->nerrors = ctx ? ctx->nerrors : 0u;
   scope->active = true;
 }
@@ -11466,34 +10656,28 @@ typedef struct {
 static facts_read_query_observation
 facts_read_query_observe(facts_read_query_scope *scope) {
   facts_read_query_observation result = {false, false, false};
-  bounds_query_outcome transport = BOUNDS_QUERY_OUTCOME_PENDING;
-  size_t limit_baseline;
-  size_t invalid_baseline;
+  ixs_bounds_transport_status transport = IXS_BOUNDS_TRANSPORT_CLEAN;
+  ixs_bounds_transport_snapshot current =
+      ixs_bounds_query_transport_snapshot(scope->bounds);
   if (scope->bounds->query_state) {
     if (scope->tracking_entered && scope->query_state &&
         (scope->bounds->query_state != scope->query_state ||
-         scope->bounds->query_state->generation != scope->generation))
-      transport = BOUNDS_QUERY_OUTCOME_INVALID;
+         current.generation != scope->transport.generation))
+      transport = IXS_BOUNDS_TRANSPORT_INVALID;
     else
-      transport = scope->bounds->query_state->transport_outcome;
+      transport = bounds_query_state_transport(scope->bounds);
   }
   result.new_oom = !scope->old_oom && scope->bounds->oom;
+  result.limited = bounds_query_limited_since(scope->bounds, scope->transport);
+  result.invalid = bounds_query_invalid_since(scope->bounds, scope->transport);
   if (scope->bounds->query_state != scope->query_state ||
-      (scope->bounds->query_state &&
-       scope->bounds->query_state->generation != scope->generation)) {
-    limit_baseline = 0u;
-    invalid_baseline = 0u;
-  } else {
-    limit_baseline = scope->limit_blocks;
-    invalid_baseline = scope->invalid_blocks;
-  }
-  result.limited = bounds_query_limited_since(scope->bounds, limit_baseline);
-  result.invalid = bounds_query_invalid_since(scope->bounds, invalid_baseline);
-  if (transport == BOUNDS_QUERY_OUTCOME_LIMITED)
-    result.limited = true;
-  else if (transport == BOUNDS_QUERY_OUTCOME_INVALID)
+      current.generation != scope->transport.generation)
     result.invalid = true;
-  else if (transport == BOUNDS_QUERY_OUTCOME_OOM)
+  if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    result.limited = true;
+  else if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    result.invalid = true;
+  else if (transport == IXS_BOUNDS_TRANSPORT_OOM)
     result.new_oom = true;
   return result;
 }
@@ -11555,9 +10739,15 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
    * release that old workspace before overwriting its arena owner. */
   bounds_projection_cache_reset_storage(&facts->bounds, false);
   bounds_projection_cache_reset_storage(candidate, false);
+  assert(candidate->query_state_arena.current == NULL &&
+         candidate->query_state_arena.spare == NULL &&
+         candidate->query_state_arena.inline_chunk == NULL);
   assert(candidate->query_arena.current == NULL &&
          candidate->query_arena.spare == NULL &&
          candidate->query_arena.inline_chunk == NULL);
+  assert(facts->bounds.query_state_arena.current == NULL &&
+         facts->bounds.query_state_arena.spare == NULL &&
+         facts->bounds.query_state_arena.inline_chunk == NULL);
   assert(facts->bounds.query_arena.current == NULL &&
          facts->bounds.query_arena.spare == NULL &&
          facts->bounds.query_arena.inline_chunk == NULL);
@@ -12565,6 +11755,9 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
   bounds_projection_cache_reset_storage(&bounds, false);
   assert(bounds.store_ctx != NULL && bounds.query_tracking_depth == 0 &&
          !bounds.query_state_owner && !bounds.query_state_borrowed &&
+         bounds.query_state_arena.current == NULL &&
+         bounds.query_state_arena.spare == NULL &&
+         bounds.query_state_arena.inline_chunk == NULL &&
          bounds.query_arena.current == NULL &&
          bounds.query_arena.spare == NULL &&
          bounds.query_arena.inline_chunk == NULL);
@@ -13125,10 +12318,9 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   }
   if (!ok || (!old_oom && facts->bounds.oom)) {
     if (status == IXS_FACT_QUERY_COMPLETE)
-      status =
-          bounds_query_limited_since(&facts->bounds, read_scope.limit_blocks)
-              ? IXS_FACT_QUERY_LIMITED
-              : IXS_FACT_QUERY_OOM;
+      status = bounds_query_limited_since(&facts->bounds, read_scope.transport)
+                   ? IXS_FACT_QUERY_LIMITED
+                   : IXS_FACT_QUERY_OOM;
     bounds_cache_clear(&facts->bounds);
   } else {
     status = IXS_FACT_QUERY_COMPLETE;
@@ -13315,7 +12507,7 @@ static ixs_query_walk_step predicate_query_advance(void *state, void *top) {
       return IXS_QUERY_WALK_OOM;
     }
     if (entry->active) {
-      bounds_query_note_invalid(query->bounds->query_state);
+      bounds_query_note_invalid(query->bounds);
       return IXS_QUERY_WALK_STOP;
     }
     if (entry->complete) {
@@ -13330,7 +12522,7 @@ static ixs_query_walk_step predicate_query_advance(void *state, void *top) {
   completed = predicate_query_complete(query->bounds, frame);
   entry = ixs_query_node_memo_get(&query->memo, frame->node, false);
   if (!entry || !entry->active) {
-    bounds_query_note_invalid(query->bounds->query_state);
+    bounds_query_note_invalid(query->bounds);
     return IXS_QUERY_WALK_STOP;
   }
   entry->active = false;
@@ -13398,7 +12590,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   const char **saved_errors;
   size_t saved_nerrors;
   size_t saved_errors_cap;
-  size_t limit_blocks;
+  ixs_bounds_transport_snapshot transport;
   bool branch_ready = false;
   bool branch_limited = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
@@ -13408,7 +12600,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     return IXS_CHECK_UNKNOWN;
 
   ctx = bounds->ctx;
-  limit_blocks = bounds->query_state ? bounds->query_state->limit_blocks : 0u;
+  transport = ixs_bounds_query_transport_snapshot(bounds);
   scratch_mark = ixs_arena_save(bounds->scratch);
   if (!ixs_bounds_fork(&branch, bounds)) {
     bounds->oom = true;
@@ -13437,7 +12629,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     goto cleanup;
   }
   if (status == IXS_BOUNDS_BUILD_LIMIT) {
-    bounds_query_note_limit(bounds->query_state);
+    bounds_query_note_limit(bounds);
     goto cleanup;
   }
   if (status != IXS_BOUNDS_BUILD_OK)
@@ -13459,7 +12651,7 @@ cleanup:
     ixs_bounds_destroy(&branch);
   ixs_arena_restore(bounds->scratch, scratch_mark);
   if (limited &&
-      (branch_limited || bounds_query_limited_since(bounds, limit_blocks)))
+      (branch_limited || bounds_query_limited_since(bounds, transport)))
     *limited = true;
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
 }
@@ -14398,7 +13590,7 @@ static ixs_query_walk_step bounds_stride_complete(bounds_stride_query *query,
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, success);
-    if (entry && entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
       entry->result.stride = stride;
     else
       success = false;
@@ -15922,7 +15114,7 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
   }
   if (ixs_node_is_sentinel(expanded_lhs) ||
       ixs_node_is_sentinel(expanded_rhs)) {
-    bounds_query_note_invalid(state->bounds->query_state);
+    bounds_query_note_invalid(state->bounds);
     return IXS_CHECK_UNKNOWN;
   }
   expanded_lhs = simp_simplify_bounds_status(state->ctx, expanded_lhs,
@@ -15939,7 +15131,7 @@ static ixs_check_result equivalence_expanded(equivalence_state *state,
   }
   if (ixs_node_is_sentinel(expanded_lhs) ||
       ixs_node_is_sentinel(expanded_rhs)) {
-    bounds_query_note_invalid(state->bounds->query_state);
+    bounds_query_note_invalid(state->bounds);
     return IXS_CHECK_UNKNOWN;
   }
   if (expanded_lhs == expanded_rhs)
@@ -16448,21 +15640,16 @@ static ixs_check_result
 equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
                                        ixs_node *rhs) {
   ixs_bounds *bounds = state->bounds;
-  size_t limit_blocks =
-      bounds->query_state ? bounds->query_state->limit_blocks : 0u;
-  size_t invalid_blocks =
-      bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
-  size_t cycle_blocks =
-      bounds->query_state ? bounds->query_state->cycle_blocks : 0u;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(bounds);
+  size_t cycle_blocks = bounds_query_cycle_count(bounds);
   bool blocked;
   ixs_quotient_algebra_result result =
       ixs_quotient_algebra_check(state->ctx, bounds, lhs, rhs, 0u);
-  blocked = result.limited ||
-            bounds_query_limited_since(bounds, limit_blocks) ||
-            (bounds->query_state &&
-             bounds->query_state->cycle_blocks != cycle_blocks);
+  blocked = result.limited || bounds_query_limited_since(bounds, transport) ||
+            bounds_query_cycle_count(bounds) != cycle_blocks;
   state->invalid |=
-      result.invalid || bounds_query_invalid_since(bounds, invalid_blocks);
+      result.invalid || bounds_query_invalid_since(bounds, transport);
   state->oom |= result.oom;
   if (blocked || state->invalid || state->oom)
     return IXS_CHECK_UNKNOWN;
@@ -16536,7 +15723,7 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   }
   if (ixs_node_is_sentinel(simplified_lhs) ||
       ixs_node_is_sentinel(simplified_rhs)) {
-    bounds_query_note_invalid(state->bounds->query_state);
+    bounds_query_note_invalid(state->bounds);
     return IXS_CHECK_UNKNOWN;
   }
   if (simplified_lhs == simplified_rhs)
@@ -16585,10 +15772,9 @@ equivalence_query_bounds_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
                                 ixs_node *rhs, ixs_check_result *result) {
   ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
   equivalence_state state;
-  size_t limit_blocks =
-      bounds->query_state ? bounds->query_state->limit_blocks : 0u;
-  size_t invalid_blocks =
-      bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(bounds);
+  ixs_bounds_transport_snapshot limit_transport = transport;
   bool old_oom = bounds->oom;
   bool track_limits = bounds_query_is_tracking(bounds);
   bool lhs_oom = false;
@@ -16609,18 +15795,18 @@ equivalence_query_bounds_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
       status = EQUIVALENCE_QUERY_LIMITED;
     goto restore;
   }
-  if (bounds->query_state)
-    limit_blocks = bounds->query_state->limit_blocks;
+  limit_transport = ixs_bounds_query_transport_snapshot(bounds);
   *result = equivalence_core(&state, lhs, rhs, 0);
-  if (state.invalid || bounds_query_invalid_since(bounds, invalid_blocks)) {
+  if (state.invalid || bounds_query_invalid_since(bounds, transport)) {
     *result = IXS_CHECK_UNKNOWN;
     status = EQUIVALENCE_QUERY_INVALID;
   } else if (state.oom || (!old_oom && bounds->oom)) {
     *result = IXS_CHECK_UNKNOWN;
     status = EQUIVALENCE_QUERY_OOM;
   } else if (*result == IXS_CHECK_UNKNOWN &&
-             (state.limited || (track_limits && bounds_query_limited_since(
-                                                    bounds, limit_blocks)))) {
+             (state.limited ||
+              (track_limits &&
+               bounds_query_limited_since(bounds, limit_transport)))) {
     *result = IXS_CHECK_UNKNOWN;
     status = EQUIVALENCE_QUERY_LIMITED;
   }
@@ -16809,7 +15995,7 @@ static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
 
 static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
                                                       ixs_node *cmp) {
-  uint64_t saved_owner;
+  bounds_query_owner_scope owner_scope;
   equivalence_query_status status;
   ixs_check_result equivalent = IXS_CHECK_UNKNOWN;
   ixs_node *lhs;
@@ -16827,18 +16013,17 @@ static ixs_check_result bounds_check_equivalence_atom(ixs_bounds *bounds,
 
   bounds_equivalence_atom_sides(bounds, cmp, &lhs, &rhs);
 
-  saved_owner = bounds->query_owner;
   bounds->predicate_equivalence_depth++;
-  bounds_query_refresh_owner(bounds);
+  bounds_query_owner_scope_begin(bounds, &owner_scope);
   status = equivalence_query_bounds_detail(bounds, bounds->ctx, lhs, rhs,
                                            &equivalent);
-  bounds->query_owner = saved_owner;
+  bounds_query_owner_scope_end(bounds, &owner_scope);
   bounds->predicate_equivalence_depth--;
 
   if (status == EQUIVALENCE_QUERY_LIMITED && bounds->query_state)
-    bounds_query_note_limit(bounds->query_state);
+    bounds_query_note_limit(bounds);
   else if (status == EQUIVALENCE_QUERY_INVALID && bounds->query_state)
-    bounds_query_note_invalid(bounds->query_state);
+    bounds_query_note_invalid(bounds);
   else if (status == EQUIVALENCE_QUERY_OOM)
     bounds->oom = true;
   if (status != EQUIVALENCE_QUERY_COMPLETE)
@@ -16895,7 +16080,8 @@ typedef struct {
 
 static void constant_difference_try_projection(
     ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
-    size_t limit_blocks, bool old_oom, constant_difference_attempt *attempt) {
+    ixs_bounds_transport_snapshot transport, bool old_oom,
+    constant_difference_attempt *attempt) {
   equivalence_state projection;
   ixs_node *nodes[2] = {lhs, rhs};
 
@@ -16917,7 +16103,7 @@ static void constant_difference_try_projection(
   attempt->oom =
       attempt->delta_oom || projection.oom || (!old_oom && bounds->oom);
   attempt->limited = attempt->delta_limited || projection.limited ||
-                     bounds_query_limited_since(bounds, limit_blocks);
+                     bounds_query_limited_since(bounds, transport);
   equivalence_state_destroy(&projection);
 }
 
@@ -16957,8 +16143,8 @@ constant_difference_query_bound_detail(ixs_ctx *ctx, ixs_bounds *bounds,
   constant_difference_attempt attempt;
   ixs_node *original_lhs = lhs;
   ixs_node *original_rhs = rhs;
-  size_t limit_blocks =
-      bounds->query_state ? bounds->query_state->limit_blocks : 0u;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(bounds);
   bool old_oom = bounds->oom;
   bool lhs_oom = false;
   bool rhs_oom = false;
@@ -16977,8 +16163,7 @@ constant_difference_query_bound_detail(ixs_ctx *ctx, ixs_bounds *bounds,
     attempt.limited = lhs_limited || rhs_limited;
     goto finish;
   }
-  if (bounds->query_state)
-    limit_blocks = bounds->query_state->limit_blocks;
+  transport = ixs_bounds_query_transport_snapshot(bounds);
 
   /* Normalize each side before constructing the difference.  Rewriting only
    * lhs-rhs can erase the affine numerator shared by two exact remainder
@@ -16992,14 +16177,14 @@ constant_difference_query_bound_detail(ixs_ctx *ctx, ixs_bounds *bounds,
       &attempt.delta_limited, &attempt.delta_oom);
   attempt.oom = attempt.delta_oom || (!old_oom && bounds->oom);
   attempt.limited =
-      attempt.delta_limited || bounds_query_limited_since(bounds, limit_blocks);
+      attempt.delta_limited || bounds_query_limited_since(bounds, transport);
   if (!attempt.ok && !attempt.oom && !attempt.limited && !attempt.invalid &&
       has_rounding) {
     /* Projection recognizes source-level truncating-remainder protocols.  A
      * useful partial normalization must not hide that independent proof
      * strategy when the normalized direct proof remains inconclusive. */
     constant_difference_try_projection(ctx, bounds, original_lhs, original_rhs,
-                                       limit_blocks, old_oom, &attempt);
+                                       transport, old_oom, &attempt);
   }
 
 finish:
@@ -18667,6 +17852,746 @@ IXS_STATIC bool ixs_bounds_get_modrem(ixs_bounds *b, const char *name,
 }
 
 /* ==================================================================== */
+/* bounds_query.c                                                     */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "bounds_query.h"
+#include <assert.h>
+#include <string.h>
+
+#define BOUNDS_QUERY_ACTIVE_INIT_CAP 16u
+#define BOUNDS_QUERY_CACHE_INIT_CAP 256u
+
+struct ixs_bounds_query_state {
+  ixs_arena *arena;
+  bounds_query_key *active;
+  bounds_query_cache_entry *cache;
+  size_t active_count;
+  size_t active_capacity;
+  size_t cache_count;
+  size_t cache_capacity;
+  size_t nesting;
+  size_t visits;
+  size_t stride_visits;
+  size_t cache_hits;
+  size_t cycle_blocks;
+  size_t limit_blocks;
+  size_t invalid_blocks;
+  bounds_query_outcome transport_outcome;
+  uint64_t generation;
+  uint64_t next_owner;
+};
+
+static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
+  return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
+         lhs.expr == rhs.expr && lhs.argument == rhs.argument &&
+         lhs.equality_disabled == rhs.equality_disabled;
+}
+
+static void bounds_query_reset(ixs_bounds_query_state *state) {
+  assert(state->active_count == 0);
+  state->active_count = 0;
+  state->visits = 0;
+  state->stride_visits = 0;
+  state->cache_hits = 0;
+  state->cycle_blocks = 0;
+  state->limit_blocks = 0;
+  state->invalid_blocks = 0;
+  state->transport_outcome = BOUNDS_QUERY_OUTCOME_PENDING;
+  state->cache_count = 0;
+  state->generation++;
+  if (state->generation == 0) {
+    if (state->cache)
+      memset(state->cache, 0, state->cache_capacity * sizeof(*state->cache));
+    state->generation = 1;
+  }
+}
+
+static unsigned bounds_query_transport_rank(bounds_query_outcome outcome) {
+  switch (outcome) {
+  case BOUNDS_QUERY_OUTCOME_LIMITED:
+    return 1u;
+  case BOUNDS_QUERY_OUTCOME_OOM:
+    return 2u;
+  case BOUNDS_QUERY_OUTCOME_INVALID:
+    return 3u;
+  default:
+    return 0u;
+  }
+}
+
+static void bounds_query_note_transport_state(ixs_bounds_query_state *state,
+                                              bounds_query_outcome outcome) {
+  if (state && bounds_query_transport_rank(outcome) >
+                   bounds_query_transport_rank(state->transport_outcome))
+    state->transport_outcome = outcome;
+}
+
+IXS_STATIC void bounds_query_note_oom(ixs_bounds *b) {
+  bounds_query_note_transport_state(b ? b->query_state : NULL,
+                                    BOUNDS_QUERY_OUTCOME_OOM);
+}
+
+IXS_STATIC void bounds_query_note_limit(ixs_bounds *b) {
+  ixs_bounds_query_state *state = b ? b->query_state : NULL;
+  if (!state)
+    return;
+  if (state->limit_blocks != SIZE_MAX)
+    state->limit_blocks++;
+  bounds_query_note_transport_state(state, BOUNDS_QUERY_OUTCOME_LIMITED);
+}
+
+IXS_STATIC void bounds_query_note_invalid(ixs_bounds *b) {
+  ixs_bounds_query_state *state = b ? b->query_state : NULL;
+  if (!state)
+    return;
+  if (state->invalid_blocks != SIZE_MAX)
+    state->invalid_blocks++;
+  bounds_query_note_transport_state(state, BOUNDS_QUERY_OUTCOME_INVALID);
+}
+
+IXS_STATIC bool
+bounds_query_limited_since(const ixs_bounds *bounds,
+                           ixs_bounds_transport_snapshot before) {
+  return bounds && bounds->query_state &&
+         (bounds->query_state->generation != before.generation
+              ? bounds->query_state->limit_blocks != 0
+              : before.limit_blocks == SIZE_MAX ||
+                    bounds->query_state->limit_blocks != before.limit_blocks);
+}
+
+IXS_STATIC bool
+bounds_query_invalid_since(const ixs_bounds *bounds,
+                           ixs_bounds_transport_snapshot before) {
+  return bounds && bounds->query_state &&
+         (bounds->query_state->generation != before.generation
+              ? bounds->query_state->invalid_blocks != 0
+              : before.invalid_blocks == SIZE_MAX ||
+                    bounds->query_state->invalid_blocks !=
+                        before.invalid_blocks);
+}
+
+static void bounds_query_counter_increment(size_t *counter) {
+  if (*counter != SIZE_MAX)
+    (*counter)++;
+}
+
+static uint64_t bounds_query_new_owner(ixs_bounds_query_state *state) {
+  /* A generation admits only finitely many visits/nested holds, so owner reuse
+   * within one generation would require more than 2^64 bounded operations.
+   * Generation wrap separately clears every memo slot in bounds_query_reset. */
+  state->next_owner++;
+  if (state->next_owner == 0)
+    state->next_owner++;
+  return state->next_owner;
+}
+
+IXS_STATIC void bounds_query_init(ixs_bounds *b) {
+  assert(b != NULL);
+  ixs_arena_init(&b->query_state_arena, IXS_ARENA_DEFAULT_SIZE);
+  ixs_arena_init(&b->query_arena, IXS_ARENA_DEFAULT_SIZE);
+  b->query_state = NULL;
+  b->query_owner = 0;
+  b->query_tracking_depth = 0;
+  b->query_state_owner = false;
+  b->query_state_borrowed = false;
+}
+
+IXS_STATIC void bounds_query_destroy(ixs_bounds *b) {
+  if (!b)
+    return;
+  assert(b->query_tracking_depth == 0);
+  assert(!b->query_state_borrowed ||
+         (b->query_state && b->query_state->nesting != 0));
+  assert(!b->query_state_owner ||
+         (b->query_state && b->query_state->arena == &b->query_state_arena &&
+          b->query_state->nesting == 0 && b->query_state->active_count == 0));
+  ixs_arena_destroy_transient(&b->query_arena);
+  /* One state plus geometric active/cache growth is bounded by the largest
+   * single query, not by retained context or query count. */
+  ixs_arena_destroy_transient(&b->query_state_arena);
+  b->query_state = NULL;
+  b->query_owner = 0;
+  b->query_tracking_depth = 0;
+  b->query_state_owner = false;
+  b->query_state_borrowed = false;
+}
+
+static bool bounds_query_ensure(ixs_bounds *b) {
+  ixs_bounds_query_state *state;
+  ixs_arena *arena;
+  if (!b || b->oom)
+    return false;
+  if (b->query_state)
+    return true;
+  if (b->store_ctx && b->store_ctx->bounds_query_state) {
+    state = b->store_ctx->bounds_query_state;
+  } else if (b->store_ctx) {
+    state =
+        ixs_arena_alloc(&b->store_ctx->arena, sizeof(*state), sizeof(void *));
+  } else {
+    state =
+        ixs_arena_alloc(&b->query_state_arena, sizeof(*state), sizeof(void *));
+  }
+  if (!state) {
+    b->oom = true;
+    return false;
+  }
+  if (!b->store_ctx || !b->store_ctx->bounds_query_state) {
+    memset(state, 0, sizeof(*state));
+    arena = b->store_ctx ? &b->store_ctx->arena : &b->query_state_arena;
+    state->arena = arena;
+    state->next_owner = 1;
+    if (b->store_ctx)
+      b->store_ctx->bounds_query_state = state;
+  } else {
+    (void)bounds_query_new_owner(state);
+  }
+  b->query_state = state;
+  b->query_owner = state->next_owner;
+  b->query_state_owner = !b->store_ctx;
+  b->query_state_borrowed = false;
+  return true;
+}
+
+IXS_STATIC void bounds_query_refresh_owner(ixs_bounds *b) {
+  if (!b || !b->query_state)
+    return;
+  b->query_owner = bounds_query_new_owner(b->query_state);
+}
+
+IXS_STATIC void
+bounds_query_owner_scope_begin(ixs_bounds *b, bounds_query_owner_scope *scope) {
+  assert(b != NULL && scope != NULL);
+  scope->owner = b->query_owner;
+  scope->active = true;
+  bounds_query_refresh_owner(b);
+}
+
+IXS_STATIC void bounds_query_owner_scope_end(ixs_bounds *b,
+                                             bounds_query_owner_scope *scope) {
+  assert(b != NULL && scope != NULL && scope->active);
+  b->query_owner = scope->owner;
+  scope->active = false;
+}
+
+IXS_STATIC bool bounds_query_is_tracking(const ixs_bounds *b) {
+  return b && (b->query_tracking_depth != 0 || b->query_state_borrowed);
+}
+
+IXS_STATIC void bounds_query_inherit_fork(ixs_bounds *dst,
+                                          const ixs_bounds *src) {
+  assert(dst != NULL && src != NULL && dst->scratch == src->scratch);
+  assert(!bounds_query_is_tracking(src) ||
+         (src->query_state && src->query_state->nesting != 0));
+  dst->query_state = bounds_query_is_tracking(src) ? src->query_state : NULL;
+  dst->query_tracking_depth = 0;
+  dst->query_state_owner = false;
+  dst->query_state_borrowed = dst->query_state != NULL;
+  dst->query_owner =
+      dst->query_state ? bounds_query_new_owner(dst->query_state) : 0;
+}
+
+IXS_STATIC size_t bounds_query_cycle_count(const ixs_bounds *b) {
+  return b && b->query_state ? b->query_state->cycle_blocks : 0;
+}
+
+IXS_STATIC ixs_bounds_transport_status
+bounds_query_state_transport(const ixs_bounds *b) {
+  bounds_query_outcome outcome = b && b->query_state
+                                     ? b->query_state->transport_outcome
+                                     : BOUNDS_QUERY_OUTCOME_PENDING;
+  switch (outcome) {
+  case BOUNDS_QUERY_OUTCOME_LIMITED:
+    return IXS_BOUNDS_TRANSPORT_LIMITED;
+  case BOUNDS_QUERY_OUTCOME_OOM:
+    return IXS_BOUNDS_TRANSPORT_OOM;
+  case BOUNDS_QUERY_OUTCOME_INVALID:
+    return IXS_BOUNDS_TRANSPORT_INVALID;
+  default:
+    return IXS_BOUNDS_TRANSPORT_CLEAN;
+  }
+}
+
+static ixs_bounds_transport_status
+bounds_query_transport_status(const ixs_bounds *b) {
+  bounds_query_outcome outcome =
+      b && bounds_query_is_tracking(b) && b->query_state
+          ? b->query_state->transport_outcome
+          : BOUNDS_QUERY_OUTCOME_PENDING;
+  if (!b || b->contradiction || outcome == BOUNDS_QUERY_OUTCOME_INVALID)
+    return IXS_BOUNDS_TRANSPORT_INVALID;
+  if (b->oom || outcome == BOUNDS_QUERY_OUTCOME_OOM)
+    return IXS_BOUNDS_TRANSPORT_OOM;
+  if (outcome == BOUNDS_QUERY_OUTCOME_LIMITED)
+    return IXS_BOUNDS_TRANSPORT_LIMITED;
+  return IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+IXS_STATIC bool ixs_bounds_query_transport_clean(const ixs_bounds *b) {
+  return bounds_query_transport_status(b) == IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+IXS_STATIC ixs_bounds_transport_snapshot
+ixs_bounds_query_transport_snapshot(const ixs_bounds *b) {
+  ixs_bounds_transport_snapshot result;
+  result.limit_blocks = b && b->query_state ? b->query_state->limit_blocks : 0;
+  result.invalid_blocks =
+      b && b->query_state ? b->query_state->invalid_blocks : 0;
+  result.generation = b && b->query_state ? b->query_state->generation : 0;
+  result.oom = b && b->oom;
+  result.inherited = bounds_query_transport_status(b);
+  return result;
+}
+
+IXS_STATIC ixs_bounds_transport_status ixs_bounds_query_transport_since(
+    const ixs_bounds *b, ixs_bounds_transport_snapshot snapshot) {
+  bool new_generation =
+      b && b->query_state && b->query_state->generation != snapshot.generation;
+  if (!b || b->contradiction ||
+      snapshot.inherited == IXS_BOUNDS_TRANSPORT_INVALID ||
+      (b->query_state && (new_generation ? b->query_state->invalid_blocks != 0
+                                         : b->query_state->invalid_blocks !=
+                                               snapshot.invalid_blocks)))
+    return IXS_BOUNDS_TRANSPORT_INVALID;
+  if ((!snapshot.oom && b->oom) ||
+      snapshot.inherited == IXS_BOUNDS_TRANSPORT_OOM)
+    return IXS_BOUNDS_TRANSPORT_OOM;
+  if (snapshot.inherited == IXS_BOUNDS_TRANSPORT_LIMITED ||
+      (b->query_state && (new_generation ? b->query_state->limit_blocks != 0
+                                         : b->query_state->limit_blocks !=
+                                               snapshot.limit_blocks)))
+    return IXS_BOUNDS_TRANSPORT_LIMITED;
+  return IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+static bool bounds_query_root_needs_tracking(const ixs_bounds *b,
+                                             const ixs_node *root) {
+  return b && (bounds_query_is_tracking(b) ||
+               ixs_node_contains_nested_piecewise(root) ||
+               ixs_relation_algebra_edge_count(&b->relations) != 0);
+}
+
+IXS_STATIC const ixs_node *bounds_query_select_root(const ixs_bounds *b,
+                                                    ixs_node *const *nodes,
+                                                    size_t nnodes) {
+  size_t i;
+  if (!nodes || nnodes == 0)
+    return NULL;
+  if (bounds_query_is_tracking(b) ||
+      (b && ixs_relation_algebra_edge_count(&b->relations) != 0))
+    return nodes[0];
+  for (i = 0; i < nnodes; i++) {
+    if (ixs_node_contains_nested_piecewise(nodes[i]))
+      return nodes[i];
+  }
+  return nodes[0];
+}
+
+static bool bounds_query_start_hold(ixs_bounds *b,
+                                    ixs_bounds_query_state *state,
+                                    bool *entered) {
+  if (state->nesting == SIZE_MAX || b->query_tracking_depth == SIZE_MAX) {
+    b->oom = true;
+    return false;
+  }
+  state->nesting++;
+  b->query_tracking_depth++;
+  *entered = true;
+  return true;
+}
+
+IXS_STATIC bool ixs_bounds_query_hold_begin(ixs_bounds *b, const ixs_node *root,
+                                            bool *entered) {
+  ixs_bounds_query_state *state;
+  assert(entered != NULL);
+  *entered = false;
+  if (!bounds_query_root_needs_tracking(b, root))
+    return true;
+  if (!bounds_query_ensure(b))
+    return false;
+  state = b->query_state;
+  if (state->nesting == 0)
+    bounds_query_reset(state);
+  return bounds_query_start_hold(b, state, entered);
+}
+
+IXS_STATIC bool bounds_query_force_hold_begin(ixs_bounds *b, bool *entered) {
+  ixs_bounds_query_state *state;
+  assert(entered != NULL);
+  *entered = false;
+  if (!bounds_query_ensure(b))
+    return false;
+  state = b->query_state;
+  if (state->nesting == 0)
+    bounds_query_reset(state);
+  return bounds_query_start_hold(b, state, entered);
+}
+
+IXS_STATIC void ixs_bounds_query_hold_end(ixs_bounds *b) {
+  ixs_bounds_query_state *state;
+  assert(b != NULL && b->query_tracking_depth != 0);
+  state = b->query_state;
+  assert(state != NULL && state->nesting != 0);
+  b->query_tracking_depth--;
+  state->nesting--;
+}
+
+static bool bounds_query_grow_active(ixs_bounds *b,
+                                     ixs_bounds_query_state *state) {
+  bounds_query_key *grown;
+  size_t capacity;
+  size_t old_bytes;
+  size_t new_bytes;
+
+  if (state->active_count < state->active_capacity)
+    return true;
+  capacity = state->active_capacity ? state->active_capacity * 2u
+                                    : BOUNDS_QUERY_ACTIVE_INIT_CAP;
+  if (capacity < state->active_capacity ||
+      state->active_capacity > SIZE_MAX / sizeof(*state->active) ||
+      capacity > SIZE_MAX / sizeof(*state->active)) {
+    b->oom = true;
+    return false;
+  }
+  old_bytes = state->active_capacity * sizeof(*state->active);
+  new_bytes = capacity * sizeof(*state->active);
+  grown = ixs_arena_grow(state->arena, state->active, old_bytes, new_bytes,
+                         sizeof(void *));
+  if (!grown) {
+    b->oom = true;
+    return false;
+  }
+  state->active = grown;
+  state->active_capacity = capacity;
+  return true;
+}
+
+static size_t bounds_query_key_hash(bounds_query_key key) {
+  uint64_t mixed = key.owner ^ key.argument ^ ((uint64_t)key.kind << 56);
+  if (key.equality_disabled)
+    mixed ^= UINT64_C(0x9e3779b97f4a7c15);
+  mixed ^= (uint64_t)((uintptr_t)key.expr >> 3);
+  mixed ^= mixed >> 33;
+  mixed *= UINT64_C(0xff51afd7ed558ccd);
+  mixed ^= mixed >> 33;
+  return (size_t)mixed;
+}
+
+static bounds_query_cache_entry *
+bounds_query_cache_find(ixs_bounds_query_state *state, bounds_query_key key,
+                        bool *found) {
+  size_t slot;
+  if (!state->cache_capacity) {
+    *found = false;
+    return NULL;
+  }
+  slot = bounds_query_key_hash(key) & (state->cache_capacity - 1u);
+  while (state->cache[slot].generation == state->generation) {
+    if (bounds_query_key_equal(state->cache[slot].key, key)) {
+      *found = true;
+      return &state->cache[slot];
+    }
+    slot = (slot + 1u) & (state->cache_capacity - 1u);
+  }
+  *found = false;
+  return &state->cache[slot];
+}
+
+static bool bounds_query_grow_cache(ixs_bounds *b,
+                                    ixs_bounds_query_state *state) {
+  bounds_query_cache_entry *grown;
+  size_t capacity;
+  size_t bytes;
+  size_t i;
+
+  capacity = state->cache_capacity ? state->cache_capacity * 2u
+                                   : BOUNDS_QUERY_CACHE_INIT_CAP;
+  if (capacity < state->cache_capacity ||
+      capacity > SIZE_MAX / sizeof(*state->cache)) {
+    b->oom = true;
+    return false;
+  }
+  bytes = capacity * sizeof(*state->cache);
+  grown = ixs_arena_alloc(state->arena, bytes, sizeof(void *));
+  if (!grown) {
+    b->oom = true;
+    return false;
+  }
+  memset(grown, 0, bytes);
+  for (i = 0; i < state->cache_capacity; i++) {
+    bounds_query_cache_entry entry = state->cache[i];
+    size_t slot;
+    if (entry.generation != state->generation)
+      continue;
+    slot = bounds_query_key_hash(entry.key) & (capacity - 1u);
+    while (grown[slot].generation == state->generation)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = entry;
+  }
+  state->cache = grown;
+  state->cache_capacity = capacity;
+  return true;
+}
+
+static bool bounds_query_prepare_cache_insert(ixs_bounds *b,
+                                              ixs_bounds_query_state *state) {
+  if (!state->cache_capacity ||
+      state->cache_count + 1u >
+          state->cache_capacity - state->cache_capacity / 4u)
+    return bounds_query_grow_cache(b, state);
+  return true;
+}
+
+IXS_STATIC bounds_query_enter_result bounds_query_begin(
+    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, uint64_t argument,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+  ixs_bounds_query_state *state;
+  bounds_query_key key;
+  bounds_query_cache_entry *entry;
+  bool found;
+
+  memset(scope, 0, sizeof(*scope));
+  *cached = NULL;
+  if (!b || !expr || (expr->properties & IXS_NODE_PROPERTY_VALID) == 0) {
+    if (b)
+      bounds_query_note_invalid(b);
+    return BOUNDS_QUERY_ENTER_INVALID;
+  }
+  if (!bounds_query_ensure(b)) {
+    bounds_query_note_oom(b);
+    return BOUNDS_QUERY_ENTER_OOM;
+  }
+  state = b->query_state;
+  if (state->nesting == 0)
+    bounds_query_reset(state);
+  if (b->oom)
+    bounds_query_note_oom(b);
+  switch (state->transport_outcome) {
+  case BOUNDS_QUERY_OUTCOME_LIMITED:
+    return BOUNDS_QUERY_ENTER_LIMIT;
+  case BOUNDS_QUERY_OUTCOME_INVALID:
+    return BOUNDS_QUERY_ENTER_INVALID;
+  case BOUNDS_QUERY_OUTCOME_OOM:
+    return BOUNDS_QUERY_ENTER_OOM;
+  default:
+    break;
+  }
+  key.kind = kind;
+  key.owner = b->query_owner;
+  key.expr = expr;
+  key.argument = argument;
+  key.equality_disabled = b->equality_disabled_depth != 0;
+  entry = bounds_query_cache_find(state, key, &found);
+  if (found) {
+    /* STARTED entries remain incomplete until their LIFO scope finishes, so
+     * an incomplete current-generation entry is exactly an active cycle.
+     * This keeps the hot-path recursion guard expected O(1); the active vector
+     * exists only for finish-order assertions and diagnostics. */
+    if (!entry->complete) {
+      bounds_query_counter_increment(&state->cycle_blocks);
+      return BOUNDS_QUERY_ENTER_CYCLE;
+    }
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE ||
+        entry->outcome == BOUNDS_QUERY_OUTCOME_NO_FACT) {
+      bounds_query_counter_increment(&state->cache_hits);
+      *cached = entry;
+      return BOUNDS_QUERY_ENTER_CACHED;
+    }
+  }
+  if (state->nesting == SIZE_MAX || state->visits == SIZE_MAX) {
+    b->oom = true;
+    bounds_query_note_oom(b);
+    return BOUNDS_QUERY_ENTER_OOM;
+  }
+  state->visits++;
+  if (kind == BOUNDS_QUERY_STRIDE)
+    state->stride_visits++;
+  if (!bounds_query_grow_active(b, state)) {
+    bounds_query_note_oom(b);
+    return BOUNDS_QUERY_ENTER_OOM;
+  }
+  if (!found) {
+    if (!bounds_query_prepare_cache_insert(b, state)) {
+      bounds_query_note_oom(b);
+      return BOUNDS_QUERY_ENTER_OOM;
+    }
+    entry = bounds_query_cache_find(state, key, &found);
+    assert(!found);
+    state->cache_count++;
+  }
+  memset(entry, 0, sizeof(*entry));
+  entry->key = key;
+  entry->generation = state->generation;
+  entry->outcome = BOUNDS_QUERY_OUTCOME_PENDING;
+  state->active[state->active_count++] = key;
+  state->nesting++;
+  scope->bounds = b;
+  scope->state = state;
+  scope->key = key;
+  scope->active = true;
+  return BOUNDS_QUERY_ENTER_STARTED;
+}
+
+IXS_STATIC bounds_query_cache_entry *
+bounds_query_finish(bounds_query_scope *scope, bool success) {
+  ixs_bounds_query_state *state;
+  bounds_query_cache_entry *entry;
+  bool found;
+  assert(scope != NULL && scope->active && scope->state != NULL &&
+         scope->bounds != NULL);
+  state = scope->state;
+  assert(state->active_count != 0 && state->nesting != 0 &&
+         bounds_query_key_equal(state->active[state->active_count - 1u],
+                                scope->key));
+  entry = bounds_query_cache_find(state, scope->key, &found);
+  assert(found && entry && !entry->complete);
+  if (scope->bounds->oom)
+    bounds_query_note_oom(scope->bounds);
+  entry->complete = true;
+  entry->outcome =
+      state->transport_outcome == BOUNDS_QUERY_OUTCOME_PENDING
+          ? success ? BOUNDS_QUERY_OUTCOME_VALUE : BOUNDS_QUERY_OUTCOME_NO_FACT
+          : state->transport_outcome;
+  entry->success = entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE;
+  state->active_count--;
+  state->nesting--;
+  scope->active = false;
+  return entry;
+}
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC void ixs_bounds_query_stats(const ixs_bounds *b, size_t *visits,
+                                       size_t *stride_visits,
+                                       size_t *cache_hits, size_t *cycle_blocks,
+                                       size_t *limit_blocks,
+                                       size_t *active_count, size_t *nesting) {
+  const ixs_bounds_query_state *state = b ? b->query_state : NULL;
+  if (visits)
+    *visits = state ? state->visits : 0;
+  if (stride_visits)
+    *stride_visits = state ? state->stride_visits : 0;
+  if (cache_hits)
+    *cache_hits = state ? state->cache_hits : 0;
+  if (cycle_blocks)
+    *cycle_blocks = state ? state->cycle_blocks : 0;
+  if (limit_blocks)
+    *limit_blocks = state ? state->limit_blocks : 0;
+  if (active_count)
+    *active_count = state ? state->active_count : 0;
+  if (nesting)
+    *nesting = state ? state->nesting : 0;
+}
+
+IXS_STATIC bool ixs_bounds_query_cycle_probe(ixs_bounds *b, ixs_node *expr) {
+  bounds_query_scope outer;
+  bounds_query_scope reentered;
+  bounds_query_cache_entry *cached;
+  bounds_query_enter_result outer_status;
+  bounds_query_enter_result reentered_status;
+  bool held = false;
+
+  if (!b || !expr || !ixs_bounds_query_hold_begin(b, expr, &held))
+    return false;
+  outer_status =
+      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, &outer, &cached);
+  if (outer_status != BOUNDS_QUERY_ENTER_STARTED)
+    goto cleanup;
+  reentered_status = bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0,
+                                        &reentered, &cached);
+  (void)bounds_query_finish(&outer, false);
+  if (held)
+    ixs_bounds_query_hold_end(b);
+  return reentered_status == BOUNDS_QUERY_ENTER_CYCLE;
+
+cleanup:
+  if (held)
+    ixs_bounds_query_hold_end(b);
+  return false;
+}
+
+IXS_STATIC bool
+ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
+                                 ixs_bounds_test_transport injected,
+                                 ixs_bounds_test_transport *observed) {
+  struct ixs_node_impl invalid_node;
+  bounds_query_scope outer;
+  bounds_query_scope invalid_scope;
+  bounds_query_cache_entry *cached = NULL;
+  bounds_query_cache_entry *entry = NULL;
+  bounds_query_enter_result enter;
+  bool held = false;
+  bool result = false;
+
+  if (!b || !expr || !observed ||
+      !ixs_bounds_query_hold_begin(b, expr, &held) || !held)
+    return false;
+  enter =
+      bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, expr, 0, &outer, &cached);
+  if (enter != BOUNDS_QUERY_ENTER_STARTED)
+    goto cleanup;
+
+  switch (injected) {
+  case IXS_BOUNDS_TEST_TRANSPORT_VALUE:
+    break;
+  case IXS_BOUNDS_TEST_TRANSPORT_LIMITED:
+    bounds_query_note_limit(b);
+    break;
+  case IXS_BOUNDS_TEST_TRANSPORT_INVALID:
+    memset(&invalid_node, 0, sizeof(invalid_node));
+    invalid_node.tag = IXS_SYM;
+    enter = bounds_query_begin(b, BOUNDS_QUERY_INTERVAL, &invalid_node, 0,
+                               &invalid_scope, &cached);
+    if (enter != BOUNDS_QUERY_ENTER_INVALID)
+      goto cleanup;
+    break;
+  default:
+    goto cleanup;
+  }
+
+  entry = bounds_query_finish(&outer, true);
+  switch (entry->outcome) {
+  case BOUNDS_QUERY_OUTCOME_VALUE:
+    *observed = IXS_BOUNDS_TEST_TRANSPORT_VALUE;
+    break;
+  case BOUNDS_QUERY_OUTCOME_LIMITED:
+    *observed = IXS_BOUNDS_TEST_TRANSPORT_LIMITED;
+    break;
+  case BOUNDS_QUERY_OUTCOME_INVALID:
+    *observed = IXS_BOUNDS_TEST_TRANSPORT_INVALID;
+    break;
+  default:
+    goto cleanup;
+  }
+  result = true;
+
+cleanup:
+  if (outer.active)
+    (void)bounds_query_finish(&outer, false);
+  if (held)
+    ixs_bounds_query_hold_end(b);
+  return result;
+}
+#endif
+
+IXS_STATIC bool bounds_query_should_track(const ixs_bounds *b,
+                                          const ixs_node *expr) {
+  return bounds_query_is_tracking(b) && expr &&
+         (expr->properties & IXS_NODE_PROPERTY_VALID) != 0;
+}
+
+IXS_STATIC void bounds_query_reset_arena(ixs_bounds *b) {
+  assert(b != NULL);
+  assert(b->query_tracking_depth == 0);
+  assert(!b->query_state_owner && !b->query_state_borrowed);
+  ixs_arena_destroy_transient(&b->query_arena);
+  ixs_arena_init(&b->query_arena, IXS_ARENA_DEFAULT_SIZE);
+}
+
+/* ==================================================================== */
 /* ctx.c                                                              */
 /* ==================================================================== */
 
@@ -19391,6 +19316,7 @@ uint32_t ixs_node_hash(const ixs_node *node) { return node->hash; }
 #include "division_algebra.h"
 
 #include "additive_row.h"
+#include "bounds_query.h"
 #include "simplify.h"
 #include <string.h>
 
@@ -25960,6 +25886,7 @@ IXS_STATIC ixs_quotient_algebra_result ixs_quotient_algebra_check(
  */
 #include "radix_algebra.h"
 
+#include "bounds_query.h"
 #include <string.h>
 
 #define RADIX_ALGEBRA_MAX_INPUT_TERMS 8u
@@ -29338,6 +29265,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
  */
 #include "simplify.h"
 #include "bounds.h"
+#include "bounds_query.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>

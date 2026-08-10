@@ -3,6 +3,7 @@
  */
 #include "radix_algebra.h"
 
+#include "bounds_query.h"
 #include <string.h>
 
 #define RADIX_ALGEBRA_MAX_INPUT_TERMS 8u

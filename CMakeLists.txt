@@ -16,6 +16,7 @@ else()
         src/additive_row.c
         src/arena.c
         src/bounds.c
+        src/bounds_query.c
         src/ctx.c
         src/division_algebra.c
         src/expand.c

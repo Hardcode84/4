@@ -3,6 +3,7 @@
  */
 #include "simplify.h"
 #include "bounds.h"
+#include "bounds_query.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>

@@ -1360,20 +1360,44 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
   seeded driver inside a caller-owned mark. Definedness, predicate, and
   AND-assumption walks allocate a per-query node-identity memo before their
   stack. Exact integer proofs keep an inline 32-entry compound-key memo over
-  `(node, relation, modulus)`. Residue and interval walks use the central
-  `bounds_query` cache because their keys and values belong to that environment.
-  Local identity and compound memos share the stack's caller-owned mark and die
-  at its restore. The central cache is generation-scoped and owner-keyed; forks
-  share its query state while those keys isolate bounds owners and generations.
+  `(node, relation, modulus)`. Bitfacts, stride, residue, and interval walks use
+  the central `bounds_query` cache because their keys and values belong to that
+  environment. Local identity and compound memos share the stack's caller-owned
+  mark and die at its restore. The central cache is generation-scoped and
+  owner-keyed; forks share its query state while those keys isolate bounds
+  owners and generations.
 
-  Consumers own transfer values, cache finish policy, transport status, and
-  final publication. Bitfacts allocates its per-child result arrays while
-  preparing supported nodes. Query-stack push/pop is amortized O(1) and uses
-  O(depth) scratch. Memoized walkers visit shared structural obligations once;
-  consumer transfer and cache policy determine their remaining work. No walker
-  stack imposes a fixed depth ceiling; consumer query budgets still apply.
-  Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
-  assumptions remain isolated.
+  `bounds_query.c` owns that opaque central state and its lifecycle. Interval,
+  bitfacts, residue, and stride entries use keys containing the kind, bounds
+  owner, expression, integer argument, and equality-disabled mode. A tracked
+  outer hold starts one generation; nested holds share it. The active-key stack
+  starts at 16 entries and doubles. The open-addressed cache starts at 256
+  entries and grows before exceeding 75% load, giving expected O(1) lookup.
+  Invalid state, OOM, and limits poison the generation in that precedence
+  order.
+
+  Context-backed bounds allocate central state lazily in the context arena.
+  Contextless bounds retain one state and its geometrically grown key/cache
+  arrays in `query_state_arena`, bounded by the largest single query.
+  `query_arena` holds operation-bounded proof storage and projection storage
+  for forks and contextless bounds. Persistent facts allocate their projection
+  table in the context arena, reuse that allocation across reads and commits,
+  and clear its semantic contents on store invalidation and commit. A fork
+  under an active hold borrows central state with a distinct owner. Its
+  embedded arenas start empty, and `query_state_arena` stays empty while state
+  is borrowed. Direct range and relation-projection caches remain separate.
+  `bounds.c` invalidates the empty-result cache, refreshes the query owner, then
+  clears the direct interval cache and relation-projection cache/count; the
+  query component does not initiate store invalidation.
+
+  Consumers own transfer values, cache finish policy, mapping typed transport
+  into result status, and final publication. Bitfacts allocates its per-child
+  result arrays while preparing supported nodes. Query-stack push/pop is
+  amortized O(1) and uses O(depth) scratch. Memoized walkers visit shared
+  structural obligations once; consumer transfer and cache policy determine
+  their remaining work. No walker stack imposes a fixed depth ceiling; consumer
+  query budgets still apply. Branch-local facts are copied by `ixs_bounds_fork`,
+  so `Piecewise` branch assumptions remain isolated.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
 - `Mod(x, m)`: result in `[0, m-1]` when `m > 0` and `x` is integer-valued
 - `ceiling(x/m)`: result >= 0 when `x >= 0` and `m > 0`
@@ -2938,6 +2962,9 @@ Amortized O(1) mechanisms are not scans: hash-table growth rehashes;
 `ixs_arena_restore` walks only work allocated after its mark; and
 `ixs_arena_destroy_transient` releases only one operation's input-sized
 workspace. None depends on retained context state `A`.
+`query_state_arena` persists across operations but retains only one state plus
+geometric buffers bounded by the largest single query, so its transient destroy
+also depends on that query size rather than operation count.
 
 `scripts/check_hotpaths.py` enforces the invariant. It builds the static
 call graph of `src/*.[ch]` with tree-sitter-c, propagates scan-taint
@@ -3011,6 +3038,8 @@ ixsimpl/
 │   ├── expand.h
 │   ├── bounds.c             # bound storage, propagation, assumption extraction
 │   ├── bounds.h
+│   ├── bounds_query.c       # central query state, cache, and transport lifecycle
+│   ├── bounds_query.h
 │   ├── division_algebra.c   # signed truncating-division certificates
 │   ├── division_algebra.h
 │   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality
