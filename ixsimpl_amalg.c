@@ -4641,6 +4641,7 @@ IXS_STATIC void bounds_difference_add_range(ixs_bounds *b, ixs_node *expr,
 #include "expand.h"
 #include "facts_store.h"
 #include "low_bits_algebra.h"
+#include "query_transaction.h"
 #include "query_walk.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
@@ -5000,18 +5001,9 @@ static bool equivalence_xor_child_proven(equivalence_state *state,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Canonical XOR
- * nodes are already
- * flat. The
- * production-backed
- * binary case pairs
- * exact arguments
- * before semantic
- * candidates. The
- * matcher remains
- * O(A^2) in its
- * admitted arity
- * A=2. */
+/* Canonical XOR nodes are flat. The production-backed binary case pairs exact
+ * arguments before semantic candidates. Its admitted arity A=2 keeps matching
+ * O(A^2). */
 static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
                                                       ixs_node *lhs,
                                                       ixs_node *rhs,
@@ -5028,16 +5020,8 @@ static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
   right_zero = rhs->u.assoc.args[0];
   right_one = rhs->u.assoc.args[1];
 
-  /* Commit exact
-   * pairs first. The
-   * remaining child
-   * then has only
-   * one possible
-   * partner, so this
-   * preserves
-   * deterministic
-   * matching without
-   * backtracking. */
+  /* Commit exact pairs first. The remaining child then has one possible
+   * partner, preserving deterministic matching without backtracking. */
   if (left_zero == right_zero)
     return equivalence_xor_child_proven(state, left_one, right_one, depth)
                ? IXS_CHECK_TRUE
@@ -5148,19 +5132,9 @@ static bool equivalence_context_process_pair(
                                               simplified_rhs);
 }
 
-/* Worklist insertion
- * and lookup are
- * expected O(N) in
- * the paired
- * canonical DAG.
- * Existing child
- * proofs keep their
- * own bounds; XOR
- * may add O(A^2)
- * bounded child
- * proofs after exact
- * argument pairing.
- */
+/* Worklist insertion and lookup are expected O(N) in the paired canonical DAG.
+ * Existing child proofs keep their own bounds; XOR may add O(A^2) bounded
+ * child proofs after exact argument pairing. */
 static ixs_check_result equivalence_same_context(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
@@ -5188,22 +5162,9 @@ static ixs_check_result equivalence_same_context(equivalence_state *state,
   return IXS_CHECK_TRUE;
 }
 
-/* Optional algebraic
- * proof rules must
- * not turn a valid
- * query into a
- * session diagnostic
- * merely because an
- * intermediate
- * rational cannot be
- * represented. Build
- * their small linear
- * intermediates
- * directly from
- * canonical nodes:
- * overflow is a rule
- * miss and
- * allocation failure
+/* Optional algebraic proofs must not diagnose a valid query merely because an
+ * intermediate rational is unrepresentable. Build their small linear forms
+ * directly from canonical nodes: overflow is a rule miss; allocation failure
  * remains OOM. */
 typedef enum {
   EQUIVALENCE_BUILD_OK,
@@ -5300,25 +5261,9 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (proved)
     return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 
-  /* A variable
-   * difference need
-   * not be constant
-   * to prove that
-   * the two
-   * expressions
-   * never agree.
-   * Reuse the
-   * ordinary range,
-   * bit, and
-   * congruence query
-   * for the
-   * canonical
-   * difference
-   * instead of
-   * teaching
-   * equivalence
-   * those domains
-   * again. */
+  /* A variable difference need not be constant to prove that two expressions
+   * never agree. Query the canonical difference through the ordinary range,
+   * bit, and congruence domains instead of duplicating them here. */
   if (ixs_node_is_sentinel(difference))
     return IXS_CHECK_UNKNOWN;
   memset(&nonzero, 0, sizeof(nonzero));
@@ -5334,17 +5279,8 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (nonzero_result == IXS_CHECK_TRUE)
     return IXS_CHECK_FALSE;
 
-  /* Integer equality
-   * is also bitwise
-   * equality.
-   * Canonical xor
-   * cancels shared
-   * subexpressions
-   * that an
-   * arithmetic
-   * difference
-   * deliberately
-   * preserves. */
+  /* Integer equality is also bitwise equality. Canonical XOR cancels shared
+   * subexpressions that an arithmetic difference deliberately preserves. */
   if (ixs_bounds_check_integer_valued(state->bounds, lhs) == IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(state->bounds, rhs) == IXS_CHECK_TRUE) {
     ixs_node *bit_difference = simp_xor(state->ctx, lhs, rhs);
@@ -5498,22 +5434,9 @@ static bool equivalence_modulus_set_insert(ixs_arena *arena,
   return true;
 }
 
-/* Discover
- * congruence
- * candidates by
- * visiting each node
- * in the two queried
- * residual DAGs
- * once. Growable
- * query-local
- * storage avoids
- * semantic depth,
- * visit, and
- * candidate-count
- * cutoffs without
- * scanning unrelated
- * context state.
- */
+/* Discover congruence candidates by visiting each node in both residual DAGs
+ * once. Growable query-local storage avoids semantic depth, visit, and
+ * candidate-count cutoffs without scanning unrelated context state. */
 static bool equivalence_collect_congruences(equivalence_state *state,
                                             ixs_node *lhs, ixs_node *rhs,
                                             equivalence_modulus_set *moduli) {
@@ -5767,17 +5690,8 @@ static bool equivalence_flatten_logic(equivalence_state *state, ixs_node *root,
     bool inserted;
     if (!query_node_set_insert(&state->ctx->scratch, &visited, node, &inserted))
       goto oom;
-    /* AND and OR are
-     * idempotent, so
-     * sharing and
-     * repeated
-     * operands may
-     * be visited
-     * once.  This
-     * also makes
-     * malformed
-     * cyclic nodes
-     * terminate. */
+    /* AND and OR are idempotent, so shared and repeated operands need one
+     * visit. This also terminates malformed cyclic nodes. */
     if (!inserted)
       continue;
     if (node->tag == tag && ixs_node_is_bool_valued(node)) {
@@ -5833,15 +5747,8 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
     memset(right_matched, 0, nright);
   }
 
-  /* Exact terms
-   * first.  This
-   * makes matching
-   * deterministic
-   * and avoids proof
-   * work on the
-   * common
-   * reordered-tree
-   * case. */
+  /* Match exact terms first for deterministic pairing and no proof work on
+   * the common reordered-tree case. */
   for (i = 0; i < nleft; i++) {
     for (j = 0; j < nright; j++) {
       if (!right_matched[j] && left_terms[i] == right_terms[j]) {
@@ -5854,24 +5761,9 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
   for (i = 0; i < nleft; i++) {
     if (left_matched[i])
       continue;
-    /* Nested
-     * associative
-     * matching is a
-     * conservative
-     * optional
-     * refinement.
-     * Only the outer
-     * match starts
-     * subproofs,
-     * statically
-     * bounding C
-     * recursion;
-     * each subproof
-     * still has
-     * unbounded
-     * growable
-     * traversal of
-     * its DAG. */
+    /* Nested associative matching is an optional refinement. Only the outer
+     * match starts subproofs, statically bounding C recursion; each subproof
+     * still traverses its DAG with growable storage. */
     if (depth != 0u)
       goto cleanup;
     for (j = 0; j < nright; j++) {
@@ -5911,19 +5803,8 @@ static ixs_check_result equivalence_predicate_shapes(equivalence_state *state,
   if (lhs->tag == IXS_CMP && rhs->tag == IXS_CMP) {
     int64_t delta;
     ixs_check_result result = equivalence_ordered_comparisons(state, lhs, rhs);
-    /* Comparisons
-     * are canonical
-     * residuals
-     * against a
-     * shared right
-     * operand. An
-     * exact zero
-     * delta
-     * therefore
-     * preserves any
-     * common
-     * comparison
-     * operator. */
+    /* Comparisons are canonical residuals against a shared right operand. An
+     * exact zero delta therefore preserves the common comparison operator. */
     if (result == IXS_CHECK_UNKNOWN &&
         lhs->u.binary.cmp_op == rhs->u.binary.cmp_op &&
         lhs->u.binary.rhs == rhs->u.binary.rhs &&
@@ -6087,18 +5968,9 @@ static ixs_check_result equivalence_core(equivalence_state *state,
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-/* Start an otherwise
- * ordinary
- * equivalence query
- * with the bounded
- * child-proof budget
- * exhausted. This
- * exercises the
- * production stop
- * condition without
- * a test-only branch
- * in the proof
- * rules. */
+/* Start an ordinary equivalence query with its bounded child-proof budget
+ * exhausted. This exercises the production stop condition without a test-only
+ * proof branch. */
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
   equivalence_state state;
@@ -6351,16 +6223,8 @@ static bool equivalence_piecewise_single_point(uint64_t mask, size_t *index) {
   return false;
 }
 
-/* Piecewise arm
- * substitution is
- * admitted only for
- * small complete
- * DAGs. This cap
- * prevents branch
- * count from
- * multiplying
- * reconstruction of
- * a large peer. */
+/* Admit Piecewise arm substitution only for small complete DAGs, preventing
+ * branch count from multiplying reconstruction of a large peer. */
 static bool equivalence_piecewise_small_operand(ixs_node *root) {
   ixs_node *stack[EQUIVALENCE_PIECEWISE_MAX_POINTS];
   ixs_node *seen[EQUIVALENCE_PIECEWISE_MAX_POINTS];
@@ -6398,25 +6262,23 @@ equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
                                   const equivalence_piecewise_domain *domain,
                                   size_t point_index, unsigned depth) {
   ixs_ctx *ctx = state->ctx;
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
-  ixs_node *point = ixs_node_int(ctx, domain->points[point_index]);
-  ixs_node *substituted_value =
-      point ? simp_subs(ctx, value, domain->selector, point) : NULL;
-  ixs_node *substituted_other =
-      point ? simp_subs(ctx, other, domain->selector, point) : NULL;
+  ixs_query_transaction transaction;
+  ixs_node *point;
+  ixs_node *substituted_value;
+  ixs_node *substituted_other;
   bool value_oom = false;
   bool value_limited = false;
   bool other_oom = false;
   bool other_limited = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
 
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  point = ixs_node_int(ctx, domain->points[point_index]);
+  substituted_value =
+      point ? simp_subs(ctx, value, domain->selector, point) : NULL;
+  substituted_other =
+      point ? simp_subs(ctx, other, domain->selector, point) : NULL;
+  (void)ixs_query_transaction_finish(&transaction, false);
   if (!point || !substituted_value || !substituted_other) {
     state->oom = true;
     return false;
@@ -6439,27 +6301,10 @@ equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Final bounded
- * fallback for an
- * exact root
- * Piecewise. It
- * tracks first-match
- * reachability in a
- * complete finite
- * congruent selector
- * mask, then proves
- * only single-point
- * arms. No
- * fact-table fork or
- * whole-operand
- * Piecewise
- * substitution
- * occurs. Work is
- * bounded by 16
- * arms, 64 selector
- * points, and
- * 64-node arm/peer
- * DAGs. */
+/* Final bounded fallback for an exact root Piecewise. Track first-match
+ * reachability in a complete finite congruent selector mask, then prove only
+ * single-point arms. No fact-table fork or whole-operand substitution occurs.
+ * Work is bounded by 16 arms, 64 selector points, and 64-node arm/peer DAGs. */
 static ixs_check_result equivalence_piecewise_root(equivalence_state *state,
                                                    ixs_node *lhs, ixs_node *rhs,
                                                    unsigned depth) {
@@ -6636,12 +6481,10 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
 IXS_STATIC ixs_algebra_status
 bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
                                 ixs_node *rhs, ixs_check_result *result) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_query_transaction transaction;
   equivalence_state state;
-  ixs_bounds_transport_snapshot transport =
-      ixs_bounds_query_transport_snapshot(bounds);
-  ixs_bounds_transport_snapshot limit_transport = transport;
-  bool old_oom = bounds->oom;
+  ixs_bounds_transport_snapshot transport;
+  ixs_bounds_transport_snapshot limit_transport;
   bool track_limits = bounds_query_is_tracking(bounds);
   bool lhs_oom = false;
   bool rhs_oom = false;
@@ -6649,13 +6492,16 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   bool rhs_limited = false;
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
+  ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
+  transport = transaction.transport;
+  limit_transport = transport;
   equivalence_state_init(&state, ctx, bounds);
   *result = IXS_CHECK_UNKNOWN;
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
       bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
           IXS_CHECK_TRUE) {
-    if (lhs_oom || rhs_oom || (!old_oom && bounds->oom))
+    if (lhs_oom || rhs_oom || (!transaction.old_oom && bounds->oom))
       status = IXS_ALGEBRA_OOM;
     else if (lhs_limited || rhs_limited)
       status = IXS_ALGEBRA_LIMITED;
@@ -6666,7 +6512,7 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   if (state.invalid || bounds_query_invalid_since(bounds, transport)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_INVALID;
-  } else if (state.oom || (!old_oom && bounds->oom)) {
+  } else if (state.oom || (!transaction.old_oom && bounds->oom)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_OOM;
   } else if (*result == IXS_CHECK_UNKNOWN &&
@@ -6679,10 +6525,9 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
 
 restore:
   equivalence_state_destroy(&state);
-  if (!old_oom && bounds->oom)
+  if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);
-  bounds->oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, mark);
+  (void)ixs_query_transaction_finish(&transaction, true);
   return status;
 }
 
@@ -6724,20 +6569,9 @@ equivalence_atom_find_exact_sides(ixs_node *difference,
   }
 }
 
-/* Isolate one unit
- * Piecewise term
- * from a normalized
- * zero-sum ADD.
- * Multiplying every
- * other coefficient
- * by the opposite
- * unit preserves
- * canonical term
- * order, so the peer
- * is rebuilt once
- * without
- * distributing into
- * any arm. */
+/* Isolate one unit Piecewise term from a normalized zero-sum ADD. Multiplying
+ * every other coefficient by the opposite unit preserves canonical term order,
+ * so the peer is rebuilt once without distributing into any arm. */
 static bool bounds_isolate_piecewise_relation(ixs_bounds *bounds,
                                               ixs_node *difference,
                                               ixs_node *piecewise,
@@ -6813,25 +6647,10 @@ cleanup:
   return ok;
 }
 
-/* Predicate
- * construction
- * normalizes
- * equality to a
- * zero-sum ADD.
- * Recover its exact
- * operands so the
- * ordinary
- * equivalence rules
- * see the same
- * scaled-Mod or
- * exact
- * root-Piecewise
- * relation as the
- * direct API. Each
- * path is O(T) in
- * the direct terms
- * and uses O(T)
- * query scratch. */
+/* Predicate construction normalizes equality to a zero-sum ADD. Recover its
+ * exact operands so ordinary equivalence sees the same scaled-Mod or exact
+ * root-Piecewise relation as the direct API. Each path is O(T) in direct terms
+ * and uses O(T) query scratch. */
 static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
                                           ixs_node **lhs, ixs_node **rhs) {
   struct ixs_node_impl equality;
@@ -7021,13 +6840,11 @@ constant_difference_normalize_operands(ixs_ctx *ctx, ixs_bounds *bounds,
 IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
     ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
     int64_t *delta, bool *matched) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_query_transaction transaction;
   constant_difference_attempt attempt;
   ixs_node *original_lhs = lhs;
   ixs_node *original_rhs = rhs;
-  ixs_bounds_transport_snapshot transport =
-      ixs_bounds_query_transport_snapshot(bounds);
-  bool old_oom = bounds->oom;
+  ixs_bounds_transport_snapshot transport;
   bool lhs_oom = false;
   bool rhs_oom = false;
   bool lhs_limited = false;
@@ -7036,6 +6853,8 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
       ixs_node_contains_rounding(lhs) || ixs_node_contains_rounding(rhs);
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
+  ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
+  transport = transaction.transport;
   memset(&attempt, 0, sizeof(attempt));
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
@@ -7047,20 +6866,8 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
   }
   transport = ixs_bounds_query_transport_snapshot(bounds);
 
-  /* Normalize each
-   * side before
-   * constructing the
-   * difference.
-   * Rewriting only
-   * lhs-rhs can
-   * erase the affine
-   * numerator shared
-   * by two exact
-   * remainder
-   * encodings before
-   * either encoding
-   * is recognized.
-   */
+  /* Normalize operands before constructing the difference. Rewriting lhs-rhs
+   * first can erase the affine numerator shared by two remainder encodings. */
   if (has_rounding && !constant_difference_normalize_operands(ctx, bounds, &lhs,
                                                               &rhs, &attempt))
     goto finish;
@@ -7068,7 +6875,7 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
   attempt.ok = bounds_modular_exact_delta_detail(
       ctx, bounds, lhs, rhs, true, &attempt.result, &attempt.invalid,
       &attempt.delta_limited, &attempt.delta_oom);
-  attempt.oom = attempt.delta_oom || (!old_oom && bounds->oom);
+  attempt.oom = attempt.delta_oom || (!transaction.old_oom && bounds->oom);
   attempt.limited =
       attempt.delta_limited || bounds_query_limited_since(bounds, transport);
   if (!attempt.ok && !attempt.oom && !attempt.limited && !attempt.invalid &&
@@ -7077,18 +6884,18 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
      * Partial normalization must not hide that independent proof strategy
      * when the normalized direct proof remains inconclusive. */
     constant_difference_try_projection(ctx, bounds, original_lhs, original_rhs,
-                                       transport, old_oom, &attempt);
+                                       transport, transaction.old_oom,
+                                       &attempt);
   }
 
 finish:
-  attempt.oom = attempt.oom || (!old_oom && bounds->oom);
+  attempt.oom = attempt.oom || (!transaction.old_oom && bounds->oom);
   status = constant_difference_query_status(
       attempt.oom, attempt.invalid, attempt.limited && !attempt.ok, attempt.ok,
       attempt.result, delta, matched);
-  if (!old_oom && bounds->oom)
+  if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);
-  bounds->oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, mark);
+  (void)ixs_query_transaction_finish(&transaction, true);
   return status;
 }
 
@@ -8628,6 +8435,7 @@ IXS_STATIC bool bounds_modular_exact_delta_detail(ixs_ctx *ctx,
 #include "bounds_range.h"
 #include "bounds_store.h"
 #include "facts_store.h"
+#include "query_transaction.h"
 #include "query_walk.h"
 #include "simplify.h"
 
@@ -8970,14 +8778,12 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
                           predicate_finite_symbol *symbols, size_t symbol_count,
                           ixs_node **targets, size_t point_count) {
   ixs_ctx *ctx = bounds->ctx;
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction transaction;
   ixs_node *replacements[PREDICATE_FINITE_MAX_SYMBOLS];
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   size_t point;
 
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   for (point = 0; point < point_count; point++) {
     ixs_node *evaluated;
     ixs_check_result current;
@@ -9023,10 +8829,7 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       entry->current = entry->lower;
     }
   }
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
 }
 
@@ -9056,11 +8859,8 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   ixs_ctx *ctx;
   ixs_bounds branch;
   ixs_bounds_build_status status;
-  ixs_arena_mark scratch_mark;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
+  ixs_query_transaction assumption;
   ixs_bounds_transport_snapshot transport;
   bool branch_ready = false;
   bool branch_limited = false;
@@ -9071,8 +8871,8 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     return IXS_CHECK_UNKNOWN;
 
   ctx = bounds->ctx;
-  transport = ixs_bounds_query_transport_snapshot(bounds);
-  scratch_mark = ixs_arena_save(bounds->scratch);
+  ixs_query_transaction_begin(&transaction, NULL, bounds, bounds->scratch);
+  transport = transaction.transport;
   if (!ixs_bounds_fork(&branch, bounds)) {
     bounds->oom = true;
     goto cleanup;
@@ -9080,17 +8880,11 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   branch_ready = true;
   /* Unsupported local assumptions are proof misses.  Their diagnostics and
    * closure are private to this branch. */
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&assumption, ctx, NULL, NULL);
   status = bounds_assume_validate_predicate(&branch, antecedent);
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_store_ingest_predicate_branch(ctx, &branch, antecedent);
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&assumption, false);
 
   if (status == IXS_BOUNDS_BUILD_OOM || branch.oom) {
     bounds->oom = true;
@@ -9117,7 +8911,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
 cleanup:
   if (branch_ready)
     ixs_bounds_destroy(&branch);
-  ixs_arena_restore(bounds->scratch, scratch_mark);
+  (void)ixs_query_transaction_finish(&transaction, false);
   if (limited &&
       (branch_limited || bounds_query_limited_since(bounds, transport)))
     *limited = true;
@@ -17214,6 +17008,7 @@ IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
 #include "division_algebra.h"
 #include "expand.h"
 #include "facts_store.h"
+#include "query_transaction.h"
 #include "query_walk.h"
 #include "simplify.h"
 #include <assert.h>
@@ -17304,9 +17099,8 @@ typedef struct {
   ixs_ctx *ctx;
   const char *query;
   ixs_bounds_query_state *query_state;
-  ixs_bounds_transport_snapshot transport;
+  ixs_query_transaction transaction;
   size_t nerrors;
-  bool old_oom;
   bool tracking_entered;
   bool tracking_limited;
   bool active;
@@ -17315,63 +17109,31 @@ typedef struct {
 static void facts_read_query_begin(facts_read_query_scope *scope,
                                    ixs_bounds *bounds, ixs_ctx *ctx,
                                    const char *query) {
+  bool old_oom = bounds->oom;
   memset(scope, 0, sizeof(*scope));
   scope->bounds = bounds;
   scope->ctx = ctx;
   scope->query = query;
-  scope->old_oom = bounds->oom;
   (void)bounds_query_force_hold_begin(bounds, &scope->tracking_entered);
   scope->query_state = bounds->query_state;
-  scope->transport = ixs_bounds_query_transport_snapshot(bounds);
+  ixs_query_transaction_begin(&scope->transaction, NULL, bounds, NULL);
+  scope->transaction.old_oom = old_oom;
   scope->nerrors = ctx ? ctx->nerrors : 0u;
   scope->active = true;
-}
-
-typedef struct {
-  bool new_oom;
-  bool limited;
-  bool invalid;
-} facts_read_query_observation;
-
-static facts_read_query_observation
-facts_read_query_observe(facts_read_query_scope *scope) {
-  facts_read_query_observation result = {false, false, false};
-  ixs_bounds_transport_status transport = IXS_BOUNDS_TRANSPORT_CLEAN;
-  ixs_bounds_transport_snapshot current =
-      ixs_bounds_query_transport_snapshot(scope->bounds);
-  if (scope->bounds->query_state) {
-    if (scope->tracking_entered && scope->query_state &&
-        (scope->bounds->query_state != scope->query_state ||
-         current.generation != scope->transport.generation))
-      transport = IXS_BOUNDS_TRANSPORT_INVALID;
-    else
-      transport = bounds_query_state_transport(scope->bounds);
-  }
-  result.new_oom = !scope->old_oom && scope->bounds->oom;
-  result.limited = bounds_query_limited_since(scope->bounds, scope->transport);
-  result.invalid = bounds_query_invalid_since(scope->bounds, scope->transport);
-  if (scope->bounds->query_state != scope->query_state ||
-      current.generation != scope->transport.generation)
-    result.invalid = true;
-  if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
-    result.limited = true;
-  else if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
-    result.invalid = true;
-  else if (transport == IXS_BOUNDS_TRANSPORT_OOM)
-    result.new_oom = true;
-  return result;
 }
 
 static ixs_fact_query_status
 facts_read_query_finish(facts_read_query_scope *scope,
                         ixs_fact_query_status status) {
-  facts_read_query_observation observed;
+  ixs_query_observation observed;
   if (!scope || !scope->active)
     return status;
-  observed = facts_read_query_observe(scope);
+  observed = ixs_query_transaction_finish(&scope->transaction, false);
+  if (scope->bounds->query_state != scope->query_state)
+    observed.invalid = true;
   if (observed.invalid)
     status = IXS_FACT_QUERY_INVALID;
-  else if (observed.new_oom || scope->old_oom)
+  else if (observed.new_oom || scope->transaction.old_oom)
     status = IXS_FACT_QUERY_OOM;
   else if ((observed.limited || scope->tracking_limited) &&
            status == IXS_FACT_QUERY_COMPLETE)
@@ -17379,7 +17141,7 @@ facts_read_query_finish(facts_read_query_scope *scope,
   if (observed.new_oom || observed.limited || scope->tracking_limited ||
       observed.invalid || status != IXS_FACT_QUERY_COMPLETE)
     bounds_store_invalidate_reads(scope->bounds);
-  scope->bounds->oom = scope->old_oom;
+  scope->bounds->oom = scope->transaction.old_oom;
   if (scope->ctx && scope->ctx->nerrors == scope->nerrors) {
     if (status == IXS_FACT_QUERY_OOM)
       ixs_ctx_push_error(scope->ctx, "%s: out of memory", scope->query);
@@ -17607,7 +17369,8 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   }
   if (!ok || (!old_oom && facts->bounds.oom)) {
     if (status == IXS_FACT_QUERY_COMPLETE)
-      status = bounds_query_limited_since(&facts->bounds, read_scope.transport)
+      status = bounds_query_limited_since(&facts->bounds,
+                                          read_scope.transaction.transport)
                    ? IXS_FACT_QUERY_LIMITED
                    : IXS_FACT_QUERY_OOM;
     bounds_store_invalidate_reads(&facts->bounds);
@@ -17799,22 +17562,19 @@ typedef struct {
   ixs_session_binding binding;
   ixs_facts *facts;
   ixs_ctx *ctx;
-  ixs_arena_mark scratch_mark;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
   facts_read_query_scope read_scope;
   ixs_fact_query_status status;
   bool bound;
   bool active;
   bool query_held;
-} algebra_query_scope;
+} facts_query_operation;
 
-static bool algebra_query_begin(ixs_facts *facts, ixs_node *const *nodes,
-                                size_t nnodes, const char *query,
-                                bool outputs_ok, const char *output_error,
-                                algebra_query_scope *scope) {
+static bool facts_query_operation_begin(ixs_facts *facts,
+                                        ixs_node *const *nodes, size_t nnodes,
+                                        const char *query, bool outputs_ok,
+                                        const char *output_error,
+                                        facts_query_operation *scope) {
   size_t i;
   memset(scope, 0, sizeof(*scope));
   scope->status = IXS_FACT_QUERY_INVALID;
@@ -17862,22 +17622,16 @@ fail:
   return false;
 }
 
-static void algebra_query_start(algebra_query_scope *scope) {
-  scope->scratch_mark = ixs_arena_save(&scope->ctx->scratch);
-  scope->diag_mark = ixs_arena_save(&scope->ctx->diag);
-  scope->saved_errors = scope->ctx->errors;
-  scope->saved_nerrors = scope->ctx->nerrors;
-  scope->saved_errors_cap = scope->ctx->errors_cap;
+static void facts_query_operation_start(facts_query_operation *scope) {
+  ixs_query_transaction_begin(&scope->transaction, scope->ctx, NULL,
+                              &scope->ctx->scratch);
   scope->active = true;
 }
 
-static bool algebra_query_finish(algebra_query_scope *scope, bool success) {
+static bool facts_query_operation_finish(facts_query_operation *scope,
+                                         bool success) {
   if (scope->active) {
-    ixs_arena_restore(&scope->ctx->scratch, scope->scratch_mark);
-    ixs_arena_restore(&scope->ctx->diag, scope->diag_mark);
-    scope->ctx->errors = scope->saved_errors;
-    scope->ctx->nerrors = scope->saved_nerrors;
-    scope->ctx->errors_cap = scope->saved_errors_cap;
+    (void)ixs_query_transaction_finish(&scope->transaction, false);
   }
   if (scope->query_held) {
     ixs_bounds_query_hold_end(&scope->facts->bounds);
@@ -17892,7 +17646,7 @@ static bool algebra_query_finish(algebra_query_scope *scope, bool success) {
   return success;
 }
 
-static ixs_node *algebra_query_normalize(algebra_query_scope *scope,
+static ixs_node *algebra_query_normalize(facts_query_operation *scope,
                                          ixs_node *expr) {
   bool limited = false;
   expr = simp_simplify_bounds_status(scope->ctx, expr, &scope->facts->bounds,
@@ -17936,7 +17690,8 @@ static ixs_node *algebra_query_normalize(algebra_query_scope *scope,
   return expr;
 }
 
-static bool algebra_query_defined(algebra_query_scope *scope, ixs_node *expr) {
+static bool algebra_query_defined(facts_query_operation *scope,
+                                  ixs_node *expr) {
   bool oom = false;
   bool limited = false;
   ixs_check_result result =
@@ -17948,7 +17703,7 @@ static bool algebra_query_defined(algebra_query_scope *scope, ixs_node *expr) {
   return result == IXS_CHECK_TRUE && scope->status == IXS_FACT_QUERY_COMPLETE;
 }
 
-static bool algebra_contains_node(algebra_query_scope *scope, ixs_node *root,
+static bool algebra_contains_node(facts_query_operation *scope, ixs_node *root,
                                   ixs_node *target, bool *contains) {
   ixs_arena_mark mark = ixs_arena_save(&scope->ctx->scratch);
   query_node_set visited;
@@ -18019,7 +17774,7 @@ static bool algebra_scalar_symbol(ixs_ctx *ctx, ixs_node *expr,
   return false;
 }
 
-static bool algebra_affine_extract(algebra_query_scope *scope, ixs_node *expr,
+static bool algebra_affine_extract(facts_query_operation *scope, ixs_node *expr,
                                    ixs_node *symbol, ixs_node **coefficient,
                                    ixs_node **residual) {
   ixs_ctx *ctx = scope->ctx;
@@ -18082,70 +17837,37 @@ static ixs_constant_difference_result
 facts_query_constant_difference(ixs_facts *facts, ixs_node *lhs,
                                 ixs_node *rhs) {
   ixs_constant_difference_result result = {IXS_FACT_QUERY_INVALID, false, 0};
-  ixs_session_binding binding;
-  facts_read_query_scope read_scope;
-  ixs_ctx *ctx;
+  facts_query_operation scope;
   ixs_node *nodes[2] = {lhs, rhs};
   ixs_algebra_status detail;
-  bool query_held = false;
-  if (!facts_store_bind(facts, &binding, &ctx))
+  if (!facts_query_operation_begin(facts, nodes, 2, "constant difference", true,
+                                   NULL, &scope)) {
+    result.status = scope.status;
     return result;
-  facts_read_query_begin(&read_scope, &facts->bounds, ctx,
-                         "constant difference");
-  if (!facts_store_ready(facts)) {
-    result.status =
-        facts->bounds.oom ? IXS_FACT_QUERY_OOM : IXS_FACT_QUERY_INVALID;
-    ixs_ctx_push_error(ctx, "constant difference: fact set is unusable");
-    goto cleanup;
   }
-  if (!facts_query_node_ok(ctx, lhs, "constant difference") ||
-      !facts_query_node_ok(ctx, rhs, "constant difference"))
-    goto cleanup;
-  if (ixs_bounds_has_empty(&facts->bounds)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  if (!ixs_bounds_query_hold_begin(
-          &facts->bounds, bounds_query_select_root(&facts->bounds, nodes, 2),
-          &query_held)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  {
-    ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-    const char **saved_errors = ctx->errors;
-    size_t saved_nerrors = ctx->nerrors;
-    size_t saved_errors_cap = ctx->errors_cap;
-    detail = bounds_constant_difference_query_detail(
-        ctx, &facts->bounds, lhs, rhs, &result.difference, &result.available);
-    ixs_arena_restore(&ctx->diag, diag_mark);
-    ctx->errors = saved_errors;
-    ctx->nerrors = saved_nerrors;
-    ctx->errors_cap = saved_errors_cap;
-  }
-  result.status = facts_status_from_algebra(detail);
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  result.status = facts_read_query_finish(&read_scope, result.status);
+  facts_query_operation_start(&scope);
+  detail = bounds_constant_difference_query_detail(scope.ctx, &facts->bounds,
+                                                   lhs, rhs, &result.difference,
+                                                   &result.available);
+  scope.status = facts_status_from_algebra(detail);
+  (void)facts_query_operation_finish(&scope, result.available);
+  result.status = scope.status;
   if (result.status != IXS_FACT_QUERY_COMPLETE) {
     result.available = false;
     result.difference = 0;
   }
-  facts_store_unbind(facts, &binding);
   return result;
 }
 
 static ixs_affine_decomposition_result
 facts_query_affine_decompose(ixs_facts *facts, ixs_node *expr,
                              ixs_node *symbol) {
-  algebra_query_scope scope;
+  facts_query_operation scope;
   ixs_affine_decomposition_result result = {IXS_FACT_QUERY_INVALID, false, NULL,
                                             NULL};
   ixs_node *nodes[2] = {expr, symbol};
-  if (!algebra_query_begin(facts, nodes, 2, "affine decomposition", true, NULL,
-                           &scope)) {
+  if (!facts_query_operation_begin(facts, nodes, 2, "affine decomposition",
+                                   true, NULL, &scope)) {
     result.status = scope.status;
     return result;
   }
@@ -18153,11 +17875,11 @@ facts_query_affine_decompose(ixs_facts *facts, ixs_node *expr,
     ixs_ctx_push_error(scope.ctx,
                        "affine decomposition: expression must be a symbol");
     scope.status = IXS_FACT_QUERY_INVALID;
-    (void)algebra_query_finish(&scope, false);
+    (void)facts_query_operation_finish(&scope, false);
     result.status = scope.status;
     return result;
   }
-  algebra_query_start(&scope);
+  facts_query_operation_start(&scope);
   if (!algebra_query_defined(&scope, expr))
     goto cleanup;
   expr = algebra_query_normalize(&scope, expr);
@@ -18168,7 +17890,7 @@ facts_query_affine_decompose(ixs_facts *facts, ixs_node *expr,
                                             (ixs_node **)&result.residual);
 
 cleanup:
-  (void)algebra_query_finish(&scope, result.available);
+  (void)facts_query_operation_finish(&scope, result.available);
   result.status = scope.status;
   if (result.status != IXS_FACT_QUERY_COMPLETE) {
     result.available = false;
@@ -18178,7 +17900,7 @@ cleanup:
   return result;
 }
 
-static ixs_node *algebra_finite_difference(algebra_query_scope *scope,
+static ixs_node *algebra_finite_difference(facts_query_operation *scope,
                                            ixs_node *expr, ixs_node *symbol,
                                            ixs_node *step) {
   ixs_node *shifted_symbol;
@@ -18225,13 +17947,13 @@ static ixs_node *algebra_finite_difference(algebra_query_scope *scope,
 static ixs_finite_difference_result
 facts_query_finite_difference(ixs_facts *facts, ixs_node *expr,
                               ixs_node *symbol, ixs_node *step) {
-  algebra_query_scope scope;
+  facts_query_operation scope;
   ixs_finite_difference_result query_result = {IXS_FACT_QUERY_INVALID, false,
                                                NULL};
   ixs_node *nodes[3] = {expr, symbol, step};
   ixs_node *result = NULL;
-  if (!algebra_query_begin(facts, nodes, 3, "finite difference", true, NULL,
-                           &scope)) {
+  if (!facts_query_operation_begin(facts, nodes, 3, "finite difference", true,
+                                   NULL, &scope)) {
     query_result.status = scope.status;
     return query_result;
   }
@@ -18239,14 +17961,14 @@ facts_query_finite_difference(ixs_facts *facts, ixs_node *expr,
     ixs_ctx_push_error(scope.ctx,
                        "finite difference: expression must be a symbol");
     scope.status = IXS_FACT_QUERY_INVALID;
-    (void)algebra_query_finish(&scope, false);
+    (void)facts_query_operation_finish(&scope, false);
     query_result.status = scope.status;
     return query_result;
   }
-  algebra_query_start(&scope);
+  facts_query_operation_start(&scope);
   result = algebra_finite_difference(&scope, expr, symbol, step);
   query_result.available = result != NULL;
-  (void)algebra_query_finish(&scope, query_result.available);
+  (void)facts_query_operation_finish(&scope, query_result.available);
   query_result.status = scope.status;
   if (query_result.status == IXS_FACT_QUERY_COMPLETE && query_result.available)
     query_result.difference = result;
@@ -18259,7 +17981,7 @@ facts_query_finite_difference(ixs_facts *facts, ixs_node *expr,
 
 static ixs_additive_constant_result
 facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
-  algebra_query_scope scope;
+  facts_query_operation scope;
   ixs_additive_constant_result query_result = {IXS_FACT_QUERY_INVALID, false,
                                                NULL, 0};
   ixs_node *nodes[1] = {expr};
@@ -18267,12 +17989,12 @@ facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
   int64_t result_constant = 0;
   int64_t q;
   bool ok = false;
-  if (!algebra_query_begin(facts, nodes, 1, "additive constant", true, NULL,
-                           &scope)) {
+  if (!facts_query_operation_begin(facts, nodes, 1, "additive constant", true,
+                                   NULL, &scope)) {
     query_result.status = scope.status;
     return query_result;
   }
-  algebra_query_start(&scope);
+  facts_query_operation_start(&scope);
   if (!algebra_query_defined(&scope, expr))
     goto cleanup;
   expr = algebra_query_normalize(&scope, expr);
@@ -18301,7 +18023,7 @@ facts_query_split_additive_constant(ixs_facts *facts, ixs_node *expr) {
   ok = true;
 
 cleanup:
-  (void)algebra_query_finish(&scope, ok);
+  (void)facts_query_operation_finish(&scope, ok);
   query_result.status = scope.status;
   query_result.available = ok && scope.status == IXS_FACT_QUERY_COMPLETE;
   if (query_result.available) {
@@ -18351,127 +18073,62 @@ cleanup:
 
 static ixs_fact_check_result facts_query_check_integer_valued(ixs_facts *facts,
                                                               ixs_node *expr) {
-  ixs_session_binding binding;
-  facts_read_query_scope read_scope;
-  ixs_ctx *ctx;
-  bool query_held = false;
+  facts_query_operation scope;
+  ixs_node *nodes[1] = {expr};
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
-  if (!facts_store_bind(facts, &binding, &ctx))
+  if (!facts_query_operation_begin(facts, nodes, 1, "integer valued", true,
+                                   NULL, &scope)) {
+    result.status = scope.status;
     return result;
-  facts_read_query_begin(&read_scope, &facts->bounds, ctx, "integer valued");
-  if (!facts_store_ready(facts)) {
-    result.status =
-        facts->bounds.oom ? IXS_FACT_QUERY_OOM : IXS_FACT_QUERY_INVALID;
-    ixs_ctx_push_error(ctx, "integer valued: fact set is unusable");
-    goto cleanup;
-  }
-  if (!facts_query_node_ok(ctx, expr, "integer valued"))
-    goto cleanup;
-  if (ixs_bounds_has_empty(&facts->bounds)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
   }
   result.check = ixs_bounds_check_integer_valued(&facts->bounds, expr);
-  result.status = IXS_FACT_QUERY_COMPLETE;
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  result.status = facts_read_query_finish(&read_scope, result.status);
+  (void)facts_query_operation_finish(&scope, true);
+  result.status = scope.status;
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.check = IXS_CHECK_UNKNOWN;
-  facts_store_unbind(facts, &binding);
   return result;
 }
 
 static ixs_fact_check_result facts_query_check_defined(ixs_facts *facts,
                                                        ixs_node *expr) {
-  ixs_session_binding binding;
-  facts_read_query_scope read_scope;
-  ixs_ctx *ctx;
+  facts_query_operation scope;
+  ixs_node *nodes[1] = {expr};
   bool oom = false;
   bool limited = false;
-  bool query_held = false;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
-  if (!facts_store_bind(facts, &binding, &ctx))
+  if (!facts_query_operation_begin(facts, nodes, 1, "defined", true, NULL,
+                                   &scope)) {
+    result.status = scope.status;
     return result;
-  facts_read_query_begin(&read_scope, &facts->bounds, ctx, "defined");
-  if (!facts_store_ready(facts)) {
-    result.status =
-        facts->bounds.oom ? IXS_FACT_QUERY_OOM : IXS_FACT_QUERY_INVALID;
-    ixs_ctx_push_error(ctx, "defined: fact set is unusable");
-    goto cleanup;
-  }
-  if (!facts_query_node_ok(ctx, expr, "defined"))
-    goto cleanup;
-  if (ixs_bounds_has_empty(&facts->bounds)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
   }
   result.check =
       bounds_defined_check_detail(&facts->bounds, expr, &oom, &limited);
-  result.status = oom       ? IXS_FACT_QUERY_OOM
-                  : limited ? IXS_FACT_QUERY_LIMITED
-                            : IXS_FACT_QUERY_COMPLETE;
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  result.status = facts_read_query_finish(&read_scope, result.status);
+  scope.status = oom       ? IXS_FACT_QUERY_OOM
+                 : limited ? IXS_FACT_QUERY_LIMITED
+                           : IXS_FACT_QUERY_COMPLETE;
+  (void)facts_query_operation_finish(&scope, true);
+  result.status = scope.status;
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.check = IXS_CHECK_UNKNOWN;
-  facts_store_unbind(facts, &binding);
   return result;
 }
 
 static ixs_fact_check_result
 facts_query_check_divisible(ixs_facts *facts, ixs_node *expr, int64_t modulus) {
-  ixs_session_binding binding;
-  facts_read_query_scope read_scope;
-  ixs_ctx *ctx;
-  bool query_held = false;
+  facts_query_operation scope;
+  ixs_node *nodes[1] = {expr};
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
-  if (!facts_store_bind(facts, &binding, &ctx))
+  if (!facts_query_operation_begin(facts, nodes, 1, "divisibility",
+                                   modulus != 0, "modulus must be nonzero",
+                                   &scope)) {
+    result.status = scope.status;
     return result;
-  facts_read_query_begin(&read_scope, &facts->bounds, ctx, "divisibility");
-  if (!facts_store_ready(facts)) {
-    result.status =
-        facts->bounds.oom ? IXS_FACT_QUERY_OOM : IXS_FACT_QUERY_INVALID;
-    ixs_ctx_push_error(ctx, "divisibility: fact set is unusable");
-    goto cleanup;
-  }
-  if (modulus == 0) {
-    ixs_ctx_push_error(ctx, "divisibility: modulus must be nonzero");
-    goto cleanup;
-  }
-  if (!facts_query_node_ok(ctx, expr, "divisibility"))
-    goto cleanup;
-  if (ixs_bounds_has_empty(&facts->bounds)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
-  if (!ixs_bounds_query_hold_begin(&facts->bounds, expr, &query_held)) {
-    result.status = IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
   }
   result.check = ixs_bounds_check_divisible(&facts->bounds, expr, modulus);
-  result.status = IXS_FACT_QUERY_COMPLETE;
-
-cleanup:
-  if (query_held)
-    ixs_bounds_query_hold_end(&facts->bounds);
-  result.status = facts_read_query_finish(&read_scope, result.status);
+  (void)facts_query_operation_finish(&scope, true);
+  result.status = scope.status;
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.check = IXS_CHECK_UNKNOWN;
-  facts_store_unbind(facts, &binding);
   return result;
 }
 
@@ -18495,17 +18152,15 @@ static ixs_fact_query_status
 exact_divide_simplify_facts(ixs_facts *facts, ixs_ctx *ctx, ixs_node *expr,
                             ixs_node **simplified) {
   /* Fact simplification is a proof probe; discard scratch and diagnostics. */
-  ixs_arena_mark scratch_mark = ixs_arena_save(&ctx->scratch);
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction transaction;
   bool old_oom = facts->bounds.oom;
   bool limited = false;
-  ixs_node *result =
-      simp_simplify_bounds_status(ctx, expr, &facts->bounds, &limited);
+  ixs_node *result;
   ixs_fact_query_status status = IXS_FACT_QUERY_COMPLETE;
 
+  ixs_query_transaction_begin(&transaction, ctx, NULL, &ctx->scratch);
+  result = simp_simplify_bounds_status(ctx, expr, &facts->bounds, &limited);
+  (void)ixs_query_transaction_finish(&transaction, false);
   *simplified = NULL;
   if (limited)
     status = IXS_FACT_QUERY_LIMITED;
@@ -18518,11 +18173,6 @@ exact_divide_simplify_facts(ixs_facts *facts, ixs_ctx *ctx, ixs_node *expr,
   if (status == IXS_FACT_QUERY_OOM)
     bounds_store_invalidate_reads(&facts->bounds);
   facts->bounds.oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, scratch_mark);
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
   return status;
 }
 
@@ -25398,6 +25048,69 @@ IXS_STATIC size_t ixs_print_c_impl(const ixs_node *expr, char *buf,
 }
 
 /* ==================================================================== */
+/* query_transaction.c                                                */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "query_transaction.h"
+
+IXS_STATIC void ixs_query_transaction_begin(ixs_query_transaction *transaction,
+                                            ixs_ctx *ctx, ixs_bounds *bounds,
+                                            ixs_arena *scratch) {
+  transaction->ctx = ctx;
+  transaction->bounds = bounds;
+  transaction->scratch = scratch;
+  if (bounds) {
+    transaction->transport = ixs_bounds_query_transport_snapshot(bounds);
+    transaction->old_oom = bounds->oom;
+  }
+  if (scratch)
+    transaction->scratch_mark = ixs_arena_save(scratch);
+  if (ctx) {
+    transaction->diag_mark = ixs_arena_save(&ctx->diag);
+    transaction->errors = ctx->errors;
+    transaction->nerrors = ctx->nerrors;
+    transaction->errors_cap = ctx->errors_cap;
+  }
+}
+
+IXS_STATIC ixs_query_observation ixs_query_transaction_finish(
+    const ixs_query_transaction *transaction, bool restore_oom) {
+  ixs_query_observation result = {false, false, false};
+  ixs_bounds *bounds = transaction->bounds;
+  if (bounds) {
+    ixs_bounds_transport_status transport =
+        bounds_query_state_transport(bounds);
+    result.new_oom = !transaction->old_oom && bounds->oom;
+    result.limited = bounds_query_limited_since(bounds, transaction->transport);
+    result.invalid = bounds_query_invalid_since(bounds, transaction->transport);
+    if (ixs_bounds_query_transport_snapshot(bounds).generation !=
+        transaction->transport.generation)
+      result.invalid = true;
+    if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+      result.limited = true;
+    else if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+      result.invalid = true;
+    else if (transport == IXS_BOUNDS_TRANSPORT_OOM)
+      result.new_oom = true;
+  }
+  if (transaction->scratch)
+    ixs_arena_restore(transaction->scratch, transaction->scratch_mark);
+  if (transaction->ctx) {
+    ixs_ctx *ctx = transaction->ctx;
+    ixs_arena_restore(&ctx->diag, transaction->diag_mark);
+    ctx->errors = transaction->errors;
+    ctx->nerrors = transaction->nerrors;
+    ctx->errors_cap = transaction->errors_cap;
+  }
+  if (restore_oom && bounds)
+    transaction->bounds->oom = transaction->old_oom;
+  return result;
+}
+
+/* ==================================================================== */
 /* query_walk.c                                                       */
 /* ==================================================================== */
 
@@ -29652,6 +29365,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
 #include "bounds_equivalence.h"
 #include "bounds_query.h"
 #include "bounds_store.h"
+#include "query_transaction.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30095,20 +29809,16 @@ static inline int32_t find_pow1_factor(ixs_node *mul, ixs_tag tag) {
  * but allocation failure must never be mistaken for that no-match. */
 static ixs_node *try_mul_power(ixs_ctx *ctx, ixs_node *result, ixs_node *base,
                                int32_t exp, bool strict, bool *no_match) {
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
-  ixs_node *power = apply_pow(ctx, ixs_node_int(ctx, 1), base, exp);
+  ixs_query_transaction transaction;
+  ixs_node *power;
 
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  power = apply_pow(ctx, ixs_node_int(ctx, 1), base, exp);
   if (power && !ixs_node_is_sentinel(power))
     power = strict ? simp_mul_strict(ctx, result, power)
                    : simp_mul(ctx, result, power);
   *no_match = power && ixs_node_is_sentinel(power);
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return *no_match ? NULL : power;
 }
 
@@ -31296,27 +31006,18 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_bounds *bnds,
                                ixs_addterm *terms, uint32_t nterms, uint32_t i,
                                size_t *inspected, bool allow_wide) {
   ixs_node *term = terms[i].term;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
   int result;
 
   if (!term || (term->tag != IXS_MOD && nterms > 2u && !allow_wide) ||
       (term->tag != IXS_MOD &&
        (term->tag != IXS_MUL || find_pow1_factor(term, IXS_MOD) < 0)))
     return 0;
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   result = cancel_floor_mod_at_impl(ctx, bnds, terms, nterms, i, inspected,
                                     allow_wide);
 
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return result;
 }
 
@@ -34396,25 +34097,16 @@ static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
  * Allocation failure remains NULL. */
 static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
   ixs_node *diff;
   if (ixs_node_is_zero(b))
     return n;
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   diff = simp_sub(ctx, a, b);
   if (!diff)
     return diff;
   if (ixs_node_is_sentinel(diff)) {
-    ixs_arena_restore(&ctx->diag, diag_mark);
-    ctx->errors = saved_errors;
-    ctx->nerrors = saved_nerrors;
-    ctx->errors_cap = saved_errors_cap;
+    (void)ixs_query_transaction_finish(&transaction, false);
     return n;
   }
   return simp_cmp(ctx, diff, n->u.binary.cmp_op, ixs_node_int(ctx, 0));
@@ -35731,20 +35423,17 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
 /* Speculative algebra may use any smart constructor while rebuilding. Roll
  * back only its explicit arithmetic-overflow diagnostics; other sentinels are
  * producer or domain failures and remain fail-loud. */
-static bool subs_rollback_arithmetic_errors(ixs_ctx *ctx, ixs_arena_mark mark,
-                                            const char **errors, size_t nerrors,
-                                            size_t errors_cap) {
+static bool
+subs_rollback_arithmetic_errors(ixs_query_transaction *transaction) {
+  ixs_ctx *ctx = transaction->ctx;
   size_t i;
-  if (ctx->nerrors == nerrors)
+  if (ctx->nerrors == transaction->nerrors)
     return false;
-  for (i = nerrors; i < ctx->nerrors; i++)
+  for (i = transaction->nerrors; i < ctx->nerrors; i++)
     if (strncmp(ctx->errors[i], "rational overflow in ",
                 sizeof("rational overflow in ") - 1u) != 0)
       return false;
-  ixs_arena_restore(&ctx->diag, mark);
-  ctx->errors = errors;
-  ctx->nerrors = nerrors;
-  ctx->errors_cap = errors_cap;
+  (void)ixs_query_transaction_finish(transaction, false);
   return true;
 }
 
@@ -35767,9 +35456,8 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   ixs_node *parse_error = NULL;
   ixs_node *domain_error = NULL;
   ixs_node *result;
-  ixs_arena_mark mark, diag_mark;
-  const char **saved_errors = NULL;
-  size_t saved_nerrors = 0, saved_errors_cap = 0;
+  ixs_arena_mark mark;
+  ixs_query_transaction transaction;
   subs_query query;
   subs_memo_slot initial_memo[SUBS_MEMO_INITIAL_CAP];
   subs_frame initial_frames[SUBS_STACK_INITIAL_CAP];
@@ -35815,26 +35503,18 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
     goto cleanup;
   }
   if (unrepresentable) {
-    diag_mark = ixs_arena_save(&ctx->diag);
-    saved_errors = ctx->errors;
-    saved_nerrors = ctx->nerrors;
-    saved_errors_cap = ctx->errors_cap;
+    ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   }
   result = subs_iterative(&query, expr);
-  if (unrepresentable &&
-      subs_rollback_arithmetic_errors(ctx, diag_mark, saved_errors,
-                                      saved_nerrors, saved_errors_cap)) {
+  if (unrepresentable && subs_rollback_arithmetic_errors(&transaction)) {
     /* A later scratch failure outranks the arithmetic miss. */
     *unrepresentable = result != NULL;
     result = NULL;
   } else if (unrepresentable && result && ixs_node_is_sentinel(result) &&
-             ctx->nerrors == saved_nerrors) {
+             ctx->nerrors == transaction.nerrors) {
     /* A speculative smart constructor returned an error sentinel but could
      * not record its diagnostic. Treat that diagnostic allocation as OOM. */
-    ixs_arena_restore(&ctx->diag, diag_mark);
-    ctx->errors = saved_errors;
-    ctx->nerrors = saved_nerrors;
-    ctx->errors_cap = saved_errors_cap;
+    (void)ixs_query_transaction_finish(&transaction, false);
     result = NULL;
   }
 cleanup:

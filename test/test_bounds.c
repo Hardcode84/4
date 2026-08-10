@@ -21,6 +21,7 @@
 #include "interval.h"
 #include "low_bits_algebra.h"
 #include "node.h"
+#include "query_transaction.h"
 #include "radix_algebra.h"
 #include "simplify.h"
 
@@ -1460,6 +1461,44 @@ static void test_bounds_mutual_query_budget_and_cache(void) {
   check_bounds_mutual_query_budget_and_cache(
       "pointer_layout_shifted_by_a_long_symbol_prefix", 1);
   check_bounds_mutual_query_budget_and_cache("many_allocations", 17);
+}
+
+static void test_query_transaction_preserves_status_coexistence(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_bounds bounds;
+  ixs_query_transaction transaction;
+  ixs_query_observation observed;
+  ixs_algebra_status local_status;
+  ixs_algebra_status published_status;
+  bool tracking_entered = false;
+
+  CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
+  CHECK(bounds_query_force_hold_begin(&bounds, &tracking_entered));
+  ixs_query_transaction_begin(&transaction, NULL, &bounds, NULL);
+  bounds.oom = true;
+  bounds_query_note_invalid(&bounds);
+  observed = ixs_query_transaction_finish(&transaction, false);
+  CHECK(observed.new_oom && observed.invalid && !observed.limited);
+
+  /* Constant-difference keeps its local OOM-before-INVALID contract, while a
+   * public facts read publishes INVALID first. The transaction carries both
+   * observations and owns neither precedence. */
+  local_status = observed.new_oom   ? IXS_ALGEBRA_OOM
+                 : observed.invalid ? IXS_ALGEBRA_INVALID
+                 : observed.limited ? IXS_ALGEBRA_LIMITED
+                                    : IXS_ALGEBRA_MATCH;
+  published_status = observed.invalid   ? IXS_ALGEBRA_INVALID
+                     : observed.new_oom ? IXS_ALGEBRA_OOM
+                     : observed.limited ? IXS_ALGEBRA_LIMITED
+                                        : IXS_ALGEBRA_MATCH;
+  CHECK(local_status == IXS_ALGEBRA_OOM);
+  CHECK(published_status == IXS_ALGEBRA_INVALID);
+
+  bounds.oom = transaction.old_oom;
+  if (tracking_entered)
+    ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+  ixs_ctx_destroy(ctx);
 }
 
 static void check_bounds_piecewise_congruence_depth_envelope(unsigned depth) {
@@ -12087,6 +12126,7 @@ int main(void) {
   test_bounds_bitfacts_mul_requires_integer_product();
   test_bounds_bitfacts_contradiction();
   test_bounds_mutual_query_budget_and_cache();
+  test_query_transaction_preserves_status_coexistence();
   test_bounds_piecewise_congruence_depth_envelope();
   test_bounds_piecewise_range_with_unrelated_congruence();
   test_bounds_flat_piecewise_keeps_case_limit();

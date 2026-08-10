@@ -8,6 +8,7 @@
 #include "bounds_range.h"
 #include "bounds_store.h"
 #include "facts_store.h"
+#include "query_transaction.h"
 #include "query_walk.h"
 #include "simplify.h"
 
@@ -350,14 +351,12 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
                           predicate_finite_symbol *symbols, size_t symbol_count,
                           ixs_node **targets, size_t point_count) {
   ixs_ctx *ctx = bounds->ctx;
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction transaction;
   ixs_node *replacements[PREDICATE_FINITE_MAX_SYMBOLS];
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   size_t point;
 
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   for (point = 0; point < point_count; point++) {
     ixs_node *evaluated;
     ixs_check_result current;
@@ -403,10 +402,7 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       entry->current = entry->lower;
     }
   }
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
 }
 
@@ -436,11 +432,8 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   ixs_ctx *ctx;
   ixs_bounds branch;
   ixs_bounds_build_status status;
-  ixs_arena_mark scratch_mark;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
+  ixs_query_transaction assumption;
   ixs_bounds_transport_snapshot transport;
   bool branch_ready = false;
   bool branch_limited = false;
@@ -451,8 +444,8 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     return IXS_CHECK_UNKNOWN;
 
   ctx = bounds->ctx;
-  transport = ixs_bounds_query_transport_snapshot(bounds);
-  scratch_mark = ixs_arena_save(bounds->scratch);
+  ixs_query_transaction_begin(&transaction, NULL, bounds, bounds->scratch);
+  transport = transaction.transport;
   if (!ixs_bounds_fork(&branch, bounds)) {
     bounds->oom = true;
     goto cleanup;
@@ -460,17 +453,11 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
   branch_ready = true;
   /* Unsupported local assumptions are proof misses.  Their diagnostics and
    * closure are private to this branch. */
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&assumption, ctx, NULL, NULL);
   status = bounds_assume_validate_predicate(&branch, antecedent);
   if (status == IXS_BOUNDS_BUILD_OK)
     status = facts_store_ingest_predicate_branch(ctx, &branch, antecedent);
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&assumption, false);
 
   if (status == IXS_BOUNDS_BUILD_OOM || branch.oom) {
     bounds->oom = true;
@@ -497,7 +484,7 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
 cleanup:
   if (branch_ready)
     ixs_bounds_destroy(&branch);
-  ixs_arena_restore(bounds->scratch, scratch_mark);
+  (void)ixs_query_transaction_finish(&transaction, false);
   if (limited &&
       (branch_limited || bounds_query_limited_since(bounds, transport)))
     *limited = true;

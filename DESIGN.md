@@ -1606,6 +1606,16 @@ scalar metadata calls initialize output parameters before validation. The read
 service owns that publication policy while lower bounds services return typed
 algebra status without writing public outputs.
 
+Speculative read and algebra adapters share one query-transaction primitive.
+It independently snapshots optional scratch, diagnostics, bounds-local OOM,
+and query transport, then returns raw new-OOM, limited, and invalid
+observations. It does not rank those observations or publish result roots.
+Constant-difference proof keeps its local OOM-before-invalid ordering, while a
+public fact read publishes invalid before OOM. A forced public read snapshots
+the old OOM latch before entering its hold and transport after entry, so hold
+allocation failure remains visible without treating the new generation as an
+invalid query.
+
 Scalar `ixs_simplify` has a separate session-local reuse path for its direct
 assumption array. The first nonempty array containing at most 64 roots retains
 its prepared semantic bounds domain. Later calls reuse it only after an exact

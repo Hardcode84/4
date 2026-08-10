@@ -2238,11 +2238,14 @@ def test_cancel_floor_mod_pairs_shared_outer() -> None:
     floor_term = 3 * outer * k * ixsimpl.floor(x / k)
     mod_term = 3 * outer * (x % k)
     expected = 3 * outer * x
+    combined = floor_term + mod_term
 
-    assert ixsimpl.same_node(floor_term + mod_term, expected)
+    assert not ixsimpl.same_node(combined, expected)
+    assert ixsimpl.same_node(combined.simplify(assumptions=[k > 0]), expected)
 
-    wide = unrelated + floor_term + mod_term
-    assert ixsimpl.same_node(wide.simplify(), unrelated + expected)
+    wide = unrelated + combined
+    assert not ixsimpl.same_node(wide.simplify(), unrelated + expected)
+    assert ixsimpl.same_node(wide.simplify(assumptions=[k > 0]), unrelated + expected)
 
 
 @given(

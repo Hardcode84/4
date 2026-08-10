@@ -13,6 +13,7 @@
 #include "expand.h"
 #include "facts_store.h"
 #include "low_bits_algebra.h"
+#include "query_transaction.h"
 #include "query_walk.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
@@ -372,18 +373,9 @@ static bool equivalence_xor_child_proven(equivalence_state *state,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Canonical XOR
- * nodes are already
- * flat. The
- * production-backed
- * binary case pairs
- * exact arguments
- * before semantic
- * candidates. The
- * matcher remains
- * O(A^2) in its
- * admitted arity
- * A=2. */
+/* Canonical XOR nodes are flat. The production-backed binary case pairs exact
+ * arguments before semantic candidates. Its admitted arity A=2 keeps matching
+ * O(A^2). */
 static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
                                                       ixs_node *lhs,
                                                       ixs_node *rhs,
@@ -400,16 +392,8 @@ static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
   right_zero = rhs->u.assoc.args[0];
   right_one = rhs->u.assoc.args[1];
 
-  /* Commit exact
-   * pairs first. The
-   * remaining child
-   * then has only
-   * one possible
-   * partner, so this
-   * preserves
-   * deterministic
-   * matching without
-   * backtracking. */
+  /* Commit exact pairs first. The remaining child then has one possible
+   * partner, preserving deterministic matching without backtracking. */
   if (left_zero == right_zero)
     return equivalence_xor_child_proven(state, left_one, right_one, depth)
                ? IXS_CHECK_TRUE
@@ -520,19 +504,9 @@ static bool equivalence_context_process_pair(
                                               simplified_rhs);
 }
 
-/* Worklist insertion
- * and lookup are
- * expected O(N) in
- * the paired
- * canonical DAG.
- * Existing child
- * proofs keep their
- * own bounds; XOR
- * may add O(A^2)
- * bounded child
- * proofs after exact
- * argument pairing.
- */
+/* Worklist insertion and lookup are expected O(N) in the paired canonical DAG.
+ * Existing child proofs keep their own bounds; XOR may add O(A^2) bounded
+ * child proofs after exact argument pairing. */
 static ixs_check_result equivalence_same_context(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
@@ -560,22 +534,9 @@ static ixs_check_result equivalence_same_context(equivalence_state *state,
   return IXS_CHECK_TRUE;
 }
 
-/* Optional algebraic
- * proof rules must
- * not turn a valid
- * query into a
- * session diagnostic
- * merely because an
- * intermediate
- * rational cannot be
- * represented. Build
- * their small linear
- * intermediates
- * directly from
- * canonical nodes:
- * overflow is a rule
- * miss and
- * allocation failure
+/* Optional algebraic proofs must not diagnose a valid query merely because an
+ * intermediate rational is unrepresentable. Build their small linear forms
+ * directly from canonical nodes: overflow is a rule miss; allocation failure
  * remains OOM. */
 typedef enum {
   EQUIVALENCE_BUILD_OK,
@@ -672,25 +633,9 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (proved)
     return delta == 0 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 
-  /* A variable
-   * difference need
-   * not be constant
-   * to prove that
-   * the two
-   * expressions
-   * never agree.
-   * Reuse the
-   * ordinary range,
-   * bit, and
-   * congruence query
-   * for the
-   * canonical
-   * difference
-   * instead of
-   * teaching
-   * equivalence
-   * those domains
-   * again. */
+  /* A variable difference need not be constant to prove that two expressions
+   * never agree. Query the canonical difference through the ordinary range,
+   * bit, and congruence domains instead of duplicating them here. */
   if (ixs_node_is_sentinel(difference))
     return IXS_CHECK_UNKNOWN;
   memset(&nonzero, 0, sizeof(nonzero));
@@ -706,17 +651,8 @@ static ixs_check_result equivalence_difference(equivalence_state *state,
   if (nonzero_result == IXS_CHECK_TRUE)
     return IXS_CHECK_FALSE;
 
-  /* Integer equality
-   * is also bitwise
-   * equality.
-   * Canonical xor
-   * cancels shared
-   * subexpressions
-   * that an
-   * arithmetic
-   * difference
-   * deliberately
-   * preserves. */
+  /* Integer equality is also bitwise equality. Canonical XOR cancels shared
+   * subexpressions that an arithmetic difference deliberately preserves. */
   if (ixs_bounds_check_integer_valued(state->bounds, lhs) == IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(state->bounds, rhs) == IXS_CHECK_TRUE) {
     ixs_node *bit_difference = simp_xor(state->ctx, lhs, rhs);
@@ -870,22 +806,9 @@ static bool equivalence_modulus_set_insert(ixs_arena *arena,
   return true;
 }
 
-/* Discover
- * congruence
- * candidates by
- * visiting each node
- * in the two queried
- * residual DAGs
- * once. Growable
- * query-local
- * storage avoids
- * semantic depth,
- * visit, and
- * candidate-count
- * cutoffs without
- * scanning unrelated
- * context state.
- */
+/* Discover congruence candidates by visiting each node in both residual DAGs
+ * once. Growable query-local storage avoids semantic depth, visit, and
+ * candidate-count cutoffs without scanning unrelated context state. */
 static bool equivalence_collect_congruences(equivalence_state *state,
                                             ixs_node *lhs, ixs_node *rhs,
                                             equivalence_modulus_set *moduli) {
@@ -1139,17 +1062,8 @@ static bool equivalence_flatten_logic(equivalence_state *state, ixs_node *root,
     bool inserted;
     if (!query_node_set_insert(&state->ctx->scratch, &visited, node, &inserted))
       goto oom;
-    /* AND and OR are
-     * idempotent, so
-     * sharing and
-     * repeated
-     * operands may
-     * be visited
-     * once.  This
-     * also makes
-     * malformed
-     * cyclic nodes
-     * terminate. */
+    /* AND and OR are idempotent, so shared and repeated operands need one
+     * visit. This also terminates malformed cyclic nodes. */
     if (!inserted)
       continue;
     if (node->tag == tag && ixs_node_is_bool_valued(node)) {
@@ -1205,15 +1119,8 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
     memset(right_matched, 0, nright);
   }
 
-  /* Exact terms
-   * first.  This
-   * makes matching
-   * deterministic
-   * and avoids proof
-   * work on the
-   * common
-   * reordered-tree
-   * case. */
+  /* Match exact terms first for deterministic pairing and no proof work on
+   * the common reordered-tree case. */
   for (i = 0; i < nleft; i++) {
     for (j = 0; j < nright; j++) {
       if (!right_matched[j] && left_terms[i] == right_terms[j]) {
@@ -1226,24 +1133,9 @@ static ixs_check_result equivalence_match_logic(equivalence_state *state,
   for (i = 0; i < nleft; i++) {
     if (left_matched[i])
       continue;
-    /* Nested
-     * associative
-     * matching is a
-     * conservative
-     * optional
-     * refinement.
-     * Only the outer
-     * match starts
-     * subproofs,
-     * statically
-     * bounding C
-     * recursion;
-     * each subproof
-     * still has
-     * unbounded
-     * growable
-     * traversal of
-     * its DAG. */
+    /* Nested associative matching is an optional refinement. Only the outer
+     * match starts subproofs, statically bounding C recursion; each subproof
+     * still traverses its DAG with growable storage. */
     if (depth != 0u)
       goto cleanup;
     for (j = 0; j < nright; j++) {
@@ -1283,19 +1175,8 @@ static ixs_check_result equivalence_predicate_shapes(equivalence_state *state,
   if (lhs->tag == IXS_CMP && rhs->tag == IXS_CMP) {
     int64_t delta;
     ixs_check_result result = equivalence_ordered_comparisons(state, lhs, rhs);
-    /* Comparisons
-     * are canonical
-     * residuals
-     * against a
-     * shared right
-     * operand. An
-     * exact zero
-     * delta
-     * therefore
-     * preserves any
-     * common
-     * comparison
-     * operator. */
+    /* Comparisons are canonical residuals against a shared right operand. An
+     * exact zero delta therefore preserves the common comparison operator. */
     if (result == IXS_CHECK_UNKNOWN &&
         lhs->u.binary.cmp_op == rhs->u.binary.cmp_op &&
         lhs->u.binary.rhs == rhs->u.binary.rhs &&
@@ -1459,18 +1340,9 @@ static ixs_check_result equivalence_core(equivalence_state *state,
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-/* Start an otherwise
- * ordinary
- * equivalence query
- * with the bounded
- * child-proof budget
- * exhausted. This
- * exercises the
- * production stop
- * condition without
- * a test-only branch
- * in the proof
- * rules. */
+/* Start an ordinary equivalence query with its bounded child-proof budget
+ * exhausted. This exercises the production stop condition without a test-only
+ * proof branch. */
 IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
     ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs) {
   equivalence_state state;
@@ -1723,16 +1595,8 @@ static bool equivalence_piecewise_single_point(uint64_t mask, size_t *index) {
   return false;
 }
 
-/* Piecewise arm
- * substitution is
- * admitted only for
- * small complete
- * DAGs. This cap
- * prevents branch
- * count from
- * multiplying
- * reconstruction of
- * a large peer. */
+/* Admit Piecewise arm substitution only for small complete DAGs, preventing
+ * branch count from multiplying reconstruction of a large peer. */
 static bool equivalence_piecewise_small_operand(ixs_node *root) {
   ixs_node *stack[EQUIVALENCE_PIECEWISE_MAX_POINTS];
   ixs_node *seen[EQUIVALENCE_PIECEWISE_MAX_POINTS];
@@ -1770,25 +1634,23 @@ equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
                                   const equivalence_piecewise_domain *domain,
                                   size_t point_index, unsigned depth) {
   ixs_ctx *ctx = state->ctx;
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
-  ixs_node *point = ixs_node_int(ctx, domain->points[point_index]);
-  ixs_node *substituted_value =
-      point ? simp_subs(ctx, value, domain->selector, point) : NULL;
-  ixs_node *substituted_other =
-      point ? simp_subs(ctx, other, domain->selector, point) : NULL;
+  ixs_query_transaction transaction;
+  ixs_node *point;
+  ixs_node *substituted_value;
+  ixs_node *substituted_other;
   bool value_oom = false;
   bool value_limited = false;
   bool other_oom = false;
   bool other_limited = false;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
 
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  point = ixs_node_int(ctx, domain->points[point_index]);
+  substituted_value =
+      point ? simp_subs(ctx, value, domain->selector, point) : NULL;
+  substituted_other =
+      point ? simp_subs(ctx, other, domain->selector, point) : NULL;
+  (void)ixs_query_transaction_finish(&transaction, false);
   if (!point || !substituted_value || !substituted_other) {
     state->oom = true;
     return false;
@@ -1811,27 +1673,10 @@ equivalence_piecewise_prove_point(equivalence_state *state, ixs_node *value,
   return result == IXS_CHECK_TRUE;
 }
 
-/* Final bounded
- * fallback for an
- * exact root
- * Piecewise. It
- * tracks first-match
- * reachability in a
- * complete finite
- * congruent selector
- * mask, then proves
- * only single-point
- * arms. No
- * fact-table fork or
- * whole-operand
- * Piecewise
- * substitution
- * occurs. Work is
- * bounded by 16
- * arms, 64 selector
- * points, and
- * 64-node arm/peer
- * DAGs. */
+/* Final bounded fallback for an exact root Piecewise. Track first-match
+ * reachability in a complete finite congruent selector mask, then prove only
+ * single-point arms. No fact-table fork or whole-operand substitution occurs.
+ * Work is bounded by 16 arms, 64 selector points, and 64-node arm/peer DAGs. */
 static ixs_check_result equivalence_piecewise_root(equivalence_state *state,
                                                    ixs_node *lhs, ixs_node *rhs,
                                                    unsigned depth) {
@@ -2008,12 +1853,10 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
 IXS_STATIC ixs_algebra_status
 bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
                                 ixs_node *rhs, ixs_check_result *result) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_query_transaction transaction;
   equivalence_state state;
-  ixs_bounds_transport_snapshot transport =
-      ixs_bounds_query_transport_snapshot(bounds);
-  ixs_bounds_transport_snapshot limit_transport = transport;
-  bool old_oom = bounds->oom;
+  ixs_bounds_transport_snapshot transport;
+  ixs_bounds_transport_snapshot limit_transport;
   bool track_limits = bounds_query_is_tracking(bounds);
   bool lhs_oom = false;
   bool rhs_oom = false;
@@ -2021,13 +1864,16 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   bool rhs_limited = false;
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
+  ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
+  transport = transaction.transport;
+  limit_transport = transport;
   equivalence_state_init(&state, ctx, bounds);
   *result = IXS_CHECK_UNKNOWN;
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
       bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
           IXS_CHECK_TRUE) {
-    if (lhs_oom || rhs_oom || (!old_oom && bounds->oom))
+    if (lhs_oom || rhs_oom || (!transaction.old_oom && bounds->oom))
       status = IXS_ALGEBRA_OOM;
     else if (lhs_limited || rhs_limited)
       status = IXS_ALGEBRA_LIMITED;
@@ -2038,7 +1884,7 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   if (state.invalid || bounds_query_invalid_since(bounds, transport)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_INVALID;
-  } else if (state.oom || (!old_oom && bounds->oom)) {
+  } else if (state.oom || (!transaction.old_oom && bounds->oom)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_OOM;
   } else if (*result == IXS_CHECK_UNKNOWN &&
@@ -2051,10 +1897,9 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
 
 restore:
   equivalence_state_destroy(&state);
-  if (!old_oom && bounds->oom)
+  if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);
-  bounds->oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, mark);
+  (void)ixs_query_transaction_finish(&transaction, true);
   return status;
 }
 
@@ -2096,20 +1941,9 @@ equivalence_atom_find_exact_sides(ixs_node *difference,
   }
 }
 
-/* Isolate one unit
- * Piecewise term
- * from a normalized
- * zero-sum ADD.
- * Multiplying every
- * other coefficient
- * by the opposite
- * unit preserves
- * canonical term
- * order, so the peer
- * is rebuilt once
- * without
- * distributing into
- * any arm. */
+/* Isolate one unit Piecewise term from a normalized zero-sum ADD. Multiplying
+ * every other coefficient by the opposite unit preserves canonical term order,
+ * so the peer is rebuilt once without distributing into any arm. */
 static bool bounds_isolate_piecewise_relation(ixs_bounds *bounds,
                                               ixs_node *difference,
                                               ixs_node *piecewise,
@@ -2185,25 +2019,10 @@ cleanup:
   return ok;
 }
 
-/* Predicate
- * construction
- * normalizes
- * equality to a
- * zero-sum ADD.
- * Recover its exact
- * operands so the
- * ordinary
- * equivalence rules
- * see the same
- * scaled-Mod or
- * exact
- * root-Piecewise
- * relation as the
- * direct API. Each
- * path is O(T) in
- * the direct terms
- * and uses O(T)
- * query scratch. */
+/* Predicate construction normalizes equality to a zero-sum ADD. Recover its
+ * exact operands so ordinary equivalence sees the same scaled-Mod or exact
+ * root-Piecewise relation as the direct API. Each path is O(T) in direct terms
+ * and uses O(T) query scratch. */
 static void bounds_equivalence_atom_sides(ixs_bounds *bounds, ixs_node *cmp,
                                           ixs_node **lhs, ixs_node **rhs) {
   struct ixs_node_impl equality;
@@ -2393,13 +2212,11 @@ constant_difference_normalize_operands(ixs_ctx *ctx, ixs_bounds *bounds,
 IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
     ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
     int64_t *delta, bool *matched) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  ixs_query_transaction transaction;
   constant_difference_attempt attempt;
   ixs_node *original_lhs = lhs;
   ixs_node *original_rhs = rhs;
-  ixs_bounds_transport_snapshot transport =
-      ixs_bounds_query_transport_snapshot(bounds);
-  bool old_oom = bounds->oom;
+  ixs_bounds_transport_snapshot transport;
   bool lhs_oom = false;
   bool rhs_oom = false;
   bool lhs_limited = false;
@@ -2408,6 +2225,8 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
       ixs_node_contains_rounding(lhs) || ixs_node_contains_rounding(rhs);
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
+  ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
+  transport = transaction.transport;
   memset(&attempt, 0, sizeof(attempt));
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
@@ -2419,20 +2238,8 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
   }
   transport = ixs_bounds_query_transport_snapshot(bounds);
 
-  /* Normalize each
-   * side before
-   * constructing the
-   * difference.
-   * Rewriting only
-   * lhs-rhs can
-   * erase the affine
-   * numerator shared
-   * by two exact
-   * remainder
-   * encodings before
-   * either encoding
-   * is recognized.
-   */
+  /* Normalize operands before constructing the difference. Rewriting lhs-rhs
+   * first can erase the affine numerator shared by two remainder encodings. */
   if (has_rounding && !constant_difference_normalize_operands(ctx, bounds, &lhs,
                                                               &rhs, &attempt))
     goto finish;
@@ -2440,7 +2247,7 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
   attempt.ok = bounds_modular_exact_delta_detail(
       ctx, bounds, lhs, rhs, true, &attempt.result, &attempt.invalid,
       &attempt.delta_limited, &attempt.delta_oom);
-  attempt.oom = attempt.delta_oom || (!old_oom && bounds->oom);
+  attempt.oom = attempt.delta_oom || (!transaction.old_oom && bounds->oom);
   attempt.limited =
       attempt.delta_limited || bounds_query_limited_since(bounds, transport);
   if (!attempt.ok && !attempt.oom && !attempt.limited && !attempt.invalid &&
@@ -2449,17 +2256,17 @@ IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
      * Partial normalization must not hide that independent proof strategy
      * when the normalized direct proof remains inconclusive. */
     constant_difference_try_projection(ctx, bounds, original_lhs, original_rhs,
-                                       transport, old_oom, &attempt);
+                                       transport, transaction.old_oom,
+                                       &attempt);
   }
 
 finish:
-  attempt.oom = attempt.oom || (!old_oom && bounds->oom);
+  attempt.oom = attempt.oom || (!transaction.old_oom && bounds->oom);
   status = constant_difference_query_status(
       attempt.oom, attempt.invalid, attempt.limited && !attempt.ok, attempt.ok,
       attempt.result, delta, matched);
-  if (!old_oom && bounds->oom)
+  if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);
-  bounds->oom = old_oom;
-  ixs_arena_restore(&ctx->scratch, mark);
+  (void)ixs_query_transaction_finish(&transaction, true);
   return status;
 }

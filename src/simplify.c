@@ -6,6 +6,7 @@
 #include "bounds_equivalence.h"
 #include "bounds_query.h"
 #include "bounds_store.h"
+#include "query_transaction.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -449,20 +450,16 @@ static inline int32_t find_pow1_factor(ixs_node *mul, ixs_tag tag) {
  * but allocation failure must never be mistaken for that no-match. */
 static ixs_node *try_mul_power(ixs_ctx *ctx, ixs_node *result, ixs_node *base,
                                int32_t exp, bool strict, bool *no_match) {
-  ixs_arena_mark diag_mark = ixs_arena_save(&ctx->diag);
-  const char **saved_errors = ctx->errors;
-  size_t saved_nerrors = ctx->nerrors;
-  size_t saved_errors_cap = ctx->errors_cap;
-  ixs_node *power = apply_pow(ctx, ixs_node_int(ctx, 1), base, exp);
+  ixs_query_transaction transaction;
+  ixs_node *power;
 
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  power = apply_pow(ctx, ixs_node_int(ctx, 1), base, exp);
   if (power && !ixs_node_is_sentinel(power))
     power = strict ? simp_mul_strict(ctx, result, power)
                    : simp_mul(ctx, result, power);
   *no_match = power && ixs_node_is_sentinel(power);
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return *no_match ? NULL : power;
 }
 
@@ -1650,27 +1647,18 @@ static int cancel_floor_mod_at(ixs_ctx *ctx, ixs_bounds *bnds,
                                ixs_addterm *terms, uint32_t nterms, uint32_t i,
                                size_t *inspected, bool allow_wide) {
   ixs_node *term = terms[i].term;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
   int result;
 
   if (!term || (term->tag != IXS_MOD && nterms > 2u && !allow_wide) ||
       (term->tag != IXS_MOD &&
        (term->tag != IXS_MUL || find_pow1_factor(term, IXS_MOD) < 0)))
     return 0;
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   result = cancel_floor_mod_at_impl(ctx, bnds, terms, nterms, i, inspected,
                                     allow_wide);
 
-  ixs_arena_restore(&ctx->diag, diag_mark);
-  ctx->errors = saved_errors;
-  ctx->nerrors = saved_nerrors;
-  ctx->errors_cap = saved_errors_cap;
+  (void)ixs_query_transaction_finish(&transaction, false);
   return result;
 }
 
@@ -4750,25 +4738,16 @@ static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr) {
  * Allocation failure remains NULL. */
 static ixs_node *cmp_normalize_to_zero(ixs_ctx *ctx, ixs_node *n) {
   ixs_node *a = n->u.binary.lhs, *b = n->u.binary.rhs;
-  ixs_arena_mark diag_mark;
-  const char **saved_errors;
-  size_t saved_nerrors;
-  size_t saved_errors_cap;
+  ixs_query_transaction transaction;
   ixs_node *diff;
   if (ixs_node_is_zero(b))
     return n;
-  diag_mark = ixs_arena_save(&ctx->diag);
-  saved_errors = ctx->errors;
-  saved_nerrors = ctx->nerrors;
-  saved_errors_cap = ctx->errors_cap;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   diff = simp_sub(ctx, a, b);
   if (!diff)
     return diff;
   if (ixs_node_is_sentinel(diff)) {
-    ixs_arena_restore(&ctx->diag, diag_mark);
-    ctx->errors = saved_errors;
-    ctx->nerrors = saved_nerrors;
-    ctx->errors_cap = saved_errors_cap;
+    (void)ixs_query_transaction_finish(&transaction, false);
     return n;
   }
   return simp_cmp(ctx, diff, n->u.binary.cmp_op, ixs_node_int(ctx, 0));
@@ -6085,20 +6064,17 @@ static ixs_node *subs_iterative(subs_query *query, ixs_node *root) {
 /* Speculative algebra may use any smart constructor while rebuilding. Roll
  * back only its explicit arithmetic-overflow diagnostics; other sentinels are
  * producer or domain failures and remain fail-loud. */
-static bool subs_rollback_arithmetic_errors(ixs_ctx *ctx, ixs_arena_mark mark,
-                                            const char **errors, size_t nerrors,
-                                            size_t errors_cap) {
+static bool
+subs_rollback_arithmetic_errors(ixs_query_transaction *transaction) {
+  ixs_ctx *ctx = transaction->ctx;
   size_t i;
-  if (ctx->nerrors == nerrors)
+  if (ctx->nerrors == transaction->nerrors)
     return false;
-  for (i = nerrors; i < ctx->nerrors; i++)
+  for (i = transaction->nerrors; i < ctx->nerrors; i++)
     if (strncmp(ctx->errors[i], "rational overflow in ",
                 sizeof("rational overflow in ") - 1u) != 0)
       return false;
-  ixs_arena_restore(&ctx->diag, mark);
-  ctx->errors = errors;
-  ctx->nerrors = nerrors;
-  ctx->errors_cap = errors_cap;
+  (void)ixs_query_transaction_finish(transaction, false);
   return true;
 }
 
@@ -6121,9 +6097,8 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
   ixs_node *parse_error = NULL;
   ixs_node *domain_error = NULL;
   ixs_node *result;
-  ixs_arena_mark mark, diag_mark;
-  const char **saved_errors = NULL;
-  size_t saved_nerrors = 0, saved_errors_cap = 0;
+  ixs_arena_mark mark;
+  ixs_query_transaction transaction;
   subs_query query;
   subs_memo_slot initial_memo[SUBS_MEMO_INITIAL_CAP];
   subs_frame initial_frames[SUBS_STACK_INITIAL_CAP];
@@ -6169,26 +6144,18 @@ static ixs_node *subs_common(ixs_ctx *ctx, ixs_node *expr, uint32_t nsubs,
     goto cleanup;
   }
   if (unrepresentable) {
-    diag_mark = ixs_arena_save(&ctx->diag);
-    saved_errors = ctx->errors;
-    saved_nerrors = ctx->nerrors;
-    saved_errors_cap = ctx->errors_cap;
+    ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
   }
   result = subs_iterative(&query, expr);
-  if (unrepresentable &&
-      subs_rollback_arithmetic_errors(ctx, diag_mark, saved_errors,
-                                      saved_nerrors, saved_errors_cap)) {
+  if (unrepresentable && subs_rollback_arithmetic_errors(&transaction)) {
     /* A later scratch failure outranks the arithmetic miss. */
     *unrepresentable = result != NULL;
     result = NULL;
   } else if (unrepresentable && result && ixs_node_is_sentinel(result) &&
-             ctx->nerrors == saved_nerrors) {
+             ctx->nerrors == transaction.nerrors) {
     /* A speculative smart constructor returned an error sentinel but could
      * not record its diagnostic. Treat that diagnostic allocation as OOM. */
-    ixs_arena_restore(&ctx->diag, diag_mark);
-    ctx->errors = saved_errors;
-    ctx->nerrors = saved_nerrors;
-    ctx->errors_cap = saved_errors_cap;
+    (void)ixs_query_transaction_finish(&transaction, false);
     result = NULL;
   }
 cleanup:
