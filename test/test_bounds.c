@@ -11,6 +11,7 @@
 #include "additive_row.h"
 #include "bounds.h"
 #include "bounds_query.h"
+#include "bounds_relation.h"
 #include "bounds_store.h"
 #include "division_algebra.h"
 #include "hash.h"
@@ -4339,6 +4340,160 @@ static void test_public_exact_equality_range_projection(void) {
   CHECK(ixs_facts_assume_pred(range_conflict,
                               ixs_cmp(ctx, s, IXS_CMP_EQ, sixteen)));
   CHECK(!test_ixs_range_facts(range_conflict, s, &range));
+
+  ixs_ctx_destroy(ctx);
+}
+
+typedef struct {
+  size_t endpoint_index;
+  size_t defined_component;
+  ixs_relation_offset defined_offset;
+  ixs_interval range;
+  ixs_check_result integer;
+  ixs_check_result defined_with_equality;
+  ixs_check_result defined_without_equality;
+  bool range_complete;
+  bool integer_complete;
+  bool defined_component_complete;
+  bool defined_with_equality_complete;
+  bool defined_without_equality_complete;
+  bool occupied;
+} test_legacy_projection_cache_entry;
+
+static bool test_projection_cache_has_generation(const ixs_bounds *bounds,
+                                                 uint32_t generation) {
+  const bounds_equality_projection_cache_entry *entries =
+      (const bounds_equality_projection_cache_entry *)
+          bounds->equality_projection_cache;
+  size_t i;
+  for (i = 0; i < bounds->equality_projection_cache_capacity; i++) {
+    if (entries[i].generation == generation)
+      return true;
+  }
+  return false;
+}
+
+static void test_equality_projection_cache_generation_lifecycle(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *lhs = ixs_sym(ctx, "projection_generation_lhs");
+  ixs_node *rhs = ixs_sym(ctx, "projection_generation_rhs");
+  ixs_node *marker = ixs_sym(ctx, "projection_generation_marker");
+  ixs_node *equality = ixs_cmp(ctx, lhs, IXS_CMP_EQ, rhs);
+  ixs_range_result broad = {true, true, 0, 1, 10, 1};
+  ixs_range_result narrow = {true, true, 2, 1, 5, 1};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_session_binding binding;
+  ixs_bounds forked;
+  ixs_bounds contextless;
+  ixs_arena_mark mark;
+  ixs_interval interval;
+  void *cache;
+  size_t capacity;
+  size_t count;
+  uint32_t generation;
+  bool held = false;
+  size_t i;
+
+  CHECK(sizeof(bounds_equality_projection_cache_entry) ==
+        sizeof(test_legacy_projection_cache_entry));
+#if UINTPTR_MAX == UINT64_MAX
+  CHECK(sizeof(bounds_equality_projection_cache_entry) == 104u);
+#endif
+  CHECK(ixs_facts_assume_pred(facts, equality));
+  CHECK(ixs_facts_assume_range(facts, rhs, &broad));
+  check_public_range(facts, lhs, 0, 10);
+  cache = facts->bounds.equality_projection_cache;
+  capacity = facts->bounds.equality_projection_cache_capacity;
+  count = facts->bounds.equality_projection_cache_count;
+  generation = facts->bounds.equality_projection_cache_generation;
+  CHECK(cache != NULL && capacity != 0u && count != 0u && generation != 0u);
+
+  check_public_range(facts, lhs, 0, 10);
+  CHECK(facts->bounds.equality_projection_cache == cache);
+  CHECK(facts->bounds.equality_projection_cache_count == count);
+  CHECK(facts->bounds.equality_projection_cache_generation == generation);
+
+  CHECK(ixs_facts_assume_range(facts, rhs, &narrow));
+  CHECK(facts->bounds.equality_projection_cache == cache);
+  CHECK(facts->bounds.equality_projection_cache_capacity == capacity);
+  CHECK(facts->bounds.equality_projection_cache_count == 0u);
+  CHECK(facts->bounds.equality_projection_cache_generation == generation + 1u);
+  CHECK(test_projection_cache_has_generation(&facts->bounds, generation));
+  check_public_range(facts, lhs, 2, 5);
+  count = facts->bounds.equality_projection_cache_count;
+  CHECK(count != 0u);
+  check_public_range(facts, lhs, 2, 5);
+  CHECK(facts->bounds.equality_projection_cache_count == count);
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  bounds_store_bind(&facts->bounds, ctx, &ctx->scratch);
+  mark = ixs_arena_save(&ctx->scratch);
+  CHECK(ixs_bounds_fork(&forked, &facts->bounds));
+  CHECK(forked.equality_projection_cache == NULL);
+  CHECK(forked.equality_projection_cache_count == 0u);
+  CHECK(forked.equality_projection_cache_capacity == 0u);
+  CHECK(forked.equality_projection_cache_generation == 1u);
+  CHECK(bounds_query_force_hold_begin(&forked, &held) && held);
+  interval = ixs_bounds_get(&forked, lhs);
+  ixs_bounds_query_hold_end(&forked);
+  held = false;
+  CHECK(interval.valid && interval.lo_p == 2 && interval.lo_q == 1 &&
+        interval.hi_p == 5 && interval.hi_q == 1);
+  CHECK(forked.equality_projection_cache != cache);
+  CHECK(forked.equality_projection_cache_count != 0u);
+  CHECK(forked.equality_projection_cache_generation == 1u);
+  ixs_bounds_destroy(&forked);
+  ixs_arena_restore(&ctx->scratch, mark);
+  ixs_session_unbind(&binding);
+
+  CHECK(ixs_bounds_init(&contextless, ixs_test_scratch(ctx)));
+  CHECK(bounds_store_swap_active_context(&contextless, ctx) == NULL);
+  CHECK(ixs_relation_algebra_assert(&contextless.relations, lhs, rhs, 0) ==
+        IXS_RELATION_STATUS_ADDED);
+  CHECK(ixs_relation_algebra_certify_total(&contextless.relations, lhs, rhs,
+                                           0) == IXS_RELATION_STATUS_ADDED);
+  ixs_bounds_add_expr(&contextless, rhs, ixs_interval_range(0, 1, 10, 1));
+  CHECK(bounds_query_force_hold_begin(&contextless, &held) && held);
+  interval = ixs_bounds_get(&contextless, lhs);
+  ixs_bounds_query_hold_end(&contextless);
+  held = false;
+  CHECK(interval.valid && interval.lo_p == 0 && interval.hi_p == 10);
+  cache = contextless.equality_projection_cache;
+  generation = contextless.equality_projection_cache_generation;
+  count = contextless.equality_projection_cache_count;
+  CHECK(cache != NULL && count != 0u);
+  ixs_bounds_add_expr(&contextless, rhs, ixs_interval_range(2, 1, 5, 1));
+  CHECK(contextless.equality_projection_cache == cache);
+  CHECK(contextless.equality_projection_cache_count == 0u);
+  CHECK(contextless.equality_projection_cache_generation != generation);
+  CHECK(contextless.equality_projection_cache_generation != 0u);
+  CHECK(test_projection_cache_has_generation(&contextless, generation));
+  CHECK(bounds_query_force_hold_begin(&contextless, &held) && held);
+  interval = ixs_bounds_get(&contextless, lhs);
+  ixs_bounds_query_hold_end(&contextless);
+  held = false;
+  CHECK(interval.valid && interval.lo_p == 2 && interval.hi_p == 5);
+  CHECK(bounds_store_swap_active_context(&contextless, NULL) == ctx);
+  ixs_bounds_destroy(&contextless);
+
+  cache = facts->bounds.equality_projection_cache;
+  capacity = facts->bounds.equality_projection_cache_capacity;
+  bounds_relation_projection_force_generation_wrap(&facts->bounds);
+  CHECK(facts->bounds.equality_projection_cache_generation == UINT32_MAX);
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, marker, IXS_CMP_NE, ixs_int(ctx, 0))));
+  CHECK(facts->bounds.equality_projection_cache == cache);
+  CHECK(facts->bounds.equality_projection_cache_capacity == capacity);
+  CHECK(facts->bounds.equality_projection_cache_count == 0u);
+  CHECK(facts->bounds.equality_projection_cache_generation == 1u);
+  for (i = 0; i < capacity; i++) {
+    const bounds_equality_projection_cache_entry *entries =
+        (const bounds_equality_projection_cache_entry *)cache;
+    CHECK(entries[i].generation == 0u);
+  }
+  check_public_range(facts, lhs, 2, 5);
+  CHECK(facts->bounds.equality_projection_cache_count != 0u);
+  CHECK(facts->bounds.equality_projection_cache_generation == 1u);
 
   ixs_ctx_destroy(ctx);
 }
@@ -12022,6 +12177,7 @@ int main(void) {
   test_public_exact_residual_wide_term_partition();
   test_public_exact_relation_disconnected_fanout();
   test_public_exact_equality_range_projection();
+  test_equality_projection_cache_generation_lifecycle();
   test_public_exact_scaled_residual_range_projection();
   test_bounds_exact_relation_fork_owns_graph();
   test_public_range_composite_predicate_fact();

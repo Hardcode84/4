@@ -120,13 +120,15 @@ typedef struct {
   ixs_arena query_arena;
   ixs_bounds_query_state *query_state;
   uint64_t query_owner;
-  /* Owner-local exact-component projection memo.  Persistent fact bounds reuse
-   * one table across scalar queries; forks use scratch-local transient tables
-   * and facts_commit reuses the destination's persistent allocation. */
+  /* Owner-local exact-component projection memo. Its generation is independent
+   * of query_owner. Persistent facts reuse one table across scalar queries;
+   * forks use scratch-local tables, and facts_commit reuses the destination's
+   * persistent allocation. */
   void *equality_projection_cache;
   size_t equality_projection_cache_count;
   size_t equality_projection_cache_capacity;
   size_t query_tracking_depth;
+  uint32_t equality_projection_cache_generation;
   /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
    * use the relation being justified to prove its own domain. */
   unsigned equality_disabled_depth;

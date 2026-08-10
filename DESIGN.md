@@ -1409,14 +1409,18 @@ layout, load factor, and allocation remain consumer-owned.
   arrays in `query_state_arena`, bounded by the largest single query.
   `query_arena` holds operation-bounded proof storage and projection storage
   for forks and contextless bounds. Persistent facts allocate their projection
-  table in the context arena, reuse that allocation across reads and commits,
-  and clear its semantic contents on store invalidation and commit. A fork
-  under an active hold borrows central state with a distinct owner. Its
+  table in the context arena and reuse that allocation across reads and
+  commits. Projection entries carry a separate nonzero `uint32_t` generation;
+  lookup and growth consider only the current generation. Ordinary
+  invalidation clears the live count and advances the generation in O(1).
+  Generation wrap clears the retained table and resumes at one. `facts_commit`
+  retains the destination allocation and generation, then invalidates it once.
+  A fork under an active hold borrows central state with a distinct owner. Its
   embedded arenas start empty, and `query_state_arena` stays empty while state
   is borrowed. Direct range and relation-projection caches remain separate.
   `bounds_store.c` refreshes the central query owner, then asks
-  `bounds_range.c` and `bounds_relation.c` to invalidate their caches. The
-  query component does not initiate store invalidation.
+  `bounds_range.c` and `bounds_relation.c` to invalidate their caches. The query
+  component does not initiate store invalidation.
 
   Consumers own transfer values, cache finish policy, mapping typed transport
   into result status, and final publication. Bitfacts allocates its per-child

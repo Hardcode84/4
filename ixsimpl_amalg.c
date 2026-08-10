@@ -713,7 +713,7 @@ bounds_equality_projection_cache_find(ixs_bounds *b, size_t endpoint_index,
   }
   slot = bounds_equality_projection_cache_hash(endpoint_index) &
          (b->equality_projection_cache_capacity - 1u);
-  while (cache[slot].occupied) {
+  while (cache[slot].generation == b->equality_projection_cache_generation) {
     bounds_equality_projection_cache_entry *entry = &cache[slot];
     if (entry->endpoint_index == endpoint_index) {
       *found = true;
@@ -753,11 +753,11 @@ static bool bounds_equality_projection_cache_grow(ixs_bounds *b) {
   for (i = 0; i < b->equality_projection_cache_capacity; i++) {
     bounds_equality_projection_cache_entry entry = cache[i];
     size_t slot;
-    if (!entry.occupied)
+    if (entry.generation != b->equality_projection_cache_generation)
       continue;
     slot = bounds_equality_projection_cache_hash(entry.endpoint_index) &
            (capacity - 1u);
-    while (grown[slot].occupied)
+    while (grown[slot].generation == b->equality_projection_cache_generation)
       slot = (slot + 1u) & (capacity - 1u);
     grown[slot] = entry;
   }
@@ -791,7 +791,7 @@ bounds_equality_projection_cache_get(ixs_bounds *b, size_t endpoint_index,
   }
   memset(entry, 0, sizeof(*entry));
   entry->endpoint_index = endpoint_index;
-  entry->occupied = true;
+  entry->generation = b->equality_projection_cache_generation;
   b->equality_projection_cache_count++;
   return entry;
 }
@@ -2207,7 +2207,7 @@ bounds_publish_defined_equality_component(ixs_bounds *b,
     assert(entry != NULL);
     entry->defined_component = component;
     entry->defined_offset = walk->entries[i].offset;
-    entry->defined_component_complete = true;
+    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT;
   }
   return true;
 }
@@ -2233,7 +2233,8 @@ bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
   if (require_defined && bounds_query_is_tracking(b) &&
       bounds_find_equality_endpoint(b, rhs, &rhs_endpoint)) {
     rhs_cached = bounds_equality_projection_cache_get(b, rhs_endpoint, false);
-    if (!rhs_cached || !rhs_cached->defined_component_complete) {
+    if (!rhs_cached || !(rhs_cached->completion &
+                         BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT)) {
       status =
           bounds_collect_equality_component(b, rhs, &walk, require_defined);
       if (status != BOUNDS_EQUALITY_WALK_VALID) {
@@ -2248,7 +2249,9 @@ bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
       rhs_cached = bounds_equality_projection_cache_get(b, rhs_endpoint, false);
     }
     lhs_cached = bounds_equality_projection_cache_get(b, lhs_endpoint, false);
-    if (!lhs_cached || !rhs_cached || !lhs_cached->defined_component_complete ||
+    if (!lhs_cached || !rhs_cached ||
+        !(lhs_cached->completion &
+          BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT) ||
         lhs_cached->defined_component != rhs_cached->defined_component)
       return BOUNDS_EQUALITY_WALK_NONE;
     if (!ixs_relation_offset_add(
@@ -4966,7 +4969,7 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
   if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
     return bounds_check_integer_valued_without_equality(b, expr);
   cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  if (cached && cached->integer_complete)
+  if (cached && (cached->completion & BOUNDS_PROJECTION_COMPLETE_INTEGER) != 0)
     return cached->integer;
   status = bounds_collect_equality_component(b, expr, &walk, true);
   if (status == BOUNDS_EQUALITY_WALK_NONE)
@@ -5008,14 +5011,17 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
         continue;
       }
       entry->integer = result;
-      entry->integer_complete = true;
+      entry->completion |= BOUNDS_PROJECTION_COMPLETE_INTEGER;
     }
   }
   bounds_equality_walk_destroy(b, &walk);
   if (b->oom)
     return IXS_CHECK_UNKNOWN;
   cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  return cached && cached->integer_complete ? cached->integer : result;
+  return cached &&
+                 (cached->completion & BOUNDS_PROJECTION_COMPLETE_INTEGER) != 0
+             ? cached->integer
+             : result;
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
@@ -7403,7 +7409,7 @@ bounds_equality_range_publish(ixs_bounds *b, const bounds_equality_walk *walk,
     }
     if (entry) {
       entry->range = projected;
-      entry->range_complete = true;
+      entry->completion |= BOUNDS_PROJECTION_COMPLETE_RANGE;
     }
     if (walk->entries[i].endpoint_index == endpoint_index)
       result = projected;
@@ -7430,7 +7436,7 @@ static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
   if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
     return intrinsic;
   cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  if (cached && cached->range_complete)
+  if (cached && (cached->completion & BOUNDS_PROJECTION_COMPLETE_RANGE) != 0)
     return cached->range;
   status = bounds_collect_equality_component(b, expr, &walk, true);
   if (status == BOUNDS_EQUALITY_WALK_NONE)
@@ -9164,11 +9170,15 @@ static bool bounds_defined_cache_lookup(ixs_bounds *b, ixs_node *expr,
   if (!entry)
     return false;
   without_equality = b->equality_disabled_depth != 0;
-  if (without_equality && entry->defined_without_equality_complete) {
+  if (without_equality &&
+      (entry->completion &
+       BOUNDS_PROJECTION_COMPLETE_DEFINED_WITHOUT_EQUALITY) != 0) {
     *result = entry->defined_without_equality;
     return true;
   }
-  if (!without_equality && entry->defined_with_equality_complete) {
+  if (!without_equality &&
+      (entry->completion & BOUNDS_PROJECTION_COMPLETE_DEFINED_WITH_EQUALITY) !=
+          0) {
     *result = entry->defined_with_equality;
     return true;
   }
@@ -9187,10 +9197,10 @@ static bool bounds_defined_cache_publish(ixs_bounds *b, ixs_node *expr,
     return false;
   if (b->equality_disabled_depth != 0) {
     entry->defined_without_equality = result;
-    entry->defined_without_equality_complete = true;
+    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_WITHOUT_EQUALITY;
   } else {
     entry->defined_with_equality = result;
-    entry->defined_with_equality_complete = true;
+    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_WITH_EQUALITY;
   }
   return true;
 }
@@ -9778,9 +9788,11 @@ static void facts_poison(ixs_facts *facts) {
 static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
   void *projection_cache = facts->bounds.equality_projection_cache;
   size_t projection_capacity = facts->bounds.equality_projection_cache_capacity;
+  uint32_t projection_generation =
+      facts->bounds.equality_projection_cache_generation;
   /* A fork's projection memo is query-local and cannot be transferred into the
    * committed bounds.  Destroy it, then reuse the destination's persistent
-   * table allocation after clearing its semantic contents. */
+   * table allocation after advancing its semantic generation once. */
   assert(candidate->store_ctx != NULL);
   assert(candidate->query_tracking_depth == 0);
   assert(!candidate->query_state_owner && !candidate->query_state_borrowed);
@@ -9806,6 +9818,7 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
   candidate->equality_projection_cache = projection_cache;
   candidate->equality_projection_cache_count = 0;
   candidate->equality_projection_cache_capacity = projection_capacity;
+  candidate->equality_projection_cache_generation = projection_generation;
   bounds_store_invalidate_reads(candidate);
   facts->bounds = *candidate;
 }
@@ -17686,6 +17699,7 @@ IXS_STATIC void bounds_relation_projection_init(ixs_bounds *b, bool transient) {
   b->equality_projection_cache = NULL;
   b->equality_projection_cache_count = 0;
   b->equality_projection_cache_capacity = 0;
+  b->equality_projection_cache_generation = 1u;
   b->equality_projection_cache_transient = transient;
 }
 
@@ -17704,12 +17718,24 @@ IXS_STATIC void bounds_relation_projection_invalidate(ixs_bounds *b) {
   bounds_equality_projection_cache_entry *cache;
   if (!b)
     return;
+  b->equality_projection_cache_count = 0;
+  b->equality_projection_cache_generation++;
+  if (b->equality_projection_cache_generation != 0)
+    return;
+  /* Zero denotes a cleared slot. Only generation wrap touches retained rows. */
   cache =
       (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
   if (cache)
     memset(cache, 0, b->equality_projection_cache_capacity * sizeof(*cache));
-  b->equality_projection_cache_count = 0;
+  b->equality_projection_cache_generation = 1u;
 }
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC void
+bounds_relation_projection_force_generation_wrap(ixs_bounds *b) {
+  b->equality_projection_cache_generation = UINT32_MAX;
+}
+#endif
 
 /* ==================================================================== */
 /* bounds_store.c                                                     */
