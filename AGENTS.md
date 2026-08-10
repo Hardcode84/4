@@ -59,7 +59,13 @@ pytest test/ --quick            # CI: 200 examples
 pytest test/ --torture          # stress: 50,000 examples, suppressed health checks
 ```
 
-The torture profile is the go-to for validating refactors and new rules. It runs 50k examples per Hypothesis test across all available cores. Expect ~5 minutes on a beefy machine. Run it before declaring a non-trivial change done.
+The default profile is the normal Python validation workflow. `--quick` is a
+deliberately reduced-cost run and does not replace the default profile for
+routine completion. The torture profile is a separate, explicitly scheduled
+expensive validation of a frozen final state. It is never part of normal
+implementation, per-change verification, hook reruns, or routine completion.
+Run torture only when the user requests it or a separately scoped final
+epic/release validation requires it.
 
 ## Code Review Follow-up
 
