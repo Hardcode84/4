@@ -26,6 +26,7 @@ else()
         src/parser.c
         src/print.c
         src/quotient_algebra.c
+        src/query_walk.c
         src/radix_algebra.c
         src/rational.c
         src/relation_algebra.c

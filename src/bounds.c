@@ -6,6 +6,7 @@
 #include "division_algebra.h"
 #include "expand.h"
 #include "low_bits_algebra.h"
+#include "query_walk.h"
 #include "quotient_algebra.h"
 #include "radix_algebra.h"
 #include "simplify.h"
@@ -271,8 +272,8 @@ static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                       ixs_node *rhs, int64_t offset);
 static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
-static bool bounds_get_bitfacts_tracked(ixs_bounds *b, ixs_node *expr,
-                                        ixs_bitfacts *out);
+static bool bounds_get_bitfacts_iterative(ixs_bounds *b, ixs_node *expr,
+                                          ixs_bitfacts *out);
 static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
                                              bool value,
                                              struct ixs_node_impl *storage);
@@ -5020,39 +5021,10 @@ typedef struct {
 
 typedef struct {
   ixs_bounds *bounds;
-  bounds_bitfacts_frame *frames;
-  size_t depth;
-  size_t capacity;
+  ixs_query_walk walk;
   bounds_bitfacts_child child;
+  ixs_bitfacts unknown;
 } bounds_bitfacts_query;
-
-static bool bounds_bitfacts_push(bounds_bitfacts_query *query, ixs_node *expr) {
-  bounds_bitfacts_frame *grown;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-  if (query->depth == query->capacity) {
-    capacity = query->capacity ? query->capacity * 2u : 16u;
-    if (capacity < query->capacity ||
-        capacity > SIZE_MAX / sizeof(*query->frames)) {
-      query->bounds->oom = true;
-      return false;
-    }
-    old_bytes = query->capacity * sizeof(*query->frames);
-    new_bytes = capacity * sizeof(*query->frames);
-    grown = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
-                           new_bytes, sizeof(void *));
-    if (!grown) {
-      query->bounds->oom = true;
-      return false;
-    }
-    query->frames = grown;
-    query->capacity = capacity;
-  }
-  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-  query->frames[query->depth++].expr = expr;
-  return true;
-}
 
 static bool bounds_bitfacts_alloc_children(bounds_bitfacts_query *query,
                                            bounds_bitfacts_frame *frame,
@@ -5072,9 +5044,10 @@ static bool bounds_bitfacts_alloc_children(bounds_bitfacts_query *query,
   return true;
 }
 
-static void bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
-                                     ixs_bitfacts bits) {
-  bounds_bitfacts_frame *frame = &query->frames[query->depth - 1u];
+static ixs_query_walk_step
+bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
+                         ixs_bitfacts bits) {
+  bounds_bitfacts_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, success);
@@ -5083,25 +5056,21 @@ static void bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
     else
       success = false;
   }
-  query->depth--;
+  IXS_QUERY_WALK_POP(&query->walk);
   query->child.success = success;
   query->child.bits = bits;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static void bounds_bitfacts_unwind(bounds_bitfacts_query *query) {
-  ixs_bitfacts unknown;
-  bitfacts_unknown(&unknown);
-  while (query->depth != 0)
-    bounds_bitfacts_complete(query, false, unknown);
+/* hot */
+static void bounds_bitfacts_abort(void *state, void *raw_frame) {
+  bounds_bitfacts_frame *frame = raw_frame;
+  (void)state;
+  if (frame->tracked)
+    (void)bounds_query_finish(&frame->scope, false);
 }
 
-typedef enum {
-  BOUNDS_BITFACTS_STEP_ADVANCED,
-  BOUNDS_BITFACTS_STEP_UNHANDLED,
-  BOUNDS_BITFACTS_STEP_OOM
-} bounds_bitfacts_step;
-
-static bounds_bitfacts_step
+static ixs_query_walk_step
 bounds_bitfacts_prepare_frame(bounds_bitfacts_query *query,
                               bounds_bitfacts_frame *frame,
                               ixs_bitfacts unknown) {
@@ -5111,87 +5080,75 @@ bounds_bitfacts_prepare_frame(bounds_bitfacts_query *query,
 
   /* Stack-local synthetic symbols are valid read-only operands but are not
    * memoized because bounds_query_should_track requires VALID. */
-  if (!node) {
-    bounds_bitfacts_complete(query, false, unknown);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
-  }
+  if (!node)
+    return bounds_bitfacts_complete(query, false, unknown);
   if (bounds_query_should_track(b, node)) {
     bounds_query_cache_entry *cached = NULL;
     bounds_query_enter_result enter = bounds_query_begin(
         b, BOUNDS_QUERY_BITFACTS, node, 0, &frame->scope, &cached);
     if (enter == BOUNDS_QUERY_ENTER_CACHED) {
-      bounds_bitfacts_complete(query, cached->success, cached->result.bitfacts);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, cached->success,
+                                      cached->result.bitfacts);
     }
     if (enter != BOUNDS_QUERY_ENTER_STARTED) {
-      bounds_bitfacts_complete(query, false, unknown);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, false, unknown);
     }
     frame->tracked = true;
   }
   bitfacts_unknown(&frame->bits);
   iv = bounds_get_tracked(b, node);
   bitfacts_apply_interval(&frame->bits, &iv);
-  return b->oom ? BOUNDS_BITFACTS_STEP_OOM : BOUNDS_BITFACTS_STEP_UNHANDLED;
+  return b->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_NEXT;
 }
 
-static bounds_bitfacts_step
+static ixs_query_walk_step
 bounds_bitfacts_start_scalar(bounds_bitfacts_query *query,
                              bounds_bitfacts_frame *frame) {
   ixs_node *node = frame->expr;
   switch (node->tag) {
   case IXS_INT:
     bitfacts_apply_exact(&frame->bits, node->u.ival);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case IXS_RAT:
     if (node->u.rat.q == 1)
       bitfacts_apply_exact(&frame->bits, node->u.rat.p);
-    bounds_bitfacts_complete(query, node->u.rat.q == 1, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, node->u.rat.q == 1, frame->bits);
   case IXS_SYM:
     bounds_get_symbol_bitfacts(query->bounds, node->u.name, &frame->bits);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case IXS_CMP:
   case IXS_NOT:
     bitfacts_apply_bool_value(&frame->bits);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case IXS_CEIL:
   case IXS_TRUNC:
   case IXS_PIECEWISE:
   case IXS_MAX:
   case IXS_MIN:
-    bounds_bitfacts_complete(query, ixs_node_is_integer_valued(node),
-                             frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, ixs_node_is_integer_valued(node),
+                                    frame->bits);
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
-    bounds_bitfacts_complete(query, false, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, false, frame->bits);
   default:
-    return BOUNDS_BITFACTS_STEP_UNHANDLED;
+    return IXS_QUERY_WALK_NEXT;
   }
 }
 
-static bounds_bitfacts_step
+static ixs_query_walk_step
 bounds_bitfacts_start_assoc(bounds_bitfacts_query *query,
                             bounds_bitfacts_frame *frame) {
   ixs_node *node = frame->expr;
   if (!node->u.assoc.args || node->u.assoc.nargs == 0) {
-    bounds_bitfacts_complete(query, false, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, false, frame->bits);
   }
   if (!bounds_bitfacts_alloc_children(query, frame, node->u.assoc.nargs))
-    return BOUNDS_BITFACTS_STEP_OOM;
+    return IXS_QUERY_WALK_OOM;
   frame->stage = BOUNDS_BITFACTS_ASSOC;
-  return bounds_bitfacts_push(query, node->u.assoc.args[0])
-             ? BOUNDS_BITFACTS_STEP_ADVANCED
-             : BOUNDS_BITFACTS_STEP_OOM;
+  return ixs_query_walk_push(&query->walk, node->u.assoc.args[0]);
 }
 
-static bounds_bitfacts_step
+static ixs_query_walk_step
 bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
                                 bounds_bitfacts_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5199,59 +5156,46 @@ bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
   case IXS_ADD:
     if (node->u.add.nterms == 0) {
       bitfacts_apply_add_known(query->bounds, node, NULL, &frame->bits);
-      bounds_bitfacts_complete(query, true, frame->bits);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, true, frame->bits);
     }
     if (!bounds_bitfacts_alloc_children(query, frame, node->u.add.nterms))
-      return BOUNDS_BITFACTS_STEP_OOM;
+      return IXS_QUERY_WALK_OOM;
     frame->stage = BOUNDS_BITFACTS_ADD;
-    return bounds_bitfacts_push(query, node->u.add.terms[0].term)
-               ? BOUNDS_BITFACTS_STEP_ADVANCED
-               : BOUNDS_BITFACTS_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, node->u.add.terms[0].term);
   case IXS_MUL:
     if (node->u.mul.coeff->tag != IXS_INT || node->u.mul.coeff->u.ival <= 0 ||
         node->u.mul.nfactors != 1 || node->u.mul.factors[0].exp != 1 ||
         !ixs_node_is_integer_valued(node) ||
         !uint64_is_pow2((uint64_t)node->u.mul.coeff->u.ival)) {
-      bounds_bitfacts_complete(query, true, frame->bits);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, true, frame->bits);
     }
     frame->stage = BOUNDS_BITFACTS_MUL;
-    return bounds_bitfacts_push(query, node->u.mul.factors[0].base)
-               ? BOUNDS_BITFACTS_STEP_ADVANCED
-               : BOUNDS_BITFACTS_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, node->u.mul.factors[0].base);
   case IXS_FLOOR:
     if (!extract_pow2_dividend(node->u.unary.arg, &frame->child_expr,
                                &frame->argument)) {
-      bounds_bitfacts_complete(query, true, frame->bits);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, true, frame->bits);
     }
     frame->stage = BOUNDS_BITFACTS_FLOOR;
-    return bounds_bitfacts_push(query, frame->child_expr)
-               ? BOUNDS_BITFACTS_STEP_ADVANCED
-               : BOUNDS_BITFACTS_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, frame->child_expr);
   case IXS_MOD:
     if (node->u.binary.rhs->tag != IXS_INT ||
         !int64_modulus_is_pow2(node->u.binary.rhs->u.ival) ||
         !ixs_node_is_integer_valued(node->u.binary.lhs)) {
-      bounds_bitfacts_complete(query, true, frame->bits);
-      return BOUNDS_BITFACTS_STEP_ADVANCED;
+      return bounds_bitfacts_complete(query, true, frame->bits);
     }
     frame->stage = BOUNDS_BITFACTS_MOD;
-    return bounds_bitfacts_push(query, node->u.binary.lhs)
-               ? BOUNDS_BITFACTS_STEP_ADVANCED
-               : BOUNDS_BITFACTS_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, node->u.binary.lhs);
   case IXS_AND:
   case IXS_OR:
   case IXS_XOR:
     return bounds_bitfacts_start_assoc(query, frame);
   default:
-    bounds_bitfacts_complete(query, false, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, false, frame->bits);
   }
 }
 
-static bounds_bitfacts_step
+static ixs_query_walk_step
 bounds_bitfacts_resume_frame(bounds_bitfacts_query *query,
                              bounds_bitfacts_frame *frame) {
   ixs_node *node = frame->expr;
@@ -5263,87 +5207,68 @@ bounds_bitfacts_resume_frame(bounds_bitfacts_query *query,
       ixs_node *child = frame->stage == BOUNDS_BITFACTS_ADD
                             ? node->u.add.terms[frame->index].term
                             : node->u.assoc.args[frame->index];
-      return bounds_bitfacts_push(query, child) ? BOUNDS_BITFACTS_STEP_ADVANCED
-                                                : BOUNDS_BITFACTS_STEP_OOM;
+      return ixs_query_walk_push(&query->walk, child);
     }
     if (frame->stage == BOUNDS_BITFACTS_ADD) {
       bitfacts_apply_add_known(query->bounds, node, frame->children,
                                &frame->bits);
-      bounds_bitfacts_complete(query, true, frame->bits);
+      return bounds_bitfacts_complete(query, true, frame->bits);
     } else {
       bool success =
           bitfacts_apply_assoc_known(node, frame->children, &frame->bits);
-      bounds_bitfacts_complete(query, success, frame->bits);
+      return bounds_bitfacts_complete(query, success, frame->bits);
     }
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
   case BOUNDS_BITFACTS_MUL:
     bitfacts_apply_mul_known(node, &query->child, &frame->bits);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case BOUNDS_BITFACTS_FLOOR:
     bitfacts_apply_floor_div_known(query->bounds, frame->child_expr,
                                    frame->argument, &query->child,
                                    &frame->bits);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case BOUNDS_BITFACTS_MOD:
     bitfacts_apply_mod_known(node, &query->child, &frame->bits);
-    bounds_bitfacts_complete(query, true, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, true, frame->bits);
   case BOUNDS_BITFACTS_INITIAL:
-    bounds_bitfacts_complete(query, false, frame->bits);
-    return BOUNDS_BITFACTS_STEP_ADVANCED;
+    return bounds_bitfacts_complete(query, false, frame->bits);
   }
-  return BOUNDS_BITFACTS_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static ixs_query_walk_step bounds_bitfacts_advance(void *state,
+                                                   void *raw_frame) {
+  bounds_bitfacts_query *query = state;
+  bounds_bitfacts_frame *frame = raw_frame;
+  ixs_query_walk_step step;
+  if (frame->stage != BOUNDS_BITFACTS_INITIAL)
+    return bounds_bitfacts_resume_frame(query, frame);
+  step = bounds_bitfacts_prepare_frame(query, frame, query->unknown);
+  if (step != IXS_QUERY_WALK_NEXT)
+    return step;
+  step = bounds_bitfacts_start_scalar(query, frame);
+  if (step == IXS_QUERY_WALK_NEXT)
+    step = bounds_bitfacts_start_composite(query, frame);
+  return step;
 }
 
 static bool bounds_get_bitfacts_iterative(ixs_bounds *b, ixs_node *expr,
                                           ixs_bitfacts *out) {
-  ixs_arena_mark mark;
   bounds_bitfacts_query query;
-  ixs_bitfacts unknown;
-  bitfacts_unknown(&unknown);
   if (!b || !expr || !out || b->oom)
     return false;
-  mark = ixs_arena_save(b->scratch);
   memset(&query, 0, sizeof(query));
   query.bounds = b;
-  if (!bounds_bitfacts_push(&query, expr))
-    goto failed;
-
-  while (query.depth != 0) {
-    bounds_bitfacts_frame *frame = &query.frames[query.depth - 1u];
-    bounds_bitfacts_step step;
-    if (frame->stage == BOUNDS_BITFACTS_INITIAL) {
-      step = bounds_bitfacts_prepare_frame(&query, frame, unknown);
-      if (step == BOUNDS_BITFACTS_STEP_OOM)
-        goto failed;
-      if (step == BOUNDS_BITFACTS_STEP_ADVANCED)
-        continue;
-      step = bounds_bitfacts_start_scalar(&query, frame);
-      if (step == BOUNDS_BITFACTS_STEP_UNHANDLED)
-        step = bounds_bitfacts_start_composite(&query, frame);
-    } else {
-      step = bounds_bitfacts_resume_frame(&query, frame);
-    }
-    if (step == BOUNDS_BITFACTS_STEP_OOM)
-      goto failed;
+  bitfacts_unknown(&query.unknown);
+  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_bitfacts_frame,
+                      expr);
+  if (!ixs_query_walk_run(&query.walk, expr, &query, bounds_bitfacts_advance,
+                          bounds_bitfacts_abort)) {
+    bitfacts_unknown(out);
+    return false;
   }
-
   *out = query.child.bits;
-  ixs_arena_restore(b->scratch, mark);
   return query.child.success;
-
-failed:
-  bounds_bitfacts_unwind(&query);
-  bitfacts_unknown(out);
-  ixs_arena_restore(b->scratch, mark);
-  return false;
-}
-
-static bool bounds_get_bitfacts_tracked(ixs_bounds *b, ixs_node *expr,
-                                        ixs_bitfacts *out) {
-  return bounds_get_bitfacts_iterative(b, expr, out);
 }
 
 IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
@@ -6950,7 +6875,7 @@ bounds_residue_direct_independent(bounds_residue_query *query,
     return BOUNDS_RESIDUE_STEP_ADVANCED;
   }
   if (ixs_node_is_integer_valued(node) && uint64_is_pow2(frame->modulus) &&
-      bounds_get_bitfacts_tracked(current, node, &bits)) {
+      bounds_get_bitfacts_iterative(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
       bounds_residue_complete(query, true, bits.known_one & mask);
@@ -7007,7 +6932,7 @@ bounds_residue_direct_tracked(bounds_residue_query *query,
     return BOUNDS_RESIDUE_STEP_ADVANCED;
   }
   if (uint64_is_pow2(frame->modulus) &&
-      bounds_get_bitfacts_tracked(current, node, &bits)) {
+      bounds_get_bitfacts_iterative(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
       bounds_residue_complete(query, true, bits.known_one & mask);
@@ -7630,9 +7555,9 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
   possible = span;
   required = 0;
   have_bits =
-      bounds_get_bitfacts_tracked(b, expr->u.assoc.args[0], &result_bits);
+      bounds_get_bitfacts_iterative(b, expr->u.assoc.args[0], &result_bits);
   for (i = 1; have_bits && i < expr->u.assoc.nargs; i++) {
-    if (!bounds_get_bitfacts_tracked(b, expr->u.assoc.args[i], &arg_bits)) {
+    if (!bounds_get_bitfacts_iterative(b, expr->u.assoc.args[i], &arg_bits)) {
       have_bits = false;
       break;
     }
@@ -14336,47 +14261,15 @@ typedef struct {
 
 typedef struct {
   ixs_bounds *bounds;
-  bounds_stride_frame *frames;
-  size_t depth;
-  size_t capacity;
+  ixs_query_walk walk;
   bool child_success;
   uint64_t child_stride;
 } bounds_stride_query;
 
-static bool bounds_stride_push(bounds_stride_query *query, ixs_node *expr) {
-  bounds_stride_frame *grown;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-  if (query->depth < query->capacity) {
-    memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-    query->frames[query->depth++].expr = expr;
-    return true;
-  }
-  capacity = query->capacity ? query->capacity * 2u : 16u;
-  if (capacity < query->capacity ||
-      capacity > SIZE_MAX / sizeof(*query->frames)) {
-    query->bounds->oom = true;
-    return false;
-  }
-  old_bytes = query->capacity * sizeof(*query->frames);
-  new_bytes = capacity * sizeof(*query->frames);
-  grown = ixs_arena_grow(query->bounds->scratch, query->frames, old_bytes,
-                         new_bytes, sizeof(void *));
-  if (!grown) {
-    query->bounds->oom = true;
-    return false;
-  }
-  query->frames = grown;
-  query->capacity = capacity;
-  memset(&query->frames[query->depth], 0, sizeof(*query->frames));
-  query->frames[query->depth++].expr = expr;
-  return true;
-}
-
-static void bounds_stride_complete(bounds_stride_query *query, bool success,
-                                   uint64_t stride) {
-  bounds_stride_frame *frame = &query->frames[query->depth - 1u];
+static ixs_query_walk_step bounds_stride_complete(bounds_stride_query *query,
+                                                  bool success,
+                                                  uint64_t stride) {
+  bounds_stride_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
   if (frame->tracked) {
     bounds_query_cache_entry *entry =
         bounds_query_finish(&frame->scope, success);
@@ -14385,133 +14278,113 @@ static void bounds_stride_complete(bounds_stride_query *query, bool success,
     else
       success = false;
   }
-  query->depth--;
+  IXS_QUERY_WALK_POP(&query->walk);
   query->child_success = success;
   query->child_stride = success ? stride : 0;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
-static void bounds_stride_unwind(bounds_stride_query *query) {
-  while (query->depth != 0)
-    bounds_stride_complete(query, false, 0);
+/* hot */
+static void bounds_stride_abort(void *state, void *raw_frame) {
+  bounds_stride_frame *frame = raw_frame;
+  (void)state;
+  if (frame->tracked)
+    (void)bounds_query_finish(&frame->scope, false);
 }
 
-typedef enum {
-  BOUNDS_STRIDE_STEP_ADVANCED,
-  BOUNDS_STRIDE_STEP_READY,
-  BOUNDS_STRIDE_STEP_OOM
-} bounds_stride_step;
-
-static bounds_stride_step
+static ixs_query_walk_step
 bounds_stride_prepare_frame(bounds_stride_query *query,
                             bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
-  if (!node || (node->properties & IXS_NODE_PROPERTY_VALID) == 0) {
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
-  }
+  if (!node || (node->properties & IXS_NODE_PROPERTY_VALID) == 0)
+    return bounds_stride_complete(query, false, 0);
   if (bounds_query_should_track(query->bounds, node)) {
     bounds_query_cache_entry *cached = NULL;
     bounds_query_enter_result enter = bounds_query_begin(
         query->bounds, BOUNDS_QUERY_STRIDE, node, 0, &frame->scope, &cached);
     if (enter == BOUNDS_QUERY_ENTER_CACHED) {
-      bounds_stride_complete(query, cached->success, cached->result.stride);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, cached->success,
+                                    cached->result.stride);
     }
     if (enter != BOUNDS_QUERY_ENTER_STARTED) {
-      bounds_stride_complete(query, false, 0);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, false, 0);
     }
     frame->tracked = true;
   }
-  return BOUNDS_STRIDE_STEP_READY;
+  return IXS_QUERY_WALK_NEXT;
 }
 
-static bounds_stride_step bounds_stride_start_add(bounds_stride_query *query,
-                                                  bounds_stride_frame *frame) {
+static ixs_query_walk_step bounds_stride_start_add(bounds_stride_query *query,
+                                                   bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
   int64_t p;
   int64_t q;
   ixs_node_get_rat(node->u.add.coeff, &p, &q);
   (void)p;
   if (q != 1) {
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, false, 0);
   }
   frame->stage = BOUNDS_STRIDE_ADD;
   frame->result = 0;
   frame->index = 0;
   if (node->u.add.nterms == 0) {
-    bounds_stride_complete(query, true, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, true, 0);
   }
-  return bounds_stride_push(query, node->u.add.terms[0].term)
-             ? BOUNDS_STRIDE_STEP_ADVANCED
-             : BOUNDS_STRIDE_STEP_OOM;
+  return ixs_query_walk_push(&query->walk, node->u.add.terms[0].term);
 }
 
-static bounds_stride_step bounds_stride_start_mul(bounds_stride_query *query,
-                                                  bounds_stride_frame *frame) {
+static ixs_query_walk_step bounds_stride_start_mul(bounds_stride_query *query,
+                                                   bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
   int64_t p;
   int64_t q;
   uint32_t i;
   ixs_node_get_rat(node->u.mul.coeff, &p, &q);
   if (q != 1) {
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, false, 0);
   }
   if (p == 0) {
-    bounds_stride_complete(query, true, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, true, 0);
   }
   if (node->u.mul.nfactors == 1 && node->u.mul.factors[0].exp == 1) {
     frame->stage = BOUNDS_STRIDE_LINEAR_MUL;
-    return bounds_stride_push(query, node->u.mul.factors[0].base)
-               ? BOUNDS_STRIDE_STEP_ADVANCED
-               : BOUNDS_STRIDE_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, node->u.mul.factors[0].base);
   }
   for (i = 0; i < node->u.mul.nfactors; i++)
     if (node->u.mul.factors[i].exp <= 0 ||
         !ixs_node_is_integer_valued(node->u.mul.factors[i].base))
       break;
   if (i != node->u.mul.nfactors) {
-    bounds_stride_complete(query, true, 1);
+    return bounds_stride_complete(query, true, 1);
   } else {
     uint64_t magnitude = bounds_int64_magnitude(p);
-    bounds_stride_complete(query, true,
-                           magnitude <= (uint64_t)INT64_MAX ? magnitude : 1);
+    return bounds_stride_complete(
+        query, true, magnitude <= (uint64_t)INT64_MAX ? magnitude : 1);
   }
-  return BOUNDS_STRIDE_STEP_ADVANCED;
 }
 
-static bounds_stride_step
+static ixs_query_walk_step
 bounds_stride_start_piecewise(bounds_stride_query *query,
                               bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
   if (!ixs_node_is_integer_valued(node) || !ixs_node_is_known_total(node) ||
-      node->u.pw.ncases == 0 || !node->u.pw.cases) {
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
-  }
+      node->u.pw.ncases == 0 || !node->u.pw.cases)
+    return bounds_stride_complete(query, false, 0);
   frame->stage = BOUNDS_STRIDE_PIECEWISE;
   frame->result = 0;
   frame->index = 0;
-  return bounds_stride_push(query, node->u.pw.cases[0].value)
-             ? BOUNDS_STRIDE_STEP_ADVANCED
-             : BOUNDS_STRIDE_STEP_OOM;
+  return ixs_query_walk_push(&query->walk, node->u.pw.cases[0].value);
 }
 
-static bounds_stride_step
+static ixs_query_walk_step
 bounds_stride_start_frame(bounds_stride_query *query,
                           bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
   switch (node->tag) {
   case IXS_INT:
-    bounds_stride_complete(query, true, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, true, 0);
   case IXS_RAT:
-    bounds_stride_complete(query, node->u.rat.q == 1, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, node->u.rat.q == 1, 0);
   case IXS_SYM: {
     int64_t modulus;
     int64_t remainder;
@@ -14521,8 +14394,7 @@ bounds_stride_start_frame(bounds_stride_query *query,
       (void)remainder;
       result = (uint64_t)modulus;
     }
-    bounds_stride_complete(query, !query->bounds->oom, result);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, !query->bounds->oom, result);
   }
   case IXS_ADD:
     return bounds_stride_start_add(query, frame);
@@ -14530,28 +14402,23 @@ bounds_stride_start_frame(bounds_stride_query *query,
     return bounds_stride_start_mul(query, frame);
   case IXS_MOD:
     if (node->u.binary.rhs->tag != IXS_INT || node->u.binary.rhs->u.ival <= 0) {
-      bounds_stride_complete(query, true, 1);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, true, 1);
     }
     frame->stage = BOUNDS_STRIDE_MOD;
-    return bounds_stride_push(query, node->u.binary.lhs)
-               ? BOUNDS_STRIDE_STEP_ADVANCED
-               : BOUNDS_STRIDE_STEP_OOM;
+    return ixs_query_walk_push(&query->walk, node->u.binary.lhs);
   case IXS_PIECEWISE:
     return bounds_stride_start_piecewise(query, frame);
   default:
-    bounds_stride_complete(query, ixs_node_is_integer_valued(node), 1);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, ixs_node_is_integer_valued(node), 1);
   }
 }
 
-static bounds_stride_step
+static ixs_query_walk_step
 bounds_stride_resume_frame(bounds_stride_query *query,
                            bounds_stride_frame *frame) {
   ixs_node *node = frame->expr;
   if (!query->child_success) {
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, false, 0);
   }
   switch (frame->stage) {
   case BOUNDS_STRIDE_ADD: {
@@ -14559,93 +14426,78 @@ bounds_stride_resume_frame(bounds_stride_query *query,
     int64_t q;
     ixs_node_get_rat(node->u.add.terms[frame->index].coeff, &p, &q);
     if (q != 1) {
-      bounds_stride_complete(query, false, 0);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, false, 0);
     }
     frame->result = bounds_u64_gcd(frame->result,
                                    bounds_scale_stride(query->child_stride, p));
     frame->index++;
     if (frame->index == node->u.add.nterms) {
-      bounds_stride_complete(query, true, frame->result);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, true, frame->result);
     }
-    return bounds_stride_push(query, node->u.add.terms[frame->index].term)
-               ? BOUNDS_STRIDE_STEP_ADVANCED
-               : BOUNDS_STRIDE_STEP_OOM;
+    return ixs_query_walk_push(&query->walk,
+                               node->u.add.terms[frame->index].term);
   }
   case BOUNDS_STRIDE_LINEAR_MUL: {
     int64_t p;
     int64_t q;
     ixs_node_get_rat(node->u.mul.coeff, &p, &q);
     (void)q;
-    bounds_stride_complete(query, true,
-                           bounds_scale_stride(query->child_stride, p));
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, true,
+                                  bounds_scale_stride(query->child_stride, p));
   }
   case BOUNDS_STRIDE_MOD:
-    bounds_stride_complete(
+    return bounds_stride_complete(
         query, true,
         bounds_u64_gcd(query->child_stride,
                        (uint64_t)node->u.binary.rhs->u.ival));
-    return BOUNDS_STRIDE_STEP_ADVANCED;
   case BOUNDS_STRIDE_PIECEWISE:
     frame->result = bounds_u64_gcd(frame->result, query->child_stride);
     frame->index++;
     if (frame->index == node->u.pw.ncases) {
-      bounds_stride_complete(query, true, frame->result);
-      return BOUNDS_STRIDE_STEP_ADVANCED;
+      return bounds_stride_complete(query, true, frame->result);
     }
-    return bounds_stride_push(query, node->u.pw.cases[frame->index].value)
-               ? BOUNDS_STRIDE_STEP_ADVANCED
-               : BOUNDS_STRIDE_STEP_OOM;
+    return ixs_query_walk_push(&query->walk,
+                               node->u.pw.cases[frame->index].value);
   case BOUNDS_STRIDE_INITIAL:
-    bounds_stride_complete(query, false, 0);
-    return BOUNDS_STRIDE_STEP_ADVANCED;
+    return bounds_stride_complete(query, false, 0);
   }
-  return BOUNDS_STRIDE_STEP_ADVANCED;
+  return IXS_QUERY_WALK_ADVANCED;
 }
 
 /* Iterative and memoized over the normalized expression DAG.  Each node and
  * immediate operand is processed once per query owner; there is no semantic
  * depth or visit ceiling and deep Piecewise trees do not consume C stack. */
+/* hot */
+static ixs_query_walk_step bounds_stride_advance(void *state, void *raw_frame) {
+  bounds_stride_query *query = state;
+  bounds_stride_frame *frame = raw_frame;
+  ixs_query_walk_step step;
+  if (frame->stage == BOUNDS_STRIDE_INITIAL) {
+    step = bounds_stride_prepare_frame(query, frame);
+    if (step == IXS_QUERY_WALK_NEXT)
+      step = bounds_stride_start_frame(query, frame);
+  } else {
+    step = bounds_stride_resume_frame(query, frame);
+  }
+  return step;
+}
+
 static bool bounds_known_stride(ixs_bounds *bounds, ixs_node *expr,
                                 uint64_t *stride) {
-  ixs_arena_mark mark;
   bounds_stride_query query;
   if (!bounds || !expr || !stride || bounds->oom)
     return false;
-
-  mark = ixs_arena_save(bounds->scratch);
   memset(&query, 0, sizeof(query));
   query.bounds = bounds;
-  if (!bounds_stride_push(&query, expr))
-    goto failed;
-
-  while (query.depth != 0) {
-    bounds_stride_frame *frame = &query.frames[query.depth - 1u];
-    bounds_stride_step step;
-
-    if (frame->stage == BOUNDS_STRIDE_INITIAL) {
-      step = bounds_stride_prepare_frame(&query, frame);
-      if (step == BOUNDS_STRIDE_STEP_READY)
-        step = bounds_stride_start_frame(&query, frame);
-    } else {
-      step = bounds_stride_resume_frame(&query, frame);
-    }
-    if (step == BOUNDS_STRIDE_STEP_OOM)
-      goto failed;
-  }
-
+  IXS_QUERY_WALK_INIT(&query.walk, bounds->scratch, &bounds->oom,
+                      bounds_stride_frame, expr);
+  if (!ixs_query_walk_run(&query.walk, expr, &query, bounds_stride_advance,
+                          bounds_stride_abort))
+    return false;
   if (!query.child_success)
-    goto failed;
+    return false;
   *stride = query.child_stride;
-  ixs_arena_restore(bounds->scratch, mark);
   return true;
-
-failed:
-  bounds_stride_unwind(&query);
-  ixs_arena_restore(bounds->scratch, mark);
-  return false;
 }
 
 typedef struct {

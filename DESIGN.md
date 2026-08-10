@@ -1346,8 +1346,18 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
   Initial storage is symbol-level in `ixs_var_bound`. Expression-level
   bitfacts are computed on demand for constants, symbols, comparisons,
-  logical NOT, and bounded-depth `AND`/`OR`/`XOR` nodes. A pointer-keyed side
-  table can be added later if expression-level assumptions need to persist.
+  logical NOT, `ADD`, restricted `MUL`/`FLOOR`/`MOD`, and `AND`/`OR`/`XOR`.
+  Bitfacts and known stride share the private iterative query stack in
+  `query_walk.c`. Typed frames keep the expression pointer first; the stack
+  starts at 16 frames, doubles with checked arena growth at pointer alignment,
+  and rolls back one outer scratch mark. The structural driver owns only
+  push/pop, growth, and LIFO abort. Each consumer owns transfer values, fixed
+  `bounds_query` cache entry/finish policy, and final publication. Bitfacts
+  allocates its per-child result arrays while preparing supported nodes.
+  Query-stack push/pop is amortized O(1) and uses O(depth) scratch. Tracked
+  bitfacts and stride queries memoize shared nodes; their transfer functions
+  and fixed query cache determine total work. Neither walker has a semantic
+  depth ceiling.
   Branch-local facts are copied by `ixs_bounds_fork`, so `Piecewise` branch
   assumptions remain isolated.
 - `floor(x)`: if `lo <= x <= hi`, then `floor(lo) <= floor(x) <= floor(hi)`
@@ -2926,9 +2936,13 @@ installed; pinned versions live in `scripts/requirements-check.txt`).
 
 Known blind spots, by design: calls through function pointers and calls
 to external (libc) functions are assumed scan-free, so walker callbacks
-must honor the hot contract on their own. Function-like macros are
-modeled as pseudo-functions — their bodies are re-parsed for calls, so
-scans reached through a macro are caught; same-name macro variants
+must honor the hot contract on their own. The bitfacts and stride advance
+and abort callbacks used by `query_walk.c` are explicit `/* hot */` roots;
+the generic callback result contains structural progress or storage failure
+only, not proof values, cache publication, or transport policy.
+Function-like macros are modeled as pseudo-functions. Their bodies are
+re-parsed for calls, so scans reached through a macro are caught; same-name
+macro variants
 (conditional compilation) union their edges, a sound over-approximation.
 Tags are human classification; the checker only propagates it. The
 empirical backstop is scaling benchmarks over the corpus, which catch
@@ -2986,6 +3000,8 @@ ixsimpl/
 │   ├── division_algebra.h
 │   ├── quotient_algebra.c   # bounded Euclidean sparse-row equality
 │   ├── quotient_algebra.h
+│   ├── query_walk.c         # shared iterative query stack lifecycle
+│   ├── query_walk.h
 │   ├── radix_algebra.c      # bounded mixed-radix nonnegativity proof
 │   ├── radix_algebra.h
 │   ├── relation_algebra.c   # indexed exact additive relations
