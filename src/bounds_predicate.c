@@ -35,6 +35,22 @@ IXS_STATIC ixs_check_result bounds_predicate_not(ixs_check_result result) {
   return IXS_CHECK_UNKNOWN;
 }
 
+static ixs_check_result predicate_cmp_atom(ixs_bounds *bounds, ixs_node *cmp) {
+  ixs_check_result result;
+  /* Reflexive equality encodes totality, so a proven domain failure is false
+   * rather than an invalid arithmetic query. */
+  if (cmp->u.binary.cmp_op == IXS_CMP_EQ &&
+      cmp->u.binary.lhs == cmp->u.binary.rhs)
+    return ixs_bounds_check_defined(bounds, cmp->u.binary.lhs);
+  result = ixs_bounds_check(bounds, cmp);
+  if (result != IXS_CHECK_UNKNOWN || !ixs_node_is_zero(cmp->u.binary.rhs) ||
+      (cmp->u.binary.cmp_op != IXS_CMP_EQ &&
+       cmp->u.binary.cmp_op != IXS_CMP_NE) ||
+      !bounds_store_contains_nonzero(bounds, cmp->u.binary.lhs))
+    return result;
+  return cmp->u.binary.cmp_op == IXS_CMP_NE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
+}
+
 static ixs_check_result predicate_query_atom(ixs_bounds *bounds,
                                              ixs_node *node) {
   ixs_interval iv;
@@ -47,7 +63,7 @@ static ixs_check_result predicate_query_atom(ixs_bounds *bounds,
   if (node->tag == IXS_RAT)
     return node->u.rat.p == 0 ? IXS_CHECK_FALSE : IXS_CHECK_TRUE;
   if (node->tag == IXS_CMP)
-    return bounds_cmp_atom(bounds, node);
+    return predicate_cmp_atom(bounds, node);
 
   /* NOT accepts numeric operands.  Interval truthiness is a bounded
    * sufficient proof for those operands; a range crossing zero is unknown. */

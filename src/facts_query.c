@@ -4,6 +4,7 @@
 #include "additive_row.h"
 #include "bounds.h"
 #include "bounds_defined.h"
+#include "bounds_equivalence.h"
 #include "bounds_predicate.h"
 #include "bounds_query.h"
 #include "bounds_range.h"
@@ -458,6 +459,14 @@ facts_status_from_algebra(ixs_algebra_status status) {
   return IXS_FACT_QUERY_COMPLETE;
 }
 
+static ixs_check_result
+facts_predicate_eval(ixs_bounds *bounds, ixs_node *predicate, bool *limited) {
+  ixs_check_result result = bounds_predicate_eval(bounds, predicate, limited);
+  if (!*limited && result == IXS_CHECK_UNKNOWN && predicate->tag == IXS_CMP)
+    result = ixs_bounds_check_query(bounds, predicate);
+  return result;
+}
+
 static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
                                                          ixs_node *predicate) {
   ixs_session_binding binding;
@@ -493,11 +502,10 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
     goto cleanup;
   }
 
-  /* The predicate engine owns proof semantics, including reflexive equality
-   * as a totality witness.  Simplification remains a fallback for predicates
-   * whose original form is inconclusive. */
+  /* The predicate engine owns structural truth. Exact EQ/NE fallback belongs
+   * to equivalence and is applied here at the public query boundary. */
   result.check =
-      bounds_predicate_eval(&facts->bounds, predicate, &predicate_limited);
+      facts_predicate_eval(&facts->bounds, predicate, &predicate_limited);
   if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
     result.check = bounds_predicate_implication(&facts->bounds, predicate,
                                                 &predicate_limited);
@@ -521,7 +529,7 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_INVALID;
   } else {
     result.check =
-        bounds_predicate_eval(&facts->bounds, simplified, &predicate_limited);
+        facts_predicate_eval(&facts->bounds, simplified, &predicate_limited);
     if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
       result.check =
           bounds_predicate_bounded_finite_domain(&facts->bounds, predicate);

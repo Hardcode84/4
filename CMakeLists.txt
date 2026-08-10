@@ -20,6 +20,7 @@ else()
         src/bounds_bitfacts.c
         src/bounds_defined.c
         src/bounds_difference.c
+        src/bounds_equivalence.c
         src/bounds_integer.c
         src/bounds_modular.c
         src/bounds_predicate.c

@@ -11,6 +11,7 @@
 #include "additive_row.h"
 #include "bounds.h"
 #include "bounds_difference.h"
+#include "bounds_equivalence.h"
 #include "bounds_query.h"
 #include "bounds_relation.h"
 #include "bounds_store.h"
@@ -310,7 +311,6 @@ static void test_bounds_sym_ge(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
   CHECK(ixs_bounds_init(&b, ixs_test_scratch(ctx)));
-  CHECK(b.predicate_equivalence_depth == 0u);
 
   ixs_node *x = ixs_sym(ctx, "x");
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)));
@@ -602,11 +602,7 @@ static void test_bounds_fork(void) {
   CHECK(b.difference_var_cap == 0);
 
   ixs_bounds child;
-  b.predicate_equivalence_depth = 3u;
   CHECK(ixs_bounds_fork(&child, &b));
-  CHECK(child.predicate_equivalence_depth == 3u);
-  b.predicate_equivalence_depth = 0u;
-  child.predicate_equivalence_depth = 0u;
   CHECK(child.var_index != b.var_index);
   CHECK(child.var_index_cap == b.var_index_cap);
 
@@ -626,9 +622,7 @@ static void test_bounds_fork(void) {
   CHECK(ixs_rat_cmp(parent_iv.hi_p, parent_iv.hi_q, 100, 1) == 0);
 
   ixs_bounds_destroy(&child);
-  CHECK(child.predicate_equivalence_depth == 0u);
   ixs_bounds_destroy(&b);
-  CHECK(b.predicate_equivalence_depth == 0u);
   ixs_ctx_destroy(ctx);
 }
 

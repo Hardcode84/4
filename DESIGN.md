@@ -1242,21 +1242,25 @@ depth-safe range subqueries, and definedness projection-cache publication.
 `bounds_integer.c` owns exact integer and divisibility proofs.
 `bounds_predicate.c` owns iterative tri-state predicate evaluation, bounded
 implication branches, and finite-domain enumeration over range/nonzero atoms.
+It does not call equivalence. The facts-facing query boundary applies the
+equivalence-owned EQ/NE fallback only after structural predicate evaluation is
+inconclusive; equivalence may use predicate truth as a lower proof service.
 `facts_store.c` owns reusable fact-set session/epoch identity, transaction
 fork/commit/poison, fact transfer, dependency closure, its bounded retained
 cache, and the create/assume/derive/substitute mutation APIs. Predicate branches
 borrow its one-root closure entry point. `facts_query.c` owns fact-set read
 validation and query transactions, scalar and batch simplification, exact
-division, metadata queries, and the public read API. `bounds.c` retains the
-exact EQ/NE and constant-difference adapters. `bounds_modular.c` owns the
-paired-Mod exact-delta search, wide signed arithmetic, dynamic no-wrap lifts,
-and its growable progress stack.
+division, metadata queries, and the public read API. `bounds_equivalence.c`
+owns equivalence query policy, exact EQ/NE fallback, ordered-congruence and
+Piecewise selector proofs, and constant-difference queries. `bounds_modular.c`
+owns the paired-Mod exact-delta search, wide signed arithmetic, dynamic
+no-wrap lifts, and its growable progress stack.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
 scaling.
-Canonical alias creation and equivalence query policy remain in `bounds.c`,
-which passes canonical nodes or trusted symbols to the leaf owners.
+Canonical alias creation remains in `bounds.c`, which passes canonical nodes
+or trusted symbols to the leaf owners.
 `bounds_range.c` owns relation endpoint admission, direct interval caching and
 transfer, structural and Piecewise ranges, equality-component range projection, integral
 and congruence refinement, truncating-remainder ranges, emptiness, and interval
@@ -3162,7 +3166,7 @@ ixsimpl/
 │   ├── facts_query.c        # fact-set reads, simplification, public query API
 │   ├── facts_store.c        # persistent facts lifetime, transactions, closure
 │   ├── facts_store.h
-│   ├── bounds.c             # query policy and aggregate coordination
+│   ├── bounds.c             # canonical aliases and aggregate coordination
 │   ├── bounds.h             # aggregate private bounds state
 │   ├── bounds_assume.c      # assumption validation and fact refinement
 │   ├── bounds_assume.h
@@ -3172,6 +3176,8 @@ ixsimpl/
 │   ├── bounds_defined.h
 │   ├── bounds_difference.c  # directed constraints and interval propagation
 │   ├── bounds_difference.h
+│   ├── bounds_equivalence.c # equivalence and constant-difference proof
+│   ├── bounds_equivalence.h
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
 │   ├── bounds_modular.c     # paired-Mod exact-delta proof

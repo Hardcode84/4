@@ -117,8 +117,6 @@ typedef struct ixs_bounds {
   /* Scoped guard for intrinsic endpoint proofs.  Equality projection must not
    * use the relation being justified to prove its own domain. */
   unsigned equality_disabled_depth;
-  /* Prevent predicate EQ/NE fallback from recursively re-entering itself. */
-  unsigned predicate_equivalence_depth;
   /* Exact proofs own their structural traversal.  Auxiliary interval and
    * predicate probes may re-enter once, but cannot form an unbounded C call
    * chain through another exact proof. */
@@ -131,13 +129,6 @@ typedef struct ixs_bounds {
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;
 
-/* Internal hooks emitted only by the test-instrumented library. */
-#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
-IXS_STATIC ixs_check_result ixs_bounds_equivalence_subproof_limit_probe(
-    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
-IXS_STATIC ixs_check_result ixs_bounds_equivalence_quotient_limit_probe(
-    ixs_facts *facts, const ixs_node *lhs, const ixs_node *rhs);
-#endif
 /* Returns false on OOM (arena exhausted). */
 IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch);
 IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
@@ -164,7 +155,6 @@ IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom);
 IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                             ixs_node *rhs, int64_t offset);
-IXS_STATIC ixs_check_result bounds_cmp_atom(ixs_bounds *b, ixs_node *cmp);
 /* Lower proof services borrow these query-policy operations. */
 IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
@@ -176,14 +166,6 @@ IXS_STATIC ixs_node *bounds_condition_assumption(ixs_bounds *bounds,
                                                  struct ixs_node_impl *storage);
 IXS_STATIC ixs_check_result bounds_condition_truth(ixs_bounds *bounds,
                                                    ixs_node *condition);
-
-/* Lower proof queries used by the facts-facing read service. */
-IXS_STATIC ixs_algebra_status
-bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
-                                ixs_node *rhs, ixs_check_result *result);
-IXS_STATIC ixs_algebra_status bounds_constant_difference_query_detail(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
-    int64_t *delta, bool *matched);
 
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
@@ -206,11 +188,5 @@ IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
  * Returns IXS_CHECK_TRUE / FALSE / UNKNOWN.  Non-CMP input or
  * non-zero rhs returns UNKNOWN. */
 IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp);
-
-/* Complete public scalar check.  One query generation spans the fast bounds
- * check and the exact EQ/NE fallback, so all callers observe one proof
- * contract and one resource outcome. */
-IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *b,
-                                                   ixs_node *cmp);
 
 #endif /* IXS_BOUNDS_H */
