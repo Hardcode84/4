@@ -586,10 +586,6 @@ typedef struct {
 } ixs_additive_constant_result;
 
 #define FACT_WORK_INIT_CAP 64u
-static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
-static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
-static bool bounds_get_bitfacts_iterative(ixs_bounds *b, ixs_node *expr,
-                                          ixs_bitfacts *out);
 static ixs_node *bounds_condition_assumption(ixs_bounds *b, ixs_node *cond,
                                              bool value,
                                              struct ixs_node_impl *storage);
@@ -813,7 +809,7 @@ bounds_collect_relation_component(ixs_bounds *b, ixs_node *expr,
                                   bounds_relation_component *component) {
   bounds_relation_cursor_step step;
   ixs_algebra_status status;
-  ixs_node *candidate;
+  ixs_node *candidate = NULL;
   size_t root_endpoint;
   component->scratch = NULL;
   if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
@@ -830,6 +826,8 @@ bounds_collect_relation_component(ixs_bounds *b, ixs_node *expr,
       continue;
     }
     if (step == BOUNDS_RELATION_CURSOR_ADMISSION) {
+      if (!candidate)
+        abort();
       status = bounds_relation_require_defined(b, candidate);
       if (status == IXS_ALGEBRA_MATCH) {
         step = bounds_relation_component_resolve(component, true);
@@ -945,37 +943,7 @@ static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
   return IXS_ALGEBRA_MATCH;
 }
 
-static void bitfacts_unknown(ixs_bitfacts *bits) {
-  bits->known_zero = 0;
-  bits->known_one = 0;
-  bits->pow2 = IXS_POW2_UNKNOWN;
-}
-
-static unsigned bit_ctz64(uint64_t v) {
-  unsigned n = 0;
-  while (v != 0 && (v & 1u) == 0) {
-    n++;
-    v >>= 1;
-  }
-  return n;
-}
-
-static uint64_t low_mask(unsigned nbits) {
-  if (nbits >= 64u)
-    return ~(uint64_t)0;
-  return (((uint64_t)1) << nbits) - 1u;
-}
-
-static uint64_t value_span_mask(uint64_t hi) {
-  uint64_t mask = 0;
-  while (hi) {
-    mask = (mask << 1) | 1u;
-    hi >>= 1;
-  }
-  return mask;
-}
-
-/* GCD of a positive modulus and a conservative dividend step.  Computing the
+/* GCD of a positive modulus and a conservative dividend step. Computing the
  * GCD directly keeps the result representable when a coefficient is
  * INT64_MIN, whose magnitude is one past INT64_MAX. */
 static int64_t mod_dividend_gcd(ixs_node *expr, int64_t modulus) {
@@ -1002,1431 +970,6 @@ static int64_t mod_dividend_gcd(ixs_node *expr, int64_t modulus) {
   }
 }
 
-static void bitfacts_apply_exact(ixs_bitfacts *bits, int64_t val) {
-  uint64_t u = (uint64_t)val;
-  bits->known_zero |= ~u;
-  bits->known_one |= u;
-  if (val == 0)
-    bits->pow2 = IXS_POW2_OR_ZERO;
-  else if (ixs_int64_is_positive_pow2(val))
-    bits->pow2 = IXS_POW2_POSITIVE;
-}
-
-static void bitfacts_apply_interval(ixs_bitfacts *bits,
-                                    const ixs_interval *iv) {
-  int64_t exact;
-  if (ixs_interval_is_point_int(*iv, &exact)) {
-    bitfacts_apply_exact(bits, exact);
-    return;
-  }
-  if (!iv->valid || iv->lo_inf || iv->hi_inf || iv->hi_q != 1 || iv->hi_p < 0 ||
-      !ixs_interval_lower_at_least(iv, 0, 1))
-    return;
-  bits->known_zero |= ~value_span_mask((uint64_t)iv->hi_p);
-}
-
-static bool bitfacts_low_value(const ixs_bitfacts *bits, unsigned nbits,
-                               uint64_t *value) {
-  uint64_t mask = low_mask(nbits);
-  if (((bits->known_zero | bits->known_one) & mask) != mask)
-    return false;
-  *value = bits->known_one & mask;
-  return true;
-}
-
-static void bitfacts_set_low_value(ixs_bitfacts *bits, unsigned nbits,
-                                   uint64_t value) {
-  uint64_t mask = low_mask(nbits);
-  bits->known_one |= value & mask;
-  bits->known_zero |= (~value) & mask;
-}
-
-static void bitfacts_apply_modrem(ixs_bitfacts *bits, int64_t modulus,
-                                  int64_t remainder) {
-  uint64_t mask, rem;
-  if (!ixs_int64_is_positive_pow2(modulus))
-    return;
-  mask = (uint64_t)modulus - 1u;
-  rem = (uint64_t)remainder & mask;
-  bits->known_zero |= (~rem) & mask;
-  bits->known_one |= rem & mask;
-}
-
-static bool bounds_get_symbol_bitfacts(ixs_bounds *b, const char *name,
-                                       ixs_bitfacts *out) {
-  int64_t exact;
-  ixs_var_bound *v = bounds_store_find_var(b, name);
-  if (v) {
-    out->known_zero |= v->bits.known_zero;
-    out->known_one |= v->bits.known_one;
-    if (v->bits.pow2 == IXS_POW2_POSITIVE ||
-        (v->bits.pow2 == IXS_POW2_OR_ZERO && out->pow2 == IXS_POW2_UNKNOWN))
-      out->pow2 = v->bits.pow2;
-    bitfacts_apply_modrem(out, v->modulus, v->remainder);
-    if (ixs_interval_is_point_int(v->iv, &exact))
-      bitfacts_apply_exact(out, exact);
-    if (out->pow2 == IXS_POW2_OR_ZERO &&
-        ixs_interval_lower_at_least(&v->iv, 1, 1))
-      out->pow2 = IXS_POW2_POSITIVE;
-  }
-  return true;
-}
-
-static void bitfacts_apply_and(ixs_bitfacts *out, const ixs_bitfacts *a,
-                               const ixs_bitfacts *b) {
-  out->known_one = a->known_one & b->known_one;
-  out->known_zero = a->known_zero | b->known_zero;
-  out->pow2 = IXS_POW2_UNKNOWN;
-}
-
-static void bitfacts_apply_or(ixs_bitfacts *out, const ixs_bitfacts *a,
-                              const ixs_bitfacts *b) {
-  out->known_one = a->known_one | b->known_one;
-  out->known_zero = a->known_zero & b->known_zero;
-  out->pow2 = IXS_POW2_UNKNOWN;
-}
-
-static void bitfacts_apply_xor(ixs_bitfacts *out, const ixs_bitfacts *a,
-                               const ixs_bitfacts *b) {
-  out->known_one =
-      (a->known_one & b->known_zero) | (a->known_zero & b->known_one);
-  out->known_zero =
-      (a->known_zero & b->known_zero) | (a->known_one & b->known_one);
-  out->pow2 = IXS_POW2_UNKNOWN;
-}
-
-typedef struct {
-  ixs_bitfacts bits;
-  bool success;
-} bounds_bitfacts_child;
-
-static bool bitfacts_scale_nonnegative_pow2_known(
-    ixs_bounds *b, ixs_node *term, int64_t coeff,
-    const bounds_bitfacts_child *child, ixs_bitfacts *out) {
-  ixs_interval iv;
-  uint64_t scale;
-  unsigned shift;
-
-  if (!child->success || !ixs_int64_is_positive_pow2(coeff) ||
-      !ixs_node_is_integer_valued(term))
-    return false;
-
-  iv = bounds_get_tracked(b, term);
-  scale = (uint64_t)coeff;
-  if (!ixs_interval_lower_at_least(&iv, 0, 1) || iv.hi_inf || iv.hi_q != 1 ||
-      iv.hi_p < 0 || (uint64_t)iv.hi_p > (uint64_t)INT64_MAX / scale)
-    return false;
-
-  shift = bit_ctz64(scale);
-  bitfacts_unknown(out);
-  out->known_zero = (child->bits.known_zero << shift) | low_mask(shift);
-  out->known_one = child->bits.known_one << shift;
-  return true;
-}
-
-/* One linear pass over normalized addends. Pairwise-disjoint possible-one
- * masks prove that integer addition cannot carry between addends. */
-static void
-bitfacts_apply_carry_free_add_known(ixs_bounds *b, ixs_node *expr,
-                                    const bounds_bitfacts_child *children,
-                                    ixs_bitfacts *out) {
-  ixs_bitfacts addend;
-  uint64_t known_one, possible;
-  int64_t cp, cq;
-  uint32_t i;
-
-  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
-  if (cq != 1 || cp < 0)
-    return;
-
-  bitfacts_unknown(&addend);
-  bitfacts_apply_exact(&addend, cp);
-  possible = ~addend.known_zero;
-  known_one = addend.known_one;
-
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    uint64_t term_possible;
-    int64_t tp, tq;
-
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
-    if (tq != 1 || !bitfacts_scale_nonnegative_pow2_known(
-                       b, expr->u.add.terms[i].term, tp, &children[i], &addend))
-      return;
-
-    term_possible = ~addend.known_zero;
-    if ((possible & term_possible) != 0)
-      return;
-    possible |= term_possible;
-    known_one |= addend.known_one;
-  }
-
-  out->known_zero |= ~possible;
-  out->known_one |= known_one;
-}
-
-static void bitfacts_apply_add_known(ixs_bounds *b, ixs_node *expr,
-                                     const bounds_bitfacts_child *children,
-                                     ixs_bitfacts *out) {
-  unsigned nbits;
-  int64_t cp, cq;
-
-  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
-  if (cq != 1)
-    return;
-
-  bitfacts_apply_carry_free_add_known(b, expr, children, out);
-
-  for (nbits = 1; nbits <= 64u; nbits++) {
-    uint64_t mask = low_mask(nbits);
-    uint64_t sum = (uint64_t)cp & mask;
-    uint32_t i;
-    bool known = true;
-
-    for (i = 0; i < expr->u.add.nterms; i++) {
-      uint64_t term_value;
-      int64_t tp, tq;
-
-      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
-      if (tq != 1 || !children[i].success ||
-          !bitfacts_low_value(&children[i].bits, nbits, &term_value)) {
-        known = false;
-        break;
-      }
-      sum = (sum + (((uint64_t)tp * term_value) & mask)) & mask;
-    }
-
-    if (!known)
-      break;
-    bitfacts_set_low_value(out, nbits, sum);
-    if (nbits == 64u)
-      break;
-  }
-}
-
-static void bitfacts_apply_mul_known(ixs_node *expr,
-                                     const bounds_bitfacts_child *child,
-                                     ixs_bitfacts *out) {
-  uint64_t coeff;
-  unsigned shift, i;
-
-  if (expr->u.mul.coeff->tag != IXS_INT || expr->u.mul.coeff->u.ival <= 0 ||
-      expr->u.mul.nfactors != 1 || expr->u.mul.factors[0].exp != 1 ||
-      !ixs_node_is_integer_valued(expr))
-    return;
-
-  coeff = (uint64_t)expr->u.mul.coeff->u.ival;
-  if (!ixs_u64_is_pow2(coeff) || !child->success)
-    return;
-
-  shift = bit_ctz64(coeff);
-  out->known_zero |= low_mask(shift);
-  for (i = shift; i < 64u; i++) {
-    uint64_t src = ((uint64_t)1) << (i - shift);
-    uint64_t dst = ((uint64_t)1) << i;
-    if (child->bits.known_zero & src)
-      out->known_zero |= dst;
-    if (child->bits.known_one & src)
-      out->known_one |= dst;
-  }
-}
-
-static bool extract_pow2_dividend(ixs_node *expr, ixs_node **dividend,
-                                  uint64_t *denom) {
-  int64_t cp, cq;
-  if (!expr || expr->tag != IXS_MUL || expr->u.mul.nfactors != 1 ||
-      expr->u.mul.factors[0].exp != 1)
-    return false;
-  ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
-  if (cp != 1 || cq <= 0 || !ixs_int64_is_positive_pow2(cq))
-    return false;
-  *dividend = expr->u.mul.factors[0].base;
-  *denom = (uint64_t)cq;
-  return true;
-}
-
-static void bitfacts_apply_floor_div_known(ixs_bounds *b, ixs_node *dividend,
-                                           uint64_t denom,
-                                           const bounds_bitfacts_child *child,
-                                           ixs_bitfacts *out) {
-  ixs_interval iv;
-  unsigned shift, i;
-
-  iv = bounds_get_tracked(b, dividend);
-  if (!child->success || !ixs_interval_lower_at_least(&iv, 0, 1))
-    return;
-
-  shift = bit_ctz64(denom);
-  for (i = 0; i + shift < 64u; i++) {
-    uint64_t src = ((uint64_t)1) << (i + shift);
-    uint64_t dst = ((uint64_t)1) << i;
-    if (child->bits.known_zero & src)
-      out->known_zero |= dst;
-    if (child->bits.known_one & src)
-      out->known_one |= dst;
-  }
-}
-
-static void bitfacts_apply_mod_known(ixs_node *expr,
-                                     const bounds_bitfacts_child *child,
-                                     ixs_bitfacts *out) {
-  uint64_t mask;
-  int64_t modulus;
-
-  if (expr->u.binary.rhs->tag != IXS_INT ||
-      !ixs_int64_is_positive_pow2(expr->u.binary.rhs->u.ival) ||
-      !ixs_node_is_integer_valued(expr->u.binary.lhs))
-    return;
-
-  modulus = expr->u.binary.rhs->u.ival;
-  mask = (uint64_t)modulus - 1u;
-  out->known_zero |= ~mask;
-  if (child->success) {
-    out->known_zero |= child->bits.known_zero & mask;
-    out->known_one |= child->bits.known_one & mask;
-  }
-}
-
-static bool bitfacts_apply_assoc_known(ixs_node *expr,
-                                       const bounds_bitfacts_child *children,
-                                       ixs_bitfacts *out) {
-  ixs_bitfacts result, arg, next;
-  uint32_t i;
-  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
-    return false;
-  if (!children[0].success)
-    return false;
-  result = children[0].bits;
-  for (i = 1; i < expr->u.assoc.nargs; i++) {
-    if (!children[i].success)
-      return false;
-    arg = children[i].bits;
-    if (expr->tag == IXS_AND)
-      bitfacts_apply_and(&next, &result, &arg);
-    else if (expr->tag == IXS_OR)
-      bitfacts_apply_or(&next, &result, &arg);
-    else
-      bitfacts_apply_xor(&next, &result, &arg);
-    result = next;
-  }
-  *out = result;
-  return true;
-}
-
-static inline bool bitfacts_apply_bool_value(ixs_bitfacts *out) {
-  out->known_zero = ~(uint64_t)1;
-  out->known_one = 0;
-  return true;
-}
-
-typedef enum {
-  BOUNDS_BITFACTS_INITIAL,
-  BOUNDS_BITFACTS_ADD,
-  BOUNDS_BITFACTS_MUL,
-  BOUNDS_BITFACTS_FLOOR,
-  BOUNDS_BITFACTS_MOD,
-  BOUNDS_BITFACTS_ASSOC
-} bounds_bitfacts_stage;
-
-typedef struct {
-  ixs_node *expr;
-  ixs_node *child_expr;
-  bounds_query_scope scope;
-  bounds_bitfacts_child *children;
-  ixs_bitfacts bits;
-  uint64_t argument;
-  uint32_t index;
-  uint32_t child_count;
-  bounds_bitfacts_stage stage;
-  bool tracked;
-} bounds_bitfacts_frame;
-
-typedef struct {
-  ixs_bounds *bounds;
-  ixs_query_walk walk;
-  bounds_bitfacts_child child;
-  ixs_bitfacts unknown;
-} bounds_bitfacts_query;
-
-static bool bounds_bitfacts_alloc_children(bounds_bitfacts_query *query,
-                                           bounds_bitfacts_frame *frame,
-                                           uint32_t count) {
-  size_t bytes;
-  if (count == 0)
-    return false;
-  bytes = (size_t)count * sizeof(*frame->children);
-  frame->children =
-      ixs_arena_alloc(query->bounds->scratch, bytes, sizeof(void *));
-  if (!frame->children) {
-    query->bounds->oom = true;
-    return false;
-  }
-  memset(frame->children, 0, bytes);
-  frame->child_count = count;
-  return true;
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
-                         ixs_bitfacts bits) {
-  bounds_bitfacts_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
-  if (frame->tracked) {
-    bounds_query_cache_entry *entry =
-        bounds_query_finish(&frame->scope, success);
-    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
-      entry->result.bitfacts = bits;
-    else
-      success = false;
-  }
-  IXS_QUERY_WALK_POP(&query->walk);
-  query->child.success = success;
-  query->child.bits = bits;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-/* hot */
-static void bounds_bitfacts_abort(void *state, void *raw_frame) {
-  bounds_bitfacts_frame *frame = raw_frame;
-  (void)state;
-  if (frame->tracked)
-    (void)bounds_query_finish(&frame->scope, false);
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_prepare_frame(bounds_bitfacts_query *query,
-                              bounds_bitfacts_frame *frame,
-                              ixs_bitfacts unknown) {
-  ixs_bounds *b = query->bounds;
-  ixs_node *node = frame->expr;
-  ixs_interval iv;
-
-  /* Stack-local synthetic symbols are valid read-only operands but are not
-   * memoized because bounds_query_should_track requires VALID. */
-  if (!node)
-    return bounds_bitfacts_complete(query, false, unknown);
-  if (bounds_query_should_track(b, node)) {
-    bounds_query_cache_entry *cached = NULL;
-    bounds_query_enter_result enter = bounds_query_begin(
-        b, BOUNDS_QUERY_BITFACTS, node, 0, &frame->scope, &cached);
-    if (enter == BOUNDS_QUERY_ENTER_CACHED) {
-      return bounds_bitfacts_complete(query, cached->success,
-                                      cached->result.bitfacts);
-    }
-    if (enter != BOUNDS_QUERY_ENTER_STARTED) {
-      return bounds_bitfacts_complete(query, false, unknown);
-    }
-    frame->tracked = true;
-  }
-  bitfacts_unknown(&frame->bits);
-  iv = bounds_get_tracked(b, node);
-  bitfacts_apply_interval(&frame->bits, &iv);
-  return b->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_NEXT;
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_start_scalar(bounds_bitfacts_query *query,
-                             bounds_bitfacts_frame *frame) {
-  ixs_node *node = frame->expr;
-  switch (node->tag) {
-  case IXS_INT:
-    bitfacts_apply_exact(&frame->bits, node->u.ival);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case IXS_RAT:
-    if (node->u.rat.q == 1)
-      bitfacts_apply_exact(&frame->bits, node->u.rat.p);
-    return bounds_bitfacts_complete(query, node->u.rat.q == 1, frame->bits);
-  case IXS_SYM:
-    bounds_get_symbol_bitfacts(query->bounds, node->u.name, &frame->bits);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case IXS_CMP:
-  case IXS_NOT:
-    bitfacts_apply_bool_value(&frame->bits);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case IXS_CEIL:
-  case IXS_TRUNC:
-  case IXS_PIECEWISE:
-  case IXS_MAX:
-  case IXS_MIN:
-    return bounds_bitfacts_complete(query, ixs_node_is_integer_valued(node),
-                                    frame->bits);
-  case IXS_ERROR:
-  case IXS_PARSE_ERROR:
-    return bounds_bitfacts_complete(query, false, frame->bits);
-  default:
-    return IXS_QUERY_WALK_NEXT;
-  }
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_start_assoc(bounds_bitfacts_query *query,
-                            bounds_bitfacts_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (!node->u.assoc.args || node->u.assoc.nargs == 0) {
-    return bounds_bitfacts_complete(query, false, frame->bits);
-  }
-  if (!bounds_bitfacts_alloc_children(query, frame, node->u.assoc.nargs))
-    return IXS_QUERY_WALK_OOM;
-  frame->stage = BOUNDS_BITFACTS_ASSOC;
-  return ixs_query_walk_push(&query->walk, node->u.assoc.args[0]);
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
-                                bounds_bitfacts_frame *frame) {
-  ixs_node *node = frame->expr;
-  switch (node->tag) {
-  case IXS_ADD:
-    if (node->u.add.nterms == 0) {
-      bitfacts_apply_add_known(query->bounds, node, NULL, &frame->bits);
-      return bounds_bitfacts_complete(query, true, frame->bits);
-    }
-    if (!bounds_bitfacts_alloc_children(query, frame, node->u.add.nterms))
-      return IXS_QUERY_WALK_OOM;
-    frame->stage = BOUNDS_BITFACTS_ADD;
-    return ixs_query_walk_push(&query->walk, node->u.add.terms[0].term);
-  case IXS_MUL:
-    if (node->u.mul.coeff->tag != IXS_INT || node->u.mul.coeff->u.ival <= 0 ||
-        node->u.mul.nfactors != 1 || node->u.mul.factors[0].exp != 1 ||
-        !ixs_node_is_integer_valued(node) ||
-        !ixs_u64_is_pow2((uint64_t)node->u.mul.coeff->u.ival)) {
-      return bounds_bitfacts_complete(query, true, frame->bits);
-    }
-    frame->stage = BOUNDS_BITFACTS_MUL;
-    return ixs_query_walk_push(&query->walk, node->u.mul.factors[0].base);
-  case IXS_FLOOR:
-    if (!extract_pow2_dividend(node->u.unary.arg, &frame->child_expr,
-                               &frame->argument)) {
-      return bounds_bitfacts_complete(query, true, frame->bits);
-    }
-    frame->stage = BOUNDS_BITFACTS_FLOOR;
-    return ixs_query_walk_push(&query->walk, frame->child_expr);
-  case IXS_MOD:
-    if (node->u.binary.rhs->tag != IXS_INT ||
-        !ixs_int64_is_positive_pow2(node->u.binary.rhs->u.ival) ||
-        !ixs_node_is_integer_valued(node->u.binary.lhs)) {
-      return bounds_bitfacts_complete(query, true, frame->bits);
-    }
-    frame->stage = BOUNDS_BITFACTS_MOD;
-    return ixs_query_walk_push(&query->walk, node->u.binary.lhs);
-  case IXS_AND:
-  case IXS_OR:
-  case IXS_XOR:
-    return bounds_bitfacts_start_assoc(query, frame);
-  default:
-    return bounds_bitfacts_complete(query, false, frame->bits);
-  }
-}
-
-static ixs_query_walk_step
-bounds_bitfacts_resume_frame(bounds_bitfacts_query *query,
-                             bounds_bitfacts_frame *frame) {
-  ixs_node *node = frame->expr;
-  switch (frame->stage) {
-  case BOUNDS_BITFACTS_ADD:
-  case BOUNDS_BITFACTS_ASSOC:
-    frame->children[frame->index++] = query->child;
-    if (frame->index < frame->child_count) {
-      ixs_node *child = frame->stage == BOUNDS_BITFACTS_ADD
-                            ? node->u.add.terms[frame->index].term
-                            : node->u.assoc.args[frame->index];
-      return ixs_query_walk_push(&query->walk, child);
-    }
-    if (frame->stage == BOUNDS_BITFACTS_ADD) {
-      bitfacts_apply_add_known(query->bounds, node, frame->children,
-                               &frame->bits);
-      return bounds_bitfacts_complete(query, true, frame->bits);
-    } else {
-      bool success =
-          bitfacts_apply_assoc_known(node, frame->children, &frame->bits);
-      return bounds_bitfacts_complete(query, success, frame->bits);
-    }
-  case BOUNDS_BITFACTS_MUL:
-    bitfacts_apply_mul_known(node, &query->child, &frame->bits);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case BOUNDS_BITFACTS_FLOOR:
-    bitfacts_apply_floor_div_known(query->bounds, frame->child_expr,
-                                   frame->argument, &query->child,
-                                   &frame->bits);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case BOUNDS_BITFACTS_MOD:
-    bitfacts_apply_mod_known(node, &query->child, &frame->bits);
-    return bounds_bitfacts_complete(query, true, frame->bits);
-  case BOUNDS_BITFACTS_INITIAL:
-    return bounds_bitfacts_complete(query, false, frame->bits);
-  }
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-/* hot */
-static ixs_query_walk_step bounds_bitfacts_advance(void *state,
-                                                   void *raw_frame) {
-  bounds_bitfacts_query *query = state;
-  bounds_bitfacts_frame *frame = raw_frame;
-  ixs_query_walk_step step;
-  if (frame->stage != BOUNDS_BITFACTS_INITIAL)
-    return bounds_bitfacts_resume_frame(query, frame);
-  step = bounds_bitfacts_prepare_frame(query, frame, query->unknown);
-  if (step != IXS_QUERY_WALK_NEXT)
-    return step;
-  step = bounds_bitfacts_start_scalar(query, frame);
-  if (step == IXS_QUERY_WALK_NEXT)
-    step = bounds_bitfacts_start_composite(query, frame);
-  return step;
-}
-
-static bool bounds_get_bitfacts_iterative(ixs_bounds *b, ixs_node *expr,
-                                          ixs_bitfacts *out) {
-  bounds_bitfacts_query query;
-  if (!b || !expr || !out || b->oom)
-    return false;
-  memset(&query, 0, sizeof(query));
-  query.bounds = b;
-  bitfacts_unknown(&query.unknown);
-  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_bitfacts_frame,
-                      expr);
-  if (!ixs_query_walk_run(&query.walk, expr, &query, bounds_bitfacts_advance,
-                          bounds_bitfacts_abort)) {
-    bitfacts_unknown(out);
-    return false;
-  }
-  *out = query.child.bits;
-  return query.child.success;
-}
-
-IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
-                                        ixs_bitfacts *out) {
-  return bounds_get_bitfacts_iterative(b, expr, out);
-}
-
-IXS_STATIC bool ixs_bounds_is_pow2_positive(ixs_bounds *b, ixs_node *expr) {
-  ixs_bitfacts bits;
-  if (!ixs_bounds_get_bitfacts(b, expr, &bits))
-    return false;
-  return bits.pow2 == IXS_POW2_POSITIVE;
-}
-
-IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr) {
-  ixs_bitfacts bits;
-  if (!ixs_bounds_get_bitfacts(b, expr, &bits))
-    return false;
-  return bits.pow2 == IXS_POW2_OR_ZERO || ixs_bounds_is_pow2_positive(b, expr);
-}
-
-static inline bool bounds_symbol_divisible(ixs_bounds *b, const char *name,
-                                           int64_t m) {
-  int64_t sym_mod, sym_rem;
-  if (!bounds_store_get_modrem(b, name, &sym_mod, &sym_rem))
-    return false;
-  return sym_mod % m == 0 && sym_rem % m == 0;
-}
-
-static bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                       int64_t modulus);
-static bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
-                                 uint64_t modulus, uint64_t *out);
-static bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
-                                             uint64_t modulus, uint64_t *out);
-
-typedef enum {
-  BOUNDS_EXACT_PROOF_INTEGER,
-  BOUNDS_EXACT_PROOF_DIVISIBLE
-} bounds_exact_proof_kind;
-
-typedef enum {
-  BOUNDS_EXACT_PROOF_INITIAL,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE,
-  BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD,
-  BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS,
-  BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN
-} bounds_exact_proof_stage;
-
-typedef struct {
-  ixs_node *expr;
-  int64_t modulus;
-  bounds_exact_proof_kind kind;
-  bool result;
-  bool active;
-  bool complete;
-} bounds_exact_proof_memo_entry;
-
-typedef struct {
-  bounds_exact_proof_memo_entry *entries;
-  size_t count;
-  size_t capacity;
-} bounds_exact_proof_memo;
-
-typedef struct {
-  ixs_node *expr;
-  int64_t modulus;
-  int64_t denominator;
-  uint32_t index;
-  bounds_exact_proof_kind kind;
-  bounds_exact_proof_stage stage;
-  bool denominator_cancelled;
-  bool reachable;
-  bool terminal_branch;
-} bounds_exact_proof_frame;
-
-typedef struct {
-  ixs_bounds *bounds;
-  ixs_query_walk walk;
-  bounds_exact_proof_memo memo;
-  bool child_result;
-  bool stack_oom;
-  bounds_exact_proof_frame inline_frames[16];
-  bounds_exact_proof_memo_entry inline_memo[32];
-} bounds_exact_proof_query;
-
-static size_t bounds_exact_proof_hash(ixs_node *expr,
-                                      bounds_exact_proof_kind kind,
-                                      int64_t modulus) {
-  size_t hash = ixs_hash_ptr(expr);
-  hash ^= (size_t)(uint64_t)modulus + (hash << 6u) + (hash >> 2u);
-  hash ^= (size_t)kind + (hash << 6u) + (hash >> 2u);
-  return hash;
-}
-
-static bool bounds_exact_proof_memo_grow(bounds_exact_proof_query *query) {
-  size_t capacity = query->memo.capacity ? query->memo.capacity * 2u : 32u;
-  bounds_exact_proof_memo_entry *grown;
-  size_t i;
-  if (capacity <= query->memo.capacity || capacity > SIZE_MAX / sizeof(*grown))
-    return false;
-  grown = ixs_arena_alloc(query->bounds->scratch, capacity * sizeof(*grown),
-                          sizeof(void *));
-  if (!grown)
-    return false;
-  memset(grown, 0, capacity * sizeof(*grown));
-  for (i = 0; i < query->memo.capacity; i++) {
-    bounds_exact_proof_memo_entry entry = query->memo.entries[i];
-    size_t slot;
-    if (!entry.expr)
-      continue;
-    slot = bounds_exact_proof_hash(entry.expr, entry.kind, entry.modulus) &
-           (capacity - 1u);
-    while (grown[slot].expr)
-      slot = (slot + 1u) & (capacity - 1u);
-    grown[slot] = entry;
-  }
-  query->memo.entries = grown;
-  query->memo.capacity = capacity;
-  return true;
-}
-
-static bounds_exact_proof_memo_entry *
-bounds_exact_proof_memo_get(bounds_exact_proof_query *query, ixs_node *expr,
-                            bounds_exact_proof_kind kind, int64_t modulus,
-                            bool create) {
-  size_t slot;
-  if (create && (!query->memo.capacity ||
-                 query->memo.count + 1u > query->memo.capacity / 2u)) {
-    if (!bounds_exact_proof_memo_grow(query))
-      return NULL;
-  }
-  if (!query->memo.capacity)
-    return NULL;
-  slot = bounds_exact_proof_hash(expr, kind, modulus) &
-         (query->memo.capacity - 1u);
-  while (query->memo.entries[slot].expr &&
-         (query->memo.entries[slot].expr != expr ||
-          query->memo.entries[slot].kind != kind ||
-          query->memo.entries[slot].modulus != modulus))
-    slot = (slot + 1u) & (query->memo.capacity - 1u);
-  if (!query->memo.entries[slot].expr) {
-    if (!create)
-      return NULL;
-    query->memo.entries[slot].expr = expr;
-    query->memo.entries[slot].kind = kind;
-    query->memo.entries[slot].modulus = modulus;
-    query->memo.count++;
-  }
-  return &query->memo.entries[slot];
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_push(bounds_exact_proof_query *query, ixs_node *expr,
-                        bounds_exact_proof_kind kind, int64_t modulus) {
-  bounds_exact_proof_memo_entry *entry;
-  bounds_exact_proof_frame *frame;
-  ixs_query_walk_step step;
-  if (!expr || (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  entry = bounds_exact_proof_memo_get(query, expr, kind, modulus, true);
-  if (!entry)
-    return IXS_QUERY_WALK_OOM;
-  if (entry->active) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  if (entry->complete) {
-    query->child_result = entry->result;
-    return IXS_QUERY_WALK_ADVANCED;
-  }
-  step = ixs_query_walk_push(&query->walk, expr);
-  if (step != IXS_QUERY_WALK_ADVANCED)
-    return step;
-  frame = IXS_QUERY_WALK_TOP(&query->walk);
-  frame->kind = kind;
-  frame->modulus = modulus;
-  frame->stage = BOUNDS_EXACT_PROOF_INITIAL;
-  entry->active = true;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_complete(bounds_exact_proof_query *query, bool result) {
-  bounds_exact_proof_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
-  bounds_exact_proof_memo_entry *entry = bounds_exact_proof_memo_get(
-      query, frame->expr, frame->kind, frame->modulus, false);
-  if (!entry || !entry->active) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  entry->result = result;
-  entry->active = false;
-  entry->complete = true;
-  IXS_QUERY_WALK_POP(&query->walk);
-  query->child_result = result;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
-                                        int64_t *q) {
-  if (!node || (node->tag != IXS_INT && node->tag != IXS_RAT))
-    return false;
-  ixs_node_get_rat(node, p, q);
-  return *q > 0;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_divisible_after_add(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  ixs_bitfacts bits;
-  uint64_t mask;
-  if (ixs_int64_is_positive_pow2(frame->modulus)) {
-    mask = (uint64_t)frame->modulus - 1u;
-    if (ixs_bounds_get_bitfacts(query->bounds, frame->expr, &bits) &&
-        (bits.known_zero & mask) == mask)
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-  }
-  return bounds_exact_proof_complete(query, false);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_integer_mul(bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  int64_t p;
-  int64_t q;
-  int64_t divisor;
-  if (!bounds_exact_proof_rational(node->u.mul.coeff, &p, &q) ||
-      (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  frame->index = 0;
-  if (q == 1) {
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  }
-  divisor = ixs_gcd(p, q);
-  if (divisor <= 0 || q % divisor != 0) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  frame->denominator = q / divisor;
-  frame->denominator_cancelled = frame->denominator == 1;
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
-                                     bounds_exact_proof_frame *frame) {
-  int64_t p;
-  int64_t q;
-  ixs_node *node = frame->expr;
-  if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
-      (node->u.add.nterms != 0 && !node->u.add.terms)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  (void)p;
-  if (q != 1)
-    return bounds_exact_proof_complete(
-        query, bounds_add_known_divisible(query->bounds, node, 1));
-  frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
-                                 bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (ixs_node_is_integer_valued(node))
-    return bounds_exact_proof_complete(query, true);
-  switch (node->tag) {
-  case IXS_MUL:
-    return bounds_exact_proof_start_integer_mul(frame);
-  case IXS_ADD:
-    return bounds_exact_proof_start_integer_add(query, frame);
-  case IXS_MAX:
-  case IXS_MIN:
-  case IXS_XOR:
-  case IXS_AND:
-  case IXS_OR:
-    if (node->u.assoc.nargs < 2 || !node->u.assoc.args) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  case IXS_PIECEWISE:
-    if (node->u.pw.ncases == 0 || !node->u.pw.cases) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  case IXS_MOD:
-    if (!node->u.binary.lhs || !node->u.binary.rhs) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS;
-    return bounds_exact_proof_push(query, node->u.binary.lhs,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
-  default:
-    return bounds_exact_proof_complete(query, false);
-  }
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_divisible_add(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  int64_t p;
-  int64_t q;
-  ixs_node *node = frame->expr;
-  if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
-      (node->u.add.nterms != 0 && !node->u.add.terms)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  if (q != 1) {
-    if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-    return bounds_exact_proof_divisible_after_add(query, frame);
-  }
-  if (p % frame->modulus != 0)
-    return bounds_exact_proof_divisible_after_add(query, frame);
-  frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_divisible_mul(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (!node->u.mul.coeff || node->u.mul.coeff->tag != IXS_INT ||
-      (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  if (node->u.mul.coeff->u.ival == 0)
-    return bounds_exact_proof_complete(query, true);
-  frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
-                                   bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  ixs_bitfacts bits;
-  uint64_t mask;
-  if (frame->modulus == 1) {
-    if (ixs_node_is_integer_valued(node))
-      return bounds_exact_proof_complete(query, true);
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
-    frame->index = UINT32_MAX;
-    return bounds_exact_proof_push(query, node, BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  if (node->tag == IXS_ADD)
-    return bounds_exact_proof_start_divisible_add(query, frame);
-  if (ixs_int64_is_positive_pow2(frame->modulus)) {
-    mask = (uint64_t)frame->modulus - 1u;
-    if (ixs_bounds_get_bitfacts(query->bounds, node, &bits) &&
-        (bits.known_zero & mask) == mask)
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-  }
-  switch (node->tag) {
-  case IXS_INT:
-    return bounds_exact_proof_complete(query,
-                                       node->u.ival % frame->modulus == 0);
-  case IXS_SYM:
-    if (!node->u.name) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    return bounds_exact_proof_complete(
-        query,
-        bounds_symbol_divisible(query->bounds, node->u.name, frame->modulus));
-  case IXS_MUL:
-    if (node->u.mul.coeff && node->u.mul.coeff->tag == IXS_INT)
-      return bounds_exact_proof_start_divisible_mul(query, frame);
-    return bounds_exact_proof_complete(query, false);
-  case IXS_MAX:
-  case IXS_MIN:
-    if (node->u.assoc.nargs == 0 || !node->u.assoc.args) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  default:
-    return bounds_exact_proof_complete(query, false);
-  }
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
-                                      bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN) {
-    if (frame->index != 0 && !query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    if (frame->index == node->u.mul.nfactors)
-      return bounds_exact_proof_complete(query, true);
-    if (!node->u.mul.factors[frame->index].base ||
-        node->u.mul.factors[frame->index].exp <= 0) {
-      if (!node->u.mul.factors[frame->index].base)
-        return IXS_QUERY_WALK_STOP;
-      return bounds_exact_proof_complete(query, false);
-    }
-    frame->index++;
-    return bounds_exact_proof_push(query,
-                                   node->u.mul.factors[frame->index - 1u].base,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE) {
-    ixs_node *base = node->u.mul.factors[frame->index].base;
-    uint64_t residue = 0;
-    bool known;
-    if (query->child_result) {
-      frame->denominator_cancelled = true;
-      frame->index++;
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-      return IXS_QUERY_WALK_ADVANCED;
-    }
-    known = bounds_known_residue_independent(
-        query->bounds, base, (uint64_t)frame->denominator, &residue);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-    if (known) {
-      if (residue == 0)
-        frame->denominator_cancelled = true;
-      frame->index++;
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-      return IXS_QUERY_WALK_ADVANCED;
-    }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
-    return bounds_exact_proof_push(query, base, BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  }
-  if (frame->index == node->u.mul.nfactors)
-    return bounds_exact_proof_complete(query, frame->denominator_cancelled);
-  if (!node->u.mul.factors[frame->index].base ||
-      node->u.mul.factors[frame->index].exp <= 0) {
-    if (!node->u.mul.factors[frame->index].base)
-      return IXS_QUERY_WALK_STOP;
-    return bounds_exact_proof_complete(query, false);
-  }
-  if (frame->denominator_cancelled) {
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
-    return bounds_exact_proof_push(query,
-                                   node->u.mul.factors[frame->index].base,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE;
-  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                 frame->denominator);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
-                                      bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
-  } else if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(
-          query, bounds_add_known_divisible(query->bounds, node, 1));
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
-  }
-  if (frame->index == node->u.add.nterms)
-    return bounds_exact_proof_complete(query, true);
-  {
-    const ixs_addterm *term = &node->u.add.terms[frame->index];
-    int64_t p;
-    int64_t q;
-    int64_t divisor;
-    if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    if (q == 1) {
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER;
-      return bounds_exact_proof_push(query, term->term,
-                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
-    }
-    divisor = ixs_gcd(p, q);
-    if (divisor <= 0 || q % divisor != 0) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE;
-    return bounds_exact_proof_push(query, term->term,
-                                   BOUNDS_EXACT_PROOF_DIVISIBLE, q / divisor);
-  }
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_integer_assoc(bounds_exact_proof_query *query,
-                                        bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->index != 0 && !query->child_result)
-    return bounds_exact_proof_complete(query, false);
-  if (frame->index == node->u.assoc.nargs)
-    return bounds_exact_proof_complete(query, true);
-  if (!node->u.assoc.args[frame->index]) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  frame->index++;
-  return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
-                                 BOUNDS_EXACT_PROOF_INTEGER, 0);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
-                                            bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    if (frame->terminal_branch)
-      return bounds_exact_proof_complete(query, true);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
-  }
-  while (frame->index < node->u.pw.ncases) {
-    ixs_node *cond = node->u.pw.cases[frame->index].cond;
-    ixs_node *value = node->u.pw.cases[frame->index].value;
-    ixs_check_result truth = IXS_CHECK_UNKNOWN;
-    if (!cond || !value) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    if (ixs_node_is_known_false(cond))
-      truth = IXS_CHECK_FALSE;
-    else if (ixs_node_is_known_true(cond))
-      truth = IXS_CHECK_TRUE;
-    else if (cond->tag == IXS_CMP)
-      truth = ixs_bounds_check(query->bounds, cond);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-    if (truth == IXS_CHECK_FALSE) {
-      frame->index++;
-      continue;
-    }
-    frame->reachable = true;
-    frame->terminal_branch = truth == IXS_CHECK_TRUE;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD;
-    return bounds_exact_proof_push(query, value, BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  return bounds_exact_proof_complete(query, frame->reachable);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_integer_mod(bounds_exact_proof_query *query,
-                                      bounds_exact_proof_frame *frame) {
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS;
-    return bounds_exact_proof_push(query, frame->expr->u.binary.rhs,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  return bounds_exact_proof_complete(query, query->child_result);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
-                                        bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD) {
-    if (!query->child_result)
-      return bounds_exact_proof_divisible_after_add(query, frame);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
-  }
-  if (frame->index == node->u.add.nterms)
-    return bounds_exact_proof_complete(query, true);
-  {
-    const ixs_addterm *term = &node->u.add.terms[frame->index];
-    int64_t p;
-    int64_t q;
-    int64_t divisor;
-    if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    if (q != 1) {
-      if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
-        return bounds_exact_proof_complete(query, true);
-      if (query->bounds->oom)
-        return IXS_QUERY_WALK_OOM;
-      return bounds_exact_proof_divisible_after_add(query, frame);
-    }
-    divisor = ixs_gcd(p, frame->modulus);
-    if (divisor <= 0 || frame->modulus % divisor != 0) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD;
-    return bounds_exact_proof_push(query, term->term,
-                                   BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                   frame->modulus / divisor);
-  }
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
-                                        bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN) {
-    int64_t divisor;
-    if (frame->index != 0 && !query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    if (frame->index < node->u.mul.nfactors) {
-      const ixs_mulfactor *factor = &node->u.mul.factors[frame->index];
-      if (!factor->base || factor->exp < 0) {
-        if (!factor->base)
-          return IXS_QUERY_WALK_STOP;
-        return bounds_exact_proof_complete(query, false);
-      }
-      frame->index++;
-      return bounds_exact_proof_push(query, factor->base,
-                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
-    }
-    divisor = ixs_gcd(node->u.mul.coeff->u.ival, frame->modulus);
-    if (divisor <= 0 || frame->modulus % divisor != 0) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->denominator = frame->modulus / divisor;
-    if (frame->denominator == 1)
-      return bounds_exact_proof_complete(query, true);
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
-  } else if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD) {
-    if (query->child_result)
-      return bounds_exact_proof_complete(query, true);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
-  }
-  while (frame->index < node->u.mul.nfactors &&
-         node->u.mul.factors[frame->index].exp < 1)
-    frame->index++;
-  if (frame->index == node->u.mul.nfactors)
-    return bounds_exact_proof_complete(query, false);
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD;
-  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                 frame->denominator);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_assoc(bounds_exact_proof_query *query,
-                                          bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->index == UINT32_MAX)
-    return bounds_exact_proof_complete(query, query->child_result);
-  if (frame->index != 0 && !query->child_result)
-    return bounds_exact_proof_complete(query, false);
-  if (frame->index == node->u.assoc.nargs)
-    return bounds_exact_proof_complete(query, true);
-  if (!node->u.assoc.args[frame->index]) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  frame->index++;
-  return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE, frame->modulus);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume(bounds_exact_proof_query *query,
-                          bounds_exact_proof_frame *frame) {
-  switch (frame->stage) {
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER:
-    return bounds_exact_proof_resume_integer_mul(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER:
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE:
-    return bounds_exact_proof_resume_integer_add(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN:
-    return bounds_exact_proof_resume_integer_assoc(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD:
-    return bounds_exact_proof_resume_integer_piecewise(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS:
-  case BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS:
-    return bounds_exact_proof_resume_integer_mod(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD:
-    return bounds_exact_proof_resume_divisible_add(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD:
-    return bounds_exact_proof_resume_divisible_mul(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN:
-    return bounds_exact_proof_resume_divisible_assoc(query, frame);
-  case BOUNDS_EXACT_PROOF_INITIAL:
-    break;
-  }
-  return IXS_QUERY_WALK_STOP;
-}
-
-/* hot */
-static ixs_query_walk_step bounds_exact_proof_advance(void *state, void *top) {
-  bounds_exact_proof_query *query = state;
-  bounds_exact_proof_frame *frame = top;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INITIAL)
-    return frame->kind == BOUNDS_EXACT_PROOF_INTEGER
-               ? bounds_exact_proof_start_integer(query, frame)
-               : bounds_exact_proof_start_divisible(query, frame);
-  return bounds_exact_proof_resume(query, frame);
-}
-
-/* Both proof relations are one iterative dependency graph.  The common small
- * query stays in fixed local buffers; deeper stacks and larger open-addressed
- * memos grow on scratch.  Expected work is O(V + E) over distinct
- * (node, relation, modulus) obligations, and malformed cycles are rejected
- * without consuming C stack. */
-static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
-                                    bounds_exact_proof_kind kind,
-                                    int64_t modulus) {
-  ixs_arena_mark mark;
-  bounds_exact_proof_query query;
-  ixs_query_walk_step step;
-  bool result = false;
-  if (!b || !expr || b->oom ||
-      (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0))
-    return false;
-  if (ixs_node_is_integer_valued(expr) &&
-      (kind == BOUNDS_EXACT_PROOF_INTEGER || modulus == 1))
-    return true;
-  /* Predicate and interval domains can ask an exact question while resolving
-   * one Piecewise condition.  One nested evaluator preserves that precision;
-   * the second re-entry is a conservative miss, making the cross-domain C
-   * call depth statically at most two while each evaluator remains iterative.
-   */
-  if (b->exact_proof_call_depth >= 2u)
-    return false;
-  b->exact_proof_call_depth++;
-  mark = ixs_arena_save(b->scratch);
-  query.bounds = b;
-  query.stack_oom = false;
-  IXS_QUERY_WALK_INIT_INLINE(&query.walk, b->scratch, &query.stack_oom,
-                             bounds_exact_proof_frame, expr,
-                             query.inline_frames);
-  query.memo.entries = query.inline_memo;
-  query.memo.count = 0;
-  query.memo.capacity =
-      sizeof(query.inline_memo) / sizeof(query.inline_memo[0]);
-  query.child_result = false;
-  memset(query.inline_memo, 0, sizeof(query.inline_memo));
-  step = bounds_exact_proof_push(&query, expr, kind, modulus);
-  if (step == IXS_QUERY_WALK_ADVANCED)
-    step = ixs_query_walk_drive(&query.walk, &query, bounds_exact_proof_advance,
-                                NULL);
-  if (step == IXS_QUERY_WALK_OOM || b->oom) {
-    b->oom = true;
-    bounds_query_note_oom(b);
-  } else if (step == IXS_QUERY_WALK_STOP) {
-    bounds_query_note_invalid(b);
-  } else {
-    result = query.child_result;
-  }
-  ixs_arena_restore(b->scratch, mark);
-  b->exact_proof_call_depth--;
-  return result;
-}
-
-IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                              int64_t m) {
-  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_DIVISIBLE, m);
-}
-
-IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
-                                                   ixs_node *expr) {
-  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_INTEGER, 0);
-}
-
-static bool bounds_interval_point_rational(ixs_interval iv, int64_t *p,
-                                           int64_t *q) {
-  if (!iv.valid || iv.lo_inf || iv.hi_inf ||
-      ixs_rat_cmp(iv.lo_p, iv.lo_q, iv.hi_p, iv.hi_q) != 0)
-    return false;
-  if (p)
-    *p = iv.lo_p;
-  if (q)
-    *q = iv.lo_q;
-  return true;
-}
-
-static ixs_check_result
-bounds_check_integer_valued_without_equality(ixs_bounds *b, ixs_node *expr) {
-  ixs_interval iv;
-  int64_t p;
-  int64_t q;
-  bool proven;
-  assert(b->equality_disabled_depth != UINT_MAX);
-  b->equality_disabled_depth++;
-  proven = ixs_bounds_is_integer_with_divinfo(b, expr);
-  if (proven) {
-    b->equality_disabled_depth--;
-    return IXS_CHECK_TRUE;
-  }
-  iv = bounds_get_intrinsic(b, expr);
-  b->equality_disabled_depth--;
-  if (b->oom || !bounds_interval_point_rational(iv, &p, &q))
-    return IXS_CHECK_UNKNOWN;
-  (void)p;
-  return q == 1 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
-}
-
 static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
                                                         ixs_node *expr) {
   bounds_relation_component component;
@@ -2439,13 +982,13 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
   size_t i;
 
   if (!ixs_relation_algebra_find_endpoint(&b->relations, expr, &endpoint_index))
-    return bounds_check_integer_valued_without_equality(b, expr);
+    return bounds_integer_check_without_equality(b, expr);
   if (bounds_query_is_tracking(b) &&
       bounds_relation_projection_lookup_integer(b, endpoint_index, &cached))
     return cached;
   status = bounds_collect_relation_component(b, expr, &component);
   if (status == IXS_ALGEBRA_NO_MATCH)
-    return bounds_check_integer_valued_without_equality(b, expr);
+    return bounds_integer_check_without_equality(b, expr);
   if (status != IXS_ALGEBRA_MATCH) {
     bounds_relation_component_destroy(&component);
     return IXS_CHECK_UNKNOWN;
@@ -2455,8 +998,8 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   }
   for (i = 0; i < component.count; i++) {
-    ixs_check_result current = bounds_check_integer_valued_without_equality(
-        b, component.entries[i].node);
+    ixs_check_result current =
+        bounds_integer_check_without_equality(b, component.entries[i].node);
     if (b->oom) {
       result = IXS_CHECK_UNKNOWN;
       break;
@@ -2490,7 +1033,7 @@ IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   if (b->equality_disabled_depth != 0 ||
       ixs_relation_algebra_edge_count(&b->relations) == 0)
-    return bounds_check_integer_valued_without_equality(b, expr);
+    return bounds_integer_check_without_equality(b, expr);
   return bounds_project_equality_integer(b, expr);
 }
 
@@ -2510,9 +1053,6 @@ static uint64_t bounds_pow_mod(uint64_t base, int32_t exponent,
   }
   return result;
 }
-
-static bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
-                                 uint64_t modulus, uint64_t *out);
 
 typedef struct {
   ixs_node *representative;
@@ -2714,8 +1254,8 @@ cleanup:
   return success;
 }
 
-static bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                       int64_t modulus) {
+IXS_STATIC bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                           int64_t modulus) {
   uint64_t denominator;
   uint64_t scaled_modulus;
   uint64_t residue;
@@ -3041,7 +1581,7 @@ bounds_residue_direct_independent(bounds_residue_query *query,
         query, true, ixs_int64_normalize_residue(exact, frame->modulus));
   }
   if (ixs_node_is_integer_valued(node) && ixs_u64_is_pow2(frame->modulus) &&
-      bounds_get_bitfacts_iterative(current, node, &bits)) {
+      ixs_bounds_get_bitfacts(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
       return bounds_residue_complete(query, true, bits.known_one & mask);
@@ -3093,7 +1633,7 @@ bounds_residue_direct_tracked(bounds_residue_query *query,
         query, true, ixs_int64_normalize_residue(exact, frame->modulus));
   }
   if (ixs_u64_is_pow2(frame->modulus) &&
-      bounds_get_bitfacts_iterative(current, node, &bits)) {
+      ixs_bounds_get_bitfacts(current, node, &bits)) {
     uint64_t mask = frame->modulus - 1u;
     if (((bits.known_zero | bits.known_one) & mask) == mask) {
       return bounds_residue_complete(query, true, bits.known_one & mask);
@@ -3516,13 +2056,14 @@ static bool bounds_known_residue_mode(ixs_bounds *b, ixs_node *expr,
   return step == IXS_QUERY_WALK_ADVANCED && query.child_success;
 }
 
-static bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
-                                 uint64_t modulus, uint64_t *out) {
+IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out) {
   return bounds_known_residue_mode(b, expr, modulus, out, false);
 }
 
-static bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
-                                             uint64_t modulus, uint64_t *out) {
+IXS_STATIC bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
+                                                 uint64_t modulus,
+                                                 uint64_t *out) {
   return bounds_known_residue_mode(b, expr, modulus, out, true);
 }
 
@@ -3666,17 +2207,16 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
     return result;
   }
 
-  span = value_span_mask((uint64_t)max_hi);
+  span = bounds_bitfacts_value_span_mask((uint64_t)max_hi);
   possible = span;
   required = 0;
-  have_bits =
-      bounds_get_bitfacts_iterative(b, expr->u.assoc.args[0], &result_bits);
+  have_bits = ixs_bounds_get_bitfacts(b, expr->u.assoc.args[0], &result_bits);
   for (i = 1; have_bits && i < expr->u.assoc.nargs; i++) {
-    if (!bounds_get_bitfacts_iterative(b, expr->u.assoc.args[i], &arg_bits)) {
+    if (!ixs_bounds_get_bitfacts(b, expr->u.assoc.args[i], &arg_bits)) {
       have_bits = false;
       break;
     }
-    bitfacts_apply_xor(&next_bits, &result_bits, &arg_bits);
+    bounds_bitfacts_apply_xor(&next_bits, &result_bits, &arg_bits);
     result_bits = next_bits;
   }
   if (have_bits) {
@@ -4691,7 +3231,7 @@ static bool bounds_expr_may_need_canonical_alias(const ixs_node *expr) {
   }
 }
 
-static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr) {
+IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr) {
   ixs_interval iv;
   ixs_node *canon = NULL;
   ixs_var_bound *var = NULL;
@@ -5082,7 +3622,7 @@ static ixs_interval bounds_get_interval_iterative(ixs_bounds *b,
   return unknown;
 }
 
-static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr) {
+IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr) {
   if (b && b->interval_evaluating)
     return bounds_get_tracked_one(b, expr);
   return bounds_get_interval_iterative(b, expr);
@@ -13508,7 +12048,7 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
-  ixs_bitfacts bits;
+  ixs_bitfacts bits = {0, 0, IXS_POW2_UNKNOWN};
   bool defined_oom = false;
   bool defined_limited = false;
   bool query_held = false;
@@ -13538,7 +12078,6 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
     goto cleanup;
   }
 
-  bitfacts_unknown(&bits);
   if (bounds_check_defined_detail(&facts->bounds, expr, &defined_oom,
                                   &defined_limited) == IXS_CHECK_TRUE &&
       ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
@@ -15528,6 +14067,652 @@ ixs_bounds_build_ctx(ixs_bounds *b, ixs_ctx *ctx, ixs_arena *scratch,
 }
 
 /* ==================================================================== */
+/* bounds_bitfacts.c                                                  */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "bounds_bitfacts.h"
+
+#include "bounds.h"
+#include "bounds_query.h"
+#include "bounds_store.h"
+#include "query_walk.h"
+#include "rational.h"
+
+#include <stdint.h>
+#include <string.h>
+
+static void bounds_bitfacts_unknown(ixs_bitfacts *bits) {
+  bits->known_zero = 0;
+  bits->known_one = 0;
+  bits->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static unsigned bit_ctz64(uint64_t v) {
+  unsigned n = 0;
+  while (v != 0 && (v & 1u) == 0) {
+    n++;
+    v >>= 1;
+  }
+  return n;
+}
+
+static uint64_t low_mask(unsigned nbits) {
+  if (nbits >= 64u)
+    return ~(uint64_t)0;
+  return (((uint64_t)1) << nbits) - 1u;
+}
+
+IXS_STATIC uint64_t bounds_bitfacts_value_span_mask(uint64_t hi) {
+  uint64_t mask = 0;
+  while (hi) {
+    mask = (mask << 1) | 1u;
+    hi >>= 1;
+  }
+  return mask;
+}
+
+static void bitfacts_apply_exact(ixs_bitfacts *bits, int64_t val) {
+  uint64_t u = (uint64_t)val;
+  bits->known_zero |= ~u;
+  bits->known_one |= u;
+  if (val == 0)
+    bits->pow2 = IXS_POW2_OR_ZERO;
+  else if (ixs_int64_is_positive_pow2(val))
+    bits->pow2 = IXS_POW2_POSITIVE;
+}
+
+static void bitfacts_apply_interval(ixs_bitfacts *bits,
+                                    const ixs_interval *iv) {
+  int64_t exact;
+  if (ixs_interval_is_point_int(*iv, &exact)) {
+    bitfacts_apply_exact(bits, exact);
+    return;
+  }
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || iv->hi_q != 1 || iv->hi_p < 0 ||
+      !ixs_interval_lower_at_least(iv, 0, 1))
+    return;
+  bits->known_zero |= ~bounds_bitfacts_value_span_mask((uint64_t)iv->hi_p);
+}
+
+static bool bitfacts_low_value(const ixs_bitfacts *bits, unsigned nbits,
+                               uint64_t *value) {
+  uint64_t mask = low_mask(nbits);
+  if (((bits->known_zero | bits->known_one) & mask) != mask)
+    return false;
+  *value = bits->known_one & mask;
+  return true;
+}
+
+static void bitfacts_set_low_value(ixs_bitfacts *bits, unsigned nbits,
+                                   uint64_t value) {
+  uint64_t mask = low_mask(nbits);
+  bits->known_one |= value & mask;
+  bits->known_zero |= (~value) & mask;
+}
+
+static void bitfacts_apply_modrem(ixs_bitfacts *bits, int64_t modulus,
+                                  int64_t remainder) {
+  uint64_t mask, rem;
+  if (!ixs_int64_is_positive_pow2(modulus))
+    return;
+  mask = (uint64_t)modulus - 1u;
+  rem = (uint64_t)remainder & mask;
+  bits->known_zero |= (~rem) & mask;
+  bits->known_one |= rem & mask;
+}
+
+static bool bounds_get_symbol_bitfacts(ixs_bounds *b, const char *name,
+                                       ixs_bitfacts *out) {
+  int64_t exact;
+  ixs_var_bound *v = bounds_store_find_var(b, name);
+  if (v) {
+    out->known_zero |= v->bits.known_zero;
+    out->known_one |= v->bits.known_one;
+    if (v->bits.pow2 == IXS_POW2_POSITIVE ||
+        (v->bits.pow2 == IXS_POW2_OR_ZERO && out->pow2 == IXS_POW2_UNKNOWN))
+      out->pow2 = v->bits.pow2;
+    bitfacts_apply_modrem(out, v->modulus, v->remainder);
+    if (ixs_interval_is_point_int(v->iv, &exact))
+      bitfacts_apply_exact(out, exact);
+    if (out->pow2 == IXS_POW2_OR_ZERO &&
+        ixs_interval_lower_at_least(&v->iv, 1, 1))
+      out->pow2 = IXS_POW2_POSITIVE;
+  }
+  return true;
+}
+
+static void bitfacts_apply_and(ixs_bitfacts *out, const ixs_bitfacts *a,
+                               const ixs_bitfacts *b) {
+  out->known_one = a->known_one & b->known_one;
+  out->known_zero = a->known_zero | b->known_zero;
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+static void bitfacts_apply_or(ixs_bitfacts *out, const ixs_bitfacts *a,
+                              const ixs_bitfacts *b) {
+  out->known_one = a->known_one | b->known_one;
+  out->known_zero = a->known_zero & b->known_zero;
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+IXS_STATIC void bounds_bitfacts_apply_xor(ixs_bitfacts *out,
+                                          const ixs_bitfacts *a,
+                                          const ixs_bitfacts *b) {
+  out->known_one =
+      (a->known_one & b->known_zero) | (a->known_zero & b->known_one);
+  out->known_zero =
+      (a->known_zero & b->known_zero) | (a->known_one & b->known_one);
+  out->pow2 = IXS_POW2_UNKNOWN;
+}
+
+typedef struct {
+  ixs_bitfacts bits;
+  bool success;
+} bounds_bitfacts_child;
+
+static bool bitfacts_scale_nonnegative_pow2_known(
+    ixs_bounds *b, ixs_node *term, int64_t coeff,
+    const bounds_bitfacts_child *child, ixs_bitfacts *out) {
+  ixs_interval iv;
+  uint64_t scale;
+  unsigned shift;
+
+  if (!child->success || !ixs_int64_is_positive_pow2(coeff) ||
+      !ixs_node_is_integer_valued(term))
+    return false;
+
+  iv = bounds_get_tracked(b, term);
+  scale = (uint64_t)coeff;
+  if (!ixs_interval_lower_at_least(&iv, 0, 1) || iv.hi_inf || iv.hi_q != 1 ||
+      iv.hi_p < 0 || (uint64_t)iv.hi_p > (uint64_t)INT64_MAX / scale)
+    return false;
+
+  shift = bit_ctz64(scale);
+  bounds_bitfacts_unknown(out);
+  out->known_zero = (child->bits.known_zero << shift) | low_mask(shift);
+  out->known_one = child->bits.known_one << shift;
+  return true;
+}
+
+/* One linear pass over normalized addends. Pairwise-disjoint possible-one
+ * masks prove that integer addition cannot carry between addends. */
+static void
+bitfacts_apply_carry_free_add_known(ixs_bounds *b, ixs_node *expr,
+                                    const bounds_bitfacts_child *children,
+                                    ixs_bitfacts *out) {
+  ixs_bitfacts addend;
+  uint64_t known_one, possible;
+  int64_t cp, cq;
+  uint32_t i;
+
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1 || cp < 0)
+    return;
+
+  bounds_bitfacts_unknown(&addend);
+  bitfacts_apply_exact(&addend, cp);
+  possible = ~addend.known_zero;
+  known_one = addend.known_one;
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    uint64_t term_possible;
+    int64_t tp, tq;
+
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+    if (tq != 1 || !bitfacts_scale_nonnegative_pow2_known(
+                       b, expr->u.add.terms[i].term, tp, &children[i], &addend))
+      return;
+
+    term_possible = ~addend.known_zero;
+    if ((possible & term_possible) != 0)
+      return;
+    possible |= term_possible;
+    known_one |= addend.known_one;
+  }
+
+  out->known_zero |= ~possible;
+  out->known_one |= known_one;
+}
+
+static void bitfacts_apply_add_known(ixs_bounds *b, ixs_node *expr,
+                                     const bounds_bitfacts_child *children,
+                                     ixs_bitfacts *out) {
+  unsigned nbits;
+  int64_t cp, cq;
+
+  ixs_node_get_rat(expr->u.add.coeff, &cp, &cq);
+  if (cq != 1)
+    return;
+
+  bitfacts_apply_carry_free_add_known(b, expr, children, out);
+
+  for (nbits = 1; nbits <= 64u; nbits++) {
+    uint64_t mask = low_mask(nbits);
+    uint64_t sum = (uint64_t)cp & mask;
+    uint32_t i;
+    bool known = true;
+
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      uint64_t term_value;
+      int64_t tp, tq;
+
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &tp, &tq);
+      if (tq != 1 || !children[i].success ||
+          !bitfacts_low_value(&children[i].bits, nbits, &term_value)) {
+        known = false;
+        break;
+      }
+      sum = (sum + (((uint64_t)tp * term_value) & mask)) & mask;
+    }
+
+    if (!known)
+      break;
+    bitfacts_set_low_value(out, nbits, sum);
+    if (nbits == 64u)
+      break;
+  }
+}
+
+static void bitfacts_apply_mul_known(ixs_node *expr,
+                                     const bounds_bitfacts_child *child,
+                                     ixs_bitfacts *out) {
+  uint64_t coeff;
+  unsigned shift, i;
+
+  if (expr->u.mul.coeff->tag != IXS_INT || expr->u.mul.coeff->u.ival <= 0 ||
+      expr->u.mul.nfactors != 1 || expr->u.mul.factors[0].exp != 1 ||
+      !ixs_node_is_integer_valued(expr))
+    return;
+
+  coeff = (uint64_t)expr->u.mul.coeff->u.ival;
+  if (!ixs_u64_is_pow2(coeff) || !child->success)
+    return;
+
+  shift = bit_ctz64(coeff);
+  out->known_zero |= low_mask(shift);
+  for (i = shift; i < 64u; i++) {
+    uint64_t src = ((uint64_t)1) << (i - shift);
+    uint64_t dst = ((uint64_t)1) << i;
+    if (child->bits.known_zero & src)
+      out->known_zero |= dst;
+    if (child->bits.known_one & src)
+      out->known_one |= dst;
+  }
+}
+
+static bool extract_pow2_dividend(ixs_node *expr, ixs_node **dividend,
+                                  uint64_t *denom) {
+  int64_t cp, cq;
+  if (!expr || expr->tag != IXS_MUL || expr->u.mul.nfactors != 1 ||
+      expr->u.mul.factors[0].exp != 1)
+    return false;
+  ixs_node_get_rat(expr->u.mul.coeff, &cp, &cq);
+  if (cp != 1 || cq <= 0 || !ixs_int64_is_positive_pow2(cq))
+    return false;
+  *dividend = expr->u.mul.factors[0].base;
+  *denom = (uint64_t)cq;
+  return true;
+}
+
+static void bitfacts_apply_floor_div_known(ixs_bounds *b, ixs_node *dividend,
+                                           uint64_t denom,
+                                           const bounds_bitfacts_child *child,
+                                           ixs_bitfacts *out) {
+  ixs_interval iv;
+  unsigned shift, i;
+
+  iv = bounds_get_tracked(b, dividend);
+  if (!child->success || !ixs_interval_lower_at_least(&iv, 0, 1))
+    return;
+
+  shift = bit_ctz64(denom);
+  for (i = 0; i + shift < 64u; i++) {
+    uint64_t src = ((uint64_t)1) << (i + shift);
+    uint64_t dst = ((uint64_t)1) << i;
+    if (child->bits.known_zero & src)
+      out->known_zero |= dst;
+    if (child->bits.known_one & src)
+      out->known_one |= dst;
+  }
+}
+
+static void bitfacts_apply_mod_known(ixs_node *expr,
+                                     const bounds_bitfacts_child *child,
+                                     ixs_bitfacts *out) {
+  uint64_t mask;
+  int64_t modulus;
+
+  if (expr->u.binary.rhs->tag != IXS_INT ||
+      !ixs_int64_is_positive_pow2(expr->u.binary.rhs->u.ival) ||
+      !ixs_node_is_integer_valued(expr->u.binary.lhs))
+    return;
+
+  modulus = expr->u.binary.rhs->u.ival;
+  mask = (uint64_t)modulus - 1u;
+  out->known_zero |= ~mask;
+  if (child->success) {
+    out->known_zero |= child->bits.known_zero & mask;
+    out->known_one |= child->bits.known_one & mask;
+  }
+}
+
+static bool bitfacts_apply_assoc_known(ixs_node *expr,
+                                       const bounds_bitfacts_child *children,
+                                       ixs_bitfacts *out) {
+  ixs_bitfacts result, arg, next;
+  uint32_t i;
+  if (expr->u.assoc.nargs == 0 || !expr->u.assoc.args)
+    return false;
+  if (!children[0].success)
+    return false;
+  result = children[0].bits;
+  for (i = 1; i < expr->u.assoc.nargs; i++) {
+    if (!children[i].success)
+      return false;
+    arg = children[i].bits;
+    if (expr->tag == IXS_AND)
+      bitfacts_apply_and(&next, &result, &arg);
+    else if (expr->tag == IXS_OR)
+      bitfacts_apply_or(&next, &result, &arg);
+    else
+      bounds_bitfacts_apply_xor(&next, &result, &arg);
+    result = next;
+  }
+  *out = result;
+  return true;
+}
+
+static inline bool bitfacts_apply_bool_value(ixs_bitfacts *out) {
+  out->known_zero = ~(uint64_t)1;
+  out->known_one = 0;
+  return true;
+}
+
+typedef enum {
+  BOUNDS_BITFACTS_INITIAL,
+  BOUNDS_BITFACTS_ADD,
+  BOUNDS_BITFACTS_MUL,
+  BOUNDS_BITFACTS_FLOOR,
+  BOUNDS_BITFACTS_MOD,
+  BOUNDS_BITFACTS_ASSOC
+} bounds_bitfacts_stage;
+
+typedef struct {
+  ixs_node *expr;
+  ixs_node *child_expr;
+  bounds_query_scope scope;
+  bounds_bitfacts_child *children;
+  ixs_bitfacts bits;
+  uint64_t argument;
+  uint32_t index;
+  uint32_t child_count;
+  bounds_bitfacts_stage stage;
+  bool tracked;
+} bounds_bitfacts_frame;
+
+typedef struct {
+  ixs_bounds *bounds;
+  ixs_query_walk walk;
+  bounds_bitfacts_child child;
+  ixs_bitfacts unknown;
+} bounds_bitfacts_query;
+
+static bool bounds_bitfacts_alloc_children(bounds_bitfacts_query *query,
+                                           bounds_bitfacts_frame *frame,
+                                           uint32_t count) {
+  size_t bytes;
+  if (count == 0)
+    return false;
+  bytes = (size_t)count * sizeof(*frame->children);
+  frame->children =
+      ixs_arena_alloc(query->bounds->scratch, bytes, sizeof(void *));
+  if (!frame->children) {
+    query->bounds->oom = true;
+    return false;
+  }
+  memset(frame->children, 0, bytes);
+  frame->child_count = count;
+  return true;
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
+                         ixs_bitfacts bits) {
+  bounds_bitfacts_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
+  if (frame->tracked) {
+    bounds_query_cache_entry *entry =
+        bounds_query_finish(&frame->scope, success);
+    if (entry->outcome == BOUNDS_QUERY_OUTCOME_VALUE)
+      entry->result.bitfacts = bits;
+    else
+      success = false;
+  }
+  IXS_QUERY_WALK_POP(&query->walk);
+  query->child.success = success;
+  query->child.bits = bits;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static void bounds_bitfacts_abort(void *state, void *raw_frame) {
+  bounds_bitfacts_frame *frame = raw_frame;
+  (void)state;
+  if (frame->tracked)
+    (void)bounds_query_finish(&frame->scope, false);
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_prepare_frame(bounds_bitfacts_query *query,
+                              bounds_bitfacts_frame *frame,
+                              ixs_bitfacts unknown) {
+  ixs_bounds *b = query->bounds;
+  ixs_node *node = frame->expr;
+  ixs_interval iv;
+
+  /* Stack-local synthetic symbols are valid read-only operands but are not
+   * memoized because bounds_query_should_track requires VALID. */
+  if (!node)
+    return bounds_bitfacts_complete(query, false, unknown);
+  if (bounds_query_should_track(b, node)) {
+    bounds_query_cache_entry *cached = NULL;
+    bounds_query_enter_result enter = bounds_query_begin(
+        b, BOUNDS_QUERY_BITFACTS, node, 0, &frame->scope, &cached);
+    if (enter == BOUNDS_QUERY_ENTER_CACHED) {
+      return bounds_bitfacts_complete(query, cached->success,
+                                      cached->result.bitfacts);
+    }
+    if (enter != BOUNDS_QUERY_ENTER_STARTED) {
+      return bounds_bitfacts_complete(query, false, unknown);
+    }
+    frame->tracked = true;
+  }
+  bounds_bitfacts_unknown(&frame->bits);
+  iv = bounds_get_tracked(b, node);
+  bitfacts_apply_interval(&frame->bits, &iv);
+  return b->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_NEXT;
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_start_scalar(bounds_bitfacts_query *query,
+                             bounds_bitfacts_frame *frame) {
+  ixs_node *node = frame->expr;
+  switch (node->tag) {
+  case IXS_INT:
+    bitfacts_apply_exact(&frame->bits, node->u.ival);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case IXS_RAT:
+    if (node->u.rat.q == 1)
+      bitfacts_apply_exact(&frame->bits, node->u.rat.p);
+    return bounds_bitfacts_complete(query, node->u.rat.q == 1, frame->bits);
+  case IXS_SYM:
+    bounds_get_symbol_bitfacts(query->bounds, node->u.name, &frame->bits);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case IXS_CMP:
+  case IXS_NOT:
+    bitfacts_apply_bool_value(&frame->bits);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case IXS_CEIL:
+  case IXS_TRUNC:
+  case IXS_PIECEWISE:
+  case IXS_MAX:
+  case IXS_MIN:
+    return bounds_bitfacts_complete(query, ixs_node_is_integer_valued(node),
+                                    frame->bits);
+  case IXS_ERROR:
+  case IXS_PARSE_ERROR:
+    return bounds_bitfacts_complete(query, false, frame->bits);
+  default:
+    return IXS_QUERY_WALK_NEXT;
+  }
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_start_assoc(bounds_bitfacts_query *query,
+                            bounds_bitfacts_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (!node->u.assoc.args || node->u.assoc.nargs == 0) {
+    return bounds_bitfacts_complete(query, false, frame->bits);
+  }
+  if (!bounds_bitfacts_alloc_children(query, frame, node->u.assoc.nargs))
+    return IXS_QUERY_WALK_OOM;
+  frame->stage = BOUNDS_BITFACTS_ASSOC;
+  return ixs_query_walk_push(&query->walk, node->u.assoc.args[0]);
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
+                                bounds_bitfacts_frame *frame) {
+  ixs_node *node = frame->expr;
+  switch (node->tag) {
+  case IXS_ADD:
+    if (node->u.add.nterms == 0) {
+      bitfacts_apply_add_known(query->bounds, node, NULL, &frame->bits);
+      return bounds_bitfacts_complete(query, true, frame->bits);
+    }
+    if (!bounds_bitfacts_alloc_children(query, frame, node->u.add.nterms))
+      return IXS_QUERY_WALK_OOM;
+    frame->stage = BOUNDS_BITFACTS_ADD;
+    return ixs_query_walk_push(&query->walk, node->u.add.terms[0].term);
+  case IXS_MUL:
+    if (node->u.mul.coeff->tag != IXS_INT || node->u.mul.coeff->u.ival <= 0 ||
+        node->u.mul.nfactors != 1 || node->u.mul.factors[0].exp != 1 ||
+        !ixs_node_is_integer_valued(node) ||
+        !ixs_u64_is_pow2((uint64_t)node->u.mul.coeff->u.ival)) {
+      return bounds_bitfacts_complete(query, true, frame->bits);
+    }
+    frame->stage = BOUNDS_BITFACTS_MUL;
+    return ixs_query_walk_push(&query->walk, node->u.mul.factors[0].base);
+  case IXS_FLOOR:
+    if (!extract_pow2_dividend(node->u.unary.arg, &frame->child_expr,
+                               &frame->argument)) {
+      return bounds_bitfacts_complete(query, true, frame->bits);
+    }
+    frame->stage = BOUNDS_BITFACTS_FLOOR;
+    return ixs_query_walk_push(&query->walk, frame->child_expr);
+  case IXS_MOD:
+    if (node->u.binary.rhs->tag != IXS_INT ||
+        !ixs_int64_is_positive_pow2(node->u.binary.rhs->u.ival) ||
+        !ixs_node_is_integer_valued(node->u.binary.lhs)) {
+      return bounds_bitfacts_complete(query, true, frame->bits);
+    }
+    frame->stage = BOUNDS_BITFACTS_MOD;
+    return ixs_query_walk_push(&query->walk, node->u.binary.lhs);
+  case IXS_AND:
+  case IXS_OR:
+  case IXS_XOR:
+    return bounds_bitfacts_start_assoc(query, frame);
+  default:
+    return bounds_bitfacts_complete(query, false, frame->bits);
+  }
+}
+
+static ixs_query_walk_step
+bounds_bitfacts_resume_frame(bounds_bitfacts_query *query,
+                             bounds_bitfacts_frame *frame) {
+  ixs_node *node = frame->expr;
+  switch (frame->stage) {
+  case BOUNDS_BITFACTS_ADD:
+  case BOUNDS_BITFACTS_ASSOC:
+    frame->children[frame->index++] = query->child;
+    if (frame->index < frame->child_count) {
+      ixs_node *child = frame->stage == BOUNDS_BITFACTS_ADD
+                            ? node->u.add.terms[frame->index].term
+                            : node->u.assoc.args[frame->index];
+      return ixs_query_walk_push(&query->walk, child);
+    }
+    if (frame->stage == BOUNDS_BITFACTS_ADD) {
+      bitfacts_apply_add_known(query->bounds, node, frame->children,
+                               &frame->bits);
+      return bounds_bitfacts_complete(query, true, frame->bits);
+    } else {
+      bool success =
+          bitfacts_apply_assoc_known(node, frame->children, &frame->bits);
+      return bounds_bitfacts_complete(query, success, frame->bits);
+    }
+  case BOUNDS_BITFACTS_MUL:
+    bitfacts_apply_mul_known(node, &query->child, &frame->bits);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case BOUNDS_BITFACTS_FLOOR:
+    bitfacts_apply_floor_div_known(query->bounds, frame->child_expr,
+                                   frame->argument, &query->child,
+                                   &frame->bits);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case BOUNDS_BITFACTS_MOD:
+    bitfacts_apply_mod_known(node, &query->child, &frame->bits);
+    return bounds_bitfacts_complete(query, true, frame->bits);
+  case BOUNDS_BITFACTS_INITIAL:
+    return bounds_bitfacts_complete(query, false, frame->bits);
+  }
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+/* hot */
+static ixs_query_walk_step bounds_bitfacts_advance(void *state,
+                                                   void *raw_frame) {
+  bounds_bitfacts_query *query = state;
+  bounds_bitfacts_frame *frame = raw_frame;
+  ixs_query_walk_step step;
+  if (frame->stage != BOUNDS_BITFACTS_INITIAL)
+    return bounds_bitfacts_resume_frame(query, frame);
+  step = bounds_bitfacts_prepare_frame(query, frame, query->unknown);
+  if (step != IXS_QUERY_WALK_NEXT)
+    return step;
+  step = bounds_bitfacts_start_scalar(query, frame);
+  if (step == IXS_QUERY_WALK_NEXT)
+    step = bounds_bitfacts_start_composite(query, frame);
+  return step;
+}
+
+IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
+                                        ixs_bitfacts *out) {
+  bounds_bitfacts_query query;
+  if (!b || !expr || !out || b->oom)
+    return false;
+  memset(&query, 0, sizeof(query));
+  query.bounds = b;
+  bounds_bitfacts_unknown(&query.unknown);
+  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_bitfacts_frame,
+                      expr);
+  if (!ixs_query_walk_run(&query.walk, expr, &query, bounds_bitfacts_advance,
+                          bounds_bitfacts_abort)) {
+    bounds_bitfacts_unknown(out);
+    return false;
+  }
+  *out = query.child.bits;
+  return query.child.success;
+}
+
+IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr) {
+  ixs_bitfacts bits;
+  if (!ixs_bounds_get_bitfacts(b, expr, &bits))
+    return false;
+  return bits.pow2 == IXS_POW2_OR_ZERO || bits.pow2 == IXS_POW2_POSITIVE;
+}
+
+/* ==================================================================== */
 /* bounds_difference.c                                                */
 /* ==================================================================== */
 
@@ -16150,6 +15335,818 @@ IXS_STATIC void bounds_difference_add_range(ixs_bounds *b, ixs_node *expr,
     if (ixs_safe_sub(constant, endpoint, &offset))
       difference_add_constraint(b, rhs, lhs, offset);
   }
+}
+
+/* ==================================================================== */
+/* bounds_integer.c                                                   */
+/* ==================================================================== */
+
+/* SPDX-FileCopyrightText: 2026 ixsimpl contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "bounds_integer.h"
+
+#include "bounds.h"
+#include "bounds_bitfacts.h"
+#include "bounds_query.h"
+#include "bounds_store.h"
+#include "hash.h"
+#include "query_walk.h"
+#include "rational.h"
+
+#include <assert.h>
+#include <limits.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef enum {
+  BOUNDS_EXACT_PROOF_INTEGER,
+  BOUNDS_EXACT_PROOF_DIVISIBLE
+} bounds_exact_proof_kind;
+
+typedef enum {
+  BOUNDS_EXACT_PROOF_INITIAL,
+  BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN,
+  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN,
+  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE,
+  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER,
+  BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN,
+  BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER,
+  BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE,
+  BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN,
+  BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN,
+  BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD,
+  BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS,
+  BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD,
+  BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN
+} bounds_exact_proof_stage;
+
+typedef struct {
+  ixs_node *expr;
+  int64_t modulus;
+  bounds_exact_proof_kind kind;
+  bool result;
+  bool active;
+  bool complete;
+} bounds_exact_proof_memo_entry;
+
+typedef struct {
+  bounds_exact_proof_memo_entry *entries;
+  size_t count;
+  size_t capacity;
+} bounds_exact_proof_memo;
+
+typedef struct {
+  ixs_node *expr;
+  int64_t modulus;
+  int64_t denominator;
+  uint32_t index;
+  bounds_exact_proof_kind kind;
+  bounds_exact_proof_stage stage;
+  bool denominator_cancelled;
+  bool reachable;
+  bool terminal_branch;
+} bounds_exact_proof_frame;
+
+typedef struct {
+  ixs_bounds *bounds;
+  ixs_query_walk walk;
+  bounds_exact_proof_memo memo;
+  bool child_result;
+  bool stack_oom;
+  bounds_exact_proof_frame inline_frames[16];
+  bounds_exact_proof_memo_entry inline_memo[32];
+} bounds_exact_proof_query;
+
+static size_t bounds_exact_proof_hash(ixs_node *expr,
+                                      bounds_exact_proof_kind kind,
+                                      int64_t modulus) {
+  size_t hash = ixs_hash_ptr(expr);
+  hash ^= (size_t)(uint64_t)modulus + (hash << 6u) + (hash >> 2u);
+  hash ^= (size_t)kind + (hash << 6u) + (hash >> 2u);
+  return hash;
+}
+
+static bool bounds_exact_proof_memo_grow(bounds_exact_proof_query *query) {
+  size_t capacity = query->memo.capacity ? query->memo.capacity * 2u : 32u;
+  bounds_exact_proof_memo_entry *grown;
+  size_t i;
+  if (capacity <= query->memo.capacity || capacity > SIZE_MAX / sizeof(*grown))
+    return false;
+  grown = ixs_arena_alloc(query->bounds->scratch, capacity * sizeof(*grown),
+                          sizeof(void *));
+  if (!grown)
+    return false;
+  memset(grown, 0, capacity * sizeof(*grown));
+  for (i = 0; i < query->memo.capacity; i++) {
+    bounds_exact_proof_memo_entry entry = query->memo.entries[i];
+    size_t slot;
+    if (!entry.expr)
+      continue;
+    slot = bounds_exact_proof_hash(entry.expr, entry.kind, entry.modulus) &
+           (capacity - 1u);
+    while (grown[slot].expr)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = entry;
+  }
+  query->memo.entries = grown;
+  query->memo.capacity = capacity;
+  return true;
+}
+
+static bounds_exact_proof_memo_entry *
+bounds_exact_proof_memo_get(bounds_exact_proof_query *query, ixs_node *expr,
+                            bounds_exact_proof_kind kind, int64_t modulus,
+                            bool create) {
+  size_t slot;
+  if (create && (!query->memo.capacity ||
+                 query->memo.count + 1u > query->memo.capacity / 2u)) {
+    if (!bounds_exact_proof_memo_grow(query))
+      return NULL;
+  }
+  if (!query->memo.capacity)
+    return NULL;
+  slot = bounds_exact_proof_hash(expr, kind, modulus) &
+         (query->memo.capacity - 1u);
+  while (query->memo.entries[slot].expr &&
+         (query->memo.entries[slot].expr != expr ||
+          query->memo.entries[slot].kind != kind ||
+          query->memo.entries[slot].modulus != modulus))
+    slot = (slot + 1u) & (query->memo.capacity - 1u);
+  if (!query->memo.entries[slot].expr) {
+    if (!create)
+      return NULL;
+    query->memo.entries[slot].expr = expr;
+    query->memo.entries[slot].kind = kind;
+    query->memo.entries[slot].modulus = modulus;
+    query->memo.count++;
+  }
+  return &query->memo.entries[slot];
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_push(bounds_exact_proof_query *query, ixs_node *expr,
+                        bounds_exact_proof_kind kind, int64_t modulus) {
+  bounds_exact_proof_memo_entry *entry;
+  bounds_exact_proof_frame *frame;
+  ixs_query_walk_step step;
+  if (!expr || (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0)) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  entry = bounds_exact_proof_memo_get(query, expr, kind, modulus, true);
+  if (!entry)
+    return IXS_QUERY_WALK_OOM;
+  if (entry->active) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  if (entry->complete) {
+    query->child_result = entry->result;
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  step = ixs_query_walk_push(&query->walk, expr);
+  if (step != IXS_QUERY_WALK_ADVANCED)
+    return step;
+  frame = IXS_QUERY_WALK_TOP(&query->walk);
+  frame->kind = kind;
+  frame->modulus = modulus;
+  frame->stage = BOUNDS_EXACT_PROOF_INITIAL;
+  entry->active = true;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_complete(bounds_exact_proof_query *query, bool result) {
+  bounds_exact_proof_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
+  bounds_exact_proof_memo_entry *entry = bounds_exact_proof_memo_get(
+      query, frame->expr, frame->kind, frame->modulus, false);
+  if (!entry || !entry->active) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  entry->result = result;
+  entry->active = false;
+  entry->complete = true;
+  IXS_QUERY_WALK_POP(&query->walk);
+  query->child_result = result;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
+                                        int64_t *q) {
+  if (!node || (node->tag != IXS_INT && node->tag != IXS_RAT))
+    return false;
+  ixs_node_get_rat(node, p, q);
+  return *q > 0;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_divisible_after_add(bounds_exact_proof_query *query,
+                                       bounds_exact_proof_frame *frame) {
+  ixs_bitfacts bits;
+  uint64_t mask;
+  if (ixs_int64_is_positive_pow2(frame->modulus)) {
+    mask = (uint64_t)frame->modulus - 1u;
+    if (ixs_bounds_get_bitfacts(query->bounds, frame->expr, &bits) &&
+        (bits.known_zero & mask) == mask)
+      return bounds_exact_proof_complete(query, true);
+    if (query->bounds->oom)
+      return IXS_QUERY_WALK_OOM;
+  }
+  return bounds_exact_proof_complete(query, false);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_integer_mul(bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  int64_t p;
+  int64_t q;
+  int64_t divisor;
+  if (!bounds_exact_proof_rational(node->u.mul.coeff, &p, &q) ||
+      (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  frame->index = 0;
+  if (q == 1) {
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN;
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  divisor = ixs_gcd(p, q);
+  if (divisor <= 0 || q % divisor != 0) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  frame->denominator = q / divisor;
+  frame->denominator_cancelled = frame->denominator == 1;
+  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
+                                     bounds_exact_proof_frame *frame) {
+  int64_t p;
+  int64_t q;
+  ixs_node *node = frame->expr;
+  if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
+      (node->u.add.nterms != 0 && !node->u.add.terms)) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  (void)p;
+  if (q != 1)
+    return bounds_exact_proof_complete(
+        query, bounds_add_known_divisible(query->bounds, node, 1));
+  frame->index = 0;
+  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
+                                 bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (ixs_node_is_integer_valued(node))
+    return bounds_exact_proof_complete(query, true);
+  switch (node->tag) {
+  case IXS_MUL:
+    return bounds_exact_proof_start_integer_mul(frame);
+  case IXS_ADD:
+    return bounds_exact_proof_start_integer_add(query, frame);
+  case IXS_MAX:
+  case IXS_MIN:
+  case IXS_XOR:
+  case IXS_AND:
+  case IXS_OR:
+    if (node->u.assoc.nargs < 2 || !node->u.assoc.args) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->index = 0;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN;
+    return IXS_QUERY_WALK_ADVANCED;
+  case IXS_PIECEWISE:
+    if (node->u.pw.ncases == 0 || !node->u.pw.cases) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->index = 0;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
+    return IXS_QUERY_WALK_ADVANCED;
+  case IXS_MOD:
+    if (!node->u.binary.lhs || !node->u.binary.rhs) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS;
+    return bounds_exact_proof_push(query, node->u.binary.lhs,
+                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+  default:
+    return bounds_exact_proof_complete(query, false);
+  }
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_divisible_add(bounds_exact_proof_query *query,
+                                       bounds_exact_proof_frame *frame) {
+  int64_t p;
+  int64_t q;
+  ixs_node *node = frame->expr;
+  if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
+      (node->u.add.nterms != 0 && !node->u.add.terms)) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  if (q != 1) {
+    if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
+      return bounds_exact_proof_complete(query, true);
+    if (query->bounds->oom)
+      return IXS_QUERY_WALK_OOM;
+    return bounds_exact_proof_divisible_after_add(query, frame);
+  }
+  if (p % frame->modulus != 0)
+    return bounds_exact_proof_divisible_after_add(query, frame);
+  frame->index = 0;
+  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_divisible_mul(bounds_exact_proof_query *query,
+                                       bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (!node->u.mul.coeff || node->u.mul.coeff->tag != IXS_INT ||
+      (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  if (node->u.mul.coeff->u.ival == 0)
+    return bounds_exact_proof_complete(query, true);
+  frame->index = 0;
+  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
+                                   bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  ixs_bitfacts bits;
+  int64_t symbol_modulus, symbol_remainder;
+  uint64_t mask;
+  if (frame->modulus == 1) {
+    if (ixs_node_is_integer_valued(node))
+      return bounds_exact_proof_complete(query, true);
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
+    frame->index = UINT32_MAX;
+    return bounds_exact_proof_push(query, node, BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  if (node->tag == IXS_ADD)
+    return bounds_exact_proof_start_divisible_add(query, frame);
+  if (ixs_int64_is_positive_pow2(frame->modulus)) {
+    mask = (uint64_t)frame->modulus - 1u;
+    if (ixs_bounds_get_bitfacts(query->bounds, node, &bits) &&
+        (bits.known_zero & mask) == mask)
+      return bounds_exact_proof_complete(query, true);
+    if (query->bounds->oom)
+      return IXS_QUERY_WALK_OOM;
+  }
+  switch (node->tag) {
+  case IXS_INT:
+    return bounds_exact_proof_complete(query,
+                                       node->u.ival % frame->modulus == 0);
+  case IXS_SYM:
+    if (!node->u.name) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    return bounds_exact_proof_complete(
+        query, bounds_store_get_modrem(query->bounds, node->u.name,
+                                       &symbol_modulus, &symbol_remainder) &&
+                   symbol_modulus % frame->modulus == 0 &&
+                   symbol_remainder % frame->modulus == 0);
+  case IXS_MUL:
+    if (node->u.mul.coeff && node->u.mul.coeff->tag == IXS_INT)
+      return bounds_exact_proof_start_divisible_mul(query, frame);
+    return bounds_exact_proof_complete(query, false);
+  case IXS_MAX:
+  case IXS_MIN:
+    if (node->u.assoc.nargs == 0 || !node->u.assoc.args) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->index = 0;
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
+    return IXS_QUERY_WALK_ADVANCED;
+  default:
+    return bounds_exact_proof_complete(query, false);
+  }
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
+                                      bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN) {
+    if (frame->index != 0 && !query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    if (frame->index == node->u.mul.nfactors)
+      return bounds_exact_proof_complete(query, true);
+    if (!node->u.mul.factors[frame->index].base ||
+        node->u.mul.factors[frame->index].exp <= 0) {
+      if (!node->u.mul.factors[frame->index].base)
+        return IXS_QUERY_WALK_STOP;
+      return bounds_exact_proof_complete(query, false);
+    }
+    frame->index++;
+    return bounds_exact_proof_push(query,
+                                   node->u.mul.factors[frame->index - 1u].base,
+                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE) {
+    ixs_node *base = node->u.mul.factors[frame->index].base;
+    uint64_t residue = 0;
+    bool known;
+    if (query->child_result) {
+      frame->denominator_cancelled = true;
+      frame->index++;
+      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+      return IXS_QUERY_WALK_ADVANCED;
+    }
+    known = bounds_known_residue_independent(
+        query->bounds, base, (uint64_t)frame->denominator, &residue);
+    if (query->bounds->oom)
+      return IXS_QUERY_WALK_OOM;
+    if (known) {
+      if (residue == 0)
+        frame->denominator_cancelled = true;
+      frame->index++;
+      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+      return IXS_QUERY_WALK_ADVANCED;
+    }
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
+    return bounds_exact_proof_push(query, base, BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER) {
+    if (!query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  if (frame->index == node->u.mul.nfactors)
+    return bounds_exact_proof_complete(query, frame->denominator_cancelled);
+  if (!node->u.mul.factors[frame->index].base ||
+      node->u.mul.factors[frame->index].exp <= 0) {
+    if (!node->u.mul.factors[frame->index].base)
+      return IXS_QUERY_WALK_STOP;
+    return bounds_exact_proof_complete(query, false);
+  }
+  if (frame->denominator_cancelled) {
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
+    return bounds_exact_proof_push(query,
+                                   node->u.mul.factors[frame->index].base,
+                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE;
+  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
+                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
+                                 frame->denominator);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
+                                      bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER) {
+    if (!query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
+  } else if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE) {
+    if (!query->child_result)
+      return bounds_exact_proof_complete(
+          query, bounds_add_known_divisible(query->bounds, node, 1));
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
+  }
+  if (frame->index == node->u.add.nterms)
+    return bounds_exact_proof_complete(query, true);
+  {
+    const ixs_addterm *term = &node->u.add.terms[frame->index];
+    int64_t p;
+    int64_t q;
+    int64_t divisor;
+    if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    if (q == 1) {
+      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER;
+      return bounds_exact_proof_push(query, term->term,
+                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
+    }
+    divisor = ixs_gcd(p, q);
+    if (divisor <= 0 || q % divisor != 0) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE;
+    return bounds_exact_proof_push(query, term->term,
+                                   BOUNDS_EXACT_PROOF_DIVISIBLE, q / divisor);
+  }
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_integer_assoc(bounds_exact_proof_query *query,
+                                        bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->index != 0 && !query->child_result)
+    return bounds_exact_proof_complete(query, false);
+  if (frame->index == node->u.assoc.nargs)
+    return bounds_exact_proof_complete(query, true);
+  if (!node->u.assoc.args[frame->index]) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  frame->index++;
+  return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
+                                 BOUNDS_EXACT_PROOF_INTEGER, 0);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
+                                            bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD) {
+    if (!query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    if (frame->terminal_branch)
+      return bounds_exact_proof_complete(query, true);
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
+  }
+  while (frame->index < node->u.pw.ncases) {
+    ixs_node *cond = node->u.pw.cases[frame->index].cond;
+    ixs_node *value = node->u.pw.cases[frame->index].value;
+    ixs_check_result truth = IXS_CHECK_UNKNOWN;
+    if (!cond || !value) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    if (ixs_node_is_known_false(cond))
+      truth = IXS_CHECK_FALSE;
+    else if (ixs_node_is_known_true(cond))
+      truth = IXS_CHECK_TRUE;
+    else if (cond->tag == IXS_CMP)
+      truth = ixs_bounds_check(query->bounds, cond);
+    if (query->bounds->oom)
+      return IXS_QUERY_WALK_OOM;
+    if (truth == IXS_CHECK_FALSE) {
+      frame->index++;
+      continue;
+    }
+    frame->reachable = true;
+    frame->terminal_branch = truth == IXS_CHECK_TRUE;
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD;
+    return bounds_exact_proof_push(query, value, BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  return bounds_exact_proof_complete(query, frame->reachable);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_integer_mod(bounds_exact_proof_query *query,
+                                      bounds_exact_proof_frame *frame) {
+  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS) {
+    if (!query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS;
+    return bounds_exact_proof_push(query, frame->expr->u.binary.rhs,
+                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+  }
+  return bounds_exact_proof_complete(query, query->child_result);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
+                                        bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD) {
+    if (!query->child_result)
+      return bounds_exact_proof_divisible_after_add(query, frame);
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
+  }
+  if (frame->index == node->u.add.nterms)
+    return bounds_exact_proof_complete(query, true);
+  {
+    const ixs_addterm *term = &node->u.add.terms[frame->index];
+    int64_t p;
+    int64_t q;
+    int64_t divisor;
+    if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    if (q != 1) {
+      if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
+        return bounds_exact_proof_complete(query, true);
+      if (query->bounds->oom)
+        return IXS_QUERY_WALK_OOM;
+      return bounds_exact_proof_divisible_after_add(query, frame);
+    }
+    divisor = ixs_gcd(p, frame->modulus);
+    if (divisor <= 0 || frame->modulus % divisor != 0) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD;
+    return bounds_exact_proof_push(query, term->term,
+                                   BOUNDS_EXACT_PROOF_DIVISIBLE,
+                                   frame->modulus / divisor);
+  }
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
+                                        bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN) {
+    int64_t divisor;
+    if (frame->index != 0 && !query->child_result)
+      return bounds_exact_proof_complete(query, false);
+    if (frame->index < node->u.mul.nfactors) {
+      const ixs_mulfactor *factor = &node->u.mul.factors[frame->index];
+      if (!factor->base || factor->exp < 0) {
+        if (!factor->base)
+          return IXS_QUERY_WALK_STOP;
+        return bounds_exact_proof_complete(query, false);
+      }
+      frame->index++;
+      return bounds_exact_proof_push(query, factor->base,
+                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
+    }
+    divisor = ixs_gcd(node->u.mul.coeff->u.ival, frame->modulus);
+    if (divisor <= 0 || frame->modulus % divisor != 0) {
+      return IXS_QUERY_WALK_STOP;
+    }
+    frame->denominator = frame->modulus / divisor;
+    if (frame->denominator == 1)
+      return bounds_exact_proof_complete(query, true);
+    frame->index = 0;
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
+  } else if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD) {
+    if (query->child_result)
+      return bounds_exact_proof_complete(query, true);
+    frame->index++;
+    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
+  }
+  while (frame->index < node->u.mul.nfactors &&
+         node->u.mul.factors[frame->index].exp < 1)
+    frame->index++;
+  if (frame->index == node->u.mul.nfactors)
+    return bounds_exact_proof_complete(query, false);
+  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD;
+  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
+                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
+                                 frame->denominator);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume_divisible_assoc(bounds_exact_proof_query *query,
+                                          bounds_exact_proof_frame *frame) {
+  ixs_node *node = frame->expr;
+  if (frame->index == UINT32_MAX)
+    return bounds_exact_proof_complete(query, query->child_result);
+  if (frame->index != 0 && !query->child_result)
+    return bounds_exact_proof_complete(query, false);
+  if (frame->index == node->u.assoc.nargs)
+    return bounds_exact_proof_complete(query, true);
+  if (!node->u.assoc.args[frame->index]) {
+    return IXS_QUERY_WALK_STOP;
+  }
+  frame->index++;
+  return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
+                                 BOUNDS_EXACT_PROOF_DIVISIBLE, frame->modulus);
+}
+
+static ixs_query_walk_step
+bounds_exact_proof_resume(bounds_exact_proof_query *query,
+                          bounds_exact_proof_frame *frame) {
+  switch (frame->stage) {
+  case BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN:
+  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN:
+  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE:
+  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER:
+    return bounds_exact_proof_resume_integer_mul(query, frame);
+  case BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN:
+  case BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER:
+  case BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE:
+    return bounds_exact_proof_resume_integer_add(query, frame);
+  case BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN:
+    return bounds_exact_proof_resume_integer_assoc(query, frame);
+  case BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN:
+  case BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD:
+    return bounds_exact_proof_resume_integer_piecewise(query, frame);
+  case BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS:
+  case BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS:
+    return bounds_exact_proof_resume_integer_mod(query, frame);
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN:
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD:
+    return bounds_exact_proof_resume_divisible_add(query, frame);
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN:
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN:
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD:
+    return bounds_exact_proof_resume_divisible_mul(query, frame);
+  case BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN:
+    return bounds_exact_proof_resume_divisible_assoc(query, frame);
+  case BOUNDS_EXACT_PROOF_INITIAL:
+    break;
+  }
+  return IXS_QUERY_WALK_STOP;
+}
+
+/* hot */
+static ixs_query_walk_step bounds_exact_proof_advance(void *state, void *top) {
+  bounds_exact_proof_query *query = state;
+  bounds_exact_proof_frame *frame = top;
+  if (frame->stage == BOUNDS_EXACT_PROOF_INITIAL)
+    return frame->kind == BOUNDS_EXACT_PROOF_INTEGER
+               ? bounds_exact_proof_start_integer(query, frame)
+               : bounds_exact_proof_start_divisible(query, frame);
+  return bounds_exact_proof_resume(query, frame);
+}
+
+/* Both proof relations are one iterative dependency graph.  The common small
+ * query stays in fixed local buffers; deeper stacks and larger open-addressed
+ * memos grow on scratch.  Expected work is O(V + E) over distinct
+ * (node, relation, modulus) obligations, and malformed cycles are rejected
+ * without consuming C stack. */
+static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
+                                    bounds_exact_proof_kind kind,
+                                    int64_t modulus) {
+  ixs_arena_mark mark;
+  bounds_exact_proof_query query;
+  ixs_query_walk_step step;
+  bool result = false;
+  if (!b || !expr || b->oom ||
+      (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0))
+    return false;
+  if (ixs_node_is_integer_valued(expr) &&
+      (kind == BOUNDS_EXACT_PROOF_INTEGER || modulus == 1))
+    return true;
+  /* Predicate and interval domains can ask an exact question while resolving
+   * one Piecewise condition.  One nested evaluator preserves that precision;
+   * the second re-entry is a conservative miss, making the cross-domain C
+   * call depth statically at most two while each evaluator remains iterative.
+   */
+  if (b->exact_proof_call_depth >= 2u)
+    return false;
+  b->exact_proof_call_depth++;
+  mark = ixs_arena_save(b->scratch);
+  query.bounds = b;
+  query.stack_oom = false;
+  IXS_QUERY_WALK_INIT_INLINE(&query.walk, b->scratch, &query.stack_oom,
+                             bounds_exact_proof_frame, expr,
+                             query.inline_frames);
+  query.memo.entries = query.inline_memo;
+  query.memo.count = 0;
+  query.memo.capacity =
+      sizeof(query.inline_memo) / sizeof(query.inline_memo[0]);
+  query.child_result = false;
+  memset(query.inline_memo, 0, sizeof(query.inline_memo));
+  step = bounds_exact_proof_push(&query, expr, kind, modulus);
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    step = ixs_query_walk_drive(&query.walk, &query, bounds_exact_proof_advance,
+                                NULL);
+  if (step == IXS_QUERY_WALK_OOM || b->oom) {
+    b->oom = true;
+    bounds_query_note_oom(b);
+  } else if (step == IXS_QUERY_WALK_STOP) {
+    bounds_query_note_invalid(b);
+  } else {
+    result = query.child_result;
+  }
+  ixs_arena_restore(b->scratch, mark);
+  b->exact_proof_call_depth--;
+  return result;
+}
+
+IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                              int64_t m) {
+  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_DIVISIBLE, m);
+}
+
+IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
+                                                   ixs_node *expr) {
+  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_INTEGER, 0);
+}
+
+IXS_STATIC ixs_check_result
+bounds_integer_check_without_equality(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval iv;
+  bool proven;
+  assert(b->equality_disabled_depth != UINT_MAX);
+  b->equality_disabled_depth++;
+  proven = ixs_bounds_is_integer_with_divinfo(b, expr);
+  if (proven) {
+    b->equality_disabled_depth--;
+    return IXS_CHECK_TRUE;
+  }
+  iv = bounds_get_intrinsic(b, expr);
+  b->equality_disabled_depth--;
+  if (b->oom || !iv.valid || iv.lo_inf || iv.hi_inf ||
+      ixs_rat_cmp(iv.lo_p, iv.lo_q, iv.hi_p, iv.hi_q) != 0)
+    return IXS_CHECK_UNKNOWN;
+  return iv.lo_q == 1 ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
 }
 
 /* ==================================================================== */

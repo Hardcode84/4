@@ -8,6 +8,8 @@
 
 #include "algebra_status.h"
 #include "bounds_assume.h"
+#include "bounds_bitfacts.h"
+#include "bounds_integer.h"
 #include "interval.h"
 #include "node.h"
 #include "relation_algebra.h"
@@ -21,12 +23,6 @@
  * The var table is a growable array on the scratch arena with an
  * open-addressed index keyed by interned symbol-name pointers.
  */
-
-typedef struct {
-  uint64_t known_zero; /* low 64 bits known to be zero */
-  uint64_t known_one;  /* low 64 bits known to be one */
-  ixs_pow2_fact pow2;
-} ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
 typedef struct ixs_difference_var ixs_difference_var;
@@ -206,29 +202,24 @@ IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                             ixs_node *rhs, int64_t offset);
 
+/* Lower proof services borrow these query-policy operations. */
+IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
+IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
+IXS_STATIC bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
+                                           int64_t modulus);
+IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out);
+IXS_STATIC bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
+                                                 uint64_t modulus,
+                                                 uint64_t *out);
+
 /* Get the interval for an expression using propagation rules. */
 IXS_STATIC ixs_interval ixs_bounds_get(ixs_bounds *b, ixs_node *expr);
 
 /* True if stored bounds contain a direct contradiction. */
 IXS_STATIC bool ixs_bounds_has_empty(ixs_bounds *b);
 
-/* Low-bit and power-of-two facts inferred from assumptions and constants. */
-IXS_STATIC bool ixs_bounds_get_bitfacts(ixs_bounds *b, ixs_node *expr,
-                                        ixs_bitfacts *out);
-IXS_STATIC bool ixs_bounds_is_pow2_or_zero(ixs_bounds *b, ixs_node *expr);
-IXS_STATIC bool ixs_bounds_is_pow2_positive(ixs_bounds *b, ixs_node *expr);
-
-/* True when expr is provably divisible by m (m > 0) given bounds. */
-IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                              int64_t m);
-
-/* True when expr is provably integer-valued given congruence info. */
-IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
-                                                   ixs_node *expr);
-
 /* Public-query semantics over an already populated bounds environment. */
-IXS_STATIC ixs_check_result ixs_bounds_check_integer_valued(ixs_bounds *b,
-                                                            ixs_node *expr);
 IXS_STATIC ixs_check_result ixs_bounds_check_divisible(ixs_bounds *b,
                                                        ixs_node *expr,
                                                        int64_t modulus);

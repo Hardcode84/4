@@ -1236,6 +1236,9 @@ its index, feasibility potentials, and interval-propagation worklists. It calls
 only store, exact-relation, and neutral arithmetic APIs; it does not re-enter
 bounds proof or simplification policy. `bounds_relation.c` owns exact-component
 cursor traversal, equality projection, and the projection-cache lifecycle.
+`bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
+`bounds_integer.c` owns exact integer and divisibility proofs; equality-component
+admission and projection remain caller policy in `bounds.c`.
 Canonical alias creation, relation endpoint admission, and query proof policy
 remain in `bounds.c`, which passes canonical nodes or trusted symbols to the
 leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
@@ -1389,15 +1392,16 @@ layout, load factor, and allocation remain consumer-owned.
   is a cardinality fact, not expressible as independent known-zero/known-one
   bits unless the bit position is already known.
 
-  Initial storage is symbol-level in `ixs_var_bound`. Expression-level
-  bitfacts are computed on demand for constants, symbols, comparisons,
+  Initial storage is symbol-level in `ixs_var_bound`. `bounds_bitfacts.c`
+  computes expression-level facts on demand for constants, symbols, comparisons,
   logical NOT, `ADD`, restricted `MUL`/`FLOOR`/`MOD`, and `AND`/`OR`/`XOR`.
   Iterative bounds queries use the private structural stack in `query_walk.c`.
   Typed frames keep the expression pointer first; storage starts at the
   consumer's configured capacity, doubles with checked arena growth at pointer
   alignment, and is zeroed before the expression is published. Bitfacts,
-  stride, residue, and interval queries start at 16 frames. Exact integer
-  proofs use 16 inline frames and grow on scratch. Definedness, predicate, and
+  stride, residue, and interval queries start at 16 frames. `bounds_integer.c`
+  runs exact integer proofs with 16 inline frames and scratch growth.
+  Definedness, predicate, and
   AND-assumption walks start at 32 frames.
 
   The structural driver owns push/pop, growth, and optional LIFO abort. Its
@@ -3110,8 +3114,12 @@ ixsimpl/
 │   ├── bounds.h             # aggregate private bounds state
 │   ├── bounds_assume.c      # assumption validation and fact refinement
 │   ├── bounds_assume.h
+│   ├── bounds_bitfacts.c    # structural known-bit and power-of-two queries
+│   ├── bounds_bitfacts.h
 │   ├── bounds_difference.c  # directed constraints and interval propagation
 │   ├── bounds_difference.h
+│   ├── bounds_integer.c     # exact integer and divisibility proof
+│   ├── bounds_integer.h
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle
 │   ├── bounds_query.h
 │   ├── bounds_store.c       # retained fact records, indexes, and mutation

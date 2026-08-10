@@ -1224,7 +1224,6 @@ static void test_bounds_bitfacts_pow2(void) {
   CHECK(ixs_bounds_get_bitfacts(&b, d, &bits));
   CHECK(bits.pow2 == IXS_POW2_OR_ZERO);
   CHECK(ixs_bounds_is_pow2_or_zero(&b, d));
-  CHECK(!ixs_bounds_is_pow2_positive(&b, d));
   iv = ixs_bounds_get(&b, d);
   CHECK(iv.valid);
   CHECK(!iv.lo_inf);
@@ -1233,7 +1232,6 @@ static void test_bounds_bitfacts_pow2(void) {
   ixs_bounds_add_assumption(&b, ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0)));
   CHECK(ixs_bounds_get_bitfacts(&b, d, &bits));
   CHECK(bits.pow2 == IXS_POW2_POSITIVE);
-  CHECK(ixs_bounds_is_pow2_positive(&b, d));
 
   ixs_bounds_destroy(&b);
   ixs_ctx_destroy(ctx);
