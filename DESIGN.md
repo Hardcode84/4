@@ -1237,8 +1237,14 @@ only store, exact-relation, and neutral arithmetic APIs; it does not re-enter
 bounds proof or simplification policy. `bounds_relation.c` owns exact-component
 cursor traversal, equality projection, and the projection-cache lifecycle.
 `bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
+`bounds_defined.c` owns iterative domain proofs, Piecewise partition coverage,
+depth-safe range subqueries, and definedness projection-cache publication.
 `bounds_integer.c` owns exact integer and divisibility proofs; equality-component
 admission and projection remain caller policy in `bounds.c`.
+`bounds_predicate.c` owns iterative tri-state predicate evaluation, bounded
+implication branches, and finite-domain enumeration over range/nonzero atoms.
+`bounds.c` supplies branch-local fact-closure admission and retains exact EQ/NE
+fallback policy.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
@@ -3136,10 +3142,14 @@ ixsimpl/
 │   ├── bounds_assume.h
 │   ├── bounds_bitfacts.c    # structural known-bit and power-of-two queries
 │   ├── bounds_bitfacts.h
+│   ├── bounds_defined.c     # domain and Piecewise coverage proof
+│   ├── bounds_defined.h
 │   ├── bounds_difference.c  # directed constraints and interval propagation
 │   ├── bounds_difference.h
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
+│   ├── bounds_predicate.c   # tri-state and finite-domain predicate proof
+│   ├── bounds_predicate.h
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle
 │   ├── bounds_query.h
 │   ├── bounds_store.c       # retained fact records, indexes, and mutation

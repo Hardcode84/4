@@ -271,6 +271,8 @@ IXS_STATIC bool ixs_node_is_sentinel(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_expr_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_pred_kind(const ixs_node *n);
 IXS_STATIC bool ixs_node_is_bool_valued(const ixs_node *n);
+IXS_STATIC bool ixs_cmp_op_valid(ixs_cmp_op op);
+IXS_STATIC ixs_cmp_op ixs_cmp_op_negate(ixs_cmp_op op);
 IXS_STATIC bool ixs_node_is_known_total(const ixs_node *n);
 
 typedef enum {

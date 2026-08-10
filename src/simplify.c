@@ -4743,32 +4743,13 @@ IXS_STATIC ixs_node *simp_cmp(ixs_ctx *ctx, ixs_node *a, ixs_cmp_op op,
 /*  simp_and / simp_or / simp_not                                     */
 /* ------------------------------------------------------------------ */
 
-static ixs_cmp_op cmp_flip_op(ixs_cmp_op op) {
-  switch (op) {
-  case IXS_CMP_GT:
-    return IXS_CMP_LE;
-  case IXS_CMP_GE:
-    return IXS_CMP_LT;
-  case IXS_CMP_LT:
-    return IXS_CMP_GE;
-  case IXS_CMP_LE:
-    return IXS_CMP_GT;
-  case IXS_CMP_EQ:
-    return IXS_CMP_NE;
-  case IXS_CMP_NE:
-    return IXS_CMP_EQ;
-  default:
-    return op;
-  }
-}
-
 /* ~(a > b) -> a <= b, etc.  Returns NULL if a is not a CMP node. */
 static ixs_node *not_cmp_flip(ixs_ctx *ctx, ixs_node *a) {
   if (a->tag != IXS_CMP)
     return NULL;
   IXS_STAT_HIT(ctx);
   return ixs_node_binary(ctx, IXS_CMP, a->u.binary.lhs, a->u.binary.rhs,
-                         cmp_flip_op(a->u.binary.cmp_op));
+                         ixs_cmp_op_negate(a->u.binary.cmp_op));
 }
 
 IXS_STATIC ixs_node *simp_not(ixs_ctx *ctx, ixs_node *a) {
@@ -4832,7 +4813,7 @@ static int assoc_has_bool_complement(ixs_ctx *ctx, ixs_node *const *args,
     probe.tag = IXS_CMP;
     probe.u.binary.lhs = arg->u.binary.lhs;
     probe.u.binary.rhs = arg->u.binary.rhs;
-    probe.u.binary.cmp_op = cmp_flip_op(arg->u.binary.cmp_op);
+    probe.u.binary.cmp_op = ixs_cmp_op_negate(arg->u.binary.cmp_op);
     return assoc_contains(ctx, args, n, &probe);
   }
   if (ixs_node_is_bool_valued(arg)) {

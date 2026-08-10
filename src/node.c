@@ -783,7 +783,7 @@ static bool node_property_total(const ixs_node *node) {
          (node->properties & IXS_NODE_PROPERTY_TOTAL) != 0;
 }
 
-static bool node_cmp_op_valid(ixs_cmp_op op) {
+IXS_STATIC bool ixs_cmp_op_valid(ixs_cmp_op op) {
   switch (op) {
   case IXS_CMP_GT:
   case IXS_CMP_GE:
@@ -794,6 +794,24 @@ static bool node_cmp_op_valid(ixs_cmp_op op) {
     return true;
   }
   return false;
+}
+
+IXS_STATIC ixs_cmp_op ixs_cmp_op_negate(ixs_cmp_op op) {
+  switch (op) {
+  case IXS_CMP_GT:
+    return IXS_CMP_LE;
+  case IXS_CMP_GE:
+    return IXS_CMP_LT;
+  case IXS_CMP_LT:
+    return IXS_CMP_GE;
+  case IXS_CMP_LE:
+    return IXS_CMP_GT;
+  case IXS_CMP_EQ:
+    return IXS_CMP_NE;
+  case IXS_CMP_NE:
+    return IXS_CMP_EQ;
+  }
+  return op;
 }
 
 static uint8_t node_pack_properties(bool integer, bool boolean, bool total,
@@ -938,7 +956,7 @@ static uint8_t node_compute_simple_properties(const ixs_node *node) {
     nested_piecewise = ixs_node_contains_nested_piecewise(node->u.unary.arg);
     break;
   case IXS_CMP:
-    integer = node_cmp_op_valid(node->u.binary.cmp_op);
+    integer = ixs_cmp_op_valid(node->u.binary.cmp_op);
     boolean = integer;
     total = integer && node_property_total(node->u.binary.lhs) &&
             node_property_total(node->u.binary.rhs);

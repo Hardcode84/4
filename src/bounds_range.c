@@ -348,7 +348,16 @@ static ixs_interval bounds_get_xor(ixs_bounds *b, ixs_node *expr) {
 }
 
 IXS_STATIC ixs_algebra_status bounds_get_truncating_remainder_range(
-    ixs_bounds *b, ixs_node *expr, bool expression_defined, ixs_interval *out);
+    ixs_bounds *b, ixs_node *expr, bool expression_defined, ixs_interval *out) {
+  ixs_division_range_result result;
+  if (!b->ctx)
+    return IXS_ALGEBRA_NO_MATCH;
+  result =
+      ixs_division_algebra_range(b->ctx, b, expr, expr, expression_defined);
+  if (result.status == IXS_ALGEBRA_MATCH)
+    *out = result.range;
+  return result.status;
+}
 
 IXS_STATIC void bounds_note_truncating_range_status(ixs_bounds *b,
                                                     ixs_algebra_status status) {
@@ -1109,24 +1118,6 @@ static inline ixs_interval bounds_get_extrema(ixs_bounds *b, ixs_node *expr,
   return absolute_lower.valid ? iv_intersect(result, absolute_lower) : result;
 }
 
-static ixs_cmp_op bounds_negate_cmp_op(ixs_cmp_op op) {
-  switch (op) {
-  case IXS_CMP_GT:
-    return IXS_CMP_LE;
-  case IXS_CMP_GE:
-    return IXS_CMP_LT;
-  case IXS_CMP_LT:
-    return IXS_CMP_GE;
-  case IXS_CMP_LE:
-    return IXS_CMP_GT;
-  case IXS_CMP_EQ:
-    return IXS_CMP_NE;
-  case IXS_CMP_NE:
-    return IXS_CMP_EQ;
-  }
-  return op;
-}
-
 IXS_STATIC ixs_node *
 bounds_condition_assumption(ixs_bounds *b, ixs_node *cond, bool value,
                             struct ixs_node_impl *storage) {
@@ -1138,9 +1129,8 @@ bounds_condition_assumption(ixs_bounds *b, ixs_node *cond, bool value,
   if (cond->tag == IXS_CMP) {
     storage->u.binary.lhs = cond->u.binary.lhs;
     storage->u.binary.rhs = cond->u.binary.rhs;
-    storage->u.binary.cmp_op =
-        value ? cond->u.binary.cmp_op
-              : bounds_negate_cmp_op(cond->u.binary.cmp_op);
+    storage->u.binary.cmp_op = value ? cond->u.binary.cmp_op
+                                     : ixs_cmp_op_negate(cond->u.binary.cmp_op);
   } else {
     storage->u.binary.lhs = cond;
     storage->u.binary.cmp_op = value ? IXS_CMP_NE : IXS_CMP_EQ;
@@ -2214,18 +2204,6 @@ IXS_STATIC ixs_check_result ixs_bounds_check(ixs_bounds *b, ixs_node *cmp) {
   if (query_held)
     ixs_bounds_query_hold_end(b);
   return result;
-}
-
-IXS_STATIC ixs_algebra_status bounds_get_truncating_remainder_range(
-    ixs_bounds *b, ixs_node *expr, bool expression_defined, ixs_interval *out) {
-  ixs_division_range_result result;
-  if (!b->ctx)
-    return IXS_ALGEBRA_NO_MATCH;
-  result =
-      ixs_division_algebra_range(b->ctx, b, expr, expr, expression_defined);
-  if (result.status == IXS_ALGEBRA_MATCH)
-    *out = result.range;
-  return result.status;
 }
 
 IXS_STATIC bool bounds_refine_integral_interval(ixs_bounds *bounds,

@@ -200,6 +200,9 @@ IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom);
 IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
                                             ixs_node *rhs, int64_t offset);
+IXS_STATIC ixs_check_result bounds_cmp_atom(ixs_bounds *b, ixs_node *cmp);
+IXS_STATIC ixs_bounds_build_status bounds_ingest_predicate_branch(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *predicate);
 /* Lower proof services borrow these query-policy operations. */
 IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);

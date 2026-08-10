@@ -17,6 +17,13 @@ typedef struct {
   size_t initial_capacity;
 } ixs_query_walk;
 
+typedef struct {
+  ixs_node *node;
+  ixs_check_result result;
+  bool active;
+  bool complete;
+} ixs_query_check_memo_entry;
+
 typedef enum {
   IXS_QUERY_WALK_ADVANCED,
   IXS_QUERY_WALK_NEXT,

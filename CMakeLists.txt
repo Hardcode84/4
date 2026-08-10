@@ -18,8 +18,10 @@ else()
         src/bounds.c
         src/bounds_assume.c
         src/bounds_bitfacts.c
+        src/bounds_defined.c
         src/bounds_difference.c
         src/bounds_integer.c
+        src/bounds_predicate.c
         src/bounds_query.c
         src/bounds_range.c
         src/bounds_relation.c
