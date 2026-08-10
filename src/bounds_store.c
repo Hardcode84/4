@@ -17,6 +17,12 @@
 #define BOUNDS_NONZERO_INDEX_INIT_CAP 8u
 #define BOUNDS_INIT_CAP 16u
 
+IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
+  bounds_store_invalidate_reads(b);
+  if (b)
+    b->oom = old_oom;
+}
+
 IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->ctx = NULL;
   b->store_ctx = NULL;

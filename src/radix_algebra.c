@@ -4,11 +4,28 @@
 #include "radix_algebra.h"
 
 #include "bounds_query.h"
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+#include "facts_store.h"
+#endif
 #include <string.h>
 
 #define RADIX_ALGEBRA_MAX_INPUT_TERMS 8u
 #define RADIX_ALGEBRA_MAX_SLOTS 16u
 #define RADIX_ALGEBRA_MAX_TRANSFERS 16u
+
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+IXS_STATIC ixs_radix_algebra_result
+ixs_radix_algebra_facts_probe(ixs_facts *facts, const ixs_node *expr) {
+  ixs_radix_algebra_result result = {IXS_CHECK_UNKNOWN, false, false};
+  ixs_session_binding binding;
+  ixs_ctx *ctx;
+  if (!expr || !facts_store_bind(facts, &binding, &ctx))
+    return result;
+  result = ixs_radix_algebra_nonnegative(&facts->bounds, expr);
+  facts_store_unbind(facts, &binding);
+  return result;
+}
+#endif
 
 typedef struct {
   const ixs_node *expr;

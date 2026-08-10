@@ -15,13 +15,13 @@ else()
     set(LIB_SOURCES
         src/additive_row.c
         src/arena.c
-        src/bounds.c
         src/bounds_assume.c
         src/bounds_bitfacts.c
         src/bounds_defined.c
         src/bounds_difference.c
         src/bounds_equivalence.c
         src/bounds_integer.c
+        src/bounds_lifecycle.c
         src/bounds_modular.c
         src/bounds_predicate.c
         src/bounds_query.c

@@ -1282,8 +1282,8 @@ no-wrap lifts, and its growable progress stack.
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
 scaling.
-Canonical alias creation remains in `bounds.c`, which passes canonical nodes
-or trusted symbols to the leaf owners.
+`bounds_assume.c` owns canonical alias creation and passes canonical nodes or
+trusted symbols to the leaf owners.
 `bounds_range.c` owns relation endpoint admission, direct interval caching and
 transfer, structural and Piecewise ranges, equality-component range projection, integral
 and congruence refinement, truncating-remainder ranges, emptiness, and interval
@@ -1291,7 +1291,9 @@ comparison entailment. Full store invalidation refreshes the central query
 owner, clears range caches, then clears relation projections; each leaf
 component writes only its owned fields.
 
-`bounds.c` orchestrates aggregate initialization, fork, and destruction.
+`bounds_lifecycle.c` orchestrates aggregate initialization, fork, and
+destruction through typed store, query, difference, relation, and range
+operations. Leaf owners do not depend on lifecycle coordination.
 Initialization performs allocation-free query ownership setup, initializes
 dense variable storage, then performs allocation-free difference initialization
 before relation state and the direct range cache. Fork query ownership
@@ -1304,6 +1306,15 @@ the mutable index and variable arrays while their incident lists retain
 immutable edges in the common scratch-arena lifetime. Each stage consumes state
 published by its predecessors, and a failed fork is discarded as one
 aggregate.
+
+The former `bounds.c` monolith is fully deleted. Lizard function counts at the
+successive extraction checkpoints account for all 709 original residents:
+709 -> 708 -> 706 -> 672 -> 621 -> 570 -> 509 -> 445 -> 394 -> 308 -> 252 ->
+189 -> 122 -> 86 -> 9 -> 0. Each step either moved a body to the named owner
+above, folded it into that owner's typed operation, or deleted an impossible or
+duplicate state. The move-only checkpoints changed production C/H from 34,410
+to 34,605 CLOC; final coordination placement reduces that cumulative growth to
+192 CLOC. Later correctness and proof changes are accounted separately.
 
 Pure integer congruence residue, alignment, and interval-intersection helpers
 live with interval arithmetic in `interval.c`. `rational.c` owns exact
@@ -3199,9 +3210,8 @@ ixsimpl/
 │   ├── facts_query.c        # fact-set reads, simplification, public query API
 │   ├── facts_store.c        # persistent facts lifetime, transactions, closure
 │   ├── facts_store.h
-│   ├── bounds.c             # canonical aliases and aggregate coordination
 │   ├── bounds.h             # aggregate private bounds state
-│   ├── bounds_assume.c      # assumption validation and fact refinement
+│   ├── bounds_assume.c      # assumptions, aliases, and fact refinement
 │   ├── bounds_assume.h
 │   ├── bounds_bitfacts.c    # structural known-bit and power-of-two queries
 │   ├── bounds_bitfacts.h
@@ -3213,6 +3223,7 @@ ixsimpl/
 │   ├── bounds_equivalence.h
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
+│   ├── bounds_lifecycle.c   # aggregate initialization, fork, and destruction
 │   ├── bounds_modular.c     # paired-Mod exact-delta proof
 │   ├── bounds_modular.h
 │   ├── bounds_predicate.c   # tri-state and finite-domain predicate proof

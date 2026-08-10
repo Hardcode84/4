@@ -8,6 +8,7 @@
 #include "bounds_difference.h"
 #include "bounds_query.h"
 #include "bounds_store.h"
+#include "expand.h"
 #include "query_walk.h"
 #include "simplify.h"
 
@@ -16,6 +17,60 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+IXS_STATIC ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
+  ixs_node *cached, *canonical, *expanded;
+  ixs_arena_mark diag_mark;
+  const char **saved_errors;
+  size_t saved_nerrors, saved_errors_cap;
+  if (!b || !b->ctx || !expr || ixs_node_is_sentinel(expr))
+    return expr;
+  if (expr->tag == IXS_INT || expr->tag == IXS_RAT || expr->tag == IXS_SYM)
+    return expr;
+
+  cached = ixs_node_transform_cache_lookup(b->ctx, expr,
+                                           IXS_NODE_TRANSFORM_BOUNDS_CANONICAL);
+  if (cached)
+    return cached;
+
+  /* Canonical-alias attempts do not publish diagnostics into valid queries. */
+  diag_mark = ixs_arena_save(&b->ctx->diag);
+  saved_errors = b->ctx->errors;
+  saved_nerrors = b->ctx->nerrors;
+  saved_errors_cap = b->ctx->errors_cap;
+  expanded = expand_impl(b->ctx, expr);
+  canonical = expanded && !ixs_node_is_sentinel(expanded)
+                  ? simp_simplify_bounds(b->ctx, expanded, NULL)
+                  : expanded;
+  ixs_arena_restore(&b->ctx->diag, diag_mark);
+  b->ctx->errors = saved_errors;
+  b->ctx->nerrors = saved_nerrors;
+  b->ctx->errors_cap = saved_errors_cap;
+
+  if (!expanded) {
+    b->oom = true;
+    return expr;
+  }
+  if (ixs_node_is_sentinel(expanded))
+    return expr;
+  if (!canonical) {
+    b->oom = true;
+    return expr;
+  }
+  if (ixs_node_is_sentinel(canonical))
+    return expanded;
+  ixs_node_transform_cache_store(
+      b->ctx, expr, IXS_NODE_TRANSFORM_BOUNDS_CANONICAL, canonical);
+  return canonical;
+}
+
+IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
+                                            ixs_node *rhs, int64_t offset) {
+  if (!b || !lhs || !rhs || b->oom || b->contradiction)
+    return;
+  bounds_store_publish_relation_status(
+      b, ixs_relation_algebra_assert(&b->relations, lhs, rhs, offset));
+}
 
 /* Record sym == rem (mod m).  Merges with existing info via CRT.
  * Overflowing constraints are silently ignored.  Direct contradictions are
