@@ -1005,7 +1005,7 @@ c*D*ceil(E/D) - c*E                     → c*Mod(-E, D)    (D positive literal)
 
 (forward direction, in simp_add — cancel_floor_mod_pairs)
 ci*o*m*floor(E/m) + ci*o*Mod(E, m)      → ci*o*E
-                     when m is a positive literal or proven positive by facts
+                     without requiring a sign or nonzero proof for m
 F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
                      when m is a positive integer literal,
                      F/(C*m) is an exact rational greater than one,
@@ -1016,10 +1016,10 @@ c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
 ```
 
-An unknown symbolic `m` keeps the complete floor/Mod pair in the source DAG.
-The identity is valid only in the positive-divisor domain, so construction must
-not erase that obligation. Assumption-aware simplification returns an invalid
-result once facts prove `m <= 0`; an unknown sign remains unchanged.
+Exact floor/Mod cancellation is valid on every defined source evaluation. If
+the divisor is invalid, the source is poison and may refine to the replacement;
+domain-error detection is best effort. Partial cancellation still requires a
+positive integer literal because its residual algebra is not the exact identity.
 
 Bounds-aware elimination accepts symbolic integer moduli: proofs of `m > 0`,
 `x >= 0`, and `x-m < 0` reduce `Mod(x,m)` to `x`. Interval propagation also
@@ -1054,9 +1054,9 @@ two-term ADDs cancel during construction. Wider ADDs use one candidate-gated
 pass during explicit simplification, avoiding repeated scans while the sum is
 built term by term. During that explicit pass, a larger same-sign floor
 multiplier may consume exactly one floor-Mod identity. Requiring a positive
-literal modulus preserves the Mod definedness domain, and requiring a compact
-positive residual avoids expanding a smaller multiplier into a subtractive
-ADD. Fixed-point simplification can consume another identity on the next pass,
+literal modulus for partial cancellation and a compact positive residual avoids
+expanding a smaller multiplier into a subtractive ADD. Fixed-point
+simplification can consume another identity on the next pass,
 which exposes radix chains while every individual pass keeps the 256-probe
 bound. Failed arithmetic probes discard their private diagnostics; allocation
 failure remains visible as `NULL`, so retrying the same simplification is safe.
