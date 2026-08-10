@@ -29,6 +29,10 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
 IXS_STATIC void bounds_store_mark_semantic_changed(ixs_bounds *bounds);
 IXS_STATIC void bounds_store_mark_contradiction(ixs_bounds *bounds);
 IXS_STATIC void bounds_store_invalidate_reads(ixs_bounds *bounds);
+/* Publish one relation insertion result into store-owned latches and caches. */
+IXS_STATIC void
+bounds_store_publish_relation_status(ixs_bounds *bounds,
+                                     ixs_relation_status status);
 /* Returned var pointers are borrowed and invalidated by later var insertion or
  * growth.  Published dense indices remain stable. */
 IXS_STATIC ixs_var_bound *bounds_store_find_var(ixs_bounds *bounds,

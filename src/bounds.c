@@ -3,6 +3,7 @@
  */
 #include "bounds.h"
 #include "additive_row.h"
+#include "bounds_difference.h"
 #include "bounds_query.h"
 #include "bounds_range.h"
 #include "bounds_relation.h"
@@ -89,82 +90,7 @@ typedef struct {
   int64_t constant;
 } ixs_additive_constant_result;
 
-#define BOUNDS_DIFFERENCE_INDEX_INIT_CAP 8u
-#define BOUNDS_EQUALITY_WALK_INIT_CAP 16u
-#define BOUNDS_EQUALITY_PROJECTION_CACHE_INIT_CAP 64u
 #define FACT_WORK_INIT_CAP 64u
-
-/* lhs - rhs <= offset, equivalently the directed edge rhs -> lhs. Edge
- * objects are immutable after publication. Variable indices remain valid
- * across append-only table growth and transactional forks. */
-struct ixs_difference_constraint {
-  ixs_node *lhs;
-  ixs_node *rhs;
-  ixs_difference_constraint *next_lhs;
-  ixs_difference_constraint *next_rhs;
-  size_t lhs_var;
-  size_t rhs_var;
-  int64_t offset;
-};
-
-typedef ixs_relation_offset bounds_wide_offset;
-
-typedef struct {
-  ixs_node *node;
-  size_t endpoint_index;
-  /* Exact node - component-root offset. Signed magnitude preserves the
-   * transient +2^63 reverse of an INT64_MIN edge. */
-  bounds_wide_offset offset;
-} bounds_equality_walk_entry;
-
-typedef struct {
-  size_t endpoint_plus_one;
-  size_t entry_plus_one;
-} bounds_equality_seen_entry;
-
-typedef struct {
-  ixs_arena_mark mark;
-  bounds_equality_walk_entry *entries;
-  bounds_equality_seen_entry *seen;
-  size_t count;
-  size_t capacity;
-  size_t seen_count;
-  size_t seen_capacity;
-  bool initialized;
-} bounds_equality_walk;
-
-typedef enum {
-  BOUNDS_EQUALITY_WALK_NONE,
-  BOUNDS_EQUALITY_WALK_VALID,
-  BOUNDS_EQUALITY_WALK_UNREPRESENTABLE,
-  BOUNDS_EQUALITY_WALK_LIMITED,
-  BOUNDS_EQUALITY_WALK_CONFLICT,
-  BOUNDS_EQUALITY_WALK_INVALID,
-  BOUNDS_EQUALITY_WALK_OOM
-} bounds_equality_walk_status;
-
-typedef struct {
-  ixs_arena_mark mark;
-  size_t *queue;
-  size_t epoch;
-  size_t capacity;
-  size_t head;
-  size_t tail;
-  size_t count;
-} difference_worklist;
-
-typedef enum {
-  BOUNDS_EQUALITY_RECORD_INSERTED,
-  BOUNDS_EQUALITY_RECORD_MATCHED,
-  BOUNDS_EQUALITY_RECORD_CONFLICT,
-  BOUNDS_EQUALITY_RECORD_INVALID,
-  BOUNDS_EQUALITY_RECORD_OOM
-} bounds_equality_record_status;
-
-static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
-                                               const char *second);
-static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs, int64_t offset);
 static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 static ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
 static bool bounds_get_bitfacts_iterative(ixs_bounds *b, ixs_node *expr,
@@ -182,144 +108,16 @@ static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
 static ixs_check_result bounds_check_defined_detail(ixs_bounds *b,
                                                     ixs_node *expr, bool *oom,
                                                     bool *limited);
-static bool bounds_find_equality_endpoint(const ixs_bounds *b,
-                                          const ixs_node *expr,
-                                          size_t *endpoint_index);
-static bounds_equality_walk_status
-bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
-                                  bounds_equality_walk *walk,
-                                  bool require_defined);
-static bounds_equality_walk_status
-bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
-                       bounds_wide_offset *offset, bool require_defined);
-static bounds_equality_walk_status
-bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
-                                 int64_t *delta);
-static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
-                                           ixs_node *rhs, int64_t *delta);
-
-static size_t bounds_equality_projection_cache_hash(size_t endpoint_index) {
-  uint64_t mixed = (uint64_t)endpoint_index;
-  mixed ^= mixed >> 33;
-  mixed *= UINT64_C(0xff51afd7ed558ccd);
-  mixed ^= mixed >> 33;
-  return (size_t)mixed;
-}
-
-static bounds_equality_projection_cache_entry *
-bounds_equality_projection_cache_find(ixs_bounds *b, size_t endpoint_index,
-                                      bool *found) {
-  bounds_equality_projection_cache_entry *cache =
-      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
-  size_t slot;
-  if (!b->equality_projection_cache_capacity) {
-    *found = false;
-    return NULL;
-  }
-  slot = bounds_equality_projection_cache_hash(endpoint_index) &
-         (b->equality_projection_cache_capacity - 1u);
-  while (cache[slot].generation == b->equality_projection_cache_generation) {
-    bounds_equality_projection_cache_entry *entry = &cache[slot];
-    if (entry->endpoint_index == endpoint_index) {
-      *found = true;
-      return entry;
-    }
-    slot = (slot + 1u) & (b->equality_projection_cache_capacity - 1u);
-  }
-  *found = false;
-  return &cache[slot];
-}
-
-static bool bounds_equality_projection_cache_grow(ixs_bounds *b) {
-  bounds_equality_projection_cache_entry *grown;
-  bounds_equality_projection_cache_entry *cache =
-      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
-  ixs_arena *arena;
-  size_t capacity = b->equality_projection_cache_capacity
-                        ? b->equality_projection_cache_capacity * 2u
-                        : BOUNDS_EQUALITY_PROJECTION_CACHE_INIT_CAP;
-  size_t bytes;
-  size_t i;
-  if (capacity < b->equality_projection_cache_capacity ||
-      capacity > SIZE_MAX / sizeof(*grown)) {
-    b->oom = true;
-    return false;
-  }
-  bytes = capacity * sizeof(*grown);
-  arena = b->equality_projection_cache_transient ? &b->query_arena
-          : b->store_ctx                         ? &b->store_ctx->arena
-                                                 : &b->query_arena;
-  grown = ixs_arena_alloc(arena, bytes, sizeof(void *));
-  if (!grown) {
-    b->oom = true;
-    return false;
-  }
-  memset(grown, 0, bytes);
-  for (i = 0; i < b->equality_projection_cache_capacity; i++) {
-    bounds_equality_projection_cache_entry entry = cache[i];
-    size_t slot;
-    if (entry.generation != b->equality_projection_cache_generation)
-      continue;
-    slot = bounds_equality_projection_cache_hash(entry.endpoint_index) &
-           (capacity - 1u);
-    while (grown[slot].generation == b->equality_projection_cache_generation)
-      slot = (slot + 1u) & (capacity - 1u);
-    grown[slot] = entry;
-  }
-  b->equality_projection_cache = grown;
-  b->equality_projection_cache_capacity = capacity;
-  return true;
-}
-
-static bounds_equality_projection_cache_entry *
-bounds_equality_projection_cache_get(ixs_bounds *b, size_t endpoint_index,
-                                     bool create) {
-  bounds_equality_projection_cache_entry *entry;
-  bool found;
-  if (!bounds_query_is_tracking(b) || !b->query_state)
-    return NULL;
-  entry = bounds_equality_projection_cache_find(b, endpoint_index, &found);
-  if (found || !create)
-    return found ? entry : NULL;
-  if (!b->equality_projection_cache_capacity ||
-      b->equality_projection_cache_count + 1u >
-          b->equality_projection_cache_capacity -
-              b->equality_projection_cache_capacity / 4u) {
-    if (!bounds_equality_projection_cache_grow(b))
-      return NULL;
-    entry = bounds_equality_projection_cache_find(b, endpoint_index, &found);
-    assert(!found);
-  }
-  if (!entry) {
-    b->oom = true;
-    return NULL;
-  }
-  memset(entry, 0, sizeof(*entry));
-  entry->endpoint_index = endpoint_index;
-  entry->generation = b->equality_projection_cache_generation;
-  b->equality_projection_cache_count++;
-  return entry;
-}
-
-static bool bounds_equality_projection_cache_reserve(ixs_bounds *b,
-                                                     size_t additional) {
-  size_t needed;
-  if (!bounds_query_is_tracking(b))
-    return true;
-  if (!b->query_state ||
-      additional > SIZE_MAX - b->equality_projection_cache_count) {
-    b->oom = true;
-    return false;
-  }
-  needed = b->equality_projection_cache_count + additional;
-  while (!b->equality_projection_cache_capacity ||
-         needed > b->equality_projection_cache_capacity -
-                      b->equality_projection_cache_capacity / 4u) {
-    if (!bounds_equality_projection_cache_grow(b))
-      return false;
-  }
-  return true;
-}
+static ixs_algebra_status
+bounds_collect_relation_component(ixs_bounds *b, ixs_node *expr,
+                                  bounds_relation_component *component);
+static ixs_algebra_status
+bounds_relation_offset_checked(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
+                               ixs_relation_offset *offset);
+static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
+                                                           ixs_node *lhs,
+                                                           ixs_node *rhs,
+                                                           int64_t *delta);
 
 static bool bounds_cache_lookup(ixs_bounds *b, ixs_node *expr,
                                 ixs_interval *out) {
@@ -359,19 +157,12 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   bool store_initialized;
   bounds_query_init(b);
   store_initialized = bounds_store_init(b, scratch);
-  b->difference_index = NULL;
-  b->difference_vars = NULL;
-  b->ndifferences = 0;
-  b->ndifference_vars = 0;
-  b->difference_index_cap = 0;
-  b->difference_var_cap = 0;
-  b->difference_epoch = 0;
-  ixs_relation_algebra_init(&b->relations, scratch);
+  bounds_difference_init(b);
+  bounds_relation_init(b, scratch, true);
   b->oom = false;
   b->equality_disabled_depth = 0;
   b->predicate_equivalence_depth = 0;
   b->exact_proof_call_depth = 0;
-  bounds_relation_projection_init(b, true);
   bounds_range_init(b, store_initialized);
   return store_initialized;
 }
@@ -387,14 +178,15 @@ IXS_STATIC bool ixs_bounds_init_ctx(ixs_bounds *b, ixs_ctx *ctx,
 static void bounds_projection_cache_reset_storage(ixs_bounds *b,
                                                   bool transient) {
   bounds_query_reset_arena(b);
-  bounds_relation_projection_init(b, transient);
+  bounds_relation_projection_reset(b, transient);
 }
 
 IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
   if (!b)
     return;
   bounds_query_destroy(b);
-  bounds_relation_projection_destroy(b);
+  bounds_relation_destroy(b);
+  b->equality_disabled_depth = 0;
   b->predicate_equivalence_depth = 0;
   b->exact_proof_call_depth = 0;
 }
@@ -404,63 +196,26 @@ static void bounds_destroy_if_initialized(ixs_bounds *b, bool initialized) {
     ixs_bounds_destroy(b);
 }
 
-static bool bounds_fork_difference_state(ixs_bounds *dst,
-                                         const ixs_bounds *src) {
-  if (src->difference_index_cap) {
-    if (!src->difference_index ||
-        src->difference_index_cap > SIZE_MAX / sizeof(*dst->difference_index))
-      return false;
-    dst->difference_index = ixs_arena_alloc(dst->scratch,
-                                            src->difference_index_cap *
-                                                sizeof(*dst->difference_index),
-                                            sizeof(void *));
-    if (!dst->difference_index)
-      return false;
-    memcpy(dst->difference_index, src->difference_index,
-           src->difference_index_cap * sizeof(*src->difference_index));
-  }
-  if (src->difference_var_cap) {
-    if (!src->difference_vars ||
-        src->difference_var_cap > SIZE_MAX / sizeof(*dst->difference_vars))
-      return false;
-    dst->difference_vars = ixs_arena_alloc(
-        dst->scratch, src->difference_var_cap * sizeof(*dst->difference_vars),
-        sizeof(void *));
-    if (!dst->difference_vars)
-      return false;
-    memcpy(dst->difference_vars, src->difference_vars,
-           src->difference_var_cap * sizeof(*src->difference_vars));
-  }
-  return true;
-}
-
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   if (!dst || !src || src->oom)
     return false;
   bounds_query_init(dst);
   if (!bounds_store_fork_begin(dst, src))
     goto failed;
-  dst->difference_index = NULL;
-  dst->difference_vars = NULL;
-  dst->ndifferences = src->ndifferences;
-  dst->ndifference_vars = src->ndifference_vars;
-  dst->difference_index_cap = src->difference_index_cap;
-  dst->difference_var_cap = src->difference_var_cap;
-  dst->difference_epoch = src->difference_epoch;
-  ixs_relation_algebra_init(&dst->relations, dst->scratch);
+  bounds_difference_inherit_fork(dst, src);
+  bounds_relation_init(dst, dst->scratch, true);
   dst->oom = false;
   bounds_query_inherit_fork(dst, src);
-  bounds_relation_projection_inherit_fork(dst, src);
+  dst->equality_disabled_depth = src->equality_disabled_depth;
   /* A fork made by a nested query remains inside the source predicate probe;
    * inheriting the guard prevents the fork from reopening the same cycle. */
   dst->predicate_equivalence_depth = src->predicate_equivalence_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
   bounds_range_inherit_fork(dst, src);
   if (!bounds_store_fork_var_index(dst, src) ||
-      !bounds_fork_difference_state(dst, src) ||
+      !bounds_difference_clone_fork(dst, src) ||
       !bounds_store_fork_mod_inverse(dst, src) ||
-      ixs_relation_algebra_clone(&dst->relations, &src->relations,
-                                 dst->scratch) != IXS_RELATION_STATUS_OK ||
+      bounds_relation_clone_fork(dst, src) != IXS_RELATION_STATUS_OK ||
       !bounds_store_fork_expr(dst, src) || !bounds_store_fork_nonzero(dst, src))
     goto failed;
   return true;
@@ -476,7 +231,7 @@ failed:
 static void apply_modrem(ixs_bounds *b, const char *name, int64_t modulus,
                          int64_t remainder) {
   if (bounds_store_merge_modrem(b, name, modulus, remainder))
-    bounds_propagate_difference_bounds(b, name, NULL);
+    bounds_difference_propagate_symbol(b, name);
 }
 
 /* Recognize Mod(sym, M) == R as a modular congruence.
@@ -845,7 +600,7 @@ static void apply_sym_cmp_const(ixs_bounds *b, const char *name, ixs_cmp_op op,
     bounds_store_apply_exact_int_bits(b, v, cp);
   bounds_store_refine_var_bits(b, v);
   if (changed)
-    bounds_propagate_difference_bounds(b, name, NULL);
+    bounds_difference_propagate_symbol(b, name);
 }
 
 static bool node_get_int_const(ixs_node *n, int64_t *out) {
@@ -1130,285 +885,12 @@ static ixs_node *bounds_canonical_expr(ixs_bounds *b, ixs_node *expr) {
   return canonical;
 }
 
-/* Pointer hashing and bounded linear probing keep range lookup expected O(1).
- */
-
-/*
- * Rebuilds only at 75% load. Growth is amortized O(1), and publication stays
- * with the caller so a later dense-array allocation cannot split the index.
- */
-
-static bool bounds_find_equality_endpoint(const ixs_bounds *b,
-                                          const ixs_node *expr,
-                                          size_t *endpoint_index) {
-  return b && ixs_relation_algebra_find_endpoint(&b->relations, expr,
-                                                 endpoint_index);
-}
-
-static void bounds_add_exact_relation(ixs_bounds *b, ixs_node *lhs,
-                                      ixs_node *rhs, int64_t offset) {
-  ixs_relation_status status;
+static void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
+                                        ixs_node *rhs, int64_t offset) {
   if (!b || !lhs || !rhs || b->oom || b->contradiction)
     return;
-  status = ixs_relation_algebra_assert(&b->relations, lhs, rhs, offset);
-  switch (status) {
-  case IXS_RELATION_STATUS_ADDED:
-    bounds_store_mark_semantic_changed(b);
-    bounds_store_invalidate_reads(b);
-    return;
-  case IXS_RELATION_STATUS_OK:
-  case IXS_RELATION_STATUS_UNCHANGED:
-    return;
-  case IXS_RELATION_STATUS_CONFLICT:
-    bounds_store_mark_contradiction(b);
-    return;
-  case IXS_RELATION_STATUS_OOM:
-    b->oom = true;
-    return;
-  case IXS_RELATION_STATUS_UNREPRESENTABLE:
-    assert(!"invalid exact-relation insertion result");
-    abort();
-  }
-  assert(!"unknown exact-relation insertion result");
-  abort();
-}
-
-static void bounds_u64_mul_wide(uint64_t lhs, uint64_t rhs, uint64_t *lo,
-                                uint64_t *hi) {
-  const uint64_t mask = UINT64_C(0xffffffff);
-  uint64_t lhs_lo = lhs & mask;
-  uint64_t lhs_hi = lhs >> 32;
-  uint64_t rhs_lo = rhs & mask;
-  uint64_t rhs_hi = rhs >> 32;
-  uint64_t p0 = lhs_lo * rhs_lo;
-  uint64_t p1 = lhs_lo * rhs_hi;
-  uint64_t p2 = lhs_hi * rhs_lo;
-  uint64_t p3 = lhs_hi * rhs_hi;
-  uint64_t middle = (p0 >> 32) + (p1 & mask) + (p2 & mask);
-  *lo = (p0 & mask) | (middle << 32);
-  *hi = p3 + (p1 >> 32) + (p2 >> 32) + (middle >> 32);
-}
-
-/* Add an integer offset to p/q without first narrowing the offset. A
- * two-limb offset cannot cancel back into int64 once its high limb is set,
- * because |p| is at most 2^63 and q is positive. */
-static bool bounds_wide_offset_add_rational(bounds_wide_offset offset,
-                                            int64_t p, int64_t q,
-                                            int64_t *result_p) {
-  bounds_wide_offset scaled;
-  bounds_wide_offset sum;
-  if (q <= 0 || offset.hi != 0)
-    return false;
-  bounds_u64_mul_wide(offset.lo, (uint64_t)q, &scaled.lo, &scaled.hi);
-  scaled.negative = offset.negative;
-  if (!ixs_relation_offset_add(scaled, ixs_relation_offset_from_int64(p), &sum))
-    return false;
-  return ixs_relation_offset_to_int64(sum, result_p);
-}
-
-/* Projection bounds remain attached to their original peer.  Comparing them
- * in component coordinates must not first narrow the component-coordinate
- * value: a peer offset at an int64 boundary can cancel only when the result is
- * translated directly to the endpoint being queried.  Floor-splitting p/q
- * leaves a signed integer plus a nonnegative proper fraction.  Three limbs are
- * sufficient for a two-limb graph offset plus one int64 quotient. */
-typedef struct {
-  uint64_t lo;
-  uint64_t mid;
-  uint64_t hi;
-  bool negative;
-} bounds_projection_integer;
-
-typedef struct {
-  int64_t p;
-  int64_t q;
-  bounds_wide_offset peer_offset;
-  bool present;
-} bounds_projection_bound;
-
-static int
-bounds_projection_integer_magnitude_cmp(bounds_projection_integer lhs,
-                                        bounds_projection_integer rhs) {
-  if (lhs.hi != rhs.hi)
-    return lhs.hi < rhs.hi ? -1 : 1;
-  if (lhs.mid != rhs.mid)
-    return lhs.mid < rhs.mid ? -1 : 1;
-  if (lhs.lo != rhs.lo)
-    return lhs.lo < rhs.lo ? -1 : 1;
-  return 0;
-}
-
-static void bounds_projection_integer_subtract_magnitudes(
-    bounds_projection_integer larger, bounds_projection_integer smaller,
-    bounds_projection_integer *result) {
-  bool borrow_lo = larger.lo < smaller.lo;
-  uint64_t mid_subtrahend = smaller.mid + (borrow_lo ? 1u : 0u);
-  bool mid_subtrahend_overflow = mid_subtrahend < smaller.mid;
-  bool borrow_mid = mid_subtrahend_overflow || larger.mid < mid_subtrahend;
-  result->lo = larger.lo - smaller.lo;
-  result->mid = larger.mid - mid_subtrahend;
-  result->hi = larger.hi - smaller.hi - (borrow_mid ? 1u : 0u);
-}
-
-static void bounds_projection_integer_add(bounds_projection_integer lhs,
-                                          bounds_projection_integer rhs,
-                                          bounds_projection_integer *result) {
-  int magnitude_cmp;
-  if (lhs.negative == rhs.negative) {
-    bool carry_lo;
-    bool carry_mid;
-    result->lo = lhs.lo + rhs.lo;
-    carry_lo = result->lo < lhs.lo;
-    result->mid = lhs.mid + rhs.mid;
-    carry_mid = result->mid < lhs.mid;
-    if (carry_lo) {
-      uint64_t old_mid = result->mid;
-      result->mid++;
-      if (result->mid < old_mid)
-        carry_mid = true;
-    }
-    result->hi = lhs.hi + rhs.hi + (carry_mid ? 1u : 0u);
-    result->negative = lhs.negative;
-  } else {
-    magnitude_cmp = bounds_projection_integer_magnitude_cmp(lhs, rhs);
-    if (magnitude_cmp >= 0) {
-      bounds_projection_integer_subtract_magnitudes(lhs, rhs, result);
-      result->negative = lhs.negative;
-    } else {
-      bounds_projection_integer_subtract_magnitudes(rhs, lhs, result);
-      result->negative = rhs.negative;
-    }
-  }
-  if (result->lo == 0 && result->mid == 0 && result->hi == 0)
-    result->negative = false;
-}
-
-static int bounds_projection_integer_cmp(bounds_projection_integer lhs,
-                                         bounds_projection_integer rhs) {
-  int magnitude_cmp;
-  if (lhs.negative != rhs.negative)
-    return lhs.negative ? -1 : 1;
-  magnitude_cmp = bounds_projection_integer_magnitude_cmp(lhs, rhs);
-  return lhs.negative ? -magnitude_cmp : magnitude_cmp;
-}
-
-static bool bounds_projection_coordinate(int64_t p, int64_t q,
-                                         bounds_wide_offset peer_offset,
-                                         bounds_projection_integer *integer,
-                                         uint64_t *remainder) {
-  bounds_projection_integer quotient = {0, 0, 0, false};
-  bounds_projection_integer offset = {0, 0, 0, false};
-  uint64_t magnitude;
-  uint64_t denominator;
-  uint64_t quotient_magnitude;
-  uint64_t truncated_remainder;
-  if (q <= 0)
-    return false;
-  denominator = (uint64_t)q;
-  magnitude = ixs_int64_magnitude(p);
-  quotient_magnitude = magnitude / denominator;
-  truncated_remainder = magnitude % denominator;
-  if (p < 0 && truncated_remainder != 0) {
-    quotient_magnitude++;
-    *remainder = denominator - truncated_remainder;
-  } else {
-    *remainder = truncated_remainder;
-  }
-  quotient.lo = quotient_magnitude;
-  quotient.negative = p < 0 && quotient_magnitude != 0;
-  offset.lo = peer_offset.lo;
-  offset.mid = peer_offset.hi;
-  offset.negative =
-      !peer_offset.negative && (peer_offset.lo != 0 || peer_offset.hi != 0);
-  if (peer_offset.negative)
-    offset.negative = false;
-  bounds_projection_integer_add(quotient, offset, integer);
-  return true;
-}
-
-static bool bounds_projection_bound_cmp(int64_t lhs_p, int64_t lhs_q,
-                                        bounds_wide_offset lhs_offset,
-                                        int64_t rhs_p, int64_t rhs_q,
-                                        bounds_wide_offset rhs_offset,
-                                        int *result) {
-  bounds_projection_integer lhs_integer;
-  bounds_projection_integer rhs_integer;
-  uint64_t lhs_remainder;
-  uint64_t rhs_remainder;
-  uint64_t lhs_product_lo;
-  uint64_t lhs_product_hi;
-  uint64_t rhs_product_lo;
-  uint64_t rhs_product_hi;
-  int integer_cmp;
-  if (!bounds_projection_coordinate(lhs_p, lhs_q, lhs_offset, &lhs_integer,
-                                    &lhs_remainder) ||
-      !bounds_projection_coordinate(rhs_p, rhs_q, rhs_offset, &rhs_integer,
-                                    &rhs_remainder))
-    return false;
-  integer_cmp = bounds_projection_integer_cmp(lhs_integer, rhs_integer);
-  if (integer_cmp != 0) {
-    *result = integer_cmp;
-    return true;
-  }
-  bounds_u64_mul_wide(lhs_remainder, (uint64_t)rhs_q, &lhs_product_lo,
-                      &lhs_product_hi);
-  bounds_u64_mul_wide(rhs_remainder, (uint64_t)lhs_q, &rhs_product_lo,
-                      &rhs_product_hi);
-  if (lhs_product_hi != rhs_product_hi)
-    *result = lhs_product_hi < rhs_product_hi ? -1 : 1;
-  else if (lhs_product_lo != rhs_product_lo)
-    *result = lhs_product_lo < rhs_product_lo ? -1 : 1;
-  else
-    *result = 0;
-  return true;
-}
-
-static bool bounds_projection_delta(bounds_wide_offset endpoint_offset,
-                                    bounds_wide_offset peer_offset,
-                                    bounds_wide_offset *delta) {
-  return ixs_relation_offset_add(
-      endpoint_offset, ixs_relation_offset_negate(peer_offset), delta);
-}
-
-static ixs_interval bounds_projection_unbounded_interval(void) {
-  ixs_interval result = ixs_interval_exact(0, 1);
-  ixs_interval_set_lo_neg_inf(&result);
-  ixs_interval_set_hi_pos_inf(&result);
-  return result;
-}
-
-static ixs_interval
-bounds_projection_apply(ixs_interval intrinsic,
-                        bounds_wide_offset endpoint_offset,
-                        const bounds_projection_bound *lower,
-                        const bounds_projection_bound *upper) {
-  ixs_interval result =
-      intrinsic.valid ? intrinsic : bounds_projection_unbounded_interval();
-  bounds_wide_offset delta;
-  int64_t shifted;
-  if (lower->present) {
-    if (!bounds_projection_delta(endpoint_offset, lower->peer_offset, &delta) ||
-        !bounds_wide_offset_add_rational(delta, lower->p, lower->q, &shifted))
-      return ixs_interval_unknown();
-    if (result.lo_inf ||
-        ixs_rat_cmp(shifted, lower->q, result.lo_p, result.lo_q) > 0) {
-      result.lo_inf = false;
-      result.lo_p = shifted;
-      result.lo_q = lower->q;
-    }
-  }
-  if (upper->present) {
-    if (!bounds_projection_delta(endpoint_offset, upper->peer_offset, &delta) ||
-        !bounds_wide_offset_add_rational(delta, upper->p, upper->q, &shifted))
-      return ixs_interval_unknown();
-    if (result.hi_inf ||
-        ixs_rat_cmp(shifted, upper->q, result.hi_p, result.hi_q) < 0) {
-      result.hi_inf = false;
-      result.hi_p = shifted;
-      result.hi_q = upper->q;
-    }
-  }
-  return ixs_interval_is_empty(result) ? ixs_interval_unknown() : result;
+  bounds_store_publish_relation_status(
+      b, ixs_relation_algebra_assert(&b->relations, lhs, rhs, offset));
 }
 
 static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
@@ -1423,960 +905,159 @@ static ixs_check_result bounds_check_defined_without_equality(ixs_bounds *b,
   return result;
 }
 
-static bool bounds_equality_walk_init(ixs_bounds *b,
-                                      bounds_equality_walk *walk) {
-  memset(walk, 0, sizeof(*walk));
-  walk->mark = ixs_arena_save(b->scratch);
-  walk->initialized = true;
-  return true;
-}
-
-static void bounds_equality_walk_destroy(ixs_bounds *b,
-                                         bounds_equality_walk *walk) {
-  if (walk && walk->initialized) {
-    ixs_arena_restore(b->scratch, walk->mark);
-    walk->initialized = false;
-  }
-}
-
-static bool bounds_equality_walk_grow(ixs_bounds *b,
-                                      bounds_equality_walk *walk) {
-  bounds_equality_walk_entry *entries;
-  size_t capacity;
-  size_t old_bytes;
-  size_t new_bytes;
-  if (walk->count < walk->capacity)
-    return true;
-  capacity = walk->capacity ? walk->capacity : BOUNDS_EQUALITY_WALK_INIT_CAP;
-  if (walk->capacity) {
-    if (capacity > SIZE_MAX / 2u)
-      goto failed;
-    capacity *= 2u;
-  }
-  if (capacity > ixs_relation_algebra_endpoint_count(&b->relations))
-    capacity = ixs_relation_algebra_endpoint_count(&b->relations);
-  if (capacity <= walk->capacity ||
-      walk->capacity > SIZE_MAX / sizeof(*walk->entries) ||
-      capacity > SIZE_MAX / sizeof(*walk->entries))
-    goto failed;
-  old_bytes = walk->capacity * sizeof(*walk->entries);
-  new_bytes = capacity * sizeof(*walk->entries);
-  if (walk->entries) {
-    entries = ixs_arena_grow(b->scratch, walk->entries, old_bytes, new_bytes,
-                             sizeof(void *));
-  } else {
-    entries = ixs_arena_alloc(b->scratch, new_bytes, sizeof(void *));
-  }
-  if (!entries)
-    goto failed;
-  walk->entries = entries;
-  walk->capacity = capacity;
-  return true;
-
-failed:
-  b->oom = true;
-  return false;
-}
-
-static size_t bounds_equality_seen_hash(size_t endpoint_index) {
-  uint64_t x = (uint64_t)endpoint_index + UINT64_C(0x9e3779b97f4a7c15);
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
-static size_t bounds_equality_seen_slot(const bounds_equality_seen_entry *seen,
-                                        size_t capacity,
-                                        size_t endpoint_index) {
-  size_t endpoint_plus_one = endpoint_index + 1u;
-  size_t slot = bounds_equality_seen_hash(endpoint_index) & (capacity - 1u);
-  while (seen[slot].endpoint_plus_one &&
-         seen[slot].endpoint_plus_one != endpoint_plus_one)
-    slot = (slot + 1u) & (capacity - 1u);
-  return slot;
-}
-
-static bool bounds_equality_walk_find(const bounds_equality_walk *walk,
-                                      size_t endpoint_index,
-                                      size_t *entry_index) {
-  size_t slot;
-  if (!walk->seen_capacity)
-    return false;
-  slot = bounds_equality_seen_slot(walk->seen, walk->seen_capacity,
-                                   endpoint_index);
-  if (!walk->seen[slot].endpoint_plus_one)
-    return false;
-  if (!walk->seen[slot].entry_plus_one)
-    return false;
-  *entry_index = walk->seen[slot].entry_plus_one - 1u;
-  return true;
-}
-
-static bool bounds_equality_walk_prepare_seen(ixs_bounds *b,
-                                              bounds_equality_walk *walk) {
-  bounds_equality_seen_entry *seen;
-  size_t capacity = walk->seen_capacity;
-  size_t bytes;
-  size_t i;
-
-  if (capacity && walk->seen_count < capacity - capacity / 4u)
-    return true;
-  if (!capacity)
-    capacity = BOUNDS_EQUALITY_WALK_INIT_CAP;
-  else {
-    if (capacity > SIZE_MAX / 2u)
-      goto failed;
-    capacity *= 2u;
-  }
-  if (capacity > SIZE_MAX / sizeof(*seen))
-    goto failed;
-  bytes = capacity * sizeof(*seen);
-  seen = ixs_arena_alloc(b->scratch, bytes, sizeof(void *));
-  if (!seen)
-    goto failed;
-  memset(seen, 0, bytes);
-  for (i = 0; i < walk->seen_capacity; i++) {
-    size_t endpoint_index;
-    size_t slot;
-    if (!walk->seen[i].endpoint_plus_one)
-      continue;
-    endpoint_index = walk->seen[i].endpoint_plus_one - 1u;
-    slot = bounds_equality_seen_slot(seen, capacity, endpoint_index);
-    seen[slot] = walk->seen[i];
-  }
-  walk->seen = seen;
-  walk->seen_capacity = capacity;
-  return true;
-
-failed:
-  b->oom = true;
-  return false;
-}
-
-static bounds_equality_record_status
-bounds_equality_walk_record(ixs_bounds *b, bounds_equality_walk *walk,
-                            size_t endpoint_index, bounds_wide_offset offset) {
-  size_t entry_index;
-  size_t slot;
-  if (endpoint_index >= ixs_relation_algebra_endpoint_count(&b->relations))
-    return BOUNDS_EQUALITY_RECORD_INVALID;
-  if (bounds_equality_walk_find(walk, endpoint_index, &entry_index)) {
-    if (entry_index >= walk->count)
-      return BOUNDS_EQUALITY_RECORD_INVALID;
-    return ixs_relation_offset_equal(walk->entries[entry_index].offset, offset)
-               ? BOUNDS_EQUALITY_RECORD_MATCHED
-               : BOUNDS_EQUALITY_RECORD_CONFLICT;
-  }
-  if (!bounds_equality_walk_grow(b, walk) ||
-      !bounds_equality_walk_prepare_seen(b, walk))
-    return BOUNDS_EQUALITY_RECORD_OOM;
-  walk->entries[walk->count].node =
-      ixs_relation_algebra_endpoint_expr(&b->relations, endpoint_index);
-  walk->entries[walk->count].endpoint_index = endpoint_index;
-  walk->entries[walk->count].offset = offset;
-  slot = bounds_equality_seen_slot(walk->seen, walk->seen_capacity,
-                                   endpoint_index);
-  if (walk->seen[slot].endpoint_plus_one)
-    return BOUNDS_EQUALITY_RECORD_INVALID;
-  walk->seen[slot].endpoint_plus_one = endpoint_index + 1u;
-  walk->seen[slot].entry_plus_one = walk->count + 1u;
-  walk->seen_count++;
-  walk->count++;
-  return BOUNDS_EQUALITY_RECORD_INSERTED;
-}
-
-static bounds_equality_walk_status
-bounds_equality_require_defined(ixs_bounds *b, ixs_node *expr) {
+static ixs_algebra_status bounds_relation_require_defined(ixs_bounds *b,
+                                                          ixs_node *expr) {
   bool defined_oom = false;
   bool defined_limited = false;
   if (bounds_check_defined_without_equality(b, expr, &defined_oom,
                                             &defined_limited) == IXS_CHECK_TRUE)
-    return BOUNDS_EQUALITY_WALK_VALID;
+    return IXS_ALGEBRA_MATCH;
   if (defined_oom)
-    return BOUNDS_EQUALITY_WALK_OOM;
+    return IXS_ALGEBRA_OOM;
   if (!defined_limited)
-    return BOUNDS_EQUALITY_WALK_NONE;
+    return IXS_ALGEBRA_NO_MATCH;
   if (bounds_query_is_tracking(b))
     bounds_query_note_limit(b);
-  return BOUNDS_EQUALITY_WALK_LIMITED;
-}
-
-static bounds_equality_walk_status
-bounds_equality_walk_edge(ixs_bounds *b, bounds_equality_walk *walk,
-                          const bounds_equality_walk_entry *current,
-                          const ixs_relation_edge **edge_ptr,
-                          bool require_defined) {
-  const ixs_relation_edge *next;
-  ixs_node *neighbor;
-  size_t neighbor_endpoint;
-  size_t neighbor_entry;
-  bounds_wide_offset step;
-  bounds_wide_offset neighbor_offset;
-  bounds_equality_record_status record_status;
-  bounds_equality_walk_status defined_status;
-
-  if (ixs_relation_algebra_edge_neighbor(&b->relations, current->endpoint_index,
-                                         *edge_ptr, &neighbor_endpoint, &step,
-                                         &next) != IXS_RELATION_QUERY_FOUND ||
-      neighbor_endpoint >= ixs_relation_algebra_endpoint_count(&b->relations))
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  *edge_ptr = next;
-  neighbor =
-      ixs_relation_algebra_endpoint_expr(&b->relations, neighbor_endpoint);
-  if (!neighbor)
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  if (!bounds_equality_walk_find(walk, neighbor_endpoint, &neighbor_entry) &&
-      require_defined) {
-    defined_status = bounds_equality_require_defined(b, neighbor);
-    if (defined_status != BOUNDS_EQUALITY_WALK_VALID)
-      return defined_status;
-  }
-  if (!ixs_relation_offset_add(current->offset, step, &neighbor_offset)) {
-    bounds_query_note_invalid(b);
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  }
-  record_status =
-      bounds_equality_walk_record(b, walk, neighbor_endpoint, neighbor_offset);
-  if (record_status == BOUNDS_EQUALITY_RECORD_OOM)
-    return BOUNDS_EQUALITY_WALK_OOM;
-  if (record_status == BOUNDS_EQUALITY_RECORD_CONFLICT) {
-    bounds_query_note_invalid(b);
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  }
-  if (record_status == BOUNDS_EQUALITY_RECORD_INVALID)
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  return BOUNDS_EQUALITY_WALK_VALID;
+  return IXS_ALGEBRA_LIMITED;
 }
 
 /* Collect the independently defined component incident to expr. Traversal is
  * nonrecursive and grows with the component; there is no semantic walk cap. */
-static bounds_equality_walk_status
-bounds_collect_equality_component(ixs_bounds *b, ixs_node *expr,
-                                  bounds_equality_walk *walk,
-                                  bool require_defined) {
-  size_t head = 0;
+static ixs_algebra_status
+bounds_collect_relation_component(ixs_bounds *b, ixs_node *expr,
+                                  bounds_relation_component *component) {
+  bounds_relation_cursor_step step;
+  ixs_algebra_status status;
+  ixs_node *candidate;
   size_t root_endpoint;
-  bounds_equality_record_status record_status;
-  bounds_equality_walk_status status;
-  bounds_wide_offset zero = {0, 0, false};
-
-  memset(walk, 0, sizeof(*walk));
+  component->scratch = NULL;
   if (!b || !expr || ixs_relation_algebra_edge_count(&b->relations) == 0 ||
-      !bounds_find_equality_endpoint(b, expr, &root_endpoint))
-    return BOUNDS_EQUALITY_WALK_NONE;
-  if (require_defined) {
-    status = bounds_equality_require_defined(b, expr);
-    if (status != BOUNDS_EQUALITY_WALK_VALID)
-      return status;
-  }
-  if (!bounds_equality_walk_init(b, walk))
-    return BOUNDS_EQUALITY_WALK_OOM;
-  record_status = bounds_equality_walk_record(b, walk, root_endpoint, zero);
-  if (record_status == BOUNDS_EQUALITY_RECORD_OOM)
-    return BOUNDS_EQUALITY_WALK_OOM;
-  if (record_status == BOUNDS_EQUALITY_RECORD_CONFLICT ||
-      record_status == BOUNDS_EQUALITY_RECORD_INVALID)
-    return BOUNDS_EQUALITY_WALK_INVALID;
-
-  while (head < walk->count) {
-    bounds_equality_walk_entry current = walk->entries[head++];
-    const ixs_relation_edge *edge =
-        ixs_relation_algebra_first_edge(&b->relations, current.endpoint_index);
-    while (edge) {
-      status =
-          bounds_equality_walk_edge(b, walk, &current, &edge, require_defined);
-      if (status == BOUNDS_EQUALITY_WALK_NONE)
-        continue;
-      if (status != BOUNDS_EQUALITY_WALK_VALID)
-        return status;
+      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &root_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_relation_require_defined(b, expr);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  step = bounds_relation_component_begin(&b->relations, b->scratch,
+                                         root_endpoint, component);
+  for (;;) {
+    if (step == BOUNDS_RELATION_CURSOR_READY) {
+      step = bounds_relation_component_pull(component, &candidate);
+      continue;
     }
+    if (step == BOUNDS_RELATION_CURSOR_ADMISSION) {
+      status = bounds_relation_require_defined(b, candidate);
+      if (status == IXS_ALGEBRA_MATCH) {
+        step = bounds_relation_component_resolve(component, true);
+        continue;
+      }
+      if (status == IXS_ALGEBRA_NO_MATCH) {
+        step = bounds_relation_component_resolve(component, false);
+        continue;
+      }
+      return status;
+    }
+    if (step == BOUNDS_RELATION_CURSOR_COMPLETE)
+      return IXS_ALGEBRA_MATCH;
+    if (step == BOUNDS_RELATION_CURSOR_OOM) {
+      b->oom = true;
+      return IXS_ALGEBRA_OOM;
+    }
+    assert(step == BOUNDS_RELATION_CURSOR_INVALID);
+    bounds_query_note_invalid(b);
+    return IXS_ALGEBRA_INVALID;
   }
-  return BOUNDS_EQUALITY_WALK_VALID;
 }
 
 static bool
-bounds_publish_defined_equality_component(ixs_bounds *b,
-                                          const bounds_equality_walk *walk) {
-  size_t component;
-  size_t i;
-  if (!bounds_query_is_tracking(b) || !walk || walk->count == 0)
+bounds_publish_relation_component(ixs_bounds *b,
+                                  const bounds_relation_component *component) {
+  if (!bounds_query_is_tracking(b))
     return true;
-  if (!bounds_equality_projection_cache_reserve(b, walk->count))
+  if (!bounds_relation_component_publish_defined(b, component)) {
+    b->oom = true;
     return false;
-  component = walk->entries[0].endpoint_index;
-  for (i = 0; i < walk->count; i++) {
-    bounds_equality_projection_cache_entry *entry =
-        bounds_equality_projection_cache_get(b, walk->entries[i].endpoint_index,
-                                             true);
-    assert(entry != NULL);
-    entry->defined_component = component;
-    entry->defined_offset = walk->entries[i].offset;
-    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT;
   }
   return true;
 }
 
-static bounds_equality_walk_status
-bounds_relation_offset(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
-                       bounds_wide_offset *offset, bool require_defined) {
-  bounds_equality_walk walk;
-  bounds_equality_walk_status status;
-  bounds_equality_projection_cache_entry *lhs_cached;
-  bounds_equality_projection_cache_entry *rhs_cached;
+static ixs_algebra_status
+bounds_relation_offset_checked(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
+                               ixs_relation_offset *offset) {
+  bounds_relation_component component;
+  ixs_algebra_status status;
+  ixs_relation_query_status cached;
   size_t lhs_endpoint;
   size_t rhs_endpoint;
   size_t entry_index;
   if (!b || !lhs || !rhs || !offset || b->oom || b->contradiction)
-    return BOUNDS_EQUALITY_WALK_NONE;
+    return IXS_ALGEBRA_NO_MATCH;
   if (lhs == rhs) {
     *offset = ixs_relation_offset_from_int64(0);
-    return BOUNDS_EQUALITY_WALK_VALID;
+    return IXS_ALGEBRA_MATCH;
   }
-  if (!bounds_find_equality_endpoint(b, lhs, &lhs_endpoint))
-    return BOUNDS_EQUALITY_WALK_NONE;
-  if (require_defined && bounds_query_is_tracking(b) &&
-      bounds_find_equality_endpoint(b, rhs, &rhs_endpoint)) {
-    rhs_cached = bounds_equality_projection_cache_get(b, rhs_endpoint, false);
-    if (!rhs_cached || !(rhs_cached->completion &
-                         BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT)) {
-      status =
-          bounds_collect_equality_component(b, rhs, &walk, require_defined);
-      if (status != BOUNDS_EQUALITY_WALK_VALID) {
-        bounds_equality_walk_destroy(b, &walk);
+  if (!ixs_relation_algebra_find_endpoint(&b->relations, lhs, &lhs_endpoint))
+    return IXS_ALGEBRA_NO_MATCH;
+  if (bounds_query_is_tracking(b) &&
+      ixs_relation_algebra_find_endpoint(&b->relations, rhs, &rhs_endpoint)) {
+    cached =
+        bounds_relation_cached_offset(b, rhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_NONE) {
+      status = bounds_collect_relation_component(b, rhs, &component);
+      if (status != IXS_ALGEBRA_MATCH) {
+        bounds_relation_component_destroy(&component);
         return status;
       }
-      if (!bounds_publish_defined_equality_component(b, &walk)) {
-        bounds_equality_walk_destroy(b, &walk);
-        return BOUNDS_EQUALITY_WALK_OOM;
+      if (!bounds_publish_relation_component(b, &component)) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
       }
-      bounds_equality_walk_destroy(b, &walk);
-      rhs_cached = bounds_equality_projection_cache_get(b, rhs_endpoint, false);
-    }
-    lhs_cached = bounds_equality_projection_cache_get(b, lhs_endpoint, false);
-    if (!lhs_cached || !rhs_cached ||
-        !(lhs_cached->completion &
-          BOUNDS_PROJECTION_COMPLETE_DEFINED_COMPONENT) ||
-        lhs_cached->defined_component != rhs_cached->defined_component)
-      return BOUNDS_EQUALITY_WALK_NONE;
-    if (!ixs_relation_offset_add(
-            lhs_cached->defined_offset,
-            ixs_relation_offset_negate(rhs_cached->defined_offset), offset)) {
+      bounds_relation_component_destroy(&component);
+    } else if (cached == IXS_RELATION_QUERY_INVALID) {
       bounds_query_note_invalid(b);
-      return BOUNDS_EQUALITY_WALK_INVALID;
+      return IXS_ALGEBRA_INVALID;
     }
-    return BOUNDS_EQUALITY_WALK_VALID;
+    cached =
+        bounds_relation_cached_offset(b, lhs_endpoint, rhs_endpoint, offset);
+    if (cached == IXS_RELATION_QUERY_INVALID) {
+      bounds_query_note_invalid(b);
+      return IXS_ALGEBRA_INVALID;
+    }
+    return cached == IXS_RELATION_QUERY_FOUND ? IXS_ALGEBRA_MATCH
+                                              : IXS_ALGEBRA_NO_MATCH;
   }
-  status = bounds_collect_equality_component(b, rhs, &walk, require_defined);
-  if (status != BOUNDS_EQUALITY_WALK_VALID) {
-    bounds_equality_walk_destroy(b, &walk);
+  status = bounds_collect_relation_component(b, rhs, &component);
+  if (status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
     return status;
   }
-  if (!bounds_equality_walk_find(&walk, lhs_endpoint, &entry_index)) {
-    bounds_equality_walk_destroy(b, &walk);
-    return BOUNDS_EQUALITY_WALK_NONE;
+  if (!bounds_relation_component_find(&component, lhs_endpoint, &entry_index)) {
+    bounds_relation_component_destroy(&component);
+    return IXS_ALGEBRA_NO_MATCH;
   }
-  if (entry_index >= walk.count) {
-    bounds_equality_walk_destroy(b, &walk);
-    return BOUNDS_EQUALITY_WALK_INVALID;
-  }
-  *offset = walk.entries[entry_index].offset;
-  bounds_equality_walk_destroy(b, &walk);
-  return BOUNDS_EQUALITY_WALK_VALID;
+  *offset = component.entries[entry_index].offset;
+  bounds_relation_component_destroy(&component);
+  return IXS_ALGEBRA_MATCH;
 }
 
-static bounds_equality_walk_status
-bounds_exact_relation_difference(ixs_bounds *b, ixs_node *lhs, ixs_node *rhs,
-                                 int64_t *delta) {
-  bounds_equality_walk_status status;
-  bounds_wide_offset offset;
+static ixs_algebra_status bounds_exact_relation_difference(ixs_bounds *b,
+                                                           ixs_node *lhs,
+                                                           ixs_node *rhs,
+                                                           int64_t *delta) {
+  ixs_algebra_status status;
+  ixs_relation_offset offset;
   if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction)
-    return BOUNDS_EQUALITY_WALK_NONE;
+    return IXS_ALGEBRA_NO_MATCH;
   /* Preserve the weighted symbol forest as the hot path. */
-  if (bounds_exact_symbol_difference(b, lhs, rhs, delta))
-    return BOUNDS_EQUALITY_WALK_VALID;
-  status = bounds_relation_offset(b, lhs, rhs, &offset, true);
-  if (status != BOUNDS_EQUALITY_WALK_VALID)
+  if (lhs->tag == IXS_SYM && rhs->tag == IXS_SYM &&
+      ixs_relation_algebra_total_symbol_difference(&b->relations, lhs, rhs,
+                                                   delta))
+    return IXS_ALGEBRA_MATCH;
+  status = bounds_relation_offset_checked(b, lhs, rhs, &offset);
+  if (status != IXS_ALGEBRA_MATCH)
     return status;
   if (!ixs_relation_offset_to_int64(offset, delta))
-    return BOUNDS_EQUALITY_WALK_UNREPRESENTABLE;
-  return BOUNDS_EQUALITY_WALK_VALID;
-}
-
-static size_t bounds_difference_hash(ixs_node *lhs, ixs_node *rhs,
-                                     int64_t offset) {
-  uint64_t x = (uint64_t)ixs_hash_ptr(lhs);
-  x ^= (uint64_t)ixs_hash_ptr(rhs) + UINT64_C(0x9e3779b97f4a7c15) + (x << 6) +
-       (x >> 2);
-  x ^= (uint64_t)offset + UINT64_C(0x9e3779b97f4a7c15) + (x << 6) + (x >> 2);
-  x ^= x >> 33;
-  x *= UINT64_C(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  return (size_t)x;
-}
-
-/* Exact-edge lookup is expected O(1); growth rehashes at 75% load. */
-static size_t
-bounds_difference_index_slot(ixs_difference_constraint *const *index,
-                             size_t capacity, ixs_node *lhs, ixs_node *rhs,
-                             int64_t offset) {
-  size_t slot = bounds_difference_hash(lhs, rhs, offset) & (capacity - 1u);
-  while (index[slot] && (index[slot]->lhs != lhs || index[slot]->rhs != rhs ||
-                         index[slot]->offset != offset))
-    slot = (slot + 1u) & (capacity - 1u);
-  return slot;
-}
-
-static bool
-bounds_prepare_difference_index(ixs_bounds *b, size_t count,
-                                ixs_difference_constraint ***prepared,
-                                size_t *prepared_capacity) {
-  size_t capacity = b->difference_index_cap;
-  ixs_difference_constraint **index;
-  size_t i;
-
-  if (capacity && count <= capacity - capacity / 4u) {
-    *prepared = b->difference_index;
-    *prepared_capacity = capacity;
-    return true;
-  }
-  if (!capacity)
-    capacity = BOUNDS_DIFFERENCE_INDEX_INIT_CAP;
-  while (count > capacity - capacity / 4u) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (capacity > SIZE_MAX / sizeof(*index))
-    return false;
-  index =
-      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
-  if (!index)
-    return false;
-  memset(index, 0, capacity * sizeof(*index));
-  for (i = 0; i < b->difference_index_cap; i++) {
-    ixs_difference_constraint *edge = b->difference_index[i];
-    size_t slot;
-    if (!edge)
-      continue;
-    slot = bounds_difference_index_slot(index, capacity, edge->lhs, edge->rhs,
-                                        edge->offset);
-    index[slot] = edge;
-  }
-  *prepared = index;
-  *prepared_capacity = capacity;
-  return true;
-}
-
-/* Relation metadata is absent from non-relational fact sets. Geometric growth
- * keeps appending graph variables amortized O(1) while stable var indices keep
- * the parallel table independent of var-array relocation. */
-static bool bounds_prepare_difference_vars(ixs_bounds *b, size_t count) {
-  ixs_difference_var *vars;
-  size_t capacity = b->difference_var_cap;
-  size_t old_bytes;
-  size_t new_bytes;
-
-  if (count <= capacity)
-    return true;
-  if (!capacity)
-    capacity = 1u;
-  while (capacity < count) {
-    if (capacity > SIZE_MAX / 2u)
-      return false;
-    capacity *= 2u;
-  }
-  if (b->difference_var_cap > SIZE_MAX / sizeof(*vars) ||
-      capacity > SIZE_MAX / sizeof(*vars))
-    return false;
-  old_bytes = b->difference_var_cap * sizeof(*vars);
-  new_bytes = capacity * sizeof(*vars);
-  vars = ixs_arena_grow(b->scratch, b->difference_vars, old_bytes, new_bytes,
-                        sizeof(void *));
-  if (!vars)
-    return false;
-  memset(vars + b->difference_var_cap, 0,
-         (capacity - b->difference_var_cap) * sizeof(*vars));
-  b->difference_vars = vars;
-  b->difference_var_cap = capacity;
-  return true;
-}
-
-static bool bounds_exact_symbol_difference(ixs_bounds *b, ixs_node *lhs,
-                                           ixs_node *rhs, int64_t *delta) {
-  ixs_relation_query_status status;
-  if (!b || !lhs || !rhs || !delta || b->oom || b->contradiction ||
-      lhs->tag != IXS_SYM || rhs->tag != IXS_SYM)
-    return false;
-  status = ixs_relation_algebra_total_offset(&b->relations, lhs, rhs, delta);
-  if (status == IXS_RELATION_QUERY_FOUND)
-    return true;
-  if (status == IXS_RELATION_QUERY_NONE ||
-      status == IXS_RELATION_QUERY_UNREPRESENTABLE)
-    return false;
-  assert(!"invalid certified exact-relation topology");
-  abort();
-}
-
-static bool bounds_difference_worklist_init(ixs_bounds *b,
-                                            difference_worklist *work) {
-  size_t count = b->ndifference_vars;
-  memset(work, 0, sizeof(*work));
-  work->mark = ixs_arena_save(b->scratch);
-  work->capacity = count;
-  if (count == 0)
-    return true;
-  if (b->difference_epoch == SIZE_MAX ||
-      count > SIZE_MAX / sizeof(*work->queue)) {
-    b->oom = true;
-    return false;
-  }
-  work->epoch = ++b->difference_epoch;
-  work->queue =
-      ixs_arena_alloc(b->scratch, count * sizeof(*work->queue), sizeof(void *));
-  if (!work->queue) {
-    ixs_arena_restore(b->scratch, work->mark);
-    b->oom = true;
-    return false;
-  }
-  return true;
-}
-
-static void bounds_difference_worklist_destroy(ixs_bounds *b,
-                                               difference_worklist *work) {
-  ixs_arena_restore(b->scratch, work->mark);
-}
-
-static bool bounds_difference_var_active(const ixs_bounds *b,
-                                         size_t var_index) {
-  const ixs_difference_var *var;
-  if (var_index >= b->nvars || var_index >= b->difference_var_cap)
-    return false;
-  var = &b->difference_vars[var_index];
-  return var->incoming || var->outgoing;
-}
-
-static bool bounds_difference_enqueue(ixs_bounds *b, difference_worklist *work,
-                                      size_t var_index) {
-  ixs_difference_var *var;
-  if (var_index >= b->nvars)
-    return false;
-  if (!bounds_difference_var_active(b, var_index))
-    return true;
-  var = &b->difference_vars[var_index];
-  if (var->queue_epoch == work->epoch)
-    return true;
-  if (work->count >= work->capacity)
-    return false;
-  work->queue[work->tail] = var_index;
-  work->tail = (work->tail + 1u) % work->capacity;
-  work->count++;
-  var->queue_epoch = work->epoch;
-  return true;
-}
-
-static size_t bounds_difference_pop(ixs_bounds *b, difference_worklist *work) {
-  size_t var_index = work->queue[work->head];
-  work->head = (work->head + 1u) % work->capacity;
-  work->count--;
-  b->difference_vars[var_index].queue_epoch = 0;
-  return var_index;
-}
-
-/* Existing potentials satisfy every published edge. Adding one edge can only
- * invalidate paths containing that edge. A strictly improving path of nvars
- * edges repeats a vertex, so its repeated segment is a negative cycle. The
- * work is proportional to the affected directed component and has no semantic
- * iteration cap. */
-static bool bounds_validate_difference_edge(ixs_bounds *b, size_t lhs_var,
-                                            size_t rhs_var, int64_t offset) {
-  difference_worklist work;
-  int64_t candidate;
-
-  if (!ixs_safe_add(b->difference_vars[rhs_var].potential, offset,
-                    &candidate)) {
-    b->oom = true;
-    return false;
-  }
-  if (b->difference_vars[lhs_var].potential <= candidate)
-    return true;
-  if (!bounds_difference_worklist_init(b, &work))
-    return false;
-
-  b->difference_vars[lhs_var].potential = candidate;
-  b->difference_vars[lhs_var].hops = 1u;
-  if (!bounds_difference_enqueue(b, &work, lhs_var)) {
-    b->oom = true;
-    bounds_difference_worklist_destroy(b, &work);
-    return false;
-  }
-
-  while (work.count && !b->contradiction && !b->oom) {
-    size_t source = bounds_difference_pop(b, &work);
-    ixs_difference_constraint *edge = b->difference_vars[source].outgoing;
-    while (edge) {
-      size_t target = edge->lhs_var;
-      if (!ixs_safe_add(b->difference_vars[source].potential, edge->offset,
-                        &candidate)) {
-        b->oom = true;
-        break;
-      }
-      if (b->difference_vars[target].potential > candidate) {
-        if (b->difference_vars[source].hops >= b->ndifference_vars - 1u) {
-          bounds_store_mark_contradiction(b);
-          break;
-        }
-        b->difference_vars[target].potential = candidate;
-        b->difference_vars[target].hops = b->difference_vars[source].hops + 1u;
-        if (!bounds_difference_enqueue(b, &work, target)) {
-          b->oom = true;
-          break;
-        }
-      }
-      edge = edge->next_rhs;
-    }
-  }
-  bounds_difference_worklist_destroy(b, &work);
-  return !b->oom;
-}
-
-static bool bounds_refine_var_upper(ixs_bounds *b, ixs_var_bound *v,
-                                    int64_t upper) {
-  ixs_interval refined;
-  if (!v ||
-      (!v->iv.hi_inf && ixs_rat_cmp(upper, 1, v->iv.hi_p, v->iv.hi_q) >= 0))
-    return false;
-  refined = v->iv;
-  refined.hi_p = upper;
-  refined.hi_q = 1;
-  refined.hi_inf = false;
-  (void)bounds_store_set_var_interval(b, v, refined);
-  bounds_store_invalidate_reads(b);
-  bounds_store_refine_var_bits(b, v);
-  return true;
-}
-
-static bool bounds_refine_var_lower(ixs_bounds *b, ixs_var_bound *v,
-                                    int64_t lower) {
-  ixs_interval refined;
-  if (!v ||
-      (!v->iv.lo_inf && ixs_rat_cmp(lower, 1, v->iv.lo_p, v->iv.lo_q) <= 0))
-    return false;
-  refined = v->iv;
-  refined.lo_p = lower;
-  refined.lo_q = 1;
-  refined.lo_inf = false;
-  (void)bounds_store_set_var_interval(b, v, refined);
-  bounds_store_invalidate_reads(b);
-  bounds_store_refine_var_bits(b, v);
-  return true;
-}
-
-static ixs_interval bounds_get_difference_symbol(ixs_bounds *b,
-                                                 ixs_var_bound *var,
-                                                 ixs_node *symbol) {
-  ixs_interval iv = var->iv;
-  if (b->nexprs) {
-    ixs_node *canon;
-    iv = iv_intersect(iv, bounds_store_expr_interval(b, symbol));
-    canon = bounds_canonical_expr(b, symbol);
-    if (canon && canon != symbol)
-      iv = iv_intersect(iv, bounds_store_expr_interval(b, canon));
-  }
-  if (var->modulus > 0)
-    iv = ixs_interval_intersect_congruence(iv, var->modulus, var->remainder);
-  return iv;
-}
-
-static bool bounds_propagate_difference_upper(ixs_bounds *b,
-                                              difference_worklist *work,
-                                              size_t var_index) {
-  ixs_difference_constraint *edge = b->difference_vars[var_index].outgoing;
-  ixs_var_bound *var = &b->vars[var_index];
-  ixs_interval iv;
-  int64_t endpoint;
-  int64_t derived;
-  if (!edge)
-    return true;
-  iv = bounds_get_difference_symbol(b, var, edge->rhs);
-  if (!iv.valid || iv.hi_inf)
-    return !b->oom;
-  endpoint = ixs_rat_floor(iv.hi_p, iv.hi_q);
-  while (edge && !b->contradiction) {
-    if (ixs_safe_add(endpoint, edge->offset, &derived) &&
-        bounds_refine_var_upper(b, &b->vars[edge->lhs_var], derived) &&
-        !bounds_difference_enqueue(b, work, edge->lhs_var)) {
-      b->oom = true;
-      return false;
-    }
-    edge = edge->next_rhs;
-  }
-  return !b->oom;
-}
-
-static bool bounds_propagate_difference_lower(ixs_bounds *b,
-                                              difference_worklist *work,
-                                              size_t var_index) {
-  ixs_difference_constraint *edge = b->difference_vars[var_index].incoming;
-  ixs_var_bound *var = &b->vars[var_index];
-  ixs_interval iv;
-  int64_t endpoint;
-  int64_t derived;
-  if (!edge)
-    return true;
-  iv = bounds_get_difference_symbol(b, var, edge->lhs);
-  if (!iv.valid || iv.lo_inf)
-    return !b->oom;
-  endpoint = ixs_rat_ceil(iv.lo_p, iv.lo_q);
-  while (edge && !b->contradiction) {
-    if (ixs_safe_sub(endpoint, edge->offset, &derived) &&
-        bounds_refine_var_lower(b, &b->vars[edge->rhs_var], derived) &&
-        !bounds_difference_enqueue(b, work, edge->rhs_var)) {
-      b->oom = true;
-      return false;
-    }
-    edge = edge->next_lhs;
-  }
-  return !b->oom;
-}
-
-/* Existing edges are already closed. An insertion needs an endpoint worklist
- * only when the new edge itself can tighten one of its endpoints. */
-static bool
-bounds_difference_edge_can_refine(ixs_bounds *b,
-                                  const ixs_difference_constraint *edge) {
-  ixs_interval iv;
-  int64_t endpoint;
-  int64_t derived;
-
-  iv = bounds_get_difference_symbol(b, &b->vars[edge->rhs_var], edge->rhs);
-  if (iv.valid && !iv.hi_inf) {
-    endpoint = ixs_rat_floor(iv.hi_p, iv.hi_q);
-    if (ixs_safe_add(endpoint, edge->offset, &derived) &&
-        (b->vars[edge->lhs_var].iv.hi_inf ||
-         ixs_rat_cmp(derived, 1, b->vars[edge->lhs_var].iv.hi_p,
-                     b->vars[edge->lhs_var].iv.hi_q) < 0))
-      return true;
-  }
-
-  iv = bounds_get_difference_symbol(b, &b->vars[edge->lhs_var], edge->lhs);
-  if (!iv.valid || iv.lo_inf)
-    return false;
-  endpoint = ixs_rat_ceil(iv.lo_p, iv.lo_q);
-  return ixs_safe_sub(endpoint, edge->offset, &derived) &&
-         (b->vars[edge->rhs_var].iv.lo_inf ||
-          ixs_rat_cmp(derived, 1, b->vars[edge->rhs_var].iv.lo_p,
-                      b->vars[edge->rhs_var].iv.lo_q) > 0);
-}
-
-static bool bounds_propagate_difference_indices(ixs_bounds *b, size_t first,
-                                                size_t second,
-                                                bool have_second) {
-  difference_worklist work;
-  bool first_active;
-  bool second_active;
-
-  if (!b || b->oom || b->contradiction || b->ndifferences == 0)
-    return true;
-  first_active = bounds_difference_var_active(b, first);
-  second_active =
-      have_second && second != first && bounds_difference_var_active(b, second);
-  if (!first_active && !second_active)
-    return true;
-  if (!bounds_difference_worklist_init(b, &work))
-    return false;
-  if ((first_active && !bounds_difference_enqueue(b, &work, first)) ||
-      (second_active && !bounds_difference_enqueue(b, &work, second))) {
-    b->oom = true;
-    bounds_difference_worklist_destroy(b, &work);
-    return false;
-  }
-
-  /* Each strict interval refinement schedules only its adjacent variable.
-   * With a feasible graph, closure is finite and costs the successful
-   * relaxations plus the incident edges they inspect. */
-  while (work.count && !b->oom && !b->contradiction) {
-    size_t var_index = bounds_difference_pop(b, &work);
-    if (!bounds_propagate_difference_upper(b, &work, var_index) ||
-        b->contradiction ||
-        !bounds_propagate_difference_lower(b, &work, var_index))
-      break;
-  }
-  bounds_difference_worklist_destroy(b, &work);
-  return !b->oom;
-}
-
-static void bounds_propagate_difference_bounds(ixs_bounds *b, const char *first,
-                                               const char *second) {
-  ixs_var_bound *first_var;
-  ixs_var_bound *second_var = NULL;
-  size_t first_index;
-  size_t second_index = 0;
-  if (!b || b->oom || !first || b->ndifferences == 0)
-    return;
-  first_var = bounds_store_find_var(b, first);
-  if (!first_var)
-    return;
-  first_index = (size_t)(first_var - b->vars);
-  if (second && second != first) {
-    second_var = bounds_store_find_var(b, second);
-    if (second_var)
-      second_index = (size_t)(second_var - b->vars);
-  }
-  (void)bounds_propagate_difference_indices(b, first_index, second_index,
-                                            second_var != NULL);
-}
-
-static bool bounds_register_exact_reverse(
-    ixs_bounds *b, ixs_difference_constraint *const *index,
-    size_t index_capacity, ixs_node *lhs, ixs_node *rhs, int64_t offset) {
-  ixs_relation_status relation_status;
-  int64_t reverse_offset;
-  size_t slot;
-  if (!ixs_safe_neg(offset, &reverse_offset))
-    return true;
-  slot = bounds_difference_index_slot(index, index_capacity, rhs, lhs,
-                                      reverse_offset);
-  if (!index[slot])
-    return true;
-  bounds_add_exact_relation(b, lhs, rhs, offset);
-  if (b->oom || b->contradiction)
-    return false;
-  relation_status =
-      ixs_relation_algebra_certify_total(&b->relations, lhs, rhs, offset);
-  switch (relation_status) {
-  case IXS_RELATION_STATUS_ADDED:
-    bounds_store_mark_semantic_changed(b);
-    bounds_store_invalidate_reads(b);
-    return true;
-  case IXS_RELATION_STATUS_OK:
-  case IXS_RELATION_STATUS_UNCHANGED:
-  case IXS_RELATION_STATUS_UNREPRESENTABLE:
-    return true;
-  case IXS_RELATION_STATUS_CONFLICT:
-    bounds_store_mark_contradiction(b);
-    return false;
-  case IXS_RELATION_STATUS_OOM:
-    b->oom = true;
-    return false;
-  }
-  assert(!"unknown certified exact-relation insertion result");
-  abort();
-}
-
-static void bounds_add_difference_constraint(ixs_bounds *b, ixs_node *lhs,
-                                             ixs_node *rhs, int64_t offset) {
-  ixs_difference_constraint **index;
-  ixs_difference_constraint *edge;
-  size_t lhs_var;
-  size_t rhs_var;
-  size_t index_capacity;
-  size_t new_vertices;
-  size_t slot;
-
-  if (!b || !lhs || !rhs || lhs == rhs || lhs->tag != IXS_SYM ||
-      rhs->tag != IXS_SYM || b->oom || b->contradiction)
-    return;
-  if (b->difference_index_cap) {
-    slot = bounds_difference_index_slot(
-        b->difference_index, b->difference_index_cap, lhs, rhs, offset);
-    if (b->difference_index[slot])
-      return;
-  }
-  if (!bounds_store_get_or_create_var_index(b, lhs->u.name, &lhs_var) ||
-      !bounds_store_get_or_create_var_index(b, rhs->u.name, &rhs_var) ||
-      b->ndifferences == SIZE_MAX ||
-      !bounds_prepare_difference_vars(b, b->nvars) ||
-      !bounds_prepare_difference_index(b, b->ndifferences + 1u, &index,
-                                       &index_capacity)) {
-    b->oom = true;
-    return;
-  }
-  new_vertices = (!b->difference_vars[lhs_var].incoming &&
-                  !b->difference_vars[lhs_var].outgoing) +
-                 (!b->difference_vars[rhs_var].incoming &&
-                  !b->difference_vars[rhs_var].outgoing);
-  if (b->ndifference_vars > SIZE_MAX - new_vertices) {
-    b->oom = true;
-    return;
-  }
-  edge = ixs_arena_alloc(b->scratch, sizeof(*edge), sizeof(void *));
-  if (!edge) {
-    b->oom = true;
-    return;
-  }
-  edge->lhs = lhs;
-  edge->rhs = rhs;
-  edge->next_lhs = b->difference_vars[lhs_var].incoming;
-  edge->next_rhs = b->difference_vars[rhs_var].outgoing;
-  edge->lhs_var = lhs_var;
-  edge->rhs_var = rhs_var;
-  edge->offset = offset;
-  b->difference_vars[lhs_var].incoming = edge;
-  b->difference_vars[rhs_var].outgoing = edge;
-  b->difference_index = index;
-  b->difference_index_cap = index_capacity;
-  slot = bounds_difference_index_slot(index, index_capacity, lhs, rhs, offset);
-  index[slot] = edge;
-  b->ndifferences++;
-  b->ndifference_vars += new_vertices;
-  bounds_store_mark_semantic_changed(b);
-  bounds_store_invalidate_reads(b);
-  if (!bounds_validate_difference_edge(b, lhs_var, rhs_var, offset) ||
-      b->contradiction)
-    return;
-  if (!bounds_register_exact_reverse(b, index, index_capacity, lhs, rhs,
-                                     offset) ||
-      b->contradiction)
-    return;
-  if (bounds_difference_edge_can_refine(b, edge))
-    (void)bounds_propagate_difference_indices(b, lhs_var, rhs_var, true);
-}
-
-static bool bounds_extract_unit_difference(ixs_node *expr, ixs_node **lhs,
-                                           ixs_node **rhs, int64_t *constant) {
-  ixs_node *positive;
-  ixs_node *negative;
-  if (!expr || expr->tag != IXS_ADD)
-    return false;
-  if (!ixs_additive_row_unit_pair(expr, &positive, &negative, constant) ||
-      positive->tag != IXS_SYM || negative->tag != IXS_SYM)
-    return false;
-  *lhs = positive;
-  *rhs = negative;
-  return true;
-}
-
-static bool bounds_exact_unit_difference_value(ixs_bounds *b, ixs_node *expr,
-                                               int64_t *value) {
-  ixs_node *lhs;
-  ixs_node *rhs;
-  int64_t constant;
-  int64_t difference;
-  return bounds_extract_unit_difference(expr, &lhs, &rhs, &constant) &&
-         bounds_exact_symbol_difference(b, lhs, rhs, &difference) &&
-         ixs_safe_add(constant, difference, value);
-}
-
-static void bounds_add_difference_range(ixs_bounds *b, ixs_node *expr,
-                                        ixs_interval iv) {
-  ixs_node *lhs;
-  ixs_node *rhs;
-  int64_t constant;
-  int64_t endpoint;
-  int64_t offset;
-  if (!iv.valid || !bounds_extract_unit_difference(expr, &lhs, &rhs, &constant))
-    return;
-  if (!iv.hi_inf) {
-    endpoint = ixs_rat_floor(iv.hi_p, iv.hi_q);
-    if (ixs_safe_sub(endpoint, constant, &offset))
-      bounds_add_difference_constraint(b, lhs, rhs, offset);
-  }
-  if (!b->oom && !b->contradiction && !iv.lo_inf) {
-    endpoint = ixs_rat_ceil(iv.lo_p, iv.lo_q);
-    if (ixs_safe_sub(constant, endpoint, &offset))
-      bounds_add_difference_constraint(b, rhs, lhs, offset);
-  }
+    return IXS_ALGEBRA_UNREPRESENTABLE;
+  return IXS_ALGEBRA_MATCH;
 }
 
 static void bounds_add_proportional_range(ixs_bounds *b, ixs_node *expr,
@@ -2493,7 +1174,7 @@ static bool bounds_refine_symbol_from_mod_range(ixs_bounds *b, ixs_node *mod,
   bounds_store_refine_var_bits(b, domain.var);
   bounds_store_add_expr_raw(b, domain.symbol, refined);
   if (!b->oom)
-    bounds_propagate_difference_bounds(b, domain.symbol->u.name, NULL);
+    bounds_difference_propagate_symbol(b, domain.symbol->u.name);
   return !b->oom;
 }
 
@@ -2696,7 +1377,7 @@ static void bounds_refine_symbol_from_floor_range(ixs_bounds *b,
   bounds_store_refine_var_bits(b, var);
   bounds_store_add_expr_raw(b, symbol, refined);
   if (!b->oom)
-    bounds_propagate_difference_bounds(b, symbol->u.name, NULL);
+    bounds_difference_propagate_symbol(b, symbol->u.name);
   if (!b->oom && !b->contradiction)
     bounds_refine_mod_inverse_symbol(b, symbol);
 }
@@ -2737,15 +1418,15 @@ static bool bounds_propagate_added_expr_ranges(ixs_bounds *b, ixs_node *expr,
     bounds_sync_raw_symbol_range(b, canon);
   if (b->oom || b->contradiction)
     return false;
-  bounds_add_difference_range(b, expr, iv);
+  bounds_difference_add_range(b, expr, iv);
   if (canon && canon != expr)
-    bounds_add_difference_range(b, canon, iv);
+    bounds_difference_add_range(b, canon, iv);
   if (b->oom || b->contradiction)
     return false;
   if (expr->tag == IXS_SYM)
-    bounds_propagate_difference_bounds(b, expr->u.name, NULL);
+    bounds_difference_propagate_symbol(b, expr->u.name);
   if (canon && canon != expr && canon->tag == IXS_SYM)
-    bounds_propagate_difference_bounds(b, canon->u.name, NULL);
+    bounds_difference_propagate_symbol(b, canon->u.name);
   return !b->oom && !b->contradiction;
 }
 
@@ -2964,11 +1645,13 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
 
   if (op == IXS_CMP_EQ) {
     if (bounds_extract_cmp_exact_relation(b, a, &equality_lhs, &equality_rhs,
-                                          &equality_offset))
-      bounds_add_exact_relation(b, equality_lhs, equality_rhs, equality_offset);
-    else if (!b->oom &&
-             extract_cmp_node_equality(a, &equality_lhs, &equality_rhs))
-      bounds_add_exact_relation(b, equality_lhs, equality_rhs, 0);
+                                          &equality_offset)) {
+      bounds_admit_exact_relation(b, equality_lhs, equality_rhs,
+                                  equality_offset);
+    } else if (!b->oom &&
+               extract_cmp_node_equality(a, &equality_lhs, &equality_rhs)) {
+      bounds_admit_exact_relation(b, equality_lhs, equality_rhs, 0);
+    }
     if (b->oom || b->contradiction)
       return;
   }
@@ -4462,36 +3145,34 @@ bounds_check_integer_valued_without_equality(ixs_bounds *b, ixs_node *expr) {
 
 static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
                                                         ixs_node *expr) {
-  bounds_equality_walk walk;
-  bounds_equality_walk_status status;
-  bounds_equality_projection_cache_entry *cached;
+  bounds_relation_component component;
+  ixs_algebra_status status;
+  ixs_check_result cached;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   ixs_bounds_transport_snapshot transport =
       ixs_bounds_query_transport_snapshot(b);
   size_t endpoint_index;
   size_t i;
 
-  if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
+  if (!ixs_relation_algebra_find_endpoint(&b->relations, expr, &endpoint_index))
     return bounds_check_integer_valued_without_equality(b, expr);
-  cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  if (cached && (cached->completion & BOUNDS_PROJECTION_COMPLETE_INTEGER) != 0)
-    return cached->integer;
-  status = bounds_collect_equality_component(b, expr, &walk, true);
-  if (status == BOUNDS_EQUALITY_WALK_NONE)
+  if (bounds_query_is_tracking(b) &&
+      bounds_relation_projection_lookup_integer(b, endpoint_index, &cached))
+    return cached;
+  status = bounds_collect_relation_component(b, expr, &component);
+  if (status == IXS_ALGEBRA_NO_MATCH)
     return bounds_check_integer_valued_without_equality(b, expr);
-  if (status != BOUNDS_EQUALITY_WALK_VALID) {
-    if (status == BOUNDS_EQUALITY_WALK_INVALID)
-      bounds_query_note_invalid(b);
-    bounds_equality_walk_destroy(b, &walk);
+  if (status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
     return IXS_CHECK_UNKNOWN;
   }
-  if (!bounds_publish_defined_equality_component(b, &walk)) {
-    bounds_equality_walk_destroy(b, &walk);
+  if (!bounds_publish_relation_component(b, &component)) {
+    bounds_relation_component_destroy(&component);
     return IXS_CHECK_UNKNOWN;
   }
-  for (i = 0; i < walk.count; i++) {
-    ixs_check_result current =
-        bounds_check_integer_valued_without_equality(b, walk.entries[i].node);
+  for (i = 0; i < component.count; i++) {
+    ixs_check_result current = bounds_check_integer_valued_without_equality(
+        b, component.entries[i].node);
     if (b->oom) {
       result = IXS_CHECK_UNKNOWN;
       break;
@@ -4506,26 +3187,16 @@ static ixs_check_result bounds_project_equality_integer(ixs_bounds *b,
   }
   if (bounds_query_limited_since(b, transport)) {
     result = IXS_CHECK_UNKNOWN;
-  } else if (!b->oom) {
-    for (i = 0; i < walk.count; i++) {
-      bounds_equality_projection_cache_entry *entry =
-          bounds_equality_projection_cache_get(
-              b, walk.entries[i].endpoint_index, true);
-      if (!entry) {
-        assert(!bounds_query_is_tracking(b));
-        continue;
-      }
-      entry->integer = result;
-      entry->completion |= BOUNDS_PROJECTION_COMPLETE_INTEGER;
-    }
-  }
-  bounds_equality_walk_destroy(b, &walk);
+  } else if (!b->oom && bounds_query_is_tracking(b))
+    bounds_relation_projection_complete_integer_component(b, &component,
+                                                          result);
+  bounds_relation_component_destroy(&component);
   if (b->oom)
     return IXS_CHECK_UNKNOWN;
-  cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  return cached &&
-                 (cached->completion & BOUNDS_PROJECTION_COMPLETE_INTEGER) != 0
-             ? cached->integer
+  return bounds_query_is_tracking(b) &&
+                 bounds_relation_projection_lookup_integer(b, endpoint_index,
+                                                           &cached)
+             ? cached
              : result;
 }
 
@@ -5069,7 +3740,7 @@ bounds_residue_direct_independent(bounds_residue_query *query,
     return bounds_residue_complete(query, false, 0);
   }
   if (node->tag == IXS_ADD &&
-      bounds_exact_unit_difference_value(current, node, &exact)) {
+      bounds_difference_exact_unit_value(current, node, &exact)) {
     return bounds_residue_complete(
         query, true, ixs_int64_normalize_residue(exact, frame->modulus));
   }
@@ -5111,7 +3782,7 @@ bounds_residue_direct_tracked(bounds_residue_query *query,
   /* Structural ADD skips recursive interval propagation, but an exact unit
    * difference is an O(1) producer invariant and retains its affine offset. */
   if (node->tag == IXS_ADD &&
-      bounds_exact_unit_difference_value(current, node, &exact)) {
+      bounds_difference_exact_unit_value(current, node, &exact)) {
     return bounds_residue_complete(
         query, true, ixs_int64_normalize_residue(exact, frame->modulus));
   }
@@ -6782,9 +5453,9 @@ static ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr) {
   }
   if (var && var->modulus > 0)
     iv = ixs_interval_intersect_congruence(iv, var->modulus, var->remainder);
-  if (bounds_exact_unit_difference_value(b, expr, &exact) ||
+  if (bounds_difference_exact_unit_value(b, expr, &exact) ||
       (canon && canon != expr &&
-       bounds_exact_unit_difference_value(b, canon, &exact)))
+       bounds_difference_exact_unit_value(b, canon, &exact)))
     iv = iv_intersect(iv, ixs_interval_exact(exact, 1));
   if (bounds_cacheable_expr(expr))
     bounds_cache_store(b, expr, iv);
@@ -6801,59 +5472,54 @@ static ixs_interval bounds_get_without_equality(ixs_bounds *b, ixs_node *expr) {
 }
 
 typedef struct {
-  bounds_projection_bound lower;
-  bounds_projection_bound upper;
+  bounds_relation_projection_bound lower;
+  bounds_relation_projection_bound upper;
   bool have_valid;
   bool publish;
   bool semantic_conflict;
 } bounds_equality_range_state;
 
-static bool
-bounds_equality_range_collect_peer(ixs_bounds *b,
-                                   const bounds_equality_walk_entry *walk_entry,
-                                   bounds_equality_range_state *state) {
-  ixs_interval peer = bounds_get_without_equality(b, walk_entry->node);
-  bounds_equality_projection_cache_entry *entry;
+static bool bounds_equality_range_collect_peer(
+    ixs_bounds *b, const bounds_relation_component_entry *component_entry,
+    bounds_equality_range_state *state) {
+  ixs_interval peer = bounds_get_without_equality(b, component_entry->node);
   int comparison;
 
   if (b->oom)
     return false;
-  entry =
-      bounds_equality_projection_cache_get(b, walk_entry->endpoint_index, true);
-  if (bounds_query_is_tracking(b) && !entry)
-    return false;
-  if (entry)
-    entry->range = peer;
+  if (bounds_query_is_tracking(b))
+    bounds_relation_projection_stage_range(b, component_entry->endpoint_index,
+                                           peer);
   if (!peer.valid)
     return true;
   state->have_valid = true;
   if (!peer.lo_inf) {
     if (state->lower.present &&
-        !bounds_projection_bound_cmp(peer.lo_p, peer.lo_q, walk_entry->offset,
-                                     state->lower.p, state->lower.q,
-                                     state->lower.peer_offset, &comparison)) {
+        !bounds_relation_projection_bound_cmp(
+            peer.lo_p, peer.lo_q, component_entry->offset, state->lower.p,
+            state->lower.q, state->lower.peer_offset, &comparison)) {
       bounds_query_note_invalid(b);
       return false;
     }
     if (!state->lower.present || comparison > 0) {
       state->lower.p = peer.lo_p;
       state->lower.q = peer.lo_q;
-      state->lower.peer_offset = walk_entry->offset;
+      state->lower.peer_offset = component_entry->offset;
       state->lower.present = true;
     }
   }
   if (!peer.hi_inf) {
     if (state->upper.present &&
-        !bounds_projection_bound_cmp(peer.hi_p, peer.hi_q, walk_entry->offset,
-                                     state->upper.p, state->upper.q,
-                                     state->upper.peer_offset, &comparison)) {
+        !bounds_relation_projection_bound_cmp(
+            peer.hi_p, peer.hi_q, component_entry->offset, state->upper.p,
+            state->upper.q, state->upper.peer_offset, &comparison)) {
       bounds_query_note_invalid(b);
       return false;
     }
     if (!state->upper.present || comparison < 0) {
       state->upper.p = peer.hi_p;
       state->upper.q = peer.hi_q;
-      state->upper.peer_offset = walk_entry->offset;
+      state->upper.peer_offset = component_entry->offset;
       state->upper.present = true;
     }
   }
@@ -6862,11 +5528,11 @@ bounds_equality_range_collect_peer(ixs_bounds *b,
 
 static void
 bounds_equality_range_collect_peers(ixs_bounds *b,
-                                    const bounds_equality_walk *walk,
+                                    const bounds_relation_component *component,
                                     bounds_equality_range_state *state) {
   size_t i;
-  for (i = 0; i < walk->count; i++) {
-    if (!bounds_equality_range_collect_peer(b, &walk->entries[i], state)) {
+  for (i = 0; i < component->count; i++) {
+    if (!bounds_equality_range_collect_peer(b, &component->entries[i], state)) {
       state->publish = false;
       break;
     }
@@ -6878,10 +5544,10 @@ static void bounds_equality_range_validate(ixs_bounds *b,
   int comparison;
   if (!state->publish || !state->lower.present || !state->upper.present)
     return;
-  if (!bounds_projection_bound_cmp(state->lower.p, state->lower.q,
-                                   state->lower.peer_offset, state->upper.p,
-                                   state->upper.q, state->upper.peer_offset,
-                                   &comparison)) {
+  if (!bounds_relation_projection_bound_cmp(
+          state->lower.p, state->lower.q, state->lower.peer_offset,
+          state->upper.p, state->upper.q, state->upper.peer_offset,
+          &comparison)) {
     bounds_query_note_invalid(b);
     state->publish = false;
     return;
@@ -6890,33 +5556,30 @@ static void bounds_equality_range_validate(ixs_bounds *b,
 }
 
 static ixs_interval
-bounds_equality_range_publish(ixs_bounds *b, const bounds_equality_walk *walk,
+bounds_equality_range_publish(ixs_bounds *b,
+                              const bounds_relation_component *component,
                               size_t endpoint_index, ixs_interval intrinsic,
                               const bounds_equality_range_state *state) {
   ixs_interval result = ixs_interval_unknown();
+  bool tracking = bounds_query_is_tracking(b);
   size_t i;
-  for (i = 0; state->publish && !b->oom && i < walk->count; i++) {
-    bounds_equality_projection_cache_entry *entry =
-        bounds_equality_projection_cache_get(b, walk->entries[i].endpoint_index,
-                                             true);
+  for (i = 0; state->publish && !b->oom && i < component->count; i++) {
     ixs_interval projected = ixs_interval_unknown();
-    if (bounds_query_is_tracking(b) && !entry)
-      break;
-    if (!state->semantic_conflict && state->have_valid) {
+    bool project = !state->semantic_conflict && state->have_valid;
+    if (tracking) {
+      projected = bounds_relation_projection_complete_range(
+          b, component->entries[i].endpoint_index, component->entries[i].offset,
+          &state->lower, &state->upper, project);
+    } else if (project) {
       ixs_interval peer_intrinsic =
-          entry ? entry->range
-                : (walk->entries[i].endpoint_index == endpoint_index
-                       ? intrinsic
-                       : ixs_interval_unknown());
-      projected =
-          bounds_projection_apply(peer_intrinsic, walk->entries[i].offset,
-                                  &state->lower, &state->upper);
+          component->entries[i].endpoint_index == endpoint_index
+              ? intrinsic
+              : ixs_interval_unknown();
+      projected = bounds_relation_projection_apply(
+          peer_intrinsic, component->entries[i].offset, &state->lower,
+          &state->upper);
     }
-    if (entry) {
-      entry->range = projected;
-      entry->completion |= BOUNDS_PROJECTION_COMPLETE_RANGE;
-    }
-    if (walk->entries[i].endpoint_index == endpoint_index)
+    if (component->entries[i].endpoint_index == endpoint_index)
       result = projected;
   }
   return result;
@@ -6925,44 +5588,42 @@ bounds_equality_range_publish(ixs_bounds *b, const bounds_equality_walk *walk,
 /* Project peer ranges back through node == expr + offset. */
 static ixs_interval bounds_project_equality_range(ixs_bounds *b, ixs_node *expr,
                                                   ixs_interval intrinsic) {
-  bounds_equality_walk walk;
-  bounds_equality_walk_status status;
-  bounds_equality_projection_cache_entry *cached;
+  bounds_relation_component component;
+  ixs_algebra_status status;
   bounds_equality_range_state state = {{0, 1, {0, 0, false}, false},
                                        {0, 1, {0, 0, false}, false},
                                        false,
                                        true,
                                        false};
+  ixs_interval cached;
   ixs_interval result;
   ixs_bounds_transport_snapshot transport =
       ixs_bounds_query_transport_snapshot(b);
   size_t endpoint_index;
 
-  if (!bounds_find_equality_endpoint(b, expr, &endpoint_index))
+  if (!ixs_relation_algebra_find_endpoint(&b->relations, expr, &endpoint_index))
     return intrinsic;
-  cached = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  if (cached && (cached->completion & BOUNDS_PROJECTION_COMPLETE_RANGE) != 0)
-    return cached->range;
-  status = bounds_collect_equality_component(b, expr, &walk, true);
-  if (status == BOUNDS_EQUALITY_WALK_NONE)
+  if (bounds_query_is_tracking(b) &&
+      bounds_relation_projection_lookup_range(b, endpoint_index, &cached))
+    return cached;
+  status = bounds_collect_relation_component(b, expr, &component);
+  if (status == IXS_ALGEBRA_NO_MATCH)
     return intrinsic;
-  if (status != BOUNDS_EQUALITY_WALK_VALID) {
-    if (status == BOUNDS_EQUALITY_WALK_INVALID)
-      bounds_query_note_invalid(b);
-    bounds_equality_walk_destroy(b, &walk);
+  if (status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
     return ixs_interval_unknown();
   }
-  if (!bounds_publish_defined_equality_component(b, &walk)) {
-    bounds_equality_walk_destroy(b, &walk);
+  if (!bounds_publish_relation_component(b, &component)) {
+    bounds_relation_component_destroy(&component);
     return ixs_interval_unknown();
   }
-  bounds_equality_range_collect_peers(b, &walk, &state);
+  bounds_equality_range_collect_peers(b, &component, &state);
   if (bounds_query_limited_since(b, transport))
     state.publish = false;
   bounds_equality_range_validate(b, &state);
-  result = bounds_equality_range_publish(b, &walk, endpoint_index, intrinsic,
-                                         &state);
-  bounds_equality_walk_destroy(b, &walk);
+  result = bounds_equality_range_publish(b, &component, endpoint_index,
+                                         intrinsic, &state);
+  bounds_relation_component_destroy(&component);
   return b->oom ? ixs_interval_unknown() : result;
 }
 
@@ -8665,47 +7326,26 @@ static ixs_check_result defined_eval(defined_state *state, ixs_bounds *b,
 
 static bool bounds_defined_cache_lookup(ixs_bounds *b, ixs_node *expr,
                                         ixs_check_result *result) {
-  bounds_equality_projection_cache_entry *entry;
   size_t endpoint_index;
   bool without_equality;
   if (!bounds_query_is_tracking(b) || !b->query_state ||
-      !bounds_find_equality_endpoint(b, expr, &endpoint_index))
-    return false;
-  entry = bounds_equality_projection_cache_get(b, endpoint_index, false);
-  if (!entry)
+      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &endpoint_index))
     return false;
   without_equality = b->equality_disabled_depth != 0;
-  if (without_equality &&
-      (entry->completion &
-       BOUNDS_PROJECTION_COMPLETE_DEFINED_WITHOUT_EQUALITY) != 0) {
-    *result = entry->defined_without_equality;
-    return true;
-  }
-  if (!without_equality &&
-      (entry->completion & BOUNDS_PROJECTION_COMPLETE_DEFINED_WITH_EQUALITY) !=
-          0) {
-    *result = entry->defined_with_equality;
-    return true;
-  }
-  return false;
+  return bounds_relation_projection_lookup_defined(b, endpoint_index,
+                                                   without_equality, result);
 }
 
 static bool bounds_defined_cache_publish(ixs_bounds *b, ixs_node *expr,
                                          ixs_check_result result) {
-  bounds_equality_projection_cache_entry *entry;
   size_t endpoint_index;
   if (!bounds_query_is_tracking(b) || !b->query_state ||
-      !bounds_find_equality_endpoint(b, expr, &endpoint_index))
+      !ixs_relation_algebra_find_endpoint(&b->relations, expr, &endpoint_index))
     return true;
-  entry = bounds_equality_projection_cache_get(b, endpoint_index, true);
-  if (!entry)
+  if (!bounds_relation_projection_complete_defined(
+          b, endpoint_index, b->equality_disabled_depth != 0, result)) {
+    b->oom = true;
     return false;
-  if (b->equality_disabled_depth != 0) {
-    entry->defined_without_equality = result;
-    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_WITHOUT_EQUALITY;
-  } else {
-    entry->defined_with_equality = result;
-    entry->completion |= BOUNDS_PROJECTION_COMPLETE_DEFINED_WITH_EQUALITY;
   }
   return true;
 }
@@ -9291,10 +7931,6 @@ static void facts_poison(ixs_facts *facts) {
 }
 
 static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
-  void *projection_cache = facts->bounds.equality_projection_cache;
-  size_t projection_capacity = facts->bounds.equality_projection_cache_capacity;
-  uint32_t projection_generation =
-      facts->bounds.equality_projection_cache_generation;
   /* A fork's projection memo is query-local and cannot be transferred into the
    * committed bounds.  Destroy it, then reuse the destination's persistent
    * table allocation after advancing its semantic generation once. */
@@ -9304,8 +7940,9 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
   /* Read queries restore their temporary allocations but may retain arena
    * chunks for reuse.  A commit replaces the complete bounds object, so
    * release that old workspace before overwriting its arena owner. */
-  bounds_projection_cache_reset_storage(&facts->bounds, false);
-  bounds_projection_cache_reset_storage(candidate, false);
+  bounds_query_reset_arena(&facts->bounds);
+  bounds_query_reset_arena(candidate);
+  bounds_relation_projection_commit(&facts->bounds, candidate);
   assert(candidate->query_state_arena.current == NULL &&
          candidate->query_state_arena.spare == NULL &&
          candidate->query_state_arena.inline_chunk == NULL);
@@ -9320,10 +7957,6 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
          facts->bounds.query_arena.inline_chunk == NULL);
   candidate->cache = facts->bounds.cache;
   candidate->cache_cap = facts->bounds.cache_cap;
-  candidate->equality_projection_cache = projection_cache;
-  candidate->equality_projection_cache_count = 0;
-  candidate->equality_projection_cache_capacity = projection_capacity;
-  candidate->equality_projection_cache_generation = projection_generation;
   bounds_store_invalidate_reads(candidate);
   facts->bounds = *candidate;
 }
@@ -9360,7 +7993,7 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
       return;
     bounds_store_import_var(dst, v, src);
     bounds_store_refine_var_bits(dst, v);
-    bounds_propagate_difference_bounds(dst, src->name, NULL);
+    bounds_difference_propagate_symbol(dst, src->name);
     return;
   }
 
@@ -9371,7 +8004,7 @@ static void bounds_add_var_fact(ixs_bounds *dst, const ixs_var_bound *src) {
                                     src->bits.known_one);
   bounds_store_apply_pow2(dst, v, src->bits.pow2);
   if (changed)
-    bounds_propagate_difference_bounds(dst, src->name, NULL);
+    bounds_difference_propagate_symbol(dst, src->name);
 }
 
 static void bounds_add_var_interval(ixs_bounds *dst, const char *name,
@@ -9803,8 +8436,8 @@ ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
 
 static bool facts_bounds_is_empty_domain(const ixs_bounds *bounds) {
   return bounds && bounds->nvars == 0 && bounds->nexprs == 0 &&
-         bounds->nmod_inverse_watchers == 0 && bounds->ndifferences == 0 &&
-         bounds->ndifference_vars == 0 &&
+         bounds->nmod_inverse_watchers == 0 &&
+         bounds_difference_is_empty(bounds) &&
          ixs_relation_algebra_endpoint_count(&bounds->relations) == 0 &&
          ixs_relation_algebra_edge_count(&bounds->relations) == 0 &&
          ixs_relation_algebra_total_count(&bounds->relations) == 0 &&
@@ -10583,7 +9216,7 @@ static bool bounds_transfer_substituted_equalities(
                           replacements);
     if (!lhs || !rhs || ixs_node_is_sentinel(lhs) || ixs_node_is_sentinel(rhs))
       return false;
-    bounds_add_exact_relation(dst, lhs, rhs, ixs_relation_edge_offset(edge));
+    bounds_admit_exact_relation(dst, lhs, rhs, ixs_relation_edge_offset(edge));
     if (dst->oom)
       return false;
   }
@@ -12898,7 +11531,7 @@ static bool bounds_delta_try_expanded(bounds_delta_query *query,
 static void bounds_delta_step_initial(bounds_delta_query *query,
                                       size_t frame_index) {
   bounds_delta_frame *frame = &query->frames[frame_index];
-  bounds_equality_walk_status relation_status;
+  ixs_algebra_status relation_status;
   int64_t relation_delta;
   ixs_node *difference;
   bool lhs_oom = false;
@@ -12922,24 +11555,19 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
   }
   relation_status = bounds_exact_relation_difference(
       query->bounds, frame->lhs, frame->rhs, &relation_delta);
-  if (relation_status == BOUNDS_EQUALITY_WALK_VALID) {
+  if (relation_status == IXS_ALGEBRA_MATCH) {
     bounds_delta_complete(query, true, relation_delta);
     return;
   }
-  if (relation_status == BOUNDS_EQUALITY_WALK_OOM) {
+  if (relation_status == IXS_ALGEBRA_OOM) {
     query->oom = true;
     return;
   }
-  if (relation_status == BOUNDS_EQUALITY_WALK_LIMITED) {
+  if (relation_status == IXS_ALGEBRA_LIMITED) {
     query->limited = true;
     return;
   }
-  if (relation_status == BOUNDS_EQUALITY_WALK_CONFLICT) {
-    bounds_store_mark_contradiction(query->bounds);
-    bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (relation_status == BOUNDS_EQUALITY_WALK_INVALID) {
+  if (relation_status == IXS_ALGEBRA_INVALID) {
     query->invalid = true;
     bounds_delta_complete(query, false, 0);
     return;

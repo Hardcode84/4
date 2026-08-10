@@ -1224,21 +1224,31 @@ non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 `bounds_store.c` owns retained variable records, expression ranges, nonzero
 facts, name and expression indexes, modular-inverse watchers, and their raw
-mutation operations. Canonicalization, predicate ingestion, difference
-propagation, and proof policy remain in `bounds.c` and pass canonical node or
-symbol identities into the store. `bounds_range.c` owns the empty-result,
-direct interval, and Piecewise range-cache lifecycle. `bounds_relation.c` owns
-the equality-projection cache lifecycle. Full store invalidation refreshes the
-central query owner, clears range caches, then clears relation projections;
-each leaf component writes only its owned fields.
+mutation operations. `bounds_difference.c` owns the directed constraint graph,
+its index, feasibility potentials, and interval-propagation worklists. It calls
+only store, exact-relation, and neutral arithmetic APIs; it does not re-enter
+bounds proof or simplification policy. `bounds_relation.c` owns exact-component
+cursor traversal, equality projection, and the projection-cache lifecycle.
+Canonicalization, predicate ingestion, relation endpoint admission, and proof
+policy remain in `bounds.c`, which passes canonical nodes or trusted symbols to
+the leaf owners. `bounds_range.c` owns the empty-result, direct interval, and
+Piecewise range-cache lifecycle. Full store invalidation refreshes the central
+query owner, clears range caches, then clears relation projections; each leaf
+component writes only its owned fields.
 
 `bounds.c` orchestrates aggregate initialization, fork, and destruction.
-Initialization orders query state, dense variable storage, relation state, and
-the direct range cache. A fork's allocation-bearing payload order is query
-state, dense variables and their index, difference indexes, modular-inverse
-watchers, exact relations, expression storage and its index, then nonzero
-facts. Each stage consumes state published by its predecessors, and a failed
-fork is discarded as one aggregate.
+Initialization performs allocation-free query ownership setup, initializes
+dense variable storage, then performs allocation-free difference initialization
+before relation state and the direct range cache. Fork query ownership
+initialization and inheritance are also allocation-free. Fork payload
+allocations occur in this order: dense variables, the variable index, the
+difference edge index, the difference variable table, modular-inverse heads and
+watchers, the relation clone, expression storage and its index, then nonzero
+facts. Difference fork inheritance is allocation-free; its clone stage copies
+the mutable index and variable arrays while their incident lists retain
+immutable edges in the common scratch-arena lifetime. Each stage consumes state
+published by its predecessors, and a failed fork is discarded as one
+aggregate.
 
 Pure integer congruence residue, alignment, and interval-intersection helpers
 live with interval arithmetic in `interval.c`. `rational.c` owns exact
@@ -1594,6 +1604,24 @@ one direct-edge index serve two deliberately different weighted closures:
   path-compressed forest keyed through the shared endpoint registry, so exact
   symbol differences remain independent of one-sided inequality fan-out.
 
+`bounds_relation.c` exposes asserted components through a typed pull cursor,
+not a proof callback. `bounds.c` proves the root defined before `begin`, so a
+failed root proof performs no component allocation. The cursor grows its entry
+array before its seen index, returns each unseen original endpoint before
+adding or recording the pending edge offset, and waits for the caller to prove
+that endpoint with equality projection disabled. Rejecting an endpoint skips
+only that edge. The relation algebra remains immutable until cursor destroy
+because the cursor borrows an incident-edge pointer.
+
+A tracked successful walk reserves projection rows for the complete admitted
+component before publishing any row. The cache stores separate component
+offset, range, integer, and definedness completion columns. Range collection
+stages each intrinsic interval, then projects and completes the column with one
+row lookup. Integer and component-definedness publication is allocation-free
+after the whole-component reserve; an independent scalar definedness result
+may reserve one row. Consumers retain proof admission and transport mapping,
+while the relation owner retains row layout, completion bits, and generation.
+
 Both closures use the same iterative weighted-union/find implementation but
 retain separate offset policies. Asserted links use two-limb signed magnitude
 so reversing an `INT64_MIN` edge and composing representable graph-sized
@@ -1609,20 +1637,22 @@ their participating endpoints. Defined asserted-component projection and
 arena cloning are O(V+E). A clone deep-copies and relinks every retained edge;
 no fact generation refers to edge storage owned by another arena. The
 component reports added, unchanged, conflict, representability miss, invalid
-topology, and allocation failure distinctly. Bounds alone maps mutation
-outcomes to contradiction and allocation state; a topology failure while
-traversing trusted retained state poisons the active query. The component scans
-no context or arena state, uses no callbacks, and has no recursive call edge.
+topology, and allocation failure distinctly. Store mutation policy maps
+insertion outcomes to contradiction, cache invalidation, and allocation state;
+bounds query policy maps an invalid retained topology into active-query poison.
+The component scans no context or arena state, uses no callbacks, and has no
+recursive call edge.
 
-The accepted representation keeps the directed difference graph and the exact
-relation algebra separate. The graph stores one-sided constraints and its own
-expected-O(1) directed-edge index. Complementary symbol constraints remain in
-that graph for feasibility and also certify the relation algebra's total
-closure; exact queries therefore do not walk inequality adjacency. Arbitrary
-asserted equalities live only in the relation algebra because their endpoints
-are not graph variables. Both owners are fact-local, arena-owned, and copied
-transactionally. Incremental graph processing visits only the affected
-difference component, never the context or arena.
+`bounds_difference.c` owns the directed difference graph separately from the
+exact relation algebra. It depends one-way on store mutation and exact-relation
+APIs; neither owner calls back into difference processing. The graph stores
+one-sided constraints and its own expected-O(1) directed-edge index.
+Complementary symbol constraints remain in that graph for feasibility and also
+certify the relation algebra's total closure; exact queries therefore do not
+walk inequality adjacency. Arbitrary asserted equalities live only in the
+relation algebra because their endpoints are not graph variables. Both owners
+are fact-local and arena-owned. Incremental graph processing visits only the
+affected difference component, never the context or arena.
 
 The directed graph uses immutable arena-owned edge records, separate incoming
 and outgoing adjacency heads, and append-stable variable indices. Adjacency,
@@ -3071,13 +3101,15 @@ ixsimpl/
 │   ├── expand.h
 │   ├── bounds.c             # fact policy, propagation, and query coordination
 │   ├── bounds.h             # aggregate private bounds state
+│   ├── bounds_difference.c  # directed constraints and interval propagation
+│   ├── bounds_difference.h
 │   ├── bounds_query.c       # central query state, cache, and transport lifecycle
 │   ├── bounds_query.h
 │   ├── bounds_store.c       # retained fact records, indexes, and mutation
 │   ├── bounds_store.h
 │   ├── bounds_range.c       # direct and Piecewise range-cache lifecycle
 │   ├── bounds_range.h
-│   ├── bounds_relation.c    # equality-projection cache lifecycle
+│   ├── bounds_relation.c    # exact-component cursor and equality projection
 │   ├── bounds_relation.h
 │   ├── division_algebra.c   # signed truncating-division certificates
 │   ├── division_algebra.h

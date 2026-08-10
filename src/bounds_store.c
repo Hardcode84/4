@@ -8,6 +8,7 @@
 #include "hash.h"
 #include <assert.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BOUNDS_VAR_INDEX_INIT_CAP 8u
@@ -220,6 +221,32 @@ IXS_STATIC void bounds_store_invalidate_reads(ixs_bounds *b) {
   bounds_query_refresh_owner(b);
   bounds_range_invalidate_all(b);
   bounds_relation_projection_invalidate(b);
+}
+
+IXS_STATIC void
+bounds_store_publish_relation_status(ixs_bounds *b,
+                                     ixs_relation_status status) {
+  assert(b != NULL);
+  switch (status) {
+  case IXS_RELATION_STATUS_ADDED:
+    bounds_store_mark_semantic_changed(b);
+    bounds_store_invalidate_reads(b);
+    return;
+  case IXS_RELATION_STATUS_OK:
+  case IXS_RELATION_STATUS_UNCHANGED:
+    return;
+  case IXS_RELATION_STATUS_CONFLICT:
+    bounds_store_mark_contradiction(b);
+    return;
+  case IXS_RELATION_STATUS_OOM:
+    b->oom = true;
+    return;
+  case IXS_RELATION_STATUS_UNREPRESENTABLE:
+    assert(!"invalid exact-relation insertion result");
+    abort();
+  }
+  assert(!"unknown exact-relation insertion result");
+  abort();
 }
 
 static size_t bounds_var_index_slot(const size_t *index, size_t capacity,

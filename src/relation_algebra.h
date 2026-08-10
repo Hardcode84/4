@@ -114,11 +114,11 @@ IXS_STATIC ixs_node *ixs_relation_edge_lhs(const ixs_relation_edge *edge);
 IXS_STATIC ixs_node *ixs_relation_edge_rhs(const ixs_relation_edge *edge);
 IXS_STATIC int64_t ixs_relation_edge_offset(const ixs_relation_edge *edge);
 
-/* Query only the certified-total closure. Checked int64 arithmetic at every
- * parent edge preserves its deliberately narrower admission policy. */
-IXS_STATIC ixs_relation_query_status ixs_relation_algebra_total_offset(
+/* Query two trusted symbols in the certified-total closure. Checked int64
+ * arithmetic at every parent edge preserves its narrower admission policy. */
+IXS_STATIC bool ixs_relation_algebra_total_symbol_difference(
     ixs_relation_algebra *algebra, const ixs_node *lhs, const ixs_node *rhs,
-    int64_t *offset);
+    int64_t *difference);
 
 IXS_STATIC ixs_relation_offset ixs_relation_offset_from_int64(int64_t value);
 IXS_STATIC ixs_relation_offset

@@ -10,6 +10,7 @@
 
 #include "additive_row.h"
 #include "bounds.h"
+#include "bounds_difference.h"
 #include "bounds_query.h"
 #include "bounds_relation.h"
 #include "bounds_store.h"
@@ -4360,19 +4361,6 @@ typedef struct {
   bool occupied;
 } test_legacy_projection_cache_entry;
 
-static bool test_projection_cache_has_generation(const ixs_bounds *bounds,
-                                                 uint32_t generation) {
-  const bounds_equality_projection_cache_entry *entries =
-      (const bounds_equality_projection_cache_entry *)
-          bounds->equality_projection_cache;
-  size_t i;
-  for (i = 0; i < bounds->equality_projection_cache_capacity; i++) {
-    if (entries[i].generation == generation)
-      return true;
-  }
-  return false;
-}
-
 static void test_equality_projection_cache_generation_lifecycle(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *lhs = ixs_sym(ctx, "projection_generation_lhs");
@@ -4392,12 +4380,11 @@ static void test_equality_projection_cache_generation_lifecycle(void) {
   size_t count;
   uint32_t generation;
   bool held = false;
-  size_t i;
 
-  CHECK(sizeof(bounds_equality_projection_cache_entry) ==
+  CHECK(bounds_relation_projection_entry_size() ==
         sizeof(test_legacy_projection_cache_entry));
 #if UINTPTR_MAX == UINT64_MAX
-  CHECK(sizeof(bounds_equality_projection_cache_entry) == 104u);
+  CHECK(bounds_relation_projection_entry_size() == 104u);
 #endif
   CHECK(ixs_facts_assume_pred(facts, equality));
   CHECK(ixs_facts_assume_range(facts, rhs, &broad));
@@ -4418,7 +4405,8 @@ static void test_equality_projection_cache_generation_lifecycle(void) {
   CHECK(facts->bounds.equality_projection_cache_capacity == capacity);
   CHECK(facts->bounds.equality_projection_cache_count == 0u);
   CHECK(facts->bounds.equality_projection_cache_generation == generation + 1u);
-  CHECK(test_projection_cache_has_generation(&facts->bounds, generation));
+  CHECK(bounds_relation_projection_generation_count(&facts->bounds,
+                                                    generation) != 0u);
   check_public_range(facts, lhs, 2, 5);
   count = facts->bounds.equality_projection_cache_count;
   CHECK(count != 0u);
@@ -4467,7 +4455,8 @@ static void test_equality_projection_cache_generation_lifecycle(void) {
   CHECK(contextless.equality_projection_cache_count == 0u);
   CHECK(contextless.equality_projection_cache_generation != generation);
   CHECK(contextless.equality_projection_cache_generation != 0u);
-  CHECK(test_projection_cache_has_generation(&contextless, generation));
+  CHECK(bounds_relation_projection_generation_count(&contextless, generation) !=
+        0u);
   CHECK(bounds_query_force_hold_begin(&contextless, &held) && held);
   interval = ixs_bounds_get(&contextless, lhs);
   ixs_bounds_query_hold_end(&contextless);
@@ -4486,11 +4475,8 @@ static void test_equality_projection_cache_generation_lifecycle(void) {
   CHECK(facts->bounds.equality_projection_cache_capacity == capacity);
   CHECK(facts->bounds.equality_projection_cache_count == 0u);
   CHECK(facts->bounds.equality_projection_cache_generation == 1u);
-  for (i = 0; i < capacity; i++) {
-    const bounds_equality_projection_cache_entry *entries =
-        (const bounds_equality_projection_cache_entry *)cache;
-    CHECK(entries[i].generation == 0u);
-  }
+  CHECK(bounds_relation_projection_generation_count(&facts->bounds, 0u) ==
+        capacity);
   check_public_range(facts, lhs, 2, 5);
   CHECK(facts->bounds.equality_projection_cache_count != 0u);
   CHECK(facts->bounds.equality_projection_cache_generation == 1u);

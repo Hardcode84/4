@@ -629,22 +629,24 @@ ixs_relation_algebra_certify_total(ixs_relation_algebra *algebra, ixs_node *lhs,
   return status;
 }
 
-IXS_STATIC ixs_relation_query_status ixs_relation_algebra_total_offset(
+IXS_STATIC bool ixs_relation_algebra_total_symbol_difference(
     ixs_relation_algebra *algebra, const ixs_node *lhs, const ixs_node *rhs,
-    int64_t *offset) {
+    int64_t *difference_result) {
+  bool narrowed;
   ixs_relation_offset lhs_offset, rhs_offset, difference;
   size_t lhs_endpoint, rhs_endpoint, lhs_total, rhs_total;
   size_t lhs_root, rhs_root;
-  assert(algebra != NULL && lhs != NULL && rhs != NULL && offset != NULL);
+  assert(algebra != NULL && lhs != NULL && rhs != NULL &&
+         difference_result != NULL);
   if (lhs == rhs) {
-    *offset = 0;
-    return IXS_RELATION_QUERY_FOUND;
+    *difference_result = 0;
+    return true;
   }
   if (!ixs_relation_algebra_find_endpoint(algebra, lhs, &lhs_endpoint) ||
       !ixs_relation_algebra_find_endpoint(algebra, rhs, &rhs_endpoint) ||
       !relation_total_lookup(algebra, lhs_endpoint, &lhs_total) ||
       !relation_total_lookup(algebra, rhs_endpoint, &rhs_total))
-    return IXS_RELATION_QUERY_NONE;
+    return false;
   if (!relation_forest_find(algebra, RELATION_CLOSURE_TOTAL, lhs_total,
                             &lhs_root, &lhs_offset, true) ||
       !relation_forest_find(algebra, RELATION_CLOSURE_TOTAL, rhs_total,
@@ -652,14 +654,12 @@ IXS_STATIC ixs_relation_query_status ixs_relation_algebra_total_offset(
       (lhs_root == rhs_root &&
        !relation_forest_arithmetic(RELATION_CLOSURE_TOTAL, lhs_offset,
                                    rhs_offset, true, &difference)))
-    return IXS_RELATION_QUERY_UNREPRESENTABLE;
+    return false;
   if (lhs_root != rhs_root)
-    return IXS_RELATION_QUERY_NONE;
-  if (!ixs_relation_offset_to_int64(difference, offset)) {
-    assert(!"certified total offset did not narrow");
-    return IXS_RELATION_QUERY_UNREPRESENTABLE;
-  }
-  return IXS_RELATION_QUERY_FOUND;
+    return false;
+  narrowed = ixs_relation_offset_to_int64(difference, difference_result);
+  assert(narrowed);
+  return narrowed;
 }
 
 IXS_STATIC size_t

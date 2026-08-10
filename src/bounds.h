@@ -28,6 +28,7 @@ typedef struct {
 } ixs_bitfacts;
 
 typedef struct ixs_difference_constraint ixs_difference_constraint;
+typedef struct ixs_difference_var ixs_difference_var;
 typedef struct ixs_bounds_query_state ixs_bounds_query_state;
 
 /* Scratch-local pointer set shared by iterative proof components. */
@@ -36,14 +37,6 @@ typedef struct {
   size_t capacity;
   size_t count;
 } query_node_set;
-
-typedef struct {
-  ixs_difference_constraint *incoming;
-  ixs_difference_constraint *outgoing;
-  int64_t potential;
-  size_t queue_epoch;
-  size_t hops;
-} ixs_difference_var;
 
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
