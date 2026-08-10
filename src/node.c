@@ -1089,7 +1089,7 @@ IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   struct ixs_node_impl *n;
   char *interned;
 
-  /* Compute hash from the bounded slice — name may not be NUL-terminated. */
+  /* Compute hash from the bounded slice -- name may not be NUL-terminated. */
   sym_hash = (uint32_t)IXS_SYM * 2654435761u;
   sym_hash = hash_mix(sym_hash, hash_str(name, len));
 
@@ -1585,12 +1585,12 @@ IXS_STATIC ixs_node *ixs_propagate1(ixs_node *a) {
 
 /*
  * If either arg is a sentinel (ERROR or PARSE_ERROR), return it so
- * the caller can short-circuit.  NULL (OOM) returns NULL — callers
- * propagate that by their own NULL return.  Both clean → NULL.
+ * the caller can short-circuit.  NULL (OOM) returns NULL -- callers
+ * propagate that by their own NULL return.  Both clean -> NULL.
  */
 IXS_STATIC ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
   if (!a || !b)
-    return NULL; /* OOM propagation — caller returns NULL */
+    return NULL; /* OOM propagation -- caller returns NULL */
   if (a->tag == IXS_PARSE_ERROR || b->tag == IXS_PARSE_ERROR)
     return a->tag == IXS_PARSE_ERROR ? a : b;
   if (a->tag == IXS_ERROR)

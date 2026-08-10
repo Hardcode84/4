@@ -512,7 +512,7 @@ static ixs_node *parse_term(parser *p) {
   for (;;) {
     skip_ws(p);
     if (peek(p) == '*') {
-      /* Check for ** (power) — not in our grammar, skip. */
+      /* Check for ** (power) -- not in our grammar, skip. */
       if (p->pos + 1 < p->len && p->input[p->pos + 1] == '*') {
         break; /* Stop, don't consume ** */
       }

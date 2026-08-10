@@ -778,11 +778,11 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 /*
  * Mod recognition pass over additive terms.
  *
- * Pass 1 — constant divisor (N is integer, embedded in MUL coeff):
+ * Pass 1 -- constant divisor (N is integer, embedded in MUL coeff):
  *   floor: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N)
  *   ceil:  c*E + d*ceil(E/N)  where d == -c*N  -> -c*Mod(-E, N)
  *
- * Pass 2 — symbolic divisor (D is a factor product in the outer MUL):
+ * Pass 2 -- symbolic divisor (D is a factor product in the outer MUL):
  *   floor: c*E - c*(D*floor(E/D))              ->  c*Mod(E, D)
  *   ceil:  c*(D*ceil(E/D)) - c*E               -> -c*Mod(-E, D)
  *

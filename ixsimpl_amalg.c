@@ -19781,7 +19781,7 @@ ixs_ctx *ixs_ctx_create(void) {
   memset(tmp.stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
 #endif
 
-  /* Emplace ctx into its own arena — one fewer heap allocation. */
+  /* Emplace ctx into its own arena -- one fewer heap allocation. */
   ctx = ixs_arena_alloc(&tmp.arena, sizeof(ixs_ctx), sizeof(void *));
   if (!ctx)
     goto fail;
@@ -23641,7 +23641,7 @@ IXS_STATIC ixs_node *ixs_node_sym(ixs_ctx *ctx, const char *name, size_t len) {
   struct ixs_node_impl *n;
   char *interned;
 
-  /* Compute hash from the bounded slice — name may not be NUL-terminated. */
+  /* Compute hash from the bounded slice -- name may not be NUL-terminated. */
   sym_hash = (uint32_t)IXS_SYM * 2654435761u;
   sym_hash = hash_mix(sym_hash, hash_str(name, len));
 
@@ -24137,12 +24137,12 @@ IXS_STATIC ixs_node *ixs_propagate1(ixs_node *a) {
 
 /*
  * If either arg is a sentinel (ERROR or PARSE_ERROR), return it so
- * the caller can short-circuit.  NULL (OOM) returns NULL — callers
- * propagate that by their own NULL return.  Both clean → NULL.
+ * the caller can short-circuit.  NULL (OOM) returns NULL -- callers
+ * propagate that by their own NULL return.  Both clean -> NULL.
  */
 IXS_STATIC ixs_node *ixs_propagate2(ixs_node *a, ixs_node *b) {
   if (!a || !b)
-    return NULL; /* OOM propagation — caller returns NULL */
+    return NULL; /* OOM propagation -- caller returns NULL */
   if (a->tag == IXS_PARSE_ERROR || b->tag == IXS_PARSE_ERROR)
     return a->tag == IXS_PARSE_ERROR ? a : b;
   if (a->tag == IXS_ERROR)
@@ -24946,7 +24946,7 @@ static ixs_node *parse_term(parser *p) {
   for (;;) {
     skip_ws(p);
     if (peek(p) == '*') {
-      /* Check for ** (power) — not in our grammar, skip. */
+      /* Check for ** (power) -- not in our grammar, skip. */
       if (p->pos + 1 < p->len && p->input[p->pos + 1] == '*') {
         break; /* Stop, don't consume ** */
       }
@@ -30688,11 +30688,11 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 /*
  * Mod recognition pass over additive terms.
  *
- * Pass 1 — constant divisor (N is integer, embedded in MUL coeff):
+ * Pass 1 -- constant divisor (N is integer, embedded in MUL coeff):
  *   floor: c*E + d*floor(E/N) where d == -c*N  ->  c*Mod(E, N)
  *   ceil:  c*E + d*ceil(E/N)  where d == -c*N  -> -c*Mod(-E, N)
  *
- * Pass 2 — symbolic divisor (D is a factor product in the outer MUL):
+ * Pass 2 -- symbolic divisor (D is a factor product in the outer MUL):
  *   floor: c*E - c*(D*floor(E/D))              ->  c*Mod(E, D)
  *   ceil:  c*(D*ceil(E/D)) - c*E               -> -c*Mod(-E, D)
  *

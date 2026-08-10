@@ -639,7 +639,7 @@ def to_ixsimpl_cond(ctx: ixsimpl.Context, tree: CondTree) -> ixsimpl.Expr:
 def _floored_mod(a: Any, b: Any) -> Any:
     """Floored modulo with the ixsimpl-required positive divisor.
 
-    Uses Python's built-in % which is exact for integers — an earlier
+    Uses Python's built-in % which is exact for integers -- an earlier
     version using math.floor(a/b) lost precision for large values."""
     if b <= 0:
         raise ZeroDivisionError
@@ -1068,7 +1068,7 @@ def test_simplify_bounds_aware_spicy(expr: ExprTree, envs: list[Env]) -> None:
 def test_matches_sympy(expr: ExprTree, envs: list[Env]) -> None:
     """Cross-check against SymPy: both should produce numerically
     equivalent results.  Python eval_expr is the ground truth; ixsimpl
-    must match it exactly.  SymPy is advisory — disagreements are
+    must match it exactly.  SymPy is advisory -- disagreements are
     reported as warnings (not assertions) because SymPy 1.14's Mod
     with evaluate=False has known bugs (#28744) that produce wrong
     results for nested Mod expressions."""

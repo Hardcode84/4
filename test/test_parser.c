@@ -80,23 +80,23 @@ static void test_arithmetic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
 
-  /* 3 + 4 → 7 */
+  /* 3 + 4 -> 7 */
   n = ixs_parse_expr(ctx, "3 + 4", 5);
   CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 7);
 
-  /* 3 * 4 → 12 */
+  /* 3 * 4 -> 12 */
   n = ixs_parse_expr(ctx, "3 * 4", 5);
   CHECK(n && ixs_node_int_val(n) == 12);
 
-  /* 7 / 2 → 7/2 (rational) */
+  /* 7 / 2 -> 7/2 (rational) */
   n = ixs_parse_expr(ctx, "7/2", 3);
   CHECK(n && ixs_node_tag(n) == IXS_RAT);
 
-  /* x + x → 2*x */
+  /* x + x -> 2*x */
   n = ixs_parse_expr(ctx, "x + x", 5);
   CHECK(n && !ixs_is_error(n));
 
-  /* 3*x + 2*x → 5*x */
+  /* 3*x + 2*x -> 5*x */
   n = ixs_parse_expr(ctx, "3*x + 2*x", 9);
   CHECK(n && !ixs_is_error(n));
   CHECK(strcmp(pr(n), "5*x") == 0);
@@ -108,19 +108,19 @@ static void test_floor_ceil(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
 
-  /* floor(7/2) → 3 */
+  /* floor(7/2) -> 3 */
   n = ixs_parse_expr(ctx, "floor(7/2)", 10);
   CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 3);
 
-  /* ceiling(7/2) → 4 */
+  /* ceiling(7/2) -> 4 */
   n = ixs_parse_expr(ctx, "ceiling(7/2)", 12);
   CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 4);
 
-  /* floor(x) → x (x is integer-valued) */
+  /* floor(x) -> x (x is integer-valued) */
   n = ixs_parse_expr(ctx, "floor(x)", 8);
   CHECK(n && ixs_node_tag(n) == IXS_SYM);
 
-  /* floor(floor(x)) → x */
+  /* floor(floor(x)) -> x */
   n = ixs_parse_expr(ctx, "floor(floor(x))", 15);
   CHECK(n && ixs_node_tag(n) == IXS_SYM);
 
@@ -146,11 +146,11 @@ static void test_mod(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
 
-  /* Mod(17, 5) → 2 */
+  /* Mod(17, 5) -> 2 */
   n = ixs_parse_expr(ctx, "Mod(17, 5)", 10);
   CHECK(n && ixs_node_int_val(n) == 2);
 
-  /* Mod(floor(x), 1) → 0 (only integer-valued args fold) */
+  /* Mod(floor(x), 1) -> 0 (only integer-valued args fold) */
   n = ixs_parse_expr(ctx, "Mod(floor(x), 1)", 16);
   CHECK(n && ixs_node_int_val(n) == 0);
 
@@ -216,7 +216,7 @@ static void test_piecewise(void) {
   const char *predicate_values =
       "Piecewise((typed_x >= 0, typed_y >= 0), (0, True))";
 
-  /* Single True branch → value */
+  /* Single True branch -> value */
   n = ixs_parse_expr(ctx, "Piecewise((42, True))", 21);
   CHECK(n && ixs_node_int_val(n) == 42);
 

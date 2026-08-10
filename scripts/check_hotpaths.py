@@ -22,7 +22,7 @@ literal or doc prose is inert.  Function-like macros are modeled as
 pseudo-functions: their replacement text is parsed for calls, so a scan
 reached through a macro is caught.  Macro bodies are parsed as isolated
 fragments, and same-name macro variants (conditional compilation) union
-their edges — a sound over-approximation.
+their edges -- a sound over-approximation.
 
 Public API functions are parsed out of include/ixsimpl.h with
 tree-sitter (no line regexes) and are hot roots by default; NONHOT_API
@@ -81,7 +81,7 @@ NONHOT_API = frozenset(
 )
 
 # Registry of scan types: axis -> one-line description.  A '/* scan: x */'
-# tag with an unregistered x is an error — adding a type is deliberately
+# tag with an unregistered x is an error -- adding a type is deliberately
 # one line here plus the tag plus a DESIGN.md update, same commit.
 SCAN_TYPES = {
     "arena": "cost grows with total live arena chunks/bytes",

@@ -1678,7 +1678,7 @@ static void test_floor_bounds_collapse(void) {
   ixs_node *r = ixs_simplify(ctx, expr, assumptions, 2);
   CHECK(r && ixs_node_int_val(r) == 0);
 
-  /* ceiling(x/64) with 0 <= x < 64: ceil(0/64)=0, ceil(63/64)=1 — NOT constant
+  /* ceiling(x/64) with 0 <= x < 64: ceil(0/64)=0, ceil(63/64)=1 -- NOT constant
    */
   expr = ixs_ceil(ctx, ixs_mul(ctx, x, ixs_rat(ctx, 1, 64)));
   r = ixs_simplify(ctx, expr, assumptions, 2);
@@ -1823,7 +1823,7 @@ static void test_mod_bounds_tighten(void) {
     CHECK(ixs_ctx_nerrors(ctx) == errors);
   }
 
-  /* Mod(3/2*x, 1) must NOT get bounds [0,0] — dividend is not integer.
+  /* Mod(3/2*x, 1) must NOT get bounds [0,0] -- dividend is not integer.
    * ceiling(Mod(3/2*x, 1)) must not collapse to 0. */
   ixs_node *half_x = ixs_div(ctx, x, ixs_int(ctx, 2));
   ixs_node *three_half_x = ixs_add(ctx, half_x, x);
@@ -1939,7 +1939,7 @@ static void test_floor_drop_small_rational(void) {
   CHECK(r == expected);
 
   /* floor(Mod(x, 8)/4 + 1/8) with 0 <= x -> floor(Mod(x,8)/4)
-   * Mod(x, 8) ∈ [0,7] (non-negative integer), denom=4, r=1/8, 1/8 < 1/4. */
+   * Mod(x, 8) is in [0,7] (non-negative integer), denom=4, r=1/8, 1/8 < 1/4. */
   ixs_node *mx8 = ixs_mod(ctx, x, ixs_int(ctx, 8));
   inner =
       ixs_add(ctx, ixs_mul(ctx, mx8, ixs_rat(ctx, 1, 4)), ixs_rat(ctx, 1, 8));
@@ -2338,7 +2338,7 @@ static void test_bounds_many_vars(void) {
         ixs_cmp(ctx, syms[i], IXS_CMP_LT, ixs_int(ctx, 256));
   }
 
-  /* Simplify Mod(v_99, 256) — the 100th variable — to v_99. */
+  /* Simplify Mod(v_99, 256) -- the 100th variable -- to v_99. */
   ixs_node *expr = ixs_mod(ctx, syms[99], ixs_int(ctx, 256));
   ixs_node *r = ixs_simplify(ctx, expr, assumptions, 200);
   CHECK(r == syms[99]);
@@ -3752,7 +3752,7 @@ static void test_modrem_congruence(void) {
   ixs_node *y = ixs_sym(ctx, "y");
   ixs_node *r;
 
-  /* Mod(x, 8) == 3  ⟹  Mod(x, 8) → 3 */
+  /* Mod(x, 8) == 3 implies Mod(x, 8) -> 3 */
   ixs_node *cong_x_8_3[] = {
       ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
               ixs_int(ctx, 3)),
@@ -3760,11 +3760,11 @@ static void test_modrem_congruence(void) {
   r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), cong_x_8_3, 1);
   CHECK(ixs_node_int_val(r) == 3);
 
-  /* Mod(x, 4) → 3 (since 8 % 4 == 0, remainder 3 % 4 == 3) */
+  /* Mod(x, 4) -> 3 (since 8 % 4 == 0, remainder 3 % 4 == 3) */
   r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)), cong_x_8_3, 1);
   CHECK(ixs_node_int_val(r) == 3);
 
-  /* Mod(x, 2) → 1 (since 8 % 2 == 0, remainder 3 % 2 == 1) */
+  /* Mod(x, 2) -> 1 (since 8 % 2 == 0, remainder 3 % 2 == 1) */
   r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), cong_x_8_3, 1);
   CHECK(ixs_node_int_val(r) == 1);
 
@@ -3776,7 +3776,7 @@ static void test_modrem_congruence(void) {
   r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 3)), cong_x_8_3, 1);
   CHECK(ixs_node_tag(r) == IXS_MOD);
 
-  /* Divisibility still works: Mod(x, 8) == 0 ⟹ Mod(x, 4) → 0 */
+  /* Divisibility still works: Mod(x, 8) == 0 implies Mod(x, 4) -> 0 */
   ixs_node *div_x_8[] = {
       ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
               ixs_int(ctx, 0)),
@@ -3784,12 +3784,12 @@ static void test_modrem_congruence(void) {
   r = ixs_simplify(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)), div_x_8, 1);
   CHECK(ixs_node_int_val(r) == 0);
 
-  /* floor(x/4) when x ≡ 0 (mod 8) still drops floor */
+  /* floor(x/4) when x == 0 (mod 8) still drops floor */
   r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))),
                    div_x_8, 1);
   CHECK(strcmp(pr(r), "1/4*x") == 0);
 
-  /* x ≡ 4 (mod 8): x is divisible by 4 (4%4==0) but NOT by 8 */
+  /* x == 4 (mod 8): x is divisible by 4 (4%4==0) but NOT by 8 */
   ixs_node *cong_x_8_4[] = {
       ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), IXS_CMP_EQ,
               ixs_int(ctx, 4)),
@@ -3802,12 +3802,12 @@ static void test_modrem_congruence(void) {
                    cong_x_8_4, 1);
   CHECK(strcmp(pr(r), "1/4*x") == 0);
 
-  /* floor(x/8) should NOT drop when x ≡ 4 (mod 8) */
+  /* floor(x/8) should NOT drop when x == 4 (mod 8) */
   r = ixs_simplify(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 8))),
                    cong_x_8_4, 1);
   CHECK(strstr(pr(r), "floor") != NULL);
 
-  /* CRT merge: Mod(y, 4)==1 and Mod(y, 6)==3 ⟹ y ≡ 9 (mod 12) */
+  /* CRT merge: Mod(y, 4)==1 and Mod(y, 6)==3 imply y == 9 (mod 12) */
   ixs_node *crt_ys[] = {
       ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 4)), IXS_CMP_EQ,
               ixs_int(ctx, 1)),
@@ -4703,7 +4703,7 @@ static void test_pw_max_bounds_collapse(void) {
     CHECK(strstr(buf, "Max(") == NULL);
   }
 
-  /* Standalone Max (no branch guard) — bounds alone don't prove x > y. */
+  /* Standalone Max (no branch guard) -- bounds alone don't prove x > y. */
   {
     ixs_node *diff = ixs_add(ctx, x, ixs_mul(ctx, ixs_int(ctx, -1), y));
     ixs_node *maxn = ixs_max(ctx, diff, one);

@@ -47,7 +47,7 @@ typedef struct {
 typedef struct {
   const char *name; /* interned pointer -- identity compare only */
   ixs_interval iv;
-  int64_t modulus;   /* 0 = no info, >0 = sym ≡ remainder (mod modulus) */
+  int64_t modulus;   /* 0 = no info, >0 = sym == remainder (mod modulus) */
   int64_t remainder; /* in [0, modulus) when modulus > 0                */
   ixs_bitfacts bits;
 } ixs_var_bound;

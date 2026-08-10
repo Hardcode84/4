@@ -13,7 +13,7 @@
  * Overflow-safe rational arithmetic on int64_t p/q pairs.
  * All results are in lowest terms with q > 0.
  * Functions returning bool: true = success, false = overflow.
- * Division/mod by zero → false.
+ * Division/mod by zero -> false.
  */
 
 /* Binary GCD, handles INT64_MIN. Inputs may be negative. */

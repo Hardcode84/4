@@ -120,7 +120,7 @@ def test_to_sympy_floor_ceil_max_min(ctx: ixsimpl.Context) -> None:
         return int(sp.xreplace({sx: sympy.Integer(val)}))
 
     # ceiling(Max(0, 2*x)/6) at x=1: ceiling(1/3) = 1
-    # Without ceiling: int(1/3) = 0 — detects the bug.
+    # Without ceiling: int(1/3) = 0 -- detects the bug.
     ceil_max = ixsimpl.ceil(ixsimpl.max_(ctx.int_(0), x + x) / ctx.int_(6))
     assert _sp_eval(ceil_max, 1) == 1, "ceiling(Max) lost"
 
@@ -128,7 +128,7 @@ def test_to_sympy_floor_ceil_max_min(ctx: ixsimpl.Context) -> None:
     assert _sp_eval(-ceil_max, 1) == -1, "-ceiling(Max) lost"
 
     # floor(Min(0, 2*x)/6) at x=-1: floor(-1/3) = -1
-    # Without floor: int(-1/3) = 0 — detects the bug.
+    # Without floor: int(-1/3) = 0 -- detects the bug.
     floor_min = ixsimpl.floor(ixsimpl.min_(ctx.int_(0), x + x) / ctx.int_(6))
     assert _sp_eval(floor_min, -1) == -1, "floor(Min) lost"
 

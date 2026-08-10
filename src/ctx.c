@@ -136,7 +136,7 @@ ixs_ctx *ixs_ctx_create(void) {
   memset(tmp.stats, 0, IXS_STATS_CAP * sizeof(ixs_stat_entry));
 #endif
 
-  /* Emplace ctx into its own arena — one fewer heap allocation. */
+  /* Emplace ctx into its own arena -- one fewer heap allocation. */
   ctx = ixs_arena_alloc(&tmp.arena, sizeof(ixs_ctx), sizeof(void *));
   if (!ctx)
     goto fail;
