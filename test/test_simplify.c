@@ -4359,6 +4359,7 @@ static void test_mod_difference_congruence(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "mod_diff_x");
   ixs_node *z = ixs_sym(ctx, "mod_diff_z");
+  ixs_node *d = ixs_sym(ctx, "mod_diff_d");
   ixs_node *m16 = ixs_int(ctx, 16);
   ixs_node *lhs = ixs_mod(ctx, ixs_add(ctx, x, z), m16);
   ixs_node *rhs = ixs_mod(ctx, x, m16);
@@ -4375,6 +4376,45 @@ static void test_mod_difference_congruence(void) {
   CHECK(ixs_simplify(ctx, ixs_sub(ctx, lhs, ixs_mod(ctx, x, ixs_int(ctx, 8))),
                      &divisible, 1) != ixs_int(ctx, 0));
   CHECK(ixs_simplify(ctx, difference, NULL, 0) != ixs_int(ctx, 0));
+
+  {
+    ixs_node *symbolic_lhs = ixs_mod(ctx, x, d);
+    ixs_node *symbolic_rhs = ixs_mod(ctx, z, d);
+    ixs_node *symbolic_difference = ixs_sub(ctx, symbolic_lhs, symbolic_rhs);
+    ixs_facts *equal_positive = ixs_facts_create(ctx);
+    ixs_facts *equal_unproved_sign = ixs_facts_create(ctx);
+    ixs_facts *positive_unequal = ixs_facts_create(ctx);
+    ixs_facts *equal_negative = ixs_facts_create(ctx);
+
+    CHECK(
+        ixs_facts_assume_pred(equal_positive, ixs_cmp(ctx, x, IXS_CMP_EQ, z)));
+    CHECK(ixs_facts_assume_pred(equal_positive,
+                                ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))));
+    CHECK(test_ixs_equivalent_facts(equal_positive, symbolic_lhs,
+                                    symbolic_rhs) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_simplify_facts(equal_positive, symbolic_difference) ==
+          ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(
+              equal_positive, ixs_add(ctx, ixs_int(ctx, 7),
+                                      symbolic_difference)) == ixs_int(ctx, 7));
+
+    CHECK(ixs_facts_assume_pred(equal_unproved_sign,
+                                ixs_cmp(ctx, x, IXS_CMP_EQ, z)));
+    CHECK(test_ixs_simplify_facts(equal_unproved_sign, symbolic_difference) ==
+          symbolic_difference);
+
+    CHECK(ixs_facts_assume_pred(positive_unequal,
+                                ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))));
+    CHECK(test_ixs_simplify_facts(positive_unequal, symbolic_difference) ==
+          symbolic_difference);
+
+    CHECK(
+        ixs_facts_assume_pred(equal_negative, ixs_cmp(ctx, x, IXS_CMP_EQ, z)));
+    CHECK(ixs_facts_assume_pred(equal_negative,
+                                ixs_cmp(ctx, d, IXS_CMP_LT, ixs_int(ctx, 0))));
+    CHECK(test_ixs_simplify_facts(equal_negative, symbolic_difference) !=
+          ixs_int(ctx, 0));
+  }
 
   {
     enum { DECOYS = 300 };

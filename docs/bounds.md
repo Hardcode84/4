@@ -621,8 +621,10 @@ This enables rules like:
 - `floor(a + (p/q)*sym + rest)` → `(p/q)*sym + floor(a + rest)` when
   `q/gcd(|p|,q)` divides sym's known modulus (the rational addend is
   integer per congruence and can be extracted from the floor)
-- `c*Mod(A,m) - c*Mod(B,m)` → `0` when `A-B ≡ 0 (mod m)` is proven
-  for the shared positive literal modulus
+- `c*Mod(A,m) - c*Mod(B,m)` → `0` when both original Mod operations are
+  defined, their shared modulus is positive, and the cached exact-delta proof
+  establishes `A == B`. Positive literal moduli additionally retain the
+  congruence fallback for `A-B ≡ 0 (mod m)`.
 - Opposite-coefficient `floor` or `ceiling` quotients with one positive integer
   denominator cancel when a bounded integer numerator shift stays in the same
   quotient bucket. The direct proof bounds `Mod(n,d) + delta` inside `[0,d)`.
@@ -1015,6 +1017,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   residual are then combined with checked `int64_t` arithmetic. This models
   mathematical Mod composition used by fixed-width wrappers; it does not add
   machine-overflow semantics.
+
+  The ADD simplifier calls the same cached modular query for
+  opposite-coefficient outer Mod nodes. The query checks definedness on both
+  original operations, proves the shared modulus positive, and asks the exact
+  delta engine whether the dividends are equal. A positive literal modulus may
+  also use the established congruence fallback for a nonzero exact delta. This
+  path performs no general simplification and preserves central
+  invalid/OOM/limited transport.
 
   Paired-Mod projection uses a growable query-local proof stack. Every child
   enters a Mod dividend or removes one matched Mod pair from a canonical ADD,

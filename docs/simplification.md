@@ -292,7 +292,9 @@ Mod(X,r0) + r0*d1 + ... + rk*dk           → Mod(X,R)
 
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
-                     when m > 0 is literal and A-B ≡ 0 (mod m)
+                     when the shared m is provably positive and the cached
+                     exact-delta proof establishes A == B
+                     or, for literal m, A-B ≡ 0 (mod m)
 ```
 
 The reverse identities, exact floor/Mod cancellation, consecutive-digit
@@ -322,6 +324,14 @@ every round with every term. Rebuilding after one match composes complete digit
 chains of any length through the same rule. Wrong coefficients, different
 carriers, noninteger radices or carriers, incomplete chains, and quotient
 normalizations that do not recover the original carrier remain unchanged.
+
+Opposite-coefficient Mod terms share the modular bounds proof used by exact
+equivalence. It proves both original Mod operations defined, proves their
+shared modulus positive, and reuses the active exact-delta cache. Equal
+dividends therefore cancel for a symbolic modulus without a second equality
+engine. Positive literal moduli retain the congruence fallback for nonzero
+dividend deltas. Missing positivity, unequal dividends, query exhaustion, and
+invalid source operations do not become algebraic matches.
 
 Complete literal rows of at most eight terms use the same direct `Mod`
 canonical target. Each place must be unique, every later digit must come from

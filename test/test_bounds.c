@@ -8077,6 +8077,49 @@ static void test_exact_integer_projection_reuses_bitfacts(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_modular_remainder_equality_reuses_queries(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "remainder_equality_x");
+  ixs_node *y = ixs_sym(ctx, "remainder_equality_y");
+  ixs_node *d = ixs_sym(ctx, "remainder_equality_d");
+  ixs_node *lhs = ixs_mod(ctx, x, d);
+  ixs_node *rhs = ixs_mod(ctx, y, d);
+  size_t visits_before, visits_after, hits_before, hits_after;
+  bool held = false;
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, x, IXS_CMP_EQ, y)));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))));
+  CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
+  CHECK(bounds_modular_remainders_equal(ctx, &bounds, lhs, rhs) ==
+        IXS_ALGEBRA_MATCH);
+  ixs_bounds_query_stats(&bounds, &visits_before, NULL, &hits_before, NULL,
+                         NULL, NULL, NULL);
+  CHECK(bounds_modular_remainders_equal(ctx, &bounds, lhs, rhs) ==
+        IXS_ALGEBRA_MATCH);
+  ixs_bounds_query_stats(&bounds, &visits_after, NULL, &hits_after, NULL, NULL,
+                         NULL, NULL);
+  CHECK(visits_after == visits_before);
+  CHECK(hits_after > hits_before);
+
+  bounds_query_note_limit(&bounds);
+  CHECK(bounds_modular_remainders_equal(ctx, &bounds, lhs, rhs) ==
+        IXS_ALGEBRA_LIMITED);
+  ixs_bounds_query_hold_end(&bounds);
+  held = false;
+  CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
+  CHECK(bounds_modular_remainders_equal(ctx, &bounds, lhs, rhs) ==
+        IXS_ALGEBRA_MATCH);
+  ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_symbol_congruence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -12560,6 +12603,7 @@ int main(void) {
   test_public_known_bits_propagation();
   test_public_known_bits_failures();
   test_exact_integer_projection_reuses_bitfacts();
+  test_modular_remainder_equality_reuses_queries();
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();

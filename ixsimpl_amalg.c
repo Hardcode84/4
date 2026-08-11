@@ -8639,6 +8639,84 @@ static ixs_algebra_status bounds_exact_value_source_defined(ixs_bounds *bounds,
 }
 
 static ixs_algebra_status
+bounds_modular_current_transport(const ixs_bounds *bounds) {
+  ixs_bounds_transport_status transport = bounds_query_state_transport(bounds);
+  if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return IXS_ALGEBRA_INVALID;
+  if (transport == IXS_BOUNDS_TRANSPORT_OOM || bounds->oom)
+    return IXS_ALGEBRA_OOM;
+  if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    return IXS_ALGEBRA_LIMITED;
+  return IXS_ALGEBRA_NO_MATCH;
+}
+
+static ixs_algebra_status
+bounds_modular_remainder_delta_equal(ixs_ctx *ctx, ixs_bounds *bounds,
+                                     ixs_node *lhs, ixs_node *rhs,
+                                     ixs_node *modulus) {
+  ixs_node *difference;
+  int64_t delta;
+  bool invalid = false;
+  bool limited = false;
+  bool oom = false;
+  if (bounds_modular_exact_delta_detail(ctx, bounds, lhs, rhs, false, &delta,
+                                        &invalid, &limited, &oom)) {
+    if (delta == 0 || (modulus->tag == IXS_INT && delta % modulus->u.ival == 0))
+      return IXS_ALGEBRA_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  if (invalid)
+    return IXS_ALGEBRA_INVALID;
+  if (oom)
+    return IXS_ALGEBRA_OOM;
+  if (limited)
+    return IXS_ALGEBRA_LIMITED;
+  if (modulus->tag != IXS_INT)
+    return IXS_ALGEBRA_NO_MATCH;
+
+  difference = simp_sub(ctx, lhs, rhs);
+  if (!difference)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(difference))
+    return IXS_ALGEBRA_INVALID;
+  if (ixs_bounds_check_congruent(bounds, difference, modulus->u.ival, 0) ==
+      IXS_CHECK_TRUE)
+    return IXS_ALGEBRA_MATCH;
+  return bounds_modular_current_transport(bounds);
+}
+
+IXS_STATIC ixs_algebra_status bounds_modular_remainders_equal(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs) {
+  ixs_node *modulus;
+  ixs_interval modulus_range;
+  ixs_algebra_status status;
+  if (!ctx || !bounds || !lhs || !rhs || lhs->tag != IXS_MOD ||
+      rhs->tag != IXS_MOD || lhs->u.binary.rhs != rhs->u.binary.rhs ||
+      bounds->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_modular_current_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  status = bounds_exact_value_source_defined(bounds, lhs);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  status = bounds_exact_value_source_defined(bounds, rhs);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+
+  modulus = lhs->u.binary.rhs;
+  modulus_range = ixs_bounds_get(bounds, modulus);
+  status = bounds_modular_current_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  if (!modulus_range.valid || modulus_range.lo_inf ||
+      ixs_rat_cmp(modulus_range.lo_p, modulus_range.lo_q, 0, 1) <= 0)
+    return IXS_ALGEBRA_NO_MATCH;
+  return bounds_modular_remainder_delta_equal(ctx, bounds, lhs->u.binary.lhs,
+                                              rhs->u.binary.lhs, modulus);
+}
+
+static ixs_algebra_status
 bounds_exact_value_project_division(ixs_ctx *ctx, ixs_bounds *bounds,
                                     ixs_node *expr, ixs_node **lhs,
                                     ixs_node **rhs) {
@@ -31132,8 +31210,7 @@ typedef struct {
 
 static bool congruent_mod_term(const ixs_addterm *term, ixs_node **modulus,
                                int64_t *coefficient_p, int64_t *coefficient_q) {
-  if (term->term->tag != IXS_MOD || term->term->u.binary.rhs->tag != IXS_INT ||
-      term->term->u.binary.rhs->u.ival <= 0)
+  if (term->term->tag != IXS_MOD)
     return false;
   *modulus = term->term->u.binary.rhs;
   ixs_node_get_rat(term->coeff, coefficient_p, coefficient_q);
@@ -31154,11 +31231,24 @@ static size_t congruent_mod_key_hash(const ixs_node *modulus,
   return (size_t)mixed;
 }
 
+static bool congruent_mod_proof_failed(ixs_ctx *ctx, ixs_algebra_status status,
+                                       ixs_node **result, bool *limited) {
+  if (status == IXS_ALGEBRA_OOM)
+    *result = NULL;
+  else if (status == IXS_ALGEBRA_INVALID)
+    *result = ctx->sentinel_error;
+  else if (status == IXS_ALGEBRA_LIMITED)
+    *limited = true;
+  else
+    return false;
+  return true;
+}
+
 /* Index eligible terms by (modulus, rational coefficient).  Each term probes
  * only the chain for its exact opposite coefficient, so unrelated wide ADDs
  * remain linear without an arbitrary pair ceiling hiding later proofs. */
 static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
-                                                 ixs_node *add) {
+                                                 ixs_node *add, bool *limited) {
   ixs_arena_mark mark;
   congruent_mod_index_entry *entries;
   size_t *buckets;
@@ -31214,27 +31304,17 @@ static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
            link = entries[link - 1u].next_plus_one) {
         congruent_mod_index_entry *candidate = &entries[link - 1u];
         ixs_node *previous;
-        ixs_node *difference;
+        ixs_algebra_status equality;
         if (candidate->modulus != modulus ||
             candidate->coefficient_p != opposite_p ||
             candidate->coefficient_q != coefficient_q)
           continue;
         previous = add->u.add.terms[candidate->term_index].term;
-        /* Preserve the original left-to-right proof orientation.  Exact
-         * relation projection may know `previous - current` directly even
-         * though divisibility is mathematically sign-symmetric. */
-        difference =
-            simp_sub(ctx, previous->u.binary.lhs, current->u.binary.lhs);
-        if (!difference || ixs_node_is_sentinel(difference)) {
-          result = difference;
-          goto cleanup;
-        }
-        if (ixs_bounds_check_congruent(bnds, difference, modulus->u.ival, 0) !=
-            IXS_CHECK_TRUE) {
-          if (bnds->oom) {
-            result = NULL;
+        equality =
+            bounds_modular_remainders_equal(ctx, bnds, previous, current);
+        if (equality != IXS_ALGEBRA_MATCH) {
+          if (congruent_mod_proof_failed(ctx, equality, &result, limited))
             goto cleanup;
-          }
           continue;
         }
         IXS_STAT_HIT(ctx);
@@ -36912,7 +36992,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   result = cancel_ceil_remainder_node(ctx, bnds, result);
   if (!result)
     return NULL;
-  result = cancel_congruent_mod_difference(ctx, bnds, result);
+  result = cancel_congruent_mod_difference(ctx, bnds, result, limited);
   result = cancel_floor_mod_node(ctx, bnds, result);
   if (result && result->tag == IXS_ADD) {
     int64_t const_p, const_q;

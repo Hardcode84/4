@@ -673,7 +673,7 @@ ixsimpl/
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
 │   ├── bounds_lifecycle.c   # aggregate initialization, fork, and destruction
-│   ├── bounds_modular.c     # exact-integer and paired-Mod projection
+│   ├── bounds_modular.c     # exact-integer and shared-Mod proofs/projection
 │   ├── bounds_modular.h
 │   ├── bounds_predicate.c   # tri-state and finite-domain predicate proof
 │   ├── bounds_predicate.h

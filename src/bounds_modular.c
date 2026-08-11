@@ -789,6 +789,84 @@ static ixs_algebra_status bounds_exact_value_source_defined(ixs_bounds *bounds,
 }
 
 static ixs_algebra_status
+bounds_modular_current_transport(const ixs_bounds *bounds) {
+  ixs_bounds_transport_status transport = bounds_query_state_transport(bounds);
+  if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return IXS_ALGEBRA_INVALID;
+  if (transport == IXS_BOUNDS_TRANSPORT_OOM || bounds->oom)
+    return IXS_ALGEBRA_OOM;
+  if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    return IXS_ALGEBRA_LIMITED;
+  return IXS_ALGEBRA_NO_MATCH;
+}
+
+static ixs_algebra_status
+bounds_modular_remainder_delta_equal(ixs_ctx *ctx, ixs_bounds *bounds,
+                                     ixs_node *lhs, ixs_node *rhs,
+                                     ixs_node *modulus) {
+  ixs_node *difference;
+  int64_t delta;
+  bool invalid = false;
+  bool limited = false;
+  bool oom = false;
+  if (bounds_modular_exact_delta_detail(ctx, bounds, lhs, rhs, false, &delta,
+                                        &invalid, &limited, &oom)) {
+    if (delta == 0 || (modulus->tag == IXS_INT && delta % modulus->u.ival == 0))
+      return IXS_ALGEBRA_MATCH;
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  if (invalid)
+    return IXS_ALGEBRA_INVALID;
+  if (oom)
+    return IXS_ALGEBRA_OOM;
+  if (limited)
+    return IXS_ALGEBRA_LIMITED;
+  if (modulus->tag != IXS_INT)
+    return IXS_ALGEBRA_NO_MATCH;
+
+  difference = simp_sub(ctx, lhs, rhs);
+  if (!difference)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(difference))
+    return IXS_ALGEBRA_INVALID;
+  if (ixs_bounds_check_congruent(bounds, difference, modulus->u.ival, 0) ==
+      IXS_CHECK_TRUE)
+    return IXS_ALGEBRA_MATCH;
+  return bounds_modular_current_transport(bounds);
+}
+
+IXS_STATIC ixs_algebra_status bounds_modular_remainders_equal(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs) {
+  ixs_node *modulus;
+  ixs_interval modulus_range;
+  ixs_algebra_status status;
+  if (!ctx || !bounds || !lhs || !rhs || lhs->tag != IXS_MOD ||
+      rhs->tag != IXS_MOD || lhs->u.binary.rhs != rhs->u.binary.rhs ||
+      bounds->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_modular_current_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  status = bounds_exact_value_source_defined(bounds, lhs);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  status = bounds_exact_value_source_defined(bounds, rhs);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+
+  modulus = lhs->u.binary.rhs;
+  modulus_range = ixs_bounds_get(bounds, modulus);
+  status = bounds_modular_current_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  if (!modulus_range.valid || modulus_range.lo_inf ||
+      ixs_rat_cmp(modulus_range.lo_p, modulus_range.lo_q, 0, 1) <= 0)
+    return IXS_ALGEBRA_NO_MATCH;
+  return bounds_modular_remainder_delta_equal(ctx, bounds, lhs->u.binary.lhs,
+                                              rhs->u.binary.lhs, modulus);
+}
+
+static ixs_algebra_status
 bounds_exact_value_project_division(ixs_ctx *ctx, ixs_bounds *bounds,
                                     ixs_node *expr, ixs_node **lhs,
                                     ixs_node **rhs) {

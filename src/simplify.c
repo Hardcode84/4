@@ -1704,8 +1704,7 @@ typedef struct {
 
 static bool congruent_mod_term(const ixs_addterm *term, ixs_node **modulus,
                                int64_t *coefficient_p, int64_t *coefficient_q) {
-  if (term->term->tag != IXS_MOD || term->term->u.binary.rhs->tag != IXS_INT ||
-      term->term->u.binary.rhs->u.ival <= 0)
+  if (term->term->tag != IXS_MOD)
     return false;
   *modulus = term->term->u.binary.rhs;
   ixs_node_get_rat(term->coeff, coefficient_p, coefficient_q);
@@ -1726,11 +1725,24 @@ static size_t congruent_mod_key_hash(const ixs_node *modulus,
   return (size_t)mixed;
 }
 
+static bool congruent_mod_proof_failed(ixs_ctx *ctx, ixs_algebra_status status,
+                                       ixs_node **result, bool *limited) {
+  if (status == IXS_ALGEBRA_OOM)
+    *result = NULL;
+  else if (status == IXS_ALGEBRA_INVALID)
+    *result = ctx->sentinel_error;
+  else if (status == IXS_ALGEBRA_LIMITED)
+    *limited = true;
+  else
+    return false;
+  return true;
+}
+
 /* Index eligible terms by (modulus, rational coefficient).  Each term probes
  * only the chain for its exact opposite coefficient, so unrelated wide ADDs
  * remain linear without an arbitrary pair ceiling hiding later proofs. */
 static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
-                                                 ixs_node *add) {
+                                                 ixs_node *add, bool *limited) {
   ixs_arena_mark mark;
   congruent_mod_index_entry *entries;
   size_t *buckets;
@@ -1786,27 +1798,17 @@ static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
            link = entries[link - 1u].next_plus_one) {
         congruent_mod_index_entry *candidate = &entries[link - 1u];
         ixs_node *previous;
-        ixs_node *difference;
+        ixs_algebra_status equality;
         if (candidate->modulus != modulus ||
             candidate->coefficient_p != opposite_p ||
             candidate->coefficient_q != coefficient_q)
           continue;
         previous = add->u.add.terms[candidate->term_index].term;
-        /* Preserve the original left-to-right proof orientation.  Exact
-         * relation projection may know `previous - current` directly even
-         * though divisibility is mathematically sign-symmetric. */
-        difference =
-            simp_sub(ctx, previous->u.binary.lhs, current->u.binary.lhs);
-        if (!difference || ixs_node_is_sentinel(difference)) {
-          result = difference;
-          goto cleanup;
-        }
-        if (ixs_bounds_check_congruent(bnds, difference, modulus->u.ival, 0) !=
-            IXS_CHECK_TRUE) {
-          if (bnds->oom) {
-            result = NULL;
+        equality =
+            bounds_modular_remainders_equal(ctx, bnds, previous, current);
+        if (equality != IXS_ALGEBRA_MATCH) {
+          if (congruent_mod_proof_failed(ctx, equality, &result, limited))
             goto cleanup;
-          }
           continue;
         }
         IXS_STAT_HIT(ctx);
@@ -7484,7 +7486,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   result = cancel_ceil_remainder_node(ctx, bnds, result);
   if (!result)
     return NULL;
-  result = cancel_congruent_mod_difference(ctx, bnds, result);
+  result = cancel_congruent_mod_difference(ctx, bnds, result, limited);
   result = cancel_floor_mod_node(ctx, bnds, result);
   if (result && result->tag == IXS_ADD) {
     int64_t const_p, const_q;

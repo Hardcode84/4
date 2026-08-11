@@ -19,6 +19,11 @@ IXS_STATIC bool bounds_modular_exact_delta_detail(
     ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
     bool allow_expand, int64_t *delta, bool *invalid, bool *limited, bool *oom);
 
+/* Prove that two original Mod nodes with one shared modulus have equal
+ * remainders. The query reuses active bounds caches and never simplifies. */
+IXS_STATIC ixs_algebra_status bounds_modular_remainders_equal(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs);
+
 /* Project an already-normalized expression to one exact int64 value.  This
  * path shares the active range, relation, modular, and bitfacts queries and
  * never calls the simplifier. */
