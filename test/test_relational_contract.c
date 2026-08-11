@@ -76,7 +76,8 @@ static void test_relational_negative_cycle_contract(void) {
   CHECK(test_ixs_check_facts(cycle, a_nonnegative) == IXS_CHECK_UNKNOWN);
   CHECK(!test_ixs_range_facts(cycle, a, &range));
   CHECK(test_ixs_equivalent_facts(cycle, a, a) == IXS_CHECK_UNKNOWN);
-  CHECK(!test_ixs_constant_difference_facts(cycle, a, a, &delta));
+  CHECK(test_simplified_difference(cycle, a, a, &delta));
+  CHECK(delta == 0);
 
   CHECK(assume_unit_difference_upper(ctx, zero_cycle, x, y, -1));
   CHECK(assume_unit_difference_upper(ctx, zero_cycle, y, z, 0));
@@ -189,9 +190,8 @@ static void test_relational_exact_equality_noise_contract(void) {
   CHECK(base_equivalent == IXS_CHECK_TRUE);
   CHECK(loaded_equivalent == IXS_CHECK_TRUE);
 
-  base_delta_ok = test_ixs_constant_difference_facts(base, x, z, &base_delta);
-  loaded_delta_ok =
-      test_ixs_constant_difference_facts(loaded, x, z, &loaded_delta);
+  base_delta_ok = test_simplified_difference(base, x, z, &base_delta);
+  loaded_delta_ok = test_simplified_difference(loaded, x, z, &loaded_delta);
   CHECK(base_delta_ok && base_delta == 0);
   CHECK(loaded_delta_ok && loaded_delta == 0);
 

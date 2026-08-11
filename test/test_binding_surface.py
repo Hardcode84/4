@@ -16,11 +16,9 @@ def test_migration_binding_surface_is_discoverable() -> None:
         "check",
         "check_predicate",
         "congruent",
-        "constant_difference",
         "defined",
         "divisible",
         "equivalent",
-        "finite_difference",
         "integer_valued",
         "known_bits",
         "pow2_fact",
@@ -44,8 +42,10 @@ def test_migration_binding_surface_is_discoverable() -> None:
     assert expr_members <= set(dir(ixsimpl.Expr))
     assert {"Context", "Expr", "Facts"} <= set(ixsimpl.__all__)
     removed_query_methods = {
+        "constant_difference",
         "decompose_exact_quotient",
         "equivalent_finite_domain",
+        "finite_difference",
         "integer_range",
     }
     assert removed_query_methods.isdisjoint(dir(ixsimpl.Context))
@@ -61,7 +61,6 @@ def _typecheck_package_surface(
 ) -> None:
     tri: bool | None = ctx.check_predicate(expr, facts)
     equivalent: bool | None = ctx.equivalent(expr, expr, facts)
-    difference: int | None = ctx.constant_difference(expr, expr, facts)
     pointer: int = expr.node_ptr
     exact: tuple[Literal["proven", "not_exact", "unknown"], ixsimpl.Expr | None]
     exact = ctx.try_exact_divide(expr, 1, facts)
@@ -72,7 +71,6 @@ def _typecheck_package_surface(
     _ = (
         tri,
         equivalent,
-        difference,
         pointer,
         exact,
         transferred,

@@ -3535,7 +3535,7 @@ static void test_fact_rewrite_constant_power(void) {
   errors = ixs_ctx_nerrors(ctx);
   {
     const ixs_node *public_result = ixs_simplify_facts(zero_facts, undefined);
-    CHECK(public_result == NULL);
+    CHECK(ixs_is_domain_error(public_result));
   }
   CHECK(ixs_ctx_nerrors(ctx) == errors + 1);
   CHECK(strstr(ixs_ctx_error(ctx, errors), "division by zero") != NULL);

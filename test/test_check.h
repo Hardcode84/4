@@ -72,12 +72,26 @@ test_ixs_check_congruent_facts(ixs_facts *facts, const ixs_node *expr,
   return ixs_check_congruent_facts(facts, expr, modulus, residue);
 }
 
-static inline bool test_ixs_constant_difference_facts(ixs_facts *facts,
-                                                      const ixs_node *lhs,
-                                                      const ixs_node *rhs,
-                                                      int64_t *difference) {
-  return ixs_constant_difference_facts(facts, lhs, rhs, difference);
+static inline bool test_simplified_difference_with_session(
+    ixs_session *session, ixs_facts *facts, const ixs_node *lhs,
+    const ixs_node *rhs, int64_t *difference) {
+  const ixs_node *expr;
+  const ixs_node *simplified;
+  if (difference)
+    *difference = 0;
+  if (!session || !facts || !difference)
+    return false;
+  expr = (ixs_sub)(session, lhs, rhs);
+  simplified = expr ? ixs_simplify_facts(facts, expr) : NULL;
+  if (!simplified || ixs_node_tag(simplified) != IXS_INT)
+    return false;
+  *difference = ixs_node_int_val(simplified);
+  return true;
 }
+
+#define test_simplified_difference(facts, lhs, rhs, difference)                \
+  test_simplified_difference_with_session(IXS_TEST_SESSION(ctx), facts, lhs,   \
+                                          rhs, difference)
 
 static inline ixs_pow2_fact test_ixs_get_pow2_fact_facts(ixs_facts *facts,
                                                          const ixs_node *expr) {
@@ -110,12 +124,29 @@ static inline bool test_ixs_affine_decompose_facts(ixs_facts *facts,
   return ixs_affine_decompose_facts(facts, expr, symbol, coefficient, residual);
 }
 
-static inline bool
-test_ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
-                                 const ixs_node *symbol, const ixs_node *step,
-                                 const ixs_node **difference) {
-  return ixs_finite_difference_facts(facts, expr, symbol, step, difference);
+static inline bool test_finite_difference_with_session(
+    ixs_session *session, ixs_facts *facts, const ixs_node *expr,
+    const ixs_node *symbol, const ixs_node *step, const ixs_node **difference) {
+  const ixs_node *shifted_symbol;
+  const ixs_node *shifted;
+  const ixs_node *raw;
+  if (difference)
+    *difference = NULL;
+  if (!session || !facts || !difference || !expr || !symbol || !step ||
+      ixs_node_tag(symbol) != IXS_SYM)
+    return false;
+  shifted_symbol = (ixs_add)(session, symbol, step);
+  shifted =
+      shifted_symbol ? (ixs_subs)(session, expr, symbol, shifted_symbol) : NULL;
+  raw = shifted ? (ixs_sub)(session, shifted, expr) : NULL;
+  raw = raw ? (ixs_expand)(session, raw) : NULL;
+  *difference = raw ? ixs_simplify_facts(facts, raw) : NULL;
+  return *difference && !ixs_is_error(*difference);
 }
+
+#define test_finite_difference(facts, expr, symbol, step, output)              \
+  test_finite_difference_with_session(IXS_TEST_SESSION(ctx), facts, expr,      \
+                                      symbol, step, output)
 
 static inline bool
 test_ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr,

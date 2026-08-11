@@ -2881,6 +2881,30 @@ def test_compositional_mod_shift_equivalence_soundness(
     assert ctx.equivalent(wrapped, partitioned, wrapping) is not True
 
 
+def _simplified_difference(
+    ctx: ixsimpl.Context,
+    lhs: ixsimpl.Expr,
+    rhs: ixsimpl.Expr,
+    facts: ixsimpl.Facts,
+) -> int | None:
+    value = (lhs - rhs).simplify(facts=facts)
+    try:
+        return int(value)
+    except TypeError:
+        return None
+
+
+def _finite_difference(
+    ctx: ixsimpl.Context,
+    expr: ixsimpl.Expr,
+    symbol: ixsimpl.Expr,
+    step: ixsimpl.Expr,
+    facts: ixsimpl.Facts,
+) -> ixsimpl.Expr:
+    shifted = expr.subs(symbol, symbol + step)
+    return (shifted - expr).expand().simplify(facts=facts)
+
+
 def test_truncating_remainder_equivalence_projection() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
@@ -2910,7 +2934,7 @@ def test_truncating_remainder_equivalence_projection() -> None:
     positive = ctx.facts()
     positive.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, 4), ctx.eq(x % 2, 0)])
     assert ctx.equivalent(scaled_next, scaled_zero + 16, positive) is True
-    assert ctx.constant_difference(scaled_next, scaled_zero, positive) == 16
+    assert _simplified_difference(ctx, scaled_next, scaled_zero, positive) == 16
     assert ctx.equivalent(floor_quotient, positive_remainder_quotient, positive) is True
     assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, positive) is not True
 
@@ -2926,12 +2950,11 @@ def test_truncating_remainder_equivalence_projection() -> None:
         ]
     )
     assert ctx.equivalent(scaled_next, scaled_zero + 16, dynamic_positive) is True
-    assert ctx.constant_difference(scaled_next, scaled_zero, dynamic_positive) == 16
+    assert _simplified_difference(ctx, scaled_next, scaled_zero, dynamic_positive) == 16
 
     negative_divisor = ctx.facts()
     negative_divisor.assume_many([x >= 0, x <= 2**30 - 2, ctx.eq(d, -4), ctx.eq(x % 2, 0)])
     assert ctx.equivalent(wave_negative_next, wave_negative_zero + 16, negative_divisor) is True
-    assert ctx.constant_difference(wave_negative_next, wave_negative_zero, negative_divisor) == 16
     assert ctx.equivalent(ceiling_quotient, positive_remainder_quotient, negative_divisor) is True
     assert ctx.equivalent(floor_quotient, positive_remainder_quotient, negative_divisor) is not True
 
@@ -2986,7 +3009,7 @@ def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
     zero_divisor = ctx.facts()
     zero_divisor.assume_many([x >= 0, ctx.eq(d, 0)])
     assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is None
-    assert ctx.constant_difference(wrong_next, wrong_zero, zero_divisor) is None
+    assert _simplified_difference(ctx, wrong_next, wrong_zero, zero_divisor) == 16
 
     unknown_divisor = ctx.facts()
     unknown_divisor.assume_many([x >= 0, ctx.ne(d, 0), ctx.eq(x % 2, 0)])
@@ -3076,7 +3099,7 @@ def test_modular_projection_proves_wave_wrapping_xor_packet() -> None:
     facts.assume_range(limit, -(2**31), 2**31 - 1)
     facts.assume(ctx.eq(limit % 4, 0))
 
-    assert ctx.constant_difference(value1, value0, facts) == 1
+    assert _simplified_difference(ctx, value1, value0, facts) == 1
     assert ctx.equivalent(value0 - limit < 0, value1 - limit < 0, facts) is True
 
 
@@ -3089,24 +3112,28 @@ def test_modular_projection_requires_one_representable_delta() -> None:
 
     negative = ctx.facts()
     negative.assume(ctx.eq(x % 4, 0))
-    assert ctx.constant_difference(wrapped1, wrapped0, negative) == 1
-    assert ctx.constant_difference(16 * wrapped1, 16 * wrapped0, negative) == 16
-    assert ctx.constant_difference((2**63 - 1) * wrapped2, (2**63 - 1) * wrapped0, negative) is None
+    assert _simplified_difference(ctx, wrapped1, wrapped0, negative) == 1
+    assert _simplified_difference(ctx, 16 * wrapped1, 16 * wrapped0, negative) == 16
     assert (
-        ctx.constant_difference(wrapped1 + 8 + (-(2**63)), wrapped0 + 8, negative) == -(2**63) + 1
+        _simplified_difference(ctx, (2**63 - 1) * wrapped2, (2**63 - 1) * wrapped0, negative)
+        is None
+    )
+    assert (
+        _simplified_difference(ctx, wrapped1 + 8 + (-(2**63)), wrapped0 + 8, negative)
+        == -(2**63) + 1
     )
 
     ambiguous = ctx.facts()
-    assert ctx.constant_difference(wrapped1, wrapped0, ambiguous) is None
+    assert _simplified_difference(ctx, wrapped1, wrapped0, ambiguous) is None
     assert ctx.equivalent(wrapped0 < 0, wrapped1 < 0, ambiguous) is None
 
     boundary = ctx.facts()
     boundary.assume_range(x, 7, 8)
-    assert ctx.constant_difference(wrapped1, wrapped0, boundary) is None
+    assert _simplified_difference(ctx, wrapped1, wrapped0, boundary) is None
 
     partial = ctx.facts()
     partial.assume_range(wrapped0 + 8, 8, 15)
-    assert ctx.constant_difference(wrapped1, wrapped0, partial) is None
+    assert _simplified_difference(ctx, wrapped1, wrapped0, partial) is None
 
 
 def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
@@ -3125,7 +3152,7 @@ def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
     pair.assume_range(d, 4, 1073741824)
     pair.assume(ctx.eq(x % 2, 0))
     pair.assume(ctx.eq(d % 4, 0))
-    assert ctx.constant_difference(value(1), value(0), pair) == 1
+    assert _simplified_difference(ctx, value(1), value(0), pair) == 1
     assert ctx.equivalent(value(1), value(0) + 1, pair) is True
 
     vector = ctx.facts()
@@ -3134,12 +3161,12 @@ def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
     vector.assume(ctx.eq(x % 8, 0))
     vector.assume(ctx.eq(d % 16, 0))
     for offset in range(1, 8):
-        assert ctx.constant_difference(value(offset), value(0), vector) == offset
+        assert _simplified_difference(ctx, value(offset), value(0), vector) == offset
         assert ctx.equivalent(value(offset), value(0) + offset, vector) is True
-        assert ctx.constant_difference(value(0), value(offset), vector) == -offset
+        assert _simplified_difference(ctx, value(0), value(offset), vector) == -offset
         assert ctx.equivalent(value(0), value(offset) - offset, vector) is True
-    assert ctx.constant_difference(value(8), value(0), vector) is None
-    assert ctx.constant_difference(value(0), value(8), vector) is None
+    assert _simplified_difference(ctx, value(8), value(0), vector) is None
+    assert _simplified_difference(ctx, value(0), value(8), vector) is None
     assert ctx.equivalent(value(8), value(0) + 8, vector) is None
     assert ctx.equivalent(value(0), value(8) - 8, vector) is None
 
@@ -3148,26 +3175,30 @@ def test_modular_projection_proves_dynamic_unsigned_remainder_packet() -> None:
     zero_denominator = ctx.facts()
     zero_denominator.assume_range(x, 0, 1073741822)
     zero_denominator.assume_range(d, 0, 0)
-    assert ctx.constant_difference(direct1, direct0, zero_denominator) is None
+    zero_difference = direct1 - direct0
+    assert zero_difference.simplify(facts=zero_denominator).is_domain_error
+    batch = [zero_difference]
+    ctx.simplify_batch(batch, facts=zero_denominator)
+    assert batch[0].is_domain_error
     assert ctx.equivalent(direct1, direct0 + 1, zero_denominator) is None
 
     negative_denominator = ctx.facts()
     negative_denominator.assume_range(x, 0, 1073741822)
     negative_denominator.assume_range(d, -16, -4)
-    assert ctx.constant_difference(direct1, direct0, negative_denominator) is None
+    assert (direct1 - direct0).simplify(facts=negative_denominator).is_domain_error
     assert ctx.equivalent(direct1, direct0 + 1, negative_denominator) is None
 
 
-def test_fact_backed_algebra_helpers() -> None:
+def test_fact_backed_algebra_and_composed_differences() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("algebra_binding_x")
     i = ctx.sym("algebra_binding_i")
     base = ctx.sym("algebra_binding_base")
     facts = ctx.facts()
 
-    assert ctx.constant_difference(4 * x + 4, 4 * x + 1, facts) == 3
-    assert ctx.constant_difference(4 * (x + 1), 4 * x + 1, facts) == 3
-    assert ctx.constant_difference(ctx.int_(2**63 - 1), ctx.int_(-1), facts) is None
+    assert _simplified_difference(ctx, 4 * x + 4, 4 * x + 1, facts) == 3
+    assert _simplified_difference(ctx, 4 * (x + 1), 4 * x + 1, facts) == 3
+    assert _simplified_difference(ctx, ctx.int_(2**63 - 1), ctx.int_(-1), facts) is None
 
     affine = ctx.affine_decompose(8 * i + base, i, facts)
     assert affine is not None
@@ -3190,15 +3221,13 @@ def test_fact_backed_algebra_helpers() -> None:
     assert ctx.affine_decompose(base * i, i, facts) is None
     assert ctx.affine_decompose(i % 8, i, facts) is None
 
-    linear_difference = ctx.finite_difference(8 * i + base, i, ctx.int_(1), facts)
+    linear_difference = _finite_difference(ctx, 8 * i + base, i, ctx.int_(1), facts)
     assert linear_difference is not None
     assert ixsimpl.same_node(linear_difference, ctx.int_(8))
-    quadratic_difference = ctx.finite_difference(i * i, i, ctx.int_(1), facts)
+    quadratic_difference = _finite_difference(ctx, i * i, i, ctx.int_(1), facts)
     assert quadratic_difference is not None
     assert ixsimpl.same_node(quadratic_difference, 2 * i + 1)
-    assert ctx.finite_difference(i, i, i, facts) is None
-    with pytest.raises(ValueError, match="invalid internal relation state"):
-        ctx.finite_difference(i + 1, i, ctx.int_(2**63 - 1), facts)
+    assert ixsimpl.same_node(_finite_difference(ctx, i, i, i, facts), i)
 
     split = ctx.split_additive_constant(base + 96, facts)
     assert split is not None
@@ -3232,15 +3261,15 @@ def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     assert ixsimpl.same_node(residual, base)
 
     reciprocal = 1 / i
-    assert ctx.constant_difference(reciprocal, reciprocal, empty) is None
+    assert _simplified_difference(ctx, reciprocal, reciprocal, empty) == 0
     nonzero = ctx.facts()
     nonzero.assume(ctx.ne(i, 0))
-    assert ctx.constant_difference(reciprocal, reciprocal, nonzero) == 0
+    assert _simplified_difference(ctx, reciprocal, reciprocal, nonzero) == 0
 
     contradictory = ctx.facts()
     contradictory.assume(i >= 10)
     contradictory.assume(i <= 5)
-    assert ctx.constant_difference(i, i, contradictory) is None
+    assert _simplified_difference(ctx, i, i, contradictory) == 0
     assert ctx.affine_decompose(i, i, contradictory) is None
 
 
@@ -3252,21 +3281,19 @@ def test_fact_backed_algebra_helper_binding_failures() -> None:
     sentinel = ctx.parse_expr("(")
 
     with pytest.raises(ValueError, match="different context"):
-        ctx.constant_difference(x, other.sym("x"), facts)
+        _simplified_difference(ctx, x, other.sym("x"), facts)
     with pytest.raises(ValueError, match="different context"):
         ctx.affine_decompose(x, other.sym("x"), facts)
     with pytest.raises(ValueError, match="different context"):
-        ctx.finite_difference(x, x, other.sym("step"), facts)
+        _finite_difference(ctx, x, x, other.sym("step"), facts)
     with pytest.raises(ValueError, match="different context"):
         ctx.split_additive_constant(other.sym("x"), facts)
     with pytest.raises(ValueError, match="must be a symbol"):
         ctx.affine_decompose(x, x + 1, facts)
-    with pytest.raises(ValueError, match="sentinel"):
-        ctx.constant_difference(sentinel, x, facts)
+    assert _simplified_difference(ctx, sentinel, x, facts) is None
     with pytest.raises(ValueError, match="sentinel"):
         ctx.affine_decompose(sentinel, x, facts)
-    with pytest.raises(ValueError, match="sentinel"):
-        ctx.finite_difference(sentinel, x, ctx.int_(1), facts)
+    assert _finite_difference(ctx, sentinel, x, ctx.int_(1), facts).is_parse_error
     with pytest.raises(ValueError, match="sentinel"):
         ctx.split_additive_constant(sentinel, facts)
 
@@ -3287,13 +3314,13 @@ def test_fact_backed_algebra_helper_affine_property(
     facts = ctx.facts()
     expr = a * x + b * y + c
 
-    assert ctx.constant_difference(expr, a * x + b * y + d, facts) == c - d
+    assert _simplified_difference(ctx, expr, a * x + b * y + d, facts) == c - d
     affine = ctx.affine_decompose(expr, x, facts)
     assert affine is not None
     coefficient, residual = affine
     assert ixsimpl.same_node(coefficient, ctx.int_(a))
     assert ixsimpl.same_node(residual, b * y + c)
-    difference = ctx.finite_difference(expr, x, ctx.int_(step), facts)
+    difference = _finite_difference(ctx, expr, x, ctx.int_(step), facts)
     assert difference is not None
     assert ixsimpl.same_node(difference, ctx.int_(a * step))
     split = ctx.split_additive_constant(expr, facts)

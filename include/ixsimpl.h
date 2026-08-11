@@ -378,21 +378,12 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
  * limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
-/* Prove that lhs - rhs is an exactly representable integer constant.  The
- * operands must be defined over the complete fact domain. */
-bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
-                                   const ixs_node *rhs, int64_t *delta);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an
  * exact rational constant and residual does not reference symbol. */
 bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
                                 const ixs_node *symbol,
                                 const ixs_node **coefficient,
                                 const ixs_node **residual);
-/* Construct expr[symbol -> symbol + step] - expr exactly.  The result may
- * still reference symbol; callers decide whether it is loop invariant. */
-bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
-                                 const ixs_node *symbol, const ixs_node *step,
-                                 const ixs_node **difference);
 /* Split expr into residual + constant with an exactly representable integer
  * constant. */
 bool ixs_split_additive_constant_facts(ixs_facts *facts, const ixs_node *expr,

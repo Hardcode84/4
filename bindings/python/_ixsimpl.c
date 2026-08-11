@@ -1916,33 +1916,6 @@ static PyObject *context_expr_int_pair(ContextObject *self,
   return pair;
 }
 
-static PyObject *Context_constant_difference(ContextObject *self,
-                                             PyObject *args, PyObject *kwargs) {
-  static char *kwlist[] = {"lhs", "rhs", "facts", NULL};
-  static const char *names[] = {"lhs", "rhs"};
-  PyObject *expr_objs[2];
-  PyObject *facts_obj;
-  const ixs_node *exprs[2];
-  ixs_facts *facts;
-  int64_t delta;
-  size_t errors_before;
-  bool ok;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO", kwlist, &expr_objs[0],
-                                   &expr_objs[1], &facts_obj))
-    return NULL;
-  if (!context_query_exprs_facts(self, expr_objs, names, 2, facts_obj, exprs,
-                                 &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(Context_session(self));
-  ok = ixs_constant_difference_facts(facts, exprs[0], exprs[1], &delta);
-  if (raise_new_prefixed_error(Context_session(self), errors_before,
-                               "constant difference:") < 0)
-    return NULL;
-  if (!ok)
-    Py_RETURN_NONE;
-  return PyLong_FromLongLong((long long)delta);
-}
-
 static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
                                           PyObject *kwargs) {
   static char *kwlist[] = {"expr", "symbol", "facts", NULL};
@@ -1970,34 +1943,6 @@ static PyObject *Context_affine_decompose(ContextObject *self, PyObject *args,
   if (!ok)
     Py_RETURN_NONE;
   return context_expr_pair(self, coefficient, residual);
-}
-
-static PyObject *Context_finite_difference(ContextObject *self, PyObject *args,
-                                           PyObject *kwargs) {
-  static char *kwlist[] = {"expr", "symbol", "step", "facts", NULL};
-  static const char *names[] = {"expr", "symbol", "step"};
-  PyObject *expr_objs[3];
-  PyObject *facts_obj;
-  const ixs_node *exprs[3];
-  const ixs_node *difference;
-  ixs_facts *facts;
-  size_t errors_before;
-  bool ok;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO", kwlist, &expr_objs[0],
-                                   &expr_objs[1], &expr_objs[2], &facts_obj))
-    return NULL;
-  if (!context_query_exprs_facts(self, expr_objs, names, 3, facts_obj, exprs,
-                                 &facts))
-    return NULL;
-  errors_before = ixs_session_nerrors(Context_session(self));
-  ok = ixs_finite_difference_facts(facts, exprs[0], exprs[1], exprs[2],
-                                   &difference);
-  if (raise_new_prefixed_error(Context_session(self), errors_before,
-                               "finite difference:") < 0)
-    return NULL;
-  if (!ok)
-    Py_RETURN_NONE;
-  return (PyObject *)Expr_wrap(self, difference);
 }
 
 static PyObject *Context_split_additive_constant(ContextObject *self,
@@ -2600,15 +2545,9 @@ static PyMethodDef Context_methods[] = {
     {"equivalent", (PyCFunction)Context_equivalent,
      METH_VARARGS | METH_KEYWORDS,
      "Prove total expression or predicate equivalence under a fact set."},
-    {"constant_difference", (PyCFunction)Context_constant_difference,
-     METH_VARARGS | METH_KEYWORDS,
-     "Return the proven integer lhs-rhs difference, or None."},
     {"affine_decompose", (PyCFunction)Context_affine_decompose,
      METH_VARARGS | METH_KEYWORDS,
      "Return (coefficient, residual) around one symbol, or None."},
-    {"finite_difference", (PyCFunction)Context_finite_difference,
-     METH_VARARGS | METH_KEYWORDS,
-     "Return expr(symbol+step)-expr(symbol), or None."},
     {"split_additive_constant", (PyCFunction)Context_split_additive_constant,
      METH_VARARGS | METH_KEYWORDS,
      "Return (residual, integer constant), or None."},

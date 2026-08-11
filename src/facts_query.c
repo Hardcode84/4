@@ -42,12 +42,6 @@ typedef struct {
 
 typedef struct {
   ixs_fact_query_status status;
-  bool available;
-  int64_t difference;
-} ixs_constant_difference_result;
-
-typedef struct {
-  ixs_fact_query_status status;
   ixs_pow2_fact fact;
 } ixs_pow2_query_result;
 
@@ -75,12 +69,6 @@ typedef struct {
   const ixs_node *coefficient;
   const ixs_node *residual;
 } ixs_affine_decomposition_result;
-
-typedef struct {
-  ixs_fact_query_status status;
-  bool available;
-  const ixs_node *difference;
-} ixs_finite_difference_result;
 
 typedef struct {
   ixs_fact_query_status status;
@@ -212,10 +200,20 @@ static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
+/* Successful poison refinement discards diagnostics from dead children.
+ * Failed simplification leaves its domain or transport diagnostic intact. */
+static void
+facts_simplify_finish_diagnostics(const ixs_query_transaction *transaction,
+                                  bool discard) {
+  if (discard)
+    (void)ixs_query_transaction_finish(transaction, false);
+}
+
 static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
                                                 ixs_node *expr) {
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
+  ixs_query_transaction diagnostic_transaction;
   ixs_arena_mark mark;
   ixs_ctx *ctx;
   ixs_node *value = NULL;
@@ -231,6 +229,7 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
     return result;
   }
   facts_read_query_begin(&read_scope, &facts->bounds, ctx, "simplify");
+  ixs_query_transaction_begin(&diagnostic_transaction, ctx, NULL, NULL);
   if (ixs_bounds_has_empty(&facts->bounds)) {
     result.status = IXS_FACT_QUERY_COMPLETE;
     result.value = expr;
@@ -261,7 +260,8 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_OOM;
     bounds_store_invalidate_reads(&facts->bounds);
   } else if (ixs_node_is_sentinel(value)) {
-    result.status = IXS_FACT_QUERY_INVALID;
+    result.status = IXS_FACT_QUERY_COMPLETE;
+    result.value = value;
   } else {
     result.status = IXS_FACT_QUERY_COMPLETE;
     result.value = value;
@@ -273,6 +273,10 @@ cleanup:
   if (query_held)
     ixs_bounds_query_hold_end(&facts->bounds);
   result.status = facts_read_query_finish(&read_scope, result.status);
+  facts_simplify_finish_diagnostics(&diagnostic_transaction,
+                                    result.status == IXS_FACT_QUERY_COMPLETE &&
+                                        result.value &&
+                                        !ixs_node_is_sentinel(result.value));
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.value = NULL;
   facts_store_unbind(facts, &binding);
@@ -310,21 +314,33 @@ static bool facts_simplify_batch_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
   return true;
 }
 
+static bool facts_simplify_batch_is_clean(ixs_node *const *exprs, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    if (ixs_node_is_sentinel(exprs[i]))
+      return false;
+  }
+  return true;
+}
+
 static ixs_fact_query_status
 facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
+  ixs_query_transaction diagnostic_transaction;
   ixs_arena_mark mark;
   ixs_ctx *ctx;
   ixs_node **originals = NULL;
   bool ok;
   bool old_oom;
+  bool clean_result = true;
   size_t i;
   ixs_fact_query_status status = IXS_FACT_QUERY_INVALID;
 
   if (!facts_store_bind(facts, &binding, &ctx))
     return status;
   facts_read_query_begin(&read_scope, &facts->bounds, ctx, "simplify batch");
+  ixs_query_transaction_begin(&diagnostic_transaction, ctx, NULL, NULL);
   mark = ixs_arena_save(&ctx->scratch);
   if (n > 0 && !exprs) {
     ixs_ctx_push_error(ctx, "simplify batch: NULL batch with nonzero count");
@@ -380,17 +396,15 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
     bounds_store_invalidate_reads(&facts->bounds);
   } else {
     status = IXS_FACT_QUERY_COMPLETE;
-    for (i = 0; i < n; i++) {
-      if (ixs_node_is_sentinel(exprs[i])) {
-        status = IXS_FACT_QUERY_INVALID;
-        break;
-      }
-    }
+    clean_result = facts_simplify_batch_is_clean(exprs, n);
   }
   facts->bounds.oom = old_oom;
 
 cleanup:
   status = facts_read_query_finish(&read_scope, status);
+  facts_simplify_finish_diagnostics(&diagnostic_transaction,
+                                    status == IXS_FACT_QUERY_COMPLETE &&
+                                        clean_result);
   if (status != IXS_FACT_QUERY_COMPLETE && originals)
     memcpy(exprs, originals, n * sizeof(*originals));
   ixs_arena_restore(&ctx->scratch, mark);
@@ -405,6 +419,8 @@ facts_simplify_truncating_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
   ixs_division_projection_result result = ixs_division_algebra_project(
       ctx, bounds, source, root, ctx->node_zero, ctx->node_zero,
       IXS_DIVISION_PROJECT_PIECEWISE_REDUCING);
+  ixs_node *projected;
+  bool limited = false;
   *status = IXS_FACT_QUERY_COMPLETE;
   if (result.status == IXS_ALGEBRA_OOM)
     *status = IXS_FACT_QUERY_OOM;
@@ -414,7 +430,14 @@ facts_simplify_truncating_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
     *status = IXS_FACT_QUERY_LIMITED;
   if (*status != IXS_FACT_QUERY_COMPLETE)
     return NULL;
-  return result.status == IXS_ALGEBRA_MATCH ? result.lhs : root;
+  if (result.status != IXS_ALGEBRA_MATCH)
+    return root;
+  projected = simp_simplify_bounds_status(ctx, result.lhs, bounds, &limited);
+  if (limited) {
+    *status = IXS_FACT_QUERY_LIMITED;
+    return NULL;
+  }
+  return projected;
 }
 
 static ixs_fact_query_status
@@ -837,32 +860,6 @@ static bool algebra_affine_extract(facts_query_operation *scope, ixs_node *expr,
   return ixs_node_is_const(*coefficient);
 }
 
-static ixs_constant_difference_result
-facts_query_constant_difference(ixs_facts *facts, ixs_node *lhs,
-                                ixs_node *rhs) {
-  ixs_constant_difference_result result = {IXS_FACT_QUERY_INVALID, false, 0};
-  facts_query_operation scope;
-  ixs_node *nodes[2] = {lhs, rhs};
-  ixs_algebra_status detail;
-  if (!facts_query_operation_begin(facts, nodes, 2, "constant difference", true,
-                                   NULL, &scope)) {
-    result.status = scope.status;
-    return result;
-  }
-  facts_query_operation_start(&scope);
-  detail = bounds_constant_difference_query_detail(scope.ctx, &facts->bounds,
-                                                   lhs, rhs, &result.difference,
-                                                   &result.available);
-  scope.status = facts_status_from_algebra(detail);
-  (void)facts_query_operation_finish(&scope, result.available);
-  result.status = scope.status;
-  if (result.status != IXS_FACT_QUERY_COMPLETE) {
-    result.available = false;
-    result.difference = 0;
-  }
-  return result;
-}
-
 static ixs_affine_decomposition_result
 facts_query_affine_decompose(ixs_facts *facts, ixs_node *expr,
                              ixs_node *symbol) {
@@ -902,85 +899,6 @@ cleanup:
     result.residual = NULL;
   }
   return result;
-}
-
-static ixs_node *algebra_finite_difference(facts_query_operation *scope,
-                                           ixs_node *expr, ixs_node *symbol,
-                                           ixs_node *step) {
-  ixs_node *shifted_symbol;
-  ixs_node *shifted_expr;
-  ixs_node *result;
-  bool contains;
-  if (!algebra_query_defined(scope, expr) ||
-      !algebra_query_defined(scope, step))
-    return NULL;
-  if (!algebra_contains_node(scope, step, symbol, &contains) || contains)
-    return NULL;
-  shifted_symbol = simp_add(scope->ctx, symbol, step);
-  if (!shifted_symbol) {
-    scope->status = IXS_FACT_QUERY_OOM;
-    return NULL;
-  }
-  if (ixs_node_is_sentinel(shifted_symbol)) {
-    scope->status = IXS_FACT_QUERY_INVALID;
-    return NULL;
-  }
-  shifted_expr = simp_subs(scope->ctx, expr, symbol, shifted_symbol);
-  if (!shifted_expr) {
-    scope->status = IXS_FACT_QUERY_OOM;
-    return NULL;
-  }
-  if (ixs_node_is_sentinel(shifted_expr)) {
-    scope->status = IXS_FACT_QUERY_INVALID;
-    return NULL;
-  }
-  if (!algebra_query_defined(scope, shifted_expr))
-    return NULL;
-  result = simp_sub(scope->ctx, shifted_expr, expr);
-  if (!result) {
-    scope->status = IXS_FACT_QUERY_OOM;
-    return NULL;
-  }
-  if (ixs_node_is_sentinel(result)) {
-    scope->status = IXS_FACT_QUERY_INVALID;
-    return NULL;
-  }
-  return algebra_query_normalize(scope, result);
-}
-
-static ixs_finite_difference_result
-facts_query_finite_difference(ixs_facts *facts, ixs_node *expr,
-                              ixs_node *symbol, ixs_node *step) {
-  facts_query_operation scope;
-  ixs_finite_difference_result query_result = {IXS_FACT_QUERY_INVALID, false,
-                                               NULL};
-  ixs_node *nodes[3] = {expr, symbol, step};
-  ixs_node *result = NULL;
-  if (!facts_query_operation_begin(facts, nodes, 3, "finite difference", true,
-                                   NULL, &scope)) {
-    query_result.status = scope.status;
-    return query_result;
-  }
-  if (symbol->tag != IXS_SYM) {
-    ixs_ctx_push_error(scope.ctx,
-                       "finite difference: expression must be a symbol");
-    scope.status = IXS_FACT_QUERY_INVALID;
-    (void)facts_query_operation_finish(&scope, false);
-    query_result.status = scope.status;
-    return query_result;
-  }
-  facts_query_operation_start(&scope);
-  result = algebra_finite_difference(&scope, expr, symbol, step);
-  query_result.available = result != NULL;
-  (void)facts_query_operation_finish(&scope, query_result.available);
-  query_result.status = scope.status;
-  if (query_result.status == IXS_FACT_QUERY_COMPLETE && query_result.available)
-    query_result.difference = result;
-  else {
-    query_result.available = false;
-    query_result.difference = NULL;
-  }
-  return query_result;
 }
 
 static ixs_additive_constant_result
@@ -1763,23 +1681,6 @@ ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                                   : IXS_CHECK_UNKNOWN;
 }
 
-bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
-                                   const ixs_node *rhs, int64_t *delta) {
-  ixs_constant_difference_result result;
-  if (delta)
-    *delta = 0;
-  if (!delta) {
-    facts_public_output_error(facts, "constant difference", "NULL output");
-    return false;
-  }
-  result =
-      facts_query_constant_difference(facts, (ixs_node *)lhs, (ixs_node *)rhs);
-  if (result.status != IXS_FACT_QUERY_COMPLETE || !result.available)
-    return false;
-  *delta = result.difference;
-  return true;
-}
-
 bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
                                 const ixs_node *symbol,
                                 const ixs_node **coefficient,
@@ -1800,24 +1701,6 @@ bool ixs_affine_decompose_facts(ixs_facts *facts, const ixs_node *expr,
     return false;
   *coefficient = result.coefficient;
   *residual = result.residual;
-  return true;
-}
-
-bool ixs_finite_difference_facts(ixs_facts *facts, const ixs_node *expr,
-                                 const ixs_node *symbol, const ixs_node *step,
-                                 const ixs_node **difference) {
-  ixs_finite_difference_result result;
-  if (difference)
-    *difference = NULL;
-  if (!difference) {
-    facts_public_output_error(facts, "finite difference", "NULL output");
-    return false;
-  }
-  result = facts_query_finite_difference(facts, (ixs_node *)expr,
-                                         (ixs_node *)symbol, (ixs_node *)step);
-  if (result.status != IXS_FACT_QUERY_COMPLETE || !result.available)
-    return false;
-  *difference = result.difference;
   return true;
 }
 

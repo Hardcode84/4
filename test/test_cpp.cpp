@@ -16,6 +16,7 @@ int main() {
   ixs::Expr y = ixs::Expr::sym(ctx, "y");
   ixs::Expr zero = ixs::Expr::integer(ctx, 0);
   ixs::Expr one = ixs::Expr::integer(ctx, 1);
+  ixs::Expr seven = ixs::Expr::integer(ctx, 7);
   ixs::Expr eight = ixs::Expr::integer(ctx, 8);
   ixs::Expr truncated = ixs::trunc(ixs::Expr::parse_expr(ctx, "x/3"));
   ixs::Expr nonnegative = ixs::Expr::parse_pred(ctx, "x >= 0");
@@ -64,17 +65,15 @@ int main() {
       facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE || !facts.range(x, range))
     return 4;
 
-  int64_t delta = 0;
   int64_t constant = 0;
   int64_t modulus = 0;
   int64_t residue = 0;
   ixs_known_bits bits = {};
   ixs::Expr coefficient = zero;
   ixs::Expr residual = zero;
-  ixs::Expr difference = zero;
-  if (!facts.constant_difference(x + eight, x + one, delta) || delta != 7 ||
+  if (!ixs_same_node(facts.simplify((x + eight) - (x + one)).raw(),
+                     seven.raw()) ||
       !facts.affine_decompose(twice_x + one, x, coefficient, residual) ||
-      !facts.finite_difference(twice_x, x, one, difference) ||
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||
       !facts.get_symbol_congruence(x, modulus, residue) || modulus != 8 ||

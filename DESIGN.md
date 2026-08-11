@@ -1284,10 +1284,10 @@ cache, and the create/assume/derive/substitute mutation APIs. Predicate branches
 borrow its one-root closure entry point. `facts_query.c` owns fact-set read
 validation and query transactions, scalar and batch simplification, exact
 division, metadata queries, and the public read API. `bounds_equivalence.c`
-owns equivalence query policy, exact EQ/NE fallback, ordered-congruence and
-Piecewise selector proofs, and constant-difference queries. `bounds_modular.c`
-owns the paired-Mod exact-delta search, wide signed arithmetic, dynamic
-no-wrap lifts, and its growable progress stack.
+owns equivalence query policy, exact EQ/NE fallback, ordered-congruence, and
+Piecewise selector proofs. `bounds_modular.c` owns generic normalized
+exact-value projection, paired-Mod exact-delta search, wide signed arithmetic,
+dynamic no-wrap lifts, and its growable progress stack.
 `bounds_residue.c` owns target-modulus residue queries, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
@@ -1623,6 +1623,7 @@ Each public fact read binds the current session, snapshots query transport and
 diagnostics, and restores bounds-local OOM state before unbinding. Invalid,
 limited, and OOM outcomes invalidate speculative read caches and retain their
 distinct diagnostics. Failed batch simplification restores every input root;
+semantic poison is a completed simplification result and remains published;
 scalar metadata calls initialize output parameters before validation. The read
 service owns that publication policy while lower bounds services return typed
 algebra status without writing public outputs.
@@ -1695,7 +1696,7 @@ fact domain with these properties:
   it cannot truncate propagation and report success.
 - Exact `x = y + c` relations are independent of one-sided graph fan-out.
   Adding inequalities that do not alter the equality component cannot change
-  range, equivalence, or constant-difference answers for that component.
+  range, equivalence, or exact-value answers for that component.
 - Fork, transaction rollback, substitution, and OOM paths preserve the whole
   relational payload or none of it. No graph edge may outlive the arena or
   refer to a variable slot from another payload generation.
@@ -2037,9 +2038,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   query node once and uses growable, expected-O(1) candidate and node sets; it
   has no semantic depth, visit, or candidate-count cutoff and never scans
   unrelated context state. After those ordered proofs miss, comparisons with
-  the same canonical operator and right operand are equal when the existing
-  constant-difference engine proves their numeric residual delta is exactly
-  zero. Any nonzero or unproved delta remains unknown because unequal
+  the same canonical operator and right operand are equal when normalized
+  exact-value projection proves their numeric residual delta is zero. Any
+  nonzero or unproved delta remains unknown because unequal
   residuals can still induce the same predicate over a restricted fact domain.
 
   A predicate equality whose normalized zero-sum ADD
@@ -2270,20 +2271,28 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   the visited expression. Limits reached after a proof strategy starts and
   allocation failures remain live query failures with diagnostics. This API
   is not an unbounded theorem prover.
-- **Narrow fact-backed algebra helpers** (`ixs_constant_difference_facts`,
-  `ixs_affine_decompose_facts`, `ixs_finite_difference_facts`, and
+- **Generic exact-value projection**: fact-backed rewriting asks the bounds
+  solver whether each normalized result has one exact `int64_t` value. The
+  lower query consumes normalized nodes and never calls the simplifier. It
+  combines exact point ranges, additive rows over the weighted relation
+  forest, and paired-Mod projection; the rewrite memo ensures each input DAG
+  node is normalized and projected once per simplification. The rewrite does
+  not dispatch on ADD or subtraction: additive rows are one lower proof
+  backend, any parent can consume a projected child, and scalar and batch
+  simplification use the same path. A successful projection is a poison
+  refinement, so it need only agree where the source is defined.
+  Contradictory fact domains still bypass rewriting rather than proving values
+  vacuously. OOM, invalid internal state, query limits, and unrepresentable
+  integer results remain distinct failures.
+- **Narrow fact-backed algebra helpers** (`ixs_affine_decompose_facts` and
   `ixs_split_additive_constant_facts`): prove definedness over the complete
   incoming fact domain, then simplify, expand, and simplify again in that same
-  environment. Constant-difference queries also accept an exact integer point
-  range for the normalized difference, including a transitive weighted-forest
-  result, and use the paired-Mod projection above for exact fixed-width and
-  dynamic-remainder deltas. Constant differences and additive constants must
-  fit `int64_t`; affine coefficients may be exact rational nodes. Affine
+  environment. Additive constants must fit `int64_t`; affine coefficients may
+  be exact rational nodes. Affine
   decomposition accepts only one symbol and rejects any nonlinear occurrence
-  or residual reference to it. Finite difference substitutes
-  `symbol + step` once and may return a symbolic result such as `2*i + 1`;
-  callers decide whether that result is loop invariant. A step referencing the
-  target symbol is rejected. Unsupported shapes, undefined partitions,
+  or residual reference to it. A finite difference is ordinary composition:
+  substitute `symbol + step`, subtract the source, expand when desired, then
+  simplify with the same facts. Unsupported shapes, undefined partitions,
   contradictory facts, representation overflow, and bounded-walk or expansion
   limits fail conservatively. These helpers do not add relational, polyhedral,
   or SMT reasoning.
@@ -2774,14 +2783,9 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
-bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
-                                   ixs_node *rhs, int64_t *delta);
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
-bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
-                                 ixs_node *symbol, ixs_node *step,
-                                 ixs_node **difference);
 bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
                                        ixs_node **residual,
                                        int64_t *constant);
@@ -3235,7 +3239,7 @@ ixsimpl/
 │   ├── bounds_defined.h
 │   ├── bounds_difference.c  # directed constraints and interval propagation
 │   ├── bounds_difference.h
-│   ├── bounds_equivalence.c # equivalence and constant-difference proof
+│   ├── bounds_equivalence.c # equivalence proof policy
 │   ├── bounds_equivalence.h
 │   ├── bounds_integer.c     # exact integer and divisibility proof
 │   ├── bounds_integer.h
@@ -3484,10 +3488,10 @@ Key properties:
   `Facts::try_exact_divide()` returns an `ExactDivideResult` containing the
   four-way status and a nullable `Expr` quotient; errors remain available
   through the owning `Context` diagnostics.
-  `Facts::constant_difference()`, `affine_decompose()`,
-  `finite_difference()`, and
-  `split_additive_constant()` mirror the narrow fact-backed C helpers and fill
-  their output references only on success.
+  `Facts::affine_decompose()` and `split_additive_constant()` mirror the narrow
+  fact-backed C helpers and fill their output references only on success.
+  Constant and finite differences use ordinary `Expr` subtraction,
+  substitution, optional expansion, and `Facts::simplify()`.
 - `Expr::raw()` returns `const ixs_node *`. `Expr::raw_const()` remains as a
   compatibility alias, but neither method offers a mutable node handle.
 - Operator overloading for natural expression building.
@@ -3605,14 +3609,13 @@ Implementation:
   `("proven", quotient)`, `("not_exact", None)`, or `("unknown", None)`.
   Core `ERROR` results raise `ValueError` for domain/representation failures
   and `MemoryError` for OOM while preserving the session diagnostic.
-- `Context.constant_difference(lhs, rhs, facts)` returns an `int` or `None`;
-  `Context.affine_decompose(expr, symbol, facts)` returns
+- `Context.affine_decompose(expr, symbol, facts)` returns
   `(coefficient, residual)` or `None`;
-  `Context.finite_difference(...)`
-  returns an `Expr` or `None`; and `Context.split_additive_constant(...)`
+  `Context.split_additive_constant(...)`
   returns `(residual, constant)` or `None`. Invalid contexts, sentinels, and
   non-symbol affine targets raise `ValueError`; valid but unmatched queries do
-  not add diagnostics.
+  not add diagnostics. Constant and finite differences are composed from
+  `Expr` subtraction, `subs()`, `expand()`, and fact-backed `simplify()`.
 - `Context.check_predicate(predicate, facts)` and
   `Context.equivalent(lhs, rhs, facts)` expose conservative tri-state results
   as `True`, `False`, or `None`.
@@ -3924,14 +3927,9 @@ ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            ixs_node *predicate);
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts,
                                       ixs_node *lhs, ixs_node *rhs);
-bool ixs_constant_difference_facts(ixs_facts *facts, ixs_node *lhs,
-                                   ixs_node *rhs, int64_t *delta);
 bool ixs_affine_decompose_facts(ixs_facts *facts, ixs_node *expr,
                                 ixs_node *symbol, ixs_node **coefficient,
                                 ixs_node **residual);
-bool ixs_finite_difference_facts(ixs_facts *facts, ixs_node *expr,
-                                 ixs_node *symbol, ixs_node *step,
-                                 ixs_node **difference);
 bool ixs_split_additive_constant_facts(ixs_facts *facts, ixs_node *expr,
                                        ixs_node **residual,
                                        int64_t *constant);
