@@ -1818,7 +1818,8 @@ static void test_contextless_query_state_survives_transient_restore(void) {
 
   CHECK(ctx && root && reciprocal && guarded);
   CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
-  CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
+  /* The binding makes ctx->scratch the live session workspace until unbind. */
+  CHECK(ixs_bounds_init(&bounds, &ctx->scratch));
   bounds.ctx = ctx;
   CHECK(ixs_bounds_query_hold_begin(&bounds, root, &held) && held);
   CHECK(ixs_bounds_check_defined(&bounds, reciprocal) == IXS_CHECK_UNKNOWN);
@@ -1846,7 +1847,7 @@ static void test_contextless_query_state_survives_transient_restore(void) {
   ixs_bounds_query_hold_end(&bounds);
   ixs_bounds_destroy(&bounds);
 
-  CHECK(ixs_bounds_init(&bounds, ixs_test_scratch(ctx)));
+  CHECK(ixs_bounds_init(&bounds, &ctx->scratch));
   bounds.ctx = ctx;
   CHECK(ixs_bounds_query_hold_begin(&bounds, root, &held) && held);
   ixs_arena_set_fail_after(&bounds.query_arena, 0);
