@@ -30,10 +30,10 @@ below lists the lifecycle and bulk-IO exceptions.  Amortized O(1)
 mechanisms (hash-table growth rehash, arena rollback proportional to
 the rolled-back work) are not scans and stay untagged.  Calls through
 function pointers and calls to external (libc) functions are assumed
-scan-free; see DESIGN.md for the full threat model.
+scan-free; see docs/runtime.md for the full threat model.
 
 Adding a scan type: one line in SCAN_TYPES, the tag above the function,
-and a DESIGN.md update in the same commit.  Tags with unregistered
+and a docs/runtime.md update in the same commit.  Tags with unregistered
 types are rejected, so a typo cannot silently pass.
 
 Exits 0 when clean, 1 on violations or graph inconsistencies.
@@ -82,7 +82,7 @@ NONHOT_API = frozenset(
 
 # Registry of scan types: axis -> one-line description.  A '/* scan: x */'
 # tag with an unregistered x is an error -- adding a type is deliberately
-# one line here plus the tag plus a DESIGN.md update, same commit.
+# one line here plus the tag plus a docs/runtime.md update, same commit.
 SCAN_TYPES = {
     "arena": "cost grows with total live arena chunks/bytes",
     "ctx": "cost grows with ctx-wide table state",

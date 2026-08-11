@@ -252,7 +252,14 @@ bindings/
   python/_ixsimpl.c         CPython extension module
 test/                       Tests and corpus data
 bench/                      Benchmark harness
-DESIGN.md                   Detailed design specification
+docs/DESIGN.md              Design index and domain analysis
+docs/architecture.md        Architecture and representation
+docs/simplification.md      Simplification engine
+docs/bounds.md              Bounds and proof services
+docs/runtime.md             Errors, performance, build, and CI
+docs/api.md                 Public API contracts
+docs/bindings.md            Language bindings
+docs/validation.md          Validation and project evolution
 ```
 
 ## License

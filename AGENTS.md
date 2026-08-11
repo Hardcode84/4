@@ -5,7 +5,7 @@ used in index computation, memory addressing, and loop bound calculation.
 
 ## Design
 
-`DESIGN.md` is the living spec. When code changes invalidate or extend what's described there — API signatures, node types, simplification rules, file structure, performance targets — update `DESIGN.md` in the same commit.
+`docs/DESIGN.md` is the living spec and index. When code changes invalidate or extend what is described there or in its linked subsystem documents — API semantics, node types, simplification rules, file structure, performance targets — update the relevant document in the same commit.
 
 ## Language & Build
 
@@ -23,7 +23,7 @@ used in index computation, memory addressing, and loop bound calculation.
 - Treat node construction, interning, simplification, ownership validation, fact/proof queries, and walker callbacks as hot paths.
 - Do not put arena walks, context-wide table scans, or other work linear in total allocated state inside those paths. Membership and ownership checks must be expected O(1).
 - Document the expected complexity of non-obvious hot-path helpers. Any worse bound needs an explicit justification and a performance regression test or benchmark.
-- Enforcement: `scripts/check_hotpaths.py` propagates `/* scan: <type> */` taint through the static call graph and fails if a hot path reaches a scan (pre-commit + ctest). If you write a function whose cost grows with any context-wide resource, tag it — a standalone comment immediately above the function definition. If no registered scan type fits, add one: one line in `SCAN_TYPES` in the script, the tag, and the DESIGN.md "Performance invariants" list — same commit. Unregistered types are rejected, so register rather than improvise.
+- Enforcement: `scripts/check_hotpaths.py` propagates `/* scan: <type> */` taint through the static call graph and fails if a hot path reaches a scan (pre-commit + ctest). If you write a function whose cost grows with any context-wide resource, tag it — a standalone comment immediately above the function definition. If no registered scan type fits, add one: one line in `SCAN_TYPES` in the script, the tag, and the `docs/runtime.md` "Performance invariants" list — same commit. Unregistered types are rejected, so register rather than improvise.
 
 ## Amalgamation
 

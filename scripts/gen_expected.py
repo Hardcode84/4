@@ -24,7 +24,7 @@ from pathlib import Path
 
 import sympy
 
-# All 20 variables from DESIGN.md
+# All 20 variables from docs/DESIGN.md
 VARIABLES = (
     "$T0",
     "$T1",
