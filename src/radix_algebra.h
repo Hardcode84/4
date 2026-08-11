@@ -21,6 +21,11 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
 IXS_STATIC ixs_radix_algebra_result
 ixs_radix_algebra_nonnegative(ixs_bounds *bounds, const ixs_node *expr);
 
+/* Prove that two defined expressions encode the same complete mixed-radix
+ * residue. Carriers must be integer-valued under bounds. */
+IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_equivalent(
+    ixs_bounds *bounds, const ixs_node *lhs, const ixs_node *rhs);
+
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
 /* Bind a fact set so tests can observe the component's local outcome. */
 IXS_STATIC ixs_radix_algebra_result

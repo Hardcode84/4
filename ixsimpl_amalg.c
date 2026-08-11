@@ -4574,6 +4574,8 @@ typedef struct {
 static ixs_check_result
 equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
                                        ixs_node *rhs);
+static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
+                                                  ixs_node *lhs, ixs_node *rhs);
 
 /* Algebraic bridge
  * rules may nest
@@ -6285,11 +6287,34 @@ equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
   return result.check;
 }
 
+static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
+                                                  ixs_node *lhs,
+                                                  ixs_node *rhs) {
+  ixs_bounds *bounds = state->bounds;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(bounds);
+  ixs_radix_algebra_result result =
+      ixs_radix_algebra_equivalent(bounds, lhs, rhs);
+
+  state->limited |=
+      result.limited || bounds_query_limited_since(bounds, transport);
+  state->invalid |= bounds_query_invalid_since(bounds, transport);
+  state->oom |= result.oom;
+  if (state->limited || state->invalid || state->oom)
+    return IXS_CHECK_UNKNOWN;
+  return result.check;
+}
+
 static ixs_check_result
 equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
                               ixs_node *rhs, ixs_node *simplified_lhs,
                               ixs_node *simplified_rhs, unsigned depth) {
   ixs_check_result result;
+
+  result = equivalence_radix_algebra(state, simplified_lhs, simplified_rhs);
+  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+      state->oom)
+    return result;
 
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
@@ -25659,6 +25684,11 @@ typedef struct {
   int64_t floor_divisor;
 } radix_slot;
 
+typedef struct {
+  const ixs_node *carrier;
+  int64_t total;
+} radix_partition;
+
 /* Borrow one bounded canonical ADD row and validate its scalar coefficients.
  * The row owns no storage and remains valid while its interned expression does.
  */
@@ -25715,6 +25745,113 @@ static bool radix_floor_parts(const ixs_node *node, const ixs_node **base,
   *base = argument->u.mul.factors[0].base;
   *divisor = denominator;
   return true;
+}
+
+static bool radix_positive_int(const ixs_node *node, int64_t *value) {
+  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
+    return false;
+  *value = node->u.ival;
+  return true;
+}
+
+static bool radix_positive_mod(const ixs_node *node, const ixs_node *carrier,
+                               int64_t *modulus) {
+  return node && node->tag == IXS_MOD && node->u.binary.lhs == carrier &&
+         radix_positive_int(node->u.binary.rhs, modulus);
+}
+
+static bool radix_row_unique_place(const radix_row *row, int64_t place,
+                                   const ixs_node **digit) {
+  bool found = false;
+  uint32_t i;
+
+  for (i = 0; i < row->nterms; i++) {
+    radix_term candidate = radix_row_term(row, i);
+    if (candidate.coefficient != place)
+      continue;
+    if (found)
+      return false;
+    *digit = candidate.node;
+    found = true;
+  }
+  return found;
+}
+
+static bool radix_partition_step(const radix_row *row, const ixs_node **carrier,
+                                 int64_t place, uint32_t matched,
+                                 int64_t *next) {
+  const ixs_node *digit = NULL;
+  const ixs_node *rounded;
+  const ixs_node *numerator;
+  bool terminal = false;
+  int64_t digit_count;
+  int64_t enclosing = 0;
+  int64_t divisor;
+
+  if (!radix_row_unique_place(row, place, &digit))
+    return false;
+  if (place == 1) {
+    if (!digit || digit->tag != IXS_MOD ||
+        !radix_positive_int(digit->u.binary.rhs, &digit_count))
+      return false;
+    *carrier = digit->u.binary.lhs;
+  } else {
+    rounded = digit;
+    if (digit && digit->tag == IXS_MOD &&
+        radix_positive_int(digit->u.binary.rhs, &digit_count))
+      rounded = digit->u.binary.lhs;
+    else
+      terminal = true;
+    if (!radix_floor_parts(rounded, &numerator, &divisor) || divisor != place ||
+        !radix_positive_mod(numerator, *carrier, &enclosing))
+      return false;
+    if (terminal) {
+      if (enclosing % place != 0)
+        return false;
+      digit_count = enclosing / place;
+    }
+  }
+  return digit_count > 1 && ixs_safe_mul(place, digit_count, next) &&
+         (place == 1 || enclosing % *next == 0) &&
+         (!terminal || (enclosing == *next && matched + 1u == row->nterms));
+}
+
+/* Recognize one complete adjacent digit chain. Each place is unique, later
+ * digits come from a containing residue, and the terminal bare floor must end
+ * exactly at that residue's modulus. */
+static ixs_algebra_status radix_partition_extract(ixs_bounds *bounds,
+                                                  const ixs_node *expr,
+                                                  radix_partition *partition) {
+  radix_row row;
+  const ixs_node *carrier = NULL;
+  int64_t place = 1;
+  uint32_t matched = 0u;
+
+  if (!expr || !partition)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (expr->tag == IXS_MOD &&
+      radix_positive_int(expr->u.binary.rhs, &partition->total)) {
+    partition->carrier = expr->u.binary.lhs;
+    return ixs_bounds_check_integer_domain(bounds,
+                                           (ixs_node *)partition->carrier);
+  }
+  if (!radix_row_borrow(expr, RADIX_ALGEBRA_MAX_INPUT_TERMS, &row) ||
+      row.nterms < 2u || row.constant_p != 0 || row.constant_q != 1)
+    return IXS_ALGEBRA_NO_MATCH;
+
+  while (matched < row.nterms) {
+    int64_t next;
+    if (!radix_partition_step(&row, &carrier, place, matched, &next))
+      return IXS_ALGEBRA_NO_MATCH;
+    place = next;
+    matched++;
+  }
+
+  if (!carrier || place <= 1)
+    return IXS_ALGEBRA_NO_MATCH;
+  partition->carrier = carrier;
+  partition->total = place;
+  return ixs_bounds_check_integer_domain(bounds, (ixs_node *)carrier);
 }
 
 static bool radix_orient_coefficient(int64_t coefficient, int orientation,
@@ -26055,6 +26192,38 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
   result = radix_reduce_nonnegative(bounds, &row, orientation);
   if (result.check == IXS_CHECK_TRUE)
     result.check = proven;
+  return result;
+}
+
+/* T is bounded by RADIX_ALGEBRA_MAX_INPUT_TERMS. Recognition is O(T^2), uses
+ * no storage, and performs one inherited domain query per operand. */
+/* hot */
+IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_equivalent(
+    ixs_bounds *bounds, const ixs_node *lhs, const ixs_node *rhs) {
+  ixs_radix_algebra_result result = {IXS_CHECK_UNKNOWN, false, false};
+  radix_partition left;
+  radix_partition right;
+  ixs_algebra_status status;
+
+  if (!bounds || !lhs || !rhs || !bounds->scratch ||
+      !ixs_bounds_query_transport_clean(bounds)) {
+    result.oom = bounds && bounds->oom;
+    return result;
+  }
+  status = radix_partition_extract(bounds, lhs, &left);
+  if (status != IXS_ALGEBRA_MATCH)
+    goto status;
+  status = radix_partition_extract(bounds, rhs, &right);
+  if (status != IXS_ALGEBRA_MATCH)
+    goto status;
+  if (left.carrier == right.carrier && left.total == right.total)
+    result.check = IXS_CHECK_TRUE;
+
+status:
+  result.limited = status == IXS_ALGEBRA_LIMITED;
+  result.oom = status == IXS_ALGEBRA_OOM || bounds->oom;
+  if (!ixs_bounds_query_transport_clean(bounds))
+    result.check = IXS_CHECK_UNKNOWN;
   return result;
 }
 

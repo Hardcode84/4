@@ -1271,6 +1271,101 @@ static void test_relational_modular_product_reduction_contract(void) {
   }
 }
 
+static ixs_node *enclosed_radix_digit(ixs_ctx *ctx, ixs_node *carrier,
+                                      int64_t enclosing, int64_t place,
+                                      int64_t radix, bool terminal) {
+  ixs_node *digit = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, carrier, ixs_int(ctx, enclosing)),
+                   ixs_int(ctx, place)));
+  return terminal ? digit : ixs_mod(ctx, digit, ixs_int(ctx, radix));
+}
+
+static void test_relational_enclosed_radix_partition_contract(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "relation_enclosed_radix_x");
+  ixs_node *other = ixs_sym(ctx, "relation_enclosed_radix_other");
+  ixs_node *low = ixs_mod(ctx, x, ixs_int(ctx, 2));
+  ixs_node *bit1 = enclosed_radix_digit(ctx, x, 64, 2, 2, false);
+  ixs_node *bit2 = enclosed_radix_digit(ctx, x, 64, 4, 2, false);
+  ixs_node *binary = ixs_add(ctx, low,
+                             ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), bit1),
+                                     ixs_mul(ctx, ixs_int(ctx, 4), bit2)));
+  ixs_node *direct8 = ixs_mod(ctx, x, ixs_int(ctx, 8));
+  ixs_node *digit3 = enclosed_radix_digit(ctx, x, 60, 2, 3, false);
+  ixs_node *digit5 = enclosed_radix_digit(ctx, x, 60, 6, 5, false);
+  ixs_node *mixed = ixs_add(ctx, low,
+                            ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), digit3),
+                                    ixs_mul(ctx, ixs_int(ctx, 6), digit5)));
+  ixs_node *terminal5 = enclosed_radix_digit(ctx, x, 30, 6, 5, true);
+  ixs_node *compact =
+      ixs_add(ctx, low,
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), digit3),
+                      ixs_mul(ctx, ixs_int(ctx, 6), terminal5)));
+  ixs_node *direct30 = ixs_mod(ctx, x, ixs_int(ctx, 30));
+  ixs_node *wrong_enclosing =
+      ixs_add(ctx, low,
+              ixs_mul(ctx, ixs_int(ctx, 2),
+                      enclosed_radix_digit(ctx, x, 6, 2, 2, false)));
+  ixs_node *missing = ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 4), bit2));
+  ixs_node *wrong_scale =
+      ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 3), bit1));
+  ixs_node *duplicate = ixs_add(
+      ctx, binary,
+      ixs_mul(ctx, ixs_int(ctx, 2), ixs_mod(ctx, other, ixs_int(ctx, 2))));
+  ixs_node *unrelated = ixs_mod(ctx, other, ixs_int(ctx, 8));
+  ixs_node *fractional = ixs_div(ctx, x, ixs_int(ctx, 2));
+  ixs_node *fractional_direct = ixs_mod(ctx, fractional, ixs_int(ctx, 4));
+  ixs_node *fractional_partition =
+      ixs_add(ctx, ixs_mod(ctx, fractional, ixs_int(ctx, 2)),
+              ixs_mul(ctx, ixs_int(ctx, 2),
+                      enclosed_radix_digit(ctx, fractional, 8, 2, 2, false)));
+  ixs_node *overflow_place = ixs_int(ctx, INT64_MAX / 2 + 1);
+  ixs_node *overflow =
+      ixs_add(ctx, ixs_mod(ctx, x, overflow_place),
+              ixs_mul(ctx, overflow_place,
+                      enclosed_radix_digit(ctx, x, INT64_MAX, INT64_MAX / 2 + 1,
+                                           2, false)));
+  ixs_node *integer_domain = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x));
+  ixs_node *binary_equality = ixs_cmp(ctx, direct8, IXS_CMP_EQ, binary);
+  ixs_facts *integer = ixs_facts_create(ctx);
+  ixs_facts *at_three = ixs_facts_create(ctx);
+  ixs_facts *at_six = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && other && low && bit1 && bit2 && binary && direct8 &&
+        digit3 && digit5 && mixed && terminal5 && compact && direct30 &&
+        wrong_enclosing && missing && wrong_scale && duplicate && unrelated &&
+        fractional && fractional_direct && fractional_partition &&
+        overflow_place && overflow && integer_domain && binary_equality &&
+        integer && at_three && at_six);
+  CHECK(ixs_facts_assume_pred(integer, integer_domain));
+  CHECK(ixs_facts_assume_pred(at_three,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 3))));
+  CHECK(ixs_facts_assume_pred(at_six,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 6))));
+
+  CHECK(test_ixs_equivalent_facts(integer, direct8, binary) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(integer, binary_equality) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, binary_equality, &integer_domain, 1) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(integer, direct30, mixed) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(integer, mixed, compact) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(at_six, ixs_mod(ctx, x, ixs_int(ctx, 4)),
+                                  wrong_enclosing) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(at_six, direct8, missing) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(at_three, direct8, wrong_scale) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_equivalent_facts(integer, binary, duplicate) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(integer, direct8, unrelated) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(integer, fractional_direct,
+                                  fractional_partition) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(integer, ixs_mod(ctx, x, overflow_place),
+                                  overflow) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_relational_scaled_mod_depth_guard(void) {
   enum { DEPTH = 128 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -1327,6 +1422,7 @@ int main(void) {
   test_relational_finite_symbol_domain_contract();
   test_relational_modular_floor_partition_contract();
   test_relational_modular_product_reduction_contract();
+  test_relational_enclosed_radix_partition_contract();
   test_relational_scaled_mod_depth_guard();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);

@@ -48,6 +48,8 @@ typedef struct {
 static ixs_check_result
 equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
                                        ixs_node *rhs);
+static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
+                                                  ixs_node *lhs, ixs_node *rhs);
 
 /* Algebraic bridge
  * rules may nest
@@ -1759,11 +1761,34 @@ equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
   return result.check;
 }
 
+static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
+                                                  ixs_node *lhs,
+                                                  ixs_node *rhs) {
+  ixs_bounds *bounds = state->bounds;
+  ixs_bounds_transport_snapshot transport =
+      ixs_bounds_query_transport_snapshot(bounds);
+  ixs_radix_algebra_result result =
+      ixs_radix_algebra_equivalent(bounds, lhs, rhs);
+
+  state->limited |=
+      result.limited || bounds_query_limited_since(bounds, transport);
+  state->invalid |= bounds_query_invalid_since(bounds, transport);
+  state->oom |= result.oom;
+  if (state->limited || state->invalid || state->oom)
+    return IXS_CHECK_UNKNOWN;
+  return result.check;
+}
+
 static ixs_check_result
 equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
                               ixs_node *rhs, ixs_node *simplified_lhs,
                               ixs_node *simplified_rhs, unsigned depth) {
   ixs_check_result result;
+
+  result = equivalence_radix_algebra(state, simplified_lhs, simplified_rhs);
+  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
+      state->oom)
+    return result;
 
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)

@@ -1465,11 +1465,19 @@ layout, load factor, and allocation remain consumer-owned.
   ordinary `UNKNOWN`; nested range-query allocation failure is reported as
   OOM.
 
-  This is the ordered Euclidean split/merge part of mixed-radix layout algebra,
-  not a general layout-composition engine. Direct Euclidean `Mod` splits accept
-  a dynamic positive modulus. Dynamic floor-radix chains, XOR and mask
-  projections, products, Piecewise, and general digit reconstruction retain
-  their existing proof domains.
+  The same component certifies complete literal mixed-radix reconstructions.
+  A direct `Mod(A,R)` and a digit row describe the same residue when the row
+  starts with `Mod(A,r0)`, each later term has the exact accumulated place as
+  its coefficient, and its digit is extracted from `Mod(A,M)` where the next
+  accumulated radix divides `M`. The last digit may omit a redundant outer
+  `Mod` only when its enclosing modulus ends exactly at the reconstructed
+  radix. Every row term must be consumed, the accumulated radix must remain
+  representable, and the shared carrier must be defined and integer-valued.
+  Recognition is `O(T^2)` for at most eight immediate terms, allocates no
+  storage, and returns `UNKNOWN` for incomplete, duplicate, fractional, or
+  unrelated carriers. This is an equality certificate, not a preferred global
+  normal form. Dynamic floor radices, XOR and mask projections, products, and
+  Piecewise retain their existing proof domains.
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 
@@ -3323,7 +3331,7 @@ ixsimpl/
 │   ├── quotient_algebra.h
 │   ├── query_walk.c         # shared iterative stacks, node sets, and vectors
 │   ├── query_walk.h
-│   ├── radix_algebra.c      # bounded mixed-radix nonnegativity proof
+│   ├── radix_algebra.c      # bounded mixed-radix order and equality proofs
 │   ├── radix_algebra.h
 │   ├── relation_algebra.c   # indexed exact additive relations
 │   ├── relation_algebra.h

@@ -2755,6 +2755,34 @@ static void test_bounds_check_radix_mod_split_oom(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_enclosed_radix_retry(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "enclosed_radix_retry_x");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *low = ixs_mod(ctx, x, two);
+  ixs_node *high = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), two)),
+      two);
+  ixs_node *partition = ixs_add(ctx, low, ixs_mul(ctx, two, high));
+  ixs_node *direct = ixs_mod(ctx, x, ixs_int(ctx, 4));
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && two && low && high && partition && direct && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+  ixs_ctx_clear_errors(ctx);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(test_ixs_equivalent_facts(facts, direct, partition) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(!facts->bounds.oom && ixs_ctx_nerrors(ctx) == 1);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_equivalent_facts(facts, direct, partition) == IXS_CHECK_TRUE);
+  CHECK(!facts->bounds.oom && ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_check_radix_certificate_guards(void) {
   static const char domain_text[] = "wi >= 0 & wi <= 255";
   static const char four_symbol_domain_text[] =
@@ -12280,6 +12308,7 @@ int main(void) {
   test_bounds_check_mod_remainder();
   test_bounds_check_wave_radix_floor_sums();
   test_bounds_check_radix_mod_split_oom();
+  test_bounds_enclosed_radix_retry();
   test_bounds_check_radix_certificate_guards();
   test_bounds_check_composite_divisibility();
   test_bounds_check_pow2_fact();
