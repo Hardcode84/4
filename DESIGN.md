@@ -2188,6 +2188,17 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   direct `c*Mod(n,m)` by `c*n` modulo a target `d` only after proving
   `(c*m)/d` integer-valued; unchecked nested occurrences remain opaque.
 
+  Fact-backed simplification applies the same integer-ring law to a genuine
+  product under a positive literal modulus. It first proves the coefficient
+  and every factor integer-valued and every factor defined, then reduces each
+  factor independently and rebuilds only when a residue becomes simpler.
+  Inside an additive residue, `c*Mod(n,m)` becomes `c*n` modulo `d` when
+  `d/gcd(m,d)` divides `c`; this avoids forming the potentially overflowing
+  product `c*m`. Single-factor sign and scale carriers keep their established
+  normal forms. Equivalence invokes this fact-backed simplifier, so ordinary
+  simplification and proof queries share the same product reduction rather
+  than recognizing a particular subtraction or modulus.
+
   Canonical mixed-radix ranges use the same row. Each positive integer digit
   `c*Mod(n,m)` contributes `[0,c*(m-1)]`; the ordinary interval engine bounds
   the residual once, and the symbolic upper bound is simplified as

@@ -1195,6 +1195,82 @@ static void test_relational_modular_floor_partition_contract(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_relational_modular_product_reduction_contract(void) {
+  static const struct {
+    int64_t inner_modulus;
+    int64_t outer_modulus;
+    int64_t radix;
+    int64_t increment;
+  } cases[] = {
+      {INT64_C(4294967296), INT64_C(4294967296), 2, 1},
+      {17, 17, 3, 5},
+      {97, 97, 7, 11},
+      {35, 7, 4, 3},
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_node *x = ixs_sym(ctx, "relation_ring_x");
+    ixs_node *slot = ixs_sym(ctx, "relation_ring_slot");
+    ixs_node *inner_modulus = ixs_int(ctx, cases[i].inner_modulus);
+    ixs_node *outer_modulus = ixs_int(ctx, cases[i].outer_modulus);
+    ixs_node *selector = ixs_mod(ctx, slot, ixs_int(ctx, cases[i].radix));
+    ixs_node *difference =
+        ixs_sub(ctx,
+                ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, cases[i].increment)),
+                        inner_modulus),
+                ixs_mod(ctx, x, inner_modulus));
+    ixs_node *actual =
+        ixs_mod(ctx, ixs_mul(ctx, selector, difference), outer_modulus);
+    ixs_node *expected =
+        ixs_mod(ctx, ixs_mul(ctx, selector, ixs_int(ctx, cases[i].increment)),
+                outer_modulus);
+    ixs_range_result x_domain = closed_integer_range(-1000, 1000);
+    ixs_range_result slot_domain = closed_integer_range(0, cases[i].radix - 1);
+    ixs_facts *facts = ixs_facts_create(ctx);
+
+    CHECK(ctx && x && slot && inner_modulus && outer_modulus && selector &&
+          difference && actual && expected && facts);
+    CHECK(ixs_facts_assume_range(facts, x, &x_domain));
+    CHECK(ixs_facts_assume_range(facts, slot, &slot_domain));
+    CHECK(ixs_facts_assume_pred(
+        facts, ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+    CHECK(ixs_facts_assume_pred(
+        facts, ixs_cmp(ctx, slot, IXS_CMP_EQ, ixs_floor(ctx, slot))));
+    CHECK(test_ixs_equivalent_facts(facts, actual, expected) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_simplify_facts(facts, actual) ==
+          test_ixs_simplify_facts(facts, expected));
+
+    ixs_ctx_destroy(ctx);
+  }
+
+  {
+    ixs_ctx *ctx = ixs_ctx_create();
+    ixs_node *x = ixs_sym(ctx, "relation_ring_rejected_x");
+    ixs_node *five = ixs_int(ctx, 5);
+    ixs_node *difference =
+        ixs_sub(ctx, ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), five),
+                ixs_mod(ctx, x, five));
+    ixs_node *fractional =
+        ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), difference), five);
+    ixs_node *fractional_expected = ixs_rat(ctx, 1, 2);
+    ixs_node *wrong_modulus = ixs_mod(ctx, difference, ixs_int(ctx, 3));
+    ixs_node *wrong_expected = ixs_int(ctx, 1);
+    ixs_facts *fixed = ixs_facts_create(ctx);
+
+    CHECK(ctx && x && difference && fractional && fractional_expected &&
+          wrong_modulus && wrong_expected && fixed);
+    CHECK(ixs_facts_assume_pred(fixed,
+                                ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 4))));
+    CHECK(test_ixs_equivalent_facts(fixed, fractional, fractional_expected) ==
+          IXS_CHECK_FALSE);
+    CHECK(test_ixs_equivalent_facts(fixed, wrong_modulus, wrong_expected) ==
+          IXS_CHECK_FALSE);
+    ixs_ctx_destroy(ctx);
+  }
+}
+
 static void test_relational_scaled_mod_depth_guard(void) {
   enum { DEPTH = 128 };
   ixs_ctx *ctx = ixs_ctx_create();
@@ -1250,6 +1326,7 @@ int main(void) {
   test_relational_numeric_boolean_equality_contract();
   test_relational_finite_symbol_domain_contract();
   test_relational_modular_floor_partition_contract();
+  test_relational_modular_product_reduction_contract();
   test_relational_scaled_mod_depth_guard();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);

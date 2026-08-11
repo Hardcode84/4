@@ -582,6 +582,103 @@ static void test_mod_bitwise_projection(void) {
   }
 }
 
+static void test_mod_product_factor_reduction(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "mod_product_x");
+  ixs_node *slot = ixs_sym(ctx, "mod_product_slot");
+  ixs_node *selector = ixs_mod(ctx, slot, ixs_int(ctx, 3));
+  ixs_node *mod17 = ixs_int(ctx, 17);
+  ixs_node *difference =
+      ixs_sub(ctx, ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 5)), mod17),
+              ixs_mod(ctx, x, mod17));
+  ixs_node *product = ixs_mul(ctx, selector, difference);
+  ixs_node *source = ixs_mod(ctx, product, mod17);
+  ixs_node *expected =
+      ixs_mod(ctx, ixs_mul(ctx, selector, ixs_int(ctx, 5)), mod17);
+  ixs_range_result x_range = {true, true, -1000, 1, 1000, 1};
+  ixs_range_result slot_range = {true, true, 0, 1, 2, 1};
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_node *fractional;
+  ixs_node *fractional_expected;
+  ixs_node *wrong_modulus;
+  ixs_node *wrong_modulus_expected;
+  ixs_node *partial;
+  ixs_node *partial_expected;
+  ixs_node *partial_divisor;
+  ixs_node *huge_x;
+  ixs_node *huge_slot;
+  ixs_node *huge_modulus;
+  ixs_node *huge_difference;
+  ixs_node *huge_source;
+  ixs_node *huge_expected;
+  ixs_range_result huge_x_range = {true, true, -1, 1, 0, 1};
+  ixs_facts *huge_facts;
+  size_t huge_errors;
+
+  CHECK(facts && ixs_facts_assume_range(facts, x, &x_range));
+  CHECK(ixs_facts_assume_range(facts, slot, &slot_range));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, slot, IXS_CMP_EQ, ixs_floor(ctx, slot))));
+  CHECK(test_ixs_simplify_facts(facts, source) ==
+        test_ixs_simplify_facts(facts, expected));
+
+  fractional = ixs_mod(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), product), mod17);
+  fractional_expected = ixs_mod(
+      ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), ixs_mul(ctx, slot, difference)),
+      mod17);
+  CHECK(test_ixs_simplify_facts(facts, fractional) == fractional_expected);
+
+  wrong_modulus = ixs_mod(ctx, product, ixs_int(ctx, 5));
+  wrong_modulus_expected =
+      ixs_mod(ctx, ixs_mul(ctx, slot, difference), ixs_int(ctx, 5));
+  CHECK(test_ixs_simplify_facts(facts, wrong_modulus) ==
+        wrong_modulus_expected);
+
+  partial_divisor = ixs_sym(ctx, "mod_product_partial_divisor");
+  partial = ixs_mod(
+      ctx,
+      ixs_mul(ctx, product, ixs_div(ctx, ixs_int(ctx, 1), partial_divisor)),
+      mod17);
+  partial_expected = ixs_mod(
+      ctx,
+      ixs_mul(
+          ctx,
+          ixs_mul(ctx, ixs_div(ctx, ixs_int(ctx, 1), partial_divisor), slot),
+          difference),
+      mod17);
+  CHECK(test_ixs_simplify_facts(facts, partial) == partial_expected);
+
+  huge_x = ixs_sym(ctx, "mod_product_huge_x");
+  huge_slot = ixs_sym(ctx, "mod_product_huge_slot");
+  huge_modulus = ixs_int(ctx, INT64_MAX);
+  huge_difference =
+      ixs_sub(ctx,
+              ixs_mod(ctx, ixs_add(ctx, huge_x, ixs_int(ctx, INT64_MAX - 1)),
+                      huge_modulus),
+              ixs_mod(ctx, huge_x, huge_modulus));
+  huge_source = ixs_mod(
+      ctx,
+      ixs_mul(ctx, ixs_int(ctx, 2), ixs_mul(ctx, huge_slot, huge_difference)),
+      huge_modulus);
+  huge_expected = ixs_mod(
+      ctx,
+      ixs_mul(ctx, ixs_int(ctx, 2),
+              ixs_mul(ctx, huge_slot,
+                      ixs_sub(ctx,
+                              ixs_add(ctx, huge_x, ixs_int(ctx, INT64_MAX - 1)),
+                              ixs_mod(ctx, huge_x, huge_modulus)))),
+      huge_modulus);
+  huge_facts = ixs_facts_create(ctx);
+  CHECK(huge_facts &&
+        ixs_facts_assume_range(huge_facts, huge_x, &huge_x_range));
+  CHECK(ixs_facts_assume_range(huge_facts, huge_slot, &slot_range));
+  huge_errors = ixs_ctx_nerrors(ctx);
+  CHECK(test_ixs_simplify_facts(huge_facts, huge_source) == huge_expected);
+  CHECK(ixs_ctx_nerrors(ctx) == huge_errors);
+}
+
 #ifdef IXS_TEST_INTERNAL
 static void test_mod_bitwise_projection_failure_retry(void) {
   ixs_ctx *ctx = ctx_create_or_die();
@@ -610,6 +707,38 @@ static void test_mod_bitwise_projection_failure_retry(void) {
   ixs_arena_set_fail_after(scratch, allocations);
   CHECK(ixs_mod(ctx, source, modulus) == expected);
   ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_mod_product_factor_reduction_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *x = ixs_sym(ctx, "mod_product_retry_x");
+  ixs_node *slot = ixs_sym(ctx, "mod_product_retry_slot");
+  ixs_node *mod17 = ixs_int(ctx, 17);
+  ixs_node *selector = ixs_mod(ctx, slot, ixs_int(ctx, 3));
+  ixs_node *difference =
+      ixs_sub(ctx, ixs_mod(ctx, ixs_add(ctx, x, ixs_int(ctx, 5)), mod17),
+              ixs_mod(ctx, x, mod17));
+  ixs_node *source = ixs_mod(ctx, ixs_mul(ctx, selector, difference), mod17);
+  ixs_node *expected =
+      ixs_mod(ctx, ixs_mul(ctx, selector, ixs_int(ctx, 5)), mod17);
+  ixs_range_result x_range = {true, true, -1000, 1, 1000, 1};
+  ixs_range_result slot_range = {true, true, 0, 1, 2, 1};
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(facts && ixs_facts_assume_range(facts, x, &x_range));
+  CHECK(ixs_facts_assume_range(facts, slot, &slot_range));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, slot, IXS_CMP_EQ, ixs_floor(ctx, slot))));
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(test_ixs_simplify_facts(facts, source) == NULL);
+  CHECK(scratch->fail_after == 0);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(test_ixs_simplify_facts(facts, source) ==
+        test_ixs_simplify_facts(facts, expected));
   ixs_ctx_destroy(ctx);
 }
 #endif
@@ -5441,8 +5570,10 @@ int main(void) {
   test_trunc_rules();
   test_mod_rules();
   test_mod_bitwise_projection();
+  test_mod_product_factor_reduction();
 #ifdef IXS_TEST_INTERNAL
   test_mod_bitwise_projection_failure_retry();
+  test_mod_product_factor_reduction_failure_retry();
 #endif
   test_rational_carrier_factoring();
   test_mod_extract_constant_residue();

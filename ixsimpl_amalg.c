@@ -33293,7 +33293,7 @@ static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
   return status == IXS_ALGEBRA_MATCH ? projected[0] : n;
 }
 
-/* Mod(c + k*Mod(x, m), m) -> Mod(c + k*x, m) for integer k. */
+/* Replace k*Mod(x, m) by k*x under Mod(..., d) when d divides k*m. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
   ixs_node *dividend = n->u.binary.lhs;
@@ -33302,6 +33302,8 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
   ixs_addterm *terms;
   ixs_node *flattened;
   ixs_node *result;
+  int64_t constant_p;
+  int64_t constant_q;
   uint32_t i;
   bool changed = false;
   (void)bnds;
@@ -33321,8 +33323,16 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     int64_t coefficient_q;
     terms[i] = dividend->u.add.terms[i];
     ixs_node_get_rat(terms[i].coeff, &coefficient_p, &coefficient_q);
-    if (coefficient_q == 1 && term->tag == IXS_MOD &&
-        term->u.binary.rhs == denominator) {
+    bool congruent = term->tag == IXS_MOD && term->u.binary.rhs == denominator;
+    if (!congruent && coefficient_q == 1 && term->tag == IXS_MOD &&
+        term->u.binary.rhs->tag == IXS_INT && denominator->tag == IXS_INT &&
+        term->u.binary.rhs->u.ival > 0 && denominator->u.ival > 0) {
+      int64_t required =
+          denominator->u.ival /
+          ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
+      congruent = coefficient_p % required == 0;
+    }
+    if (coefficient_q == 1 && congruent) {
       terms[i].term = term->u.binary.lhs;
       changed = true;
     }
@@ -33331,9 +33341,122 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     ixs_arena_restore(&ctx->scratch, mark);
     return n;
   }
-  flattened =
-      ixs_node_add(ctx, dividend->u.add.coeff, dividend->u.add.nterms, terms);
+  ixs_node_get_rat(dividend->u.add.coeff, &constant_p, &constant_q);
+  flattened = rebuild_add_from_terms(ctx, terms, dividend->u.add.nterms,
+                                     constant_p, constant_q);
   result = flattened ? simp_mod(ctx, flattened, denominator) : NULL;
+  ixs_arena_restore(&ctx->scratch, mark);
+  return result;
+}
+
+static ixs_node *mod_product_apply_power(ixs_ctx *ctx, ixs_node *acc,
+                                         ixs_node *base, int32_t exponent,
+                                         bool *unrepresentable) {
+  uint32_t magnitude = (uint32_t)exponent;
+  ixs_node *power = base;
+  while (magnitude != 0u) {
+    bool failed = false;
+    if ((magnitude & 1u) != 0u) {
+      acc = simp_try_mul(ctx, acc, power, &failed);
+      if (failed) {
+        *unrepresentable = true;
+        return NULL;
+      }
+      if (!acc)
+        return NULL;
+    }
+    magnitude >>= 1u;
+    if (magnitude != 0u) {
+      power = simp_try_mul(ctx, power, power, &failed);
+      if (failed) {
+        *unrepresentable = true;
+        return NULL;
+      }
+      if (!power)
+        return NULL;
+    }
+  }
+  return acc;
+}
+
+/* Modular reduction is a ring homomorphism over integer products. Reduce a
+ * factor only when its residue simplifies; this avoids growing normal forms.
+ * Canonical MUL factors are not MUL nodes, so these residue queries do not
+ * re-enter this rule on an unbounded product chain. */
+static ixs_node *rule_mod_reduce_product_factors(ixs_ctx *ctx, ixs_bounds *bnds,
+                                                 ixs_node *n) {
+  ixs_node *product = n->u.binary.lhs;
+  ixs_node *modulus = n->u.binary.rhs;
+  ixs_mulfactor *factors;
+  ixs_node *rebuilt;
+  ixs_node *result;
+  ixs_arena_mark mark;
+  int64_t coefficient_p;
+  int64_t coefficient_q;
+  uint32_t i;
+  bool changed = false;
+  bool unrepresentable = false;
+
+  if (!bnds || product->tag != IXS_MUL || product->u.mul.nfactors < 2u ||
+      modulus->tag != IXS_INT || modulus->u.ival <= 0)
+    return n;
+  ixs_node_get_rat(product->u.mul.coeff, &coefficient_p, &coefficient_q);
+  if (coefficient_q != 1 || coefficient_p == 0)
+    return n;
+  for (i = 0; i < product->u.mul.nfactors; i++) {
+    ixs_mulfactor factor = product->u.mul.factors[i];
+    if (factor.exp <= 0 ||
+        ixs_bounds_check_integer_valued(bnds, factor.base) != IXS_CHECK_TRUE ||
+        ixs_bounds_check_defined(bnds, factor.base) != IXS_CHECK_TRUE)
+      return n;
+  }
+
+  mark = ixs_arena_save(&ctx->scratch);
+  factors =
+      ixs_arena_alloc(&ctx->scratch, product->u.mul.nfactors * sizeof(*factors),
+                      sizeof(void *));
+  if (!factors && product->u.mul.nfactors != 0) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  memcpy(factors, product->u.mul.factors,
+         product->u.mul.nfactors * sizeof(*factors));
+
+  for (i = 0; i < product->u.mul.nfactors; i++) {
+    ixs_node *raw =
+        ixs_node_binary(ctx, IXS_MOD, factors[i].base, modulus, (ixs_cmp_op)0);
+    ixs_node *residue;
+    if (!raw) {
+      result = NULL;
+      goto cleanup;
+    }
+    residue = simp_mod_bnds(ctx, bnds, factors[i].base, modulus);
+    if (!residue) {
+      result = NULL;
+      goto cleanup;
+    }
+    if (residue != raw && residue != factors[i].base) {
+      factors[i].base = residue;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    result = n;
+    goto cleanup;
+  }
+
+  rebuilt = product->u.mul.coeff;
+  for (i = 0; i < product->u.mul.nfactors; i++) {
+    rebuilt = mod_product_apply_power(ctx, rebuilt, factors[i].base,
+                                      factors[i].exp, &unrepresentable);
+    if (!rebuilt) {
+      result = unrepresentable ? n : NULL;
+      goto cleanup;
+    }
+  }
+  result = simp_mod_bnds(ctx, bnds, rebuilt, modulus);
+
+cleanup:
   ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }
@@ -33377,6 +33500,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_idempotent, "mod_idempotent", false},
     {rule_mod_bitwise_projection, "mod_bitwise_projection", false},
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
+    {rule_mod_reduce_product_factors, "mod_reduce_product_factors", true},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
     {rule_mod_extract_small_const, "mod_extract_small_const", false},
