@@ -381,9 +381,9 @@ static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
                                   uint32_t nterms, int64_t const_p,
                                   int64_t const_q, bool allow_wide,
                                   ixs_node **result);
-static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
+static ixs_node *xor_difference_in_add(ixs_ctx *ctx, const ixs_addterm *terms,
                                        uint32_t nterms, int64_t const_p,
-                                       int64_t const_q);
+                                       int64_t const_q, ixs_bounds *bnds);
 static ixs_node *pw_fold_in_add(ixs_ctx *ctx, ixs_addterm *terms,
                                 uint32_t nterms, int64_t const_p,
                                 int64_t const_q);
@@ -590,7 +590,7 @@ static int add_try_rewrites(ixs_ctx *ctx, add_accum *acc, ixs_node **result) {
   if (status != 0)
     return status;
   *result = xor_difference_in_add(ctx, acc->terms, acc->nterms, acc->const_p,
-                                  acc->const_q);
+                                  acc->const_q, NULL);
   if (*result)
     return 1;
   *result =
@@ -2012,23 +2012,28 @@ static bool xor_offset_delta(ixs_node *a, ixs_node *b, ixs_node **selector,
   return false;
 }
 
-static bool bit_known_zero_without_assumptions(ixs_ctx *ctx, ixs_node *expr,
-                                               uint64_t bit) {
+static bool bit_known_zero(ixs_ctx *ctx, ixs_bounds *active, ixs_node *expr,
+                           uint64_t bit) {
   ixs_bounds bnds;
+  ixs_bounds *query = active;
   ixs_bitfacts bits;
   bool query_held = false;
   bool result;
-  if (!ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch))
-    return false;
-  if (!ixs_bounds_query_hold_begin(&bnds, expr, &query_held)) {
-    ixs_bounds_destroy(&bnds);
-    return false;
+  if (!query) {
+    if (!ixs_bounds_init_ctx(&bnds, ctx, &ctx->scratch))
+      return false;
+    query = &bnds;
+    if (!ixs_bounds_query_hold_begin(query, expr, &query_held)) {
+      ixs_bounds_destroy(query);
+      return false;
+    }
   }
-  result = ixs_bounds_get_bitfacts(&bnds, expr, &bits) &&
+  result = ixs_bounds_get_bitfacts(query, expr, &bits) &&
            (bits.known_zero & bit) != 0;
   if (query_held)
-    ixs_bounds_query_hold_end(&bnds);
-  ixs_bounds_destroy(&bnds);
+    ixs_bounds_query_hold_end(query);
+  if (!active)
+    ixs_bounds_destroy(query);
   return result;
 }
 
@@ -2060,9 +2065,9 @@ static ixs_node *xor_delta_expr(ixs_ctx *ctx, ixs_node *selector, int64_t delta,
   return scaled;
 }
 
-static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
+static ixs_node *xor_difference_in_add(ixs_ctx *ctx, const ixs_addterm *terms,
                                        uint32_t nterms, int64_t const_p,
-                                       int64_t const_q) {
+                                       int64_t const_q, ixs_bounds *bnds) {
   uint32_t i, j, k;
 
   for (i = 0; i < nterms; i++) {
@@ -2091,7 +2096,7 @@ static ixs_node *xor_difference_in_add(ixs_ctx *ctx, ixs_addterm *terms,
         continue;
       if (!ixs_node_is_integer_valued(toggle_operand) ||
           !ixs_u64_is_pow2(bit) ||
-          !bit_known_zero_without_assumptions(ctx, toggle_operand, bit))
+          !bit_known_zero(ctx, bnds, toggle_operand, bit))
         continue;
 
       replacement = xor_delta_expr(ctx, selector, delta, terms[i].coeff);
@@ -6833,22 +6838,21 @@ static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                               rewrite_memo_slot *memo,
                               rewrite_shared_cache *shared, bool *limited);
 
-static ixs_node *rewrite_project_exact_value(ixs_ctx *ctx, ixs_node *n,
-                                             ixs_bounds *bnds, bool *limited) {
-  bool invalid = false;
-  bool projection_limited = false;
-  bool oom = false;
+static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
+                                               ixs_bounds *bnds,
+                                               bool *limited) {
+  ixs_algebra_status status;
   int64_t exact;
   if (!bnds || ixs_node_is_const(n) || ixs_node_is_sentinel(n))
     return n;
-  if (bounds_modular_exact_normalized_value_detail(
-          ctx, bnds, n, &exact, &invalid, &projection_limited, &oom))
+  status = bounds_project_exact_integer(ctx, bnds, n, &exact);
+  if (status == IXS_ALGEBRA_MATCH)
     return ixs_node_int(ctx, exact);
-  if (oom)
+  if (status == IXS_ALGEBRA_OOM)
     return NULL;
-  if (invalid)
+  if (status == IXS_ALGEBRA_INVALID)
     return ctx->sentinel_error;
-  if (projection_limited)
+  if (status == IXS_ALGEBRA_LIMITED)
     *limited = true;
   return n;
 }
@@ -6871,7 +6875,7 @@ static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   }
   result = rewrite_impl(ctx, n, bnds, memo, shared, limited);
   if (result)
-    result = rewrite_project_exact_value(ctx, result, bnds, limited);
+    result = rewrite_project_exact_integer(ctx, result, bnds, limited);
   if (result && !rewrite_shared_cache_store(shared, n, result))
     return NULL;
   memo[slot].key = n;
@@ -7482,6 +7486,17 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
     return NULL;
   result = cancel_congruent_mod_difference(ctx, bnds, result);
   result = cancel_floor_mod_node(ctx, bnds, result);
+  if (result && result->tag == IXS_ADD) {
+    int64_t const_p, const_q;
+    ixs_node *xor_result;
+    ixs_node_get_rat(result->u.add.coeff, &const_p, &const_q);
+    xor_result = xor_difference_in_add(
+        ctx, result->u.add.terms, result->u.add.nterms, const_p, const_q, bnds);
+    if (xor_result)
+      return xor_result;
+    if (bnds && bnds->oom)
+      return NULL;
+  }
   if (!result || round_candidates < 2u)
     return result;
   return cancel_equal_round_difference(ctx, bnds, result);

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "bounds_modular.h"
+#include "bounds_bitfacts.h"
 #include "bounds_defined.h"
 #include "bounds_query.h"
 #include "bounds_range.h"
@@ -767,39 +768,24 @@ IXS_STATIC bool bounds_modular_exact_delta_detail(ixs_ctx *ctx,
   return bounds_delta_query_result(&query, delta, invalid, limited, oom);
 }
 
-static bool bounds_exact_value_failure(ixs_algebra_status status, bool *invalid,
-                                       bool *limited, bool *oom) {
-  if (status == IXS_ALGEBRA_OOM) {
-    if (oom)
-      *oom = true;
-    return true;
-  }
-  if (status == IXS_ALGEBRA_INVALID) {
-    if (invalid)
-      *invalid = true;
-    return true;
-  }
-  if (status == IXS_ALGEBRA_LIMITED) {
-    if (limited)
-      *limited = true;
-    return true;
-  }
-  return false;
-}
-
-static bool bounds_exact_value_source_defined(ixs_bounds *bounds,
-                                              ixs_node *expr, bool *limited,
-                                              bool *oom) {
+static ixs_algebra_status bounds_exact_value_source_defined(ixs_bounds *bounds,
+                                                            ixs_node *expr) {
+  ixs_bounds_transport_snapshot snapshot =
+      ixs_bounds_query_transport_snapshot(bounds);
+  ixs_bounds_transport_status transport;
   bool defined_oom = false;
   bool defined_limited = false;
   if (bounds_defined_check_detail(bounds, expr, &defined_oom,
                                   &defined_limited) == IXS_CHECK_TRUE)
-    return true;
-  if (oom)
-    *oom = defined_oom;
-  if (limited)
-    *limited = defined_limited;
-  return false;
+    return IXS_ALGEBRA_MATCH;
+  transport = ixs_bounds_query_transport_since(bounds, snapshot);
+  if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return IXS_ALGEBRA_INVALID;
+  if (defined_oom || transport == IXS_BOUNDS_TRANSPORT_OOM)
+    return IXS_ALGEBRA_OOM;
+  if (defined_limited || transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    return IXS_ALGEBRA_LIMITED;
+  return IXS_ALGEBRA_NO_MATCH;
 }
 
 static ixs_algebra_status
@@ -818,54 +804,93 @@ bounds_exact_value_project_division(ixs_ctx *ctx, ixs_bounds *bounds,
   return projection.status;
 }
 
-IXS_STATIC bool bounds_modular_exact_normalized_value_detail(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *expr, int64_t *value,
-    bool *invalid, bool *limited, bool *oom) {
+static ixs_algebra_status
+bounds_exact_value_project_bitfacts(ixs_bounds *bounds, ixs_node *expr,
+                                    int64_t *value) {
+  ixs_bitfacts bits;
+  uint64_t raw;
+  ixs_bounds_transport_status transport;
+  if (!ixs_bounds_get_bitfacts(bounds, expr, &bits)) {
+    transport = bounds_query_state_transport(bounds);
+    if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+      return IXS_ALGEBRA_INVALID;
+    if (transport == IXS_BOUNDS_TRANSPORT_OOM || bounds->oom)
+      return IXS_ALGEBRA_OOM;
+    if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+      return IXS_ALGEBRA_LIMITED;
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  assert((bits.known_zero & bits.known_one) == 0);
+  if ((bits.known_zero | bits.known_one) != UINT64_MAX)
+    return IXS_ALGEBRA_NO_MATCH;
+  raw = bits.known_one;
+  *value = raw <= (uint64_t)INT64_MAX ? (int64_t)raw
+                                      : -1 - (int64_t)(UINT64_MAX - raw);
+  return IXS_ALGEBRA_MATCH;
+}
+
+static ixs_algebra_status
+bounds_exact_value_project_delta(ixs_ctx *ctx, ixs_bounds *bounds,
+                                 ixs_node *lhs, ixs_node *rhs, int64_t *value) {
   bounds_delta_query query;
   bounds_delta_frame initial_frame;
-  ixs_node *lhs = expr;
-  ixs_node *rhs = ctx ? ctx->node_zero : NULL;
-  ixs_node *difference;
-  ixs_algebra_status additive_status;
-  ixs_algebra_status projection_status;
-  if (invalid)
-    *invalid = false;
-  if (limited)
-    *limited = false;
-  if (oom)
-    *oom = false;
-  if (!ctx || !bounds || !expr || !value || bounds->oom ||
-      bounds->contradiction)
-    return false;
-  if (!bounds_exact_value_source_defined(bounds, expr, limited, oom))
-    return false;
-  if (bounds_range_exact_integer_difference(bounds, expr, value))
-    return true;
-  if (expr->tag != IXS_ADD)
-    return false;
-  projection_status =
-      bounds_exact_value_project_division(ctx, bounds, expr, &lhs, &rhs);
-  if (bounds_exact_value_failure(projection_status, invalid, limited, oom))
-    return false;
-  difference = simp_sub(ctx, lhs, rhs);
-  if (!difference) {
-    if (oom)
-      *oom = true;
-    return false;
-  }
-  if (ixs_node_is_sentinel(difference)) {
-    if (invalid)
-      *invalid = true;
-    return false;
-  }
-  additive_status = bounds_exact_additive_value(bounds, difference, value);
-  if (additive_status == IXS_ALGEBRA_MATCH)
-    return true;
-  if (bounds_exact_value_failure(additive_status, invalid, limited, oom))
-    return false;
+  ixs_node *difference = simp_sub(ctx, lhs, rhs);
+  ixs_algebra_status status;
+  bool invalid = false;
+  bool limited = false;
+  bool oom = false;
+  if (!difference)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(difference))
+    return IXS_ALGEBRA_INVALID;
+  status = bounds_exact_additive_value(bounds, difference, value);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
   if (!bounds_delta_query_start(&query, &initial_frame, ctx, bounds, lhs, rhs,
                                 false, true))
-    return false;
+    return bounds->oom ? IXS_ALGEBRA_OOM : IXS_ALGEBRA_NO_MATCH;
   bounds_delta_query_run(&query);
-  return bounds_delta_query_result(&query, value, invalid, limited, oom);
+  if (bounds_delta_query_result(&query, value, &invalid, &limited, &oom))
+    return IXS_ALGEBRA_MATCH;
+  if (invalid)
+    return IXS_ALGEBRA_INVALID;
+  if (oom)
+    return IXS_ALGEBRA_OOM;
+  if (limited)
+    return IXS_ALGEBRA_LIMITED;
+  return IXS_ALGEBRA_NO_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
+                                                           ixs_bounds *bounds,
+                                                           ixs_node *expr,
+                                                           int64_t *value) {
+  ixs_node *lhs = expr;
+  ixs_node *rhs = ctx ? ctx->node_zero : NULL;
+  ixs_algebra_status status;
+  ixs_bounds_transport_status transport;
+  if (!ctx || !bounds || !expr || !value || bounds->oom ||
+      bounds->contradiction)
+    return bounds && bounds->oom ? IXS_ALGEBRA_OOM : IXS_ALGEBRA_NO_MATCH;
+  transport = bounds_query_state_transport(bounds);
+  if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return IXS_ALGEBRA_INVALID;
+  if (transport == IXS_BOUNDS_TRANSPORT_OOM)
+    return IXS_ALGEBRA_OOM;
+  if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+    return IXS_ALGEBRA_LIMITED;
+  status = bounds_exact_value_source_defined(bounds, expr);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  if (bounds_range_exact_integer_difference(bounds, expr, value))
+    return IXS_ALGEBRA_MATCH;
+  status = bounds_exact_value_project_bitfacts(bounds, expr, value);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  if (expr->tag != IXS_ADD)
+    return IXS_ALGEBRA_NO_MATCH;
+  status = bounds_exact_value_project_division(ctx, bounds, expr, &lhs, &rhs);
+  if (status != IXS_ALGEBRA_MATCH && status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  return bounds_exact_value_project_delta(ctx, bounds, lhs, rhs, value);
 }

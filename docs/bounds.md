@@ -37,9 +37,9 @@ borrow its one-root closure entry point. `facts_query.c` owns fact-set read
 validation and query transactions, scalar and batch simplification, exact
 division, metadata queries, and the public read API. `bounds_equivalence.c`
 owns equivalence query policy, exact EQ/NE fallback, ordered-congruence, and
-Piecewise selector proofs. `bounds_modular.c` owns generic normalized
-exact-value projection, paired-Mod exact-delta search, wide signed arithmetic,
-dynamic no-wrap lifts, and its growable progress stack.
+Piecewise selector proofs. `bounds_modular.c` owns normalized exact-integer
+projection, paired-Mod exact-delta search, wide signed arithmetic, dynamic
+no-wrap lifts, and its growable progress stack.
 `bounds_residue.c` owns target-modulus residue transitions, including
 proof-independent rational cancellation and branch-sensitive Piecewise
 evaluation. It does not start a second proof driver. `bounds_stride.c` owns
@@ -1077,16 +1077,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   the visited expression. Limits reached after a proof strategy starts and
   allocation failures remain live query failures with diagnostics. This API
   is not an unbounded theorem prover.
-- **Generic exact-value projection**: fact-backed rewriting asks the bounds
+- **Generic exact-integer projection**: fact-backed rewriting asks the bounds
   solver whether each normalized result has one exact `int64_t` value. The
   lower query consumes normalized nodes and never calls the simplifier. It
-  combines exact point ranges, additive rows over the weighted relation
-  forest, and paired-Mod projection; the rewrite memo ensures each input DAG
-  node is normalized and projected once per simplification. The rewrite does
-  not dispatch on ADD or subtraction: additive rows are one lower proof
-  backend, any parent can consume a projected child, and scalar and batch
-  simplification use the same path. A successful projection is a poison
-  refinement, so it need only agree where the source is defined.
+  combines exact point ranges, complete low-64 bitfacts, additive rows over the
+  weighted relation forest, and paired-Mod projection. Complete bitfacts are
+  converted to signed two's-complement values without implementation-defined
+  unsigned-to-signed casts. The rewrite memo projects each input DAG node once,
+  while interval and bitfacts work reuse the active central query cache. Scalar
+  and batch simplification use the same path. A successful projection is a
+  poison refinement, so it need only agree where the source is defined.
   Contradictory fact domains still bypass rewriting rather than proving values
   vacuously. OOM, invalid internal state, query limits, and unrepresentable
   integer results remain distinct failures.

@@ -528,6 +528,12 @@ clean retry. Equivalence consumes the same fact-backed simplifier, so an
 invertible binary basis is proved through its canonical reconstruction rather
 than a second XOR prover.
 
+Fact-backed ADD rewriting gives the XOR-delta rule its active bounds object.
+The rule therefore reuses the current bitfacts cache and can consume stored
+congruence and mask facts. Fact-free construction retains the same structural
+rule through a temporary empty bounds object; it is not used when facts are
+active.
+
 The known-bit query merges exact interval facts and propagates low 64-bit
 facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
 non-negative `x`, and `Mod(x, 2^n)`. `MUL` and `Mod` only produce bitfacts
@@ -542,6 +548,13 @@ integer scaled by a positive power of two and their possible-one masks are
 pairwise disjoint. Addition is then carry-free and its possible and required
 bits are the unions of the addend masks. Overlapping masks, negative scales,
 and non-integer scales keep the interval-derived fallback.
+
+After rebuilding a fact-backed node, the generic exact-integer projector may
+materialize it when known-zero and known-one cover all 64 bits. For example,
+`Mod(x, 16) == 0` reduces `x & 15` to zero. Partial coverage does not produce a
+constant. Projection runs once per rewrite-memo entry and shares the active
+bitfacts query rather than walking the reachable DAG in a separate bounds
+context.
 
 ## 4.9 Bitwise And/Or And Logical Not
 

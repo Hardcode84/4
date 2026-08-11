@@ -10,8 +10,10 @@
 
 #include "additive_row.h"
 #include "bounds.h"
+#include "bounds_assume.h"
 #include "bounds_difference.h"
 #include "bounds_equivalence.h"
+#include "bounds_modular.h"
 #include "bounds_query.h"
 #include "bounds_relation.h"
 #include "bounds_store.h"
@@ -1857,6 +1859,7 @@ static void test_contextless_query_state_survives_transient_restore(void) {
   CHECK(ixs_bounds_check_integer_domain(&bounds, guarded) == IXS_ALGEBRA_MATCH);
   ixs_bounds_query_hold_end(&bounds);
   ixs_bounds_destroy(&bounds);
+
   ixs_session_unbind(&binding);
   ixs_ctx_destroy(ctx);
 }
@@ -8030,6 +8033,50 @@ static void test_public_known_bits_failures(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_exact_integer_projection_reuses_bitfacts(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "exact_bit_projection_x");
+  ixs_node *expr = ixs_and(ctx, x, ixs_int(ctx, 15));
+  ixs_node *assumption = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                 IXS_CMP_EQ, ixs_int(ctx, 0));
+  size_t visits_before, visits_after, hits_before, hits_after;
+  int64_t value = -1;
+  ixs_algebra_status status;
+  bool held = false;
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds, assumption));
+  CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
+  status = bounds_project_exact_integer(ctx, &bounds, expr, &value);
+  CHECK(status == IXS_ALGEBRA_MATCH && value == 0);
+  ixs_bounds_query_stats(&bounds, &visits_before, NULL, &hits_before, NULL,
+                         NULL, NULL, NULL);
+  value = -1;
+  status = bounds_project_exact_integer(ctx, &bounds, expr, &value);
+  CHECK(status == IXS_ALGEBRA_MATCH && value == 0);
+  ixs_bounds_query_stats(&bounds, &visits_after, NULL, &hits_after, NULL, NULL,
+                         NULL, NULL);
+  CHECK(visits_after == visits_before);
+  CHECK(hits_after > hits_before);
+
+  bounds_query_note_limit(&bounds);
+  CHECK(bounds_project_exact_integer(ctx, &bounds, expr, &value) ==
+        IXS_ALGEBRA_LIMITED);
+  ixs_bounds_query_hold_end(&bounds);
+  held = false;
+  CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
+  status = bounds_project_exact_integer(ctx, &bounds, expr, &value);
+  CHECK(status == IXS_ALGEBRA_MATCH && value == 0);
+  ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_symbol_congruence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -12512,6 +12559,7 @@ int main(void) {
   test_public_fact_divisibility_requires_integral_product();
   test_public_known_bits_propagation();
   test_public_known_bits_failures();
+  test_exact_integer_projection_reuses_bitfacts();
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();

@@ -3565,6 +3565,50 @@ static void test_fact_backed_simplification(void) {
   ixs_ctx_destroy(other);
 }
 
+static void test_fact_backed_bit_projection(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "facts_bit_projection_x");
+  ixs_node *selector = ixs_sym(ctx, "facts_bit_projection_selector");
+  ixs_node *mask15 = ixs_int(ctx, 15);
+  ixs_node *mask7 = ixs_int(ctx, 7);
+  ixs_node *low4 = ixs_and(ctx, x, mask15);
+  ixs_node *signed_value = ixs_or(ctx, x, ixs_int(ctx, -16));
+  ixs_node *xor_source =
+      ixs_sub(ctx, ixs_xor(ctx, selector, ixs_add(ctx, x, ixs_int(ctx, 8))),
+              ixs_xor(ctx, selector, x));
+  ixs_node *xor_expected = ixs_sub(
+      ctx, ixs_int(ctx, 8),
+      ixs_mul(ctx, ixs_int(ctx, 2), ixs_and(ctx, selector, ixs_int(ctx, 8))));
+  ixs_facts *mod16 = ixs_facts_create(ctx);
+  ixs_facts *mod8 = ixs_facts_create(ctx);
+  ixs_facts *low4_is5 = ixs_facts_create(ctx);
+  ixs_facts *low3_is5 = ixs_facts_create(ctx);
+  const ixs_node *batch[2] = {low4, low4};
+
+  CHECK(ixs_facts_assume_pred(mod16,
+                              ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 16)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(
+      ixs_facts_assume_pred(mod8, ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)),
+                                          IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(low4_is5, ixs_cmp(ctx, ixs_and(ctx, x, mask15),
+                                                IXS_CMP_EQ, ixs_int(ctx, 5))));
+  CHECK(ixs_facts_assume_pred(low3_is5, ixs_cmp(ctx, ixs_and(ctx, x, mask7),
+                                                IXS_CMP_EQ, ixs_int(ctx, 5))));
+
+  CHECK(test_ixs_simplify_facts(mod16, low4) == ixs_int(ctx, 0));
+  CHECK(test_ixs_simplify_facts(mod8, low4) == low4);
+  CHECK(test_ixs_simplify_facts(low4_is5, signed_value) == ixs_int(ctx, -11));
+  CHECK(test_ixs_simplify_facts(low3_is5, signed_value) == signed_value);
+  CHECK(test_ixs_simplify_facts(mod16, xor_source) ==
+        test_ixs_simplify_facts(mod16, xor_expected));
+  CHECK(test_ixs_simplify_facts(mod8, xor_source) == xor_source);
+
+  test_ixs_simplify_batch_facts(mod16, batch, 2);
+  CHECK(batch[0] == ixs_int(ctx, 0));
+  CHECK(batch[1] == batch[0]);
+}
+
 static void test_fact_backed_affine_truncating_remainder(void) {
   enum { TRUNCATING_LIMIT_CASES = 33 };
   ixs_ctx *ctx = get_ctx();
@@ -5781,6 +5825,7 @@ int main(void) {
   test_floor_symbolic_denom_residue();
   test_simplify_batch();
   test_fact_backed_simplification();
+  test_fact_backed_bit_projection();
   test_fact_backed_affine_truncating_remainder();
   test_exact_divide_fact_piecewise();
   test_fact_rewrite_constant_power();
