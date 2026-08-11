@@ -152,6 +152,7 @@ int main(int argc, char **argv) {
   size_t n_simplified = 0;
   size_t n_errors = 0;
   size_t n_mismatches = 0;
+  size_t n_zero_one_residuals = 0;
   char line[MAX_LINE];
   char out_buf[MAX_LINE];
   char **expected_lines = NULL;
@@ -214,10 +215,18 @@ int main(int argc, char **argv) {
       continue;
     }
     n_simplified++;
+    if (ixs_node_tag(simplified) == IXS_INT &&
+        (ixs_node_int_val(simplified) == 0 ||
+         ixs_node_int_val(simplified) == 1))
+      n_zero_one_residuals++;
 
     {
       size_t n = ixs_print(simplified, out_buf, sizeof out_buf);
-      out_buf[n] = '\0';
+      if (n == SIZE_MAX || n >= sizeof out_buf) {
+        fprintf(stderr, "print error line %zu\n", n_lines);
+        n_errors++;
+        continue;
+      }
     }
 
     if (gen_expected) {
@@ -255,8 +264,9 @@ int main(int argc, char **argv) {
   }
 
   printf("test_corpus: %zu lines, %zu parsed, %zu simplified, %zu errors, "
-         "%zu mismatches\n",
-         n_lines, n_parsed, n_simplified, n_errors, n_mismatches);
+         "%zu mismatches, %zu zero/one residuals\n",
+         n_lines, n_parsed, n_simplified, n_errors, n_mismatches,
+         n_zero_one_residuals);
   if (n_assumptions > 0)
     printf("  (using %zu assumptions from %s)\n", n_assumptions,
            assumptions_path);

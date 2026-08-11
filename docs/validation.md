@@ -70,6 +70,11 @@ expressions in the corpus should already simplify significantly.
 **Milestone**: All 615 expressions produce correct results. Performance target
 met (< 50ms total).
 
+The corpus runner also reports how many expressions simplify to the canonical
+integer constants 0 or 1. This zero/one residual count is a quality metric:
+lower counts expose lost simplification even when every result remains
+semantically correct.
+
 ### Phase 5: Bindings
 
 - C++ header-only wrapper (`ixsimpl.hpp`)
