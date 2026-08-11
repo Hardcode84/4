@@ -923,8 +923,8 @@ def test_associative_many_grouping_fuzz(op: str, leaves: list[str | int], env: E
     grouped = ctor(lhs, rhs)
     permuted = ctor(*reversed(args))
 
-    assert ixsimpl.same_node(flat, grouped)
-    assert ixsimpl.same_node(flat, permuted)
+    assert flat.node_ptr == grouped.node_ptr
+    assert flat.node_ptr == permuted.node_ptr
     assert eval_ixs(flat, ctx, env) == eval_expr((op, *leaves), env)
 
 
@@ -1302,7 +1302,7 @@ def test_sympy_roundtrip_semantics(expr: ExprTree, envs: list[Env]) -> None:
 
 
 @given(expr=expressions(max_depth=4))
-def test_import_roundtrip_same_node(expr: ExprTree) -> None:
+def test_import_roundtrip_preserves_identity(expr: ExprTree) -> None:
     """Importing into another context and back preserves canonical identity."""
     ctx1 = ixsimpl.Context()
     ctx2 = ixsimpl.Context()
@@ -1316,12 +1316,12 @@ def test_import_roundtrip_same_node(expr: ExprTree) -> None:
     imported_again = ctx2.import_(original)
     roundtripped = ctx1.import_(imported)
 
-    assert ixsimpl.same_node(imported, imported_again)
-    assert ixsimpl.same_node(roundtripped, original)
+    assert imported.node_ptr == imported_again.node_ptr
+    assert roundtripped.node_ptr == original.node_ptr
 
 
 @given(expr=expressions(max_depth=4))
-def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
+def test_serialize_roundtrip_preserves_identity(expr: ExprTree) -> None:
     """Serializing into another context and back preserves canonical identity."""
     ctx1 = ixsimpl.Context()
     ctx2 = ixsimpl.Context()
@@ -1337,9 +1337,9 @@ def test_serialize_roundtrip_same_node(expr: ExprTree) -> None:
     roundtrip_data = ctx2.serialize(decoded)
     roundtripped = ctx1.deserialize(roundtrip_data)
 
-    assert ixsimpl.same_node(decoded, decoded_again)
+    assert decoded.node_ptr == decoded_again.node_ptr
     assert roundtrip_data == data
-    assert ixsimpl.same_node(roundtripped, original)
+    assert roundtripped.node_ptr == original.node_ptr
 
 
 def test_trunc_binding_constructs_toward_zero_rounding() -> None:
@@ -1349,7 +1349,7 @@ def test_trunc_binding_constructs_toward_zero_rounding() -> None:
     trunc_dynamic: Any = ixsimpl.trunc
 
     assert truncated.tag == ixsimpl.TRUNC
-    assert ixsimpl.same_node(truncated, ctx.parse_expr("Trunc(trunc_binding_x/3)"))
+    assert truncated.node_ptr == (ctx.parse_expr("Trunc(trunc_binding_x/3)")).node_ptr
     assert int(truncated.subs(x, -5)) == -1
     assert int(truncated.subs(x, 5)) == 1
     with pytest.raises(TypeError, match="requires an Expr"):
@@ -2239,10 +2239,10 @@ def test_cancel_floor_mod_pairs_shared_outer() -> None:
     mod_term = 3 * outer * (x % k)
     expected = 3 * outer * x
 
-    assert ixsimpl.same_node(floor_term + mod_term, expected)
+    assert (floor_term + mod_term).node_ptr == expected.node_ptr
 
     wide = unrelated + floor_term + mod_term
-    assert ixsimpl.same_node(wide.simplify(), unrelated + expected)
+    assert (wide.simplify()).node_ptr == (unrelated + expected).node_ptr
 
 
 def test_exact_floor_mod_refines_poison_before_child_rewrite() -> None:
@@ -2304,7 +2304,7 @@ def test_cancel_floor_mod_partial_semantics(
     )
     simplified = original.simplify()
 
-    assert ixsimpl.same_node(simplified, expected)
+    assert simplified.node_ptr == expected.node_ptr
     for env in envs:
         assert eval_ixs(original, ctx, env) == eval_ixs(simplified, ctx, env)
 
@@ -2779,7 +2779,7 @@ def test_wrapped_xor_ordered_equivalence_and_mod_residue_split() -> None:
 
     for offset in (1, 2, 3):
         shifted_mod = (aligned_dividend + offset) % modulus
-        assert ixsimpl.same_node(shifted_mod, aligned_mod + offset)
+        assert shifted_mod.node_ptr == (aligned_mod + offset).node_ptr
 
     facts = ctx.facts()
     facts.assume_many([lane >= 0, lane <= 31, ctx.eq(limit % 4, 0)])
@@ -3203,42 +3203,42 @@ def test_fact_backed_algebra_and_composed_differences() -> None:
     affine = ctx.affine_decompose(8 * i + base, i, facts)
     assert affine is not None
     coefficient, residual = affine
-    assert ixsimpl.same_node(coefficient, ctx.int_(8))
-    assert ixsimpl.same_node(residual, base)
+    assert coefficient.node_ptr == (ctx.int_(8)).node_ptr
+    assert residual.node_ptr == base.node_ptr
 
     factored = ctx.affine_decompose(8 * (i + base), i, facts)
     assert factored is not None
     coefficient, residual = factored
-    assert ixsimpl.same_node(coefficient, ctx.int_(8))
-    assert ixsimpl.same_node(residual, 8 * base)
+    assert coefficient.node_ptr == (ctx.int_(8)).node_ptr
+    assert residual.node_ptr == (8 * base).node_ptr
 
     rational = ctx.affine_decompose(i / 2, i, facts)
     assert rational is not None
     coefficient, residual = rational
-    assert ixsimpl.same_node(coefficient, ctx.rat(1, 2))
-    assert ixsimpl.same_node(residual, ctx.int_(0))
+    assert coefficient.node_ptr == (ctx.rat(1, 2)).node_ptr
+    assert residual.node_ptr == (ctx.int_(0)).node_ptr
     assert ctx.affine_decompose(i * i, i, facts) is None
     assert ctx.affine_decompose(base * i, i, facts) is None
     assert ctx.affine_decompose(i % 8, i, facts) is None
 
     linear_difference = _finite_difference(ctx, 8 * i + base, i, ctx.int_(1), facts)
     assert linear_difference is not None
-    assert ixsimpl.same_node(linear_difference, ctx.int_(8))
+    assert linear_difference.node_ptr == (ctx.int_(8)).node_ptr
     quadratic_difference = _finite_difference(ctx, i * i, i, ctx.int_(1), facts)
     assert quadratic_difference is not None
-    assert ixsimpl.same_node(quadratic_difference, 2 * i + 1)
-    assert ixsimpl.same_node(_finite_difference(ctx, i, i, i, facts), i)
+    assert quadratic_difference.node_ptr == (2 * i + 1).node_ptr
+    assert (_finite_difference(ctx, i, i, i, facts)).node_ptr == i.node_ptr
 
     split = ctx.split_additive_constant(base + 96, facts)
     assert split is not None
     residual, constant = split
-    assert ixsimpl.same_node(residual, base)
+    assert residual.node_ptr == base.node_ptr
     assert constant == 96
     for limit in (-(2**63), 2**63 - 1):
         split = ctx.split_additive_constant(base + limit, facts)
         assert split is not None
         residual, constant = split
-        assert ixsimpl.same_node(residual, base)
+        assert residual.node_ptr == base.node_ptr
         assert constant == limit
     assert ctx.split_additive_constant(base + ctx.rat(1, 2), facts) is None
 
@@ -3257,8 +3257,8 @@ def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     affine = ctx.affine_decompose(piecewise, i, nonnegative)
     assert affine is not None
     coefficient, residual = affine
-    assert ixsimpl.same_node(coefficient, ctx.int_(8))
-    assert ixsimpl.same_node(residual, base)
+    assert coefficient.node_ptr == (ctx.int_(8)).node_ptr
+    assert residual.node_ptr == base.node_ptr
 
     reciprocal = 1 / i
     assert _simplified_difference(ctx, reciprocal, reciprocal, empty) == 0
@@ -3318,15 +3318,15 @@ def test_fact_backed_algebra_helper_affine_property(
     affine = ctx.affine_decompose(expr, x, facts)
     assert affine is not None
     coefficient, residual = affine
-    assert ixsimpl.same_node(coefficient, ctx.int_(a))
-    assert ixsimpl.same_node(residual, b * y + c)
+    assert coefficient.node_ptr == (ctx.int_(a)).node_ptr
+    assert residual.node_ptr == (b * y + c).node_ptr
     difference = _finite_difference(ctx, expr, x, ctx.int_(step), facts)
     assert difference is not None
-    assert ixsimpl.same_node(difference, ctx.int_(a * step))
+    assert difference.node_ptr == (ctx.int_(a * step)).node_ptr
     split = ctx.split_additive_constant(expr, facts)
     assert split is not None
     residual, constant = split
-    assert ixsimpl.same_node(residual, a * x + b * y)
+    assert residual.node_ptr == (a * x + b * y).node_ptr
     assert constant == c
 
 
@@ -3418,12 +3418,12 @@ def test_fact_backed_exact_divide() -> None:
     status, quotient = ctx.try_exact_divide(expr, 8, facts)
     assert status == "proven"
     assert quotient is not None
-    assert ixsimpl.same_node(quotient, 8 * item + 4 * slot)
+    assert quotient.node_ptr == (8 * item + 4 * slot).node_ptr
 
     status, quotient = ctx.try_exact_divide(expr, -8, facts)
     assert status == "proven"
     assert quotient is not None
-    assert ixsimpl.same_node(quotient, -8 * item - 4 * slot)
+    assert quotient.node_ptr == (-8 * item - 4 * slot).node_ptr
 
     assert ctx.try_exact_divide(item + 1, 8, facts) == ("unknown", None)
     assert ctx.try_exact_divide(ctx.int_(65), 8, facts) == ("not_exact", None)
@@ -3433,7 +3433,7 @@ def test_fact_backed_exact_divide() -> None:
     status, quotient = ctx.try_exact_divide(k, 32, facts)
     assert status == "proven"
     assert quotient is not None
-    assert ixsimpl.same_node(quotient, k / 32)
+    assert quotient.node_ptr == (k / 32).node_ptr
 
     contradictory = ctx.facts()
     contradictory.assume(item >= 10)
@@ -3457,7 +3457,7 @@ def test_fact_backed_exact_divide_piecewise() -> None:
     status, quotient = ctx.try_exact_divide(piecewise, 8, active)
     assert status == "proven"
     assert quotient is not None
-    assert ixsimpl.same_node(quotient, expected)
+    assert quotient.node_ptr == expected.node_ptr
 
     assert ctx.try_exact_divide(piecewise, 8, ctx.facts()) == ("unknown", None)
 
@@ -3478,7 +3478,7 @@ def test_fact_backed_exact_divide_piecewise() -> None:
     status, quotient = ctx.try_exact_divide(product, 8, covered)
     assert status == "proven"
     assert quotient is not None
-    assert ixsimpl.same_node(quotient, k)
+    assert quotient.node_ptr == k.node_ptr
 
 
 def test_exact_divide_binding_rejects_cross_context_inputs() -> None:
@@ -5408,7 +5408,7 @@ def test_mod_symbolic_divisor_contract() -> None:
     expr = ixsimpl.mod(x, m)
 
     assert not expr.is_error
-    assert ixsimpl.same_node(expr.simplify(assumptions=[m > 0]), expr)
+    assert (expr.simplify(assumptions=[m > 0])).node_ptr == expr.node_ptr
     assert expr.simplify(assumptions=[m < 0]).is_domain_error
     assert expr.simplify(assumptions=[m <= 0]).is_domain_error
     assert expr.simplify(assumptions=[ctx.eq(m, 0)]).is_domain_error
@@ -5423,8 +5423,8 @@ def test_percent_operator_builds_mod() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
 
-    assert ixsimpl.same_node(x % 4, ixsimpl.mod(x, 4))
-    assert ixsimpl.same_node(17 % x, ixsimpl.mod(ctx.int_(17), x))
+    assert (x % 4).node_ptr == (ixsimpl.mod(x, 4)).node_ptr
+    assert (17 % x).node_ptr == (ixsimpl.mod(ctx.int_(17), x)).node_ptr
     assert (x % 4).eval({"x": -7}) == 1
 
 
@@ -5432,20 +5432,20 @@ def test_bitwise_operators_build_and_or() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("x"), ctx.sym("y")
 
-    assert ixsimpl.same_node(x & y, ixsimpl.and_(x, y))
-    assert ixsimpl.same_node(x | y, ixsimpl.or_(x, y))
-    assert ixsimpl.same_node(x & 3, ixsimpl.and_(x, 3))
-    assert ixsimpl.same_node(3 & x, ixsimpl.and_(ctx.int_(3), x))
-    assert ixsimpl.same_node(x | 1, ixsimpl.or_(x, 1))
-    assert ixsimpl.same_node(1 | x, ixsimpl.or_(ctx.int_(1), x))
+    assert (x & y).node_ptr == (ixsimpl.and_(x, y)).node_ptr
+    assert (x | y).node_ptr == (ixsimpl.or_(x, y)).node_ptr
+    assert (x & 3).node_ptr == (ixsimpl.and_(x, 3)).node_ptr
+    assert (3 & x).node_ptr == (ixsimpl.and_(ctx.int_(3), x)).node_ptr
+    assert (x | 1).node_ptr == (ixsimpl.or_(x, 1)).node_ptr
+    assert (1 | x).node_ptr == (ixsimpl.or_(ctx.int_(1), x)).node_ptr
     assert (x & 3).eval({"x": 6}) == 2
     assert (x | 1).eval({"x": 6}) == 7
-    assert ixsimpl.same_node(ctx.parse_expr("x & 3"), x & 3)
-    assert ixsimpl.same_node(ctx.parse_expr("x | y"), x | y)
-    assert ixsimpl.same_node(ctx.parse_expr("1 | x & 3"), ctx.int_(1) | (x & 3))
-    assert ixsimpl.same_node(ctx.parse_pred("x & 3 == 1"), ctx.eq(x & 3, 1))
-    assert ixsimpl.same_node(ctx.parse_pred("(x & 3) == 1"), ctx.eq(x & 3, 1))
-    assert ixsimpl.same_node(ctx.parse_pred("(x | y) == 0"), ctx.eq(x | y, 0))
+    assert (ctx.parse_expr("x & 3")).node_ptr == (x & 3).node_ptr
+    assert (ctx.parse_expr("x | y")).node_ptr == (x | y).node_ptr
+    assert (ctx.parse_expr("1 | x & 3")).node_ptr == (ctx.int_(1) | (x & 3)).node_ptr
+    assert (ctx.parse_pred("x & 3 == 1")).node_ptr == (ctx.eq(x & 3, 1)).node_ptr
+    assert (ctx.parse_pred("(x & 3) == 1")).node_ptr == (ctx.eq(x & 3, 1)).node_ptr
+    assert (ctx.parse_pred("(x | y) == 0")).node_ptr == (ctx.eq(x | y, 0)).node_ptr
     assert str(ctx.parse_pred("x & y")) == "x != 0 & y != 0"
     assert str(ctx.parse_pred("x & y == 0")) == "y == 0 & x != 0"
     assert str(ctx.parse_pred("x | y == 0")) == "y == 0 | x != 0"

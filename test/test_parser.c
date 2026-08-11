@@ -268,7 +268,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(expr_node);
   roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(expr_node, roundtrip));
+  CHECK((expr_node == roundtrip));
 
   expr_node = ixs_parse_expr(ctx, "x | y", 5);
   CHECK(expr_node && !ixs_is_error(expr_node));
@@ -278,7 +278,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(expr_node);
   roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(expr_node, roundtrip));
+  CHECK((expr_node == roundtrip));
 
   expr_node = ixs_parse_expr(ctx, "1 | x & 3", 9);
   CHECK(expr_node && !ixs_is_error(expr_node));
@@ -288,7 +288,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(expr_node);
   roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(expr_node, roundtrip));
+  CHECK((expr_node == roundtrip));
 
   cmp_node = ixs_parse_pred(ctx, "x & 3 == 1", 10);
   CHECK(cmp_node && !ixs_is_error(cmp_node));
@@ -299,7 +299,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(cmp_node);
   roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(cmp_node, roundtrip));
+  CHECK((cmp_node == roundtrip));
 
   cmp_node = ixs_parse_pred(ctx, "(x & 3) == 1", 12);
   CHECK(cmp_node && !ixs_is_error(cmp_node));
@@ -317,7 +317,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(cmp_node);
   roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(cmp_node, roundtrip));
+  CHECK((cmp_node == roundtrip));
 
   and_node = ixs_parse_pred(ctx, "x & y", 5);
   CHECK(and_node && !ixs_is_error(and_node));
@@ -329,7 +329,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(and_node);
   roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(and_node, roundtrip));
+  CHECK((and_node == roundtrip));
 
   and_node = ixs_parse_pred(ctx, "x & y == 0", 10);
   CHECK(and_node && !ixs_is_error(and_node));
@@ -362,7 +362,7 @@ static void test_bitwise_condition_roundtrip(void) {
   printed = pr(or_node);
   roundtrip = ixs_parse_pred(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(or_node, roundtrip));
+  CHECK((or_node == roundtrip));
 
   ixs_ctx_destroy(ctx);
 }
@@ -548,7 +548,7 @@ static void test_signed_wrap64_roundtrip(void) {
   CHECK(ixs_print(expr, printed, sizeof(printed)) < sizeof(printed));
   roundtrip = ixs_parse_expr(ctx, printed, strlen(printed));
   CHECK(roundtrip && !ixs_is_error(roundtrip));
-  CHECK(ixs_same_node(expr, roundtrip));
+  CHECK((expr == roundtrip));
   CHECK(ixs_ctx_nerrors(ctx) == 0);
 
   ixs_ctx_destroy(ctx);

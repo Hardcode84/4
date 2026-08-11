@@ -15794,12 +15794,6 @@ bool ixs_range(ixs_session *s, ixs_node *expr, ixs_node *const *assumptions,
   return result;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Comparison and substitution                                       */
-/* ------------------------------------------------------------------ */
-
-bool ixs_same_node(const ixs_node *a, const ixs_node *b) { return a == b; }
-
 ixs_node *ixs_subs(ixs_session *s, ixs_node *expr, ixs_node *target,
                    ixs_node *replacement) {
   ixs_session_binding binding;

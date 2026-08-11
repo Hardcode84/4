@@ -442,14 +442,14 @@ static void test_roundtrip_deterministic(void) {
   check_same_print(expr, decoded);
 
   decoded_again = deserialize_from_buffer(&dst_s, &buf1);
-  CHECK(ixs_same_node(decoded, decoded_again));
+  CHECK((decoded == decoded_again));
 
   CHECK(serialize_to_buffer(&dst_s, decoded, &buf2));
   CHECK(buf1.len == buf2.len);
   CHECK(memcmp(buf1.data, buf2.data, buf1.len) == 0);
 
   roundtripped = deserialize_from_buffer(&src_s, &buf2);
-  CHECK(ixs_same_node(roundtripped, expr));
+  CHECK((roundtripped == expr));
 
   buffer_destroy(&buf2);
   buffer_destroy(&buf1);
@@ -639,8 +639,8 @@ static void test_bounds_canonical_alias_public(void) {
 
   CHECK(raw != NULL);
   CHECK(!ixs_is_error(raw));
-  CHECK(!ixs_same_node(raw, canonical));
-  CHECK(ixs_same_node(ixs_simplify(&s, raw, NULL, 0), canonical));
+  CHECK(!(raw == canonical));
+  CHECK((ixs_simplify(&s, raw, NULL, 0) == canonical));
   CHECK(raw_facts != NULL);
   CHECK(canonical_facts != NULL);
 
@@ -870,9 +870,9 @@ static void test_facts_assume_preds_order_and_identity(void) {
 
   CHECK(raw != NULL);
   CHECK(!ixs_is_error(raw));
-  CHECK(!ixs_same_node(raw, canonical));
-  CHECK(ixs_same_node(ixs_simplify(&s, raw, NULL, 0), canonical));
-  CHECK(!ixs_same_node(raw_predicate, canonical_predicate));
+  CHECK(!(raw == canonical));
+  CHECK((ixs_simplify(&s, raw, NULL, 0) == canonical));
+  CHECK(!(raw_predicate == canonical_predicate));
 
   repeated[0] = canonical_predicate;
   repeated[1] = divisor_eight;
@@ -1139,7 +1139,7 @@ static void test_associative_payload_validation(void) {
     args[3] = args[2];
     expected = assoc_fns[i](&s, 4, args);
     CHECK(decoded != NULL && !ixs_is_error(decoded));
-    CHECK(ixs_same_node(decoded, expected));
+    CHECK((decoded == expected));
     CHECK(ixs_session_nerrors(&s) == 0);
   }
 

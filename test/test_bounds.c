@@ -967,15 +967,15 @@ static void test_additive_row_ownership_and_extrema(void) {
   ixs_arena_set_fail_after(&scratch, IXS_ARENA_FAILURE_DISABLED);
   CHECK(ixs_additive_row_relation(ctx, &scratch, lhs, y, &positive, &negative,
                                   &offset) == IXS_ALGEBRA_MATCH);
-  CHECK(ixs_same_node(positive, lhs));
-  CHECK(ixs_same_node(negative, y));
+  CHECK((positive == lhs));
+  CHECK((negative == y));
   CHECK(offset == 0);
 
   CHECK(ixs_additive_row_relation(ctx, &scratch, ixs_int(ctx, 0),
                                   ixs_sub(ctx, x, y), &positive, &negative,
                                   &offset) == IXS_ALGEBRA_MATCH);
-  CHECK(ixs_same_node(positive, y));
-  CHECK(ixs_same_node(negative, x));
+  CHECK((positive == y));
+  CHECK((negative == x));
   CHECK(offset == 0);
 
   errors = ixs_ctx_nerrors(ctx);
@@ -4684,13 +4684,13 @@ static void test_public_modular_projection_difference(void) {
   CHECK(ixs_facts_assume_pred(negative,
                               ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)),
                                       IXS_CMP_EQ, ixs_int(ctx, 0))));
-  CHECK(ixs_same_node(test_ixs_simplify_facts(negative, difference_expr),
-                      ixs_int(ctx, 1)));
-  CHECK(ixs_same_node(test_ixs_simplify_facts(negative, nested_difference),
-                      ixs_int(ctx, 1)));
+  CHECK(
+      (test_ixs_simplify_facts(negative, difference_expr) == ixs_int(ctx, 1)));
+  CHECK((test_ixs_simplify_facts(negative, nested_difference) ==
+         ixs_int(ctx, 1)));
   test_ixs_simplify_batch_facts(negative, batch, 2);
-  CHECK(ixs_same_node(batch[0], ixs_int(ctx, 1)));
-  CHECK(ixs_same_node(batch[1], ixs_int(ctx, 1)));
+  CHECK((batch[0] == ixs_int(ctx, 1)));
+  CHECK((batch[1] == ixs_int(ctx, 1)));
   CHECK(test_simplified_difference(negative, wrapped1, wrapped0, &delta));
   CHECK(delta == 1);
   CHECK(
@@ -7759,7 +7759,7 @@ static void test_generic_piecewise_scalar_selector(void) {
   CHECK(test_ixs_equivalent_facts(facts, piecewise, indicator) ==
         IXS_CHECK_TRUE);
   simplified = test_ixs_simplify_facts(facts, scaled);
-  CHECK(ixs_same_node(simplified, condition));
+  CHECK((simplified == condition));
   CHECK(test_ixs_check_integer_valued_facts(facts, simplified) ==
         IXS_CHECK_TRUE);
 
@@ -10254,17 +10254,17 @@ static void test_public_affine_and_simplified_difference(void) {
   CHECK(test_ixs_affine_decompose_facts(
       facts, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), i), base), i,
       &coefficient, &residual));
-  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
-  CHECK(ixs_same_node(residual, base));
+  CHECK((coefficient == ixs_int(ctx, 8)));
+  CHECK((residual == base));
   CHECK(test_ixs_affine_decompose_facts(
       facts, ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, i, base)), i,
       &coefficient, &residual));
-  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
-  CHECK(ixs_same_node(residual, ixs_mul(ctx, ixs_int(ctx, 8), base)));
+  CHECK((coefficient == ixs_int(ctx, 8)));
+  CHECK((residual == ixs_mul(ctx, ixs_int(ctx, 8), base)));
   CHECK(test_ixs_affine_decompose_facts(facts, ixs_div(ctx, i, ixs_int(ctx, 2)),
                                         i, &coefficient, &residual));
-  CHECK(ixs_same_node(coefficient, ixs_rat(ctx, 1, 2)));
-  CHECK(ixs_same_node(residual, ixs_int(ctx, 0)));
+  CHECK((coefficient == ixs_rat(ctx, 1, 2)));
+  CHECK((residual == ixs_int(ctx, 0)));
 
   CHECK(!test_ixs_affine_decompose_facts(facts, ixs_mul(ctx, i, i), i,
                                          &coefficient, &residual));
@@ -10297,14 +10297,14 @@ static void test_composed_finite_difference_and_additive_split(void) {
   CHECK(test_finite_difference(
       facts, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), i), base), i, one,
       &difference));
-  CHECK(ixs_same_node(difference, ixs_int(ctx, 8)));
+  CHECK((difference == ixs_int(ctx, 8)));
   CHECK(test_finite_difference(facts, ixs_mul(ctx, i, i), i, one, &difference));
-  CHECK(ixs_same_node(difference, ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), i),
-                                          ixs_int(ctx, 1))));
+  CHECK((difference ==
+         ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), i), ixs_int(ctx, 1))));
   CHECK(test_finite_difference(
       facts, ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, i, base)), i, one,
       &difference));
-  CHECK(ixs_same_node(difference, ixs_int(ctx, 8)));
+  CHECK((difference == ixs_int(ctx, 8)));
   /* Predicates are scalar 0/1 expressions on algebra-query surfaces.  This
    * models a Wave loop-invariant, all-equal predicate table. */
   CHECK(ixs_facts_assume_pred(predicate_facts, invariant_predicate));
@@ -10312,29 +10312,29 @@ static void test_composed_finite_difference_and_additive_split(void) {
         IXS_CHECK_TRUE);
   CHECK(test_finite_difference(predicate_facts, invariant_predicate, i, one,
                                &difference));
-  CHECK(ixs_same_node(difference, ixs_int(ctx, 0)));
+  CHECK((difference == ixs_int(ctx, 0)));
 
   CHECK(test_ixs_split_additive_constant_facts(
       facts, ixs_add(ctx, base, ixs_int(ctx, 96)), &residual, &constant));
-  CHECK(ixs_same_node(residual, base));
+  CHECK((residual == base));
   CHECK(constant == 96);
   CHECK(test_ixs_split_additive_constant_facts(
       facts,
       ixs_mul(ctx, ixs_int(ctx, 8), ixs_add(ctx, base, ixs_int(ctx, 12))),
       &residual, &constant));
-  CHECK(ixs_same_node(residual, ixs_mul(ctx, ixs_int(ctx, 8), base)));
+  CHECK((residual == ixs_mul(ctx, ixs_int(ctx, 8), base)));
   CHECK(constant == 96);
   CHECK(test_ixs_split_additive_constant_facts(
       facts, ixs_add(ctx, base, ixs_int(ctx, INT64_MAX)), &residual,
       &constant));
-  CHECK(ixs_same_node(residual, base) && constant == INT64_MAX);
+  CHECK((residual == base) && constant == INT64_MAX);
   CHECK(test_ixs_split_additive_constant_facts(
       facts, ixs_add(ctx, base, ixs_int(ctx, INT64_MIN)), &residual,
       &constant));
-  CHECK(ixs_same_node(residual, base) && constant == INT64_MIN);
+  CHECK((residual == base) && constant == INT64_MIN);
   CHECK(test_ixs_split_additive_constant_facts(facts, base, &residual,
                                                &constant));
-  CHECK(ixs_same_node(residual, base) && constant == 0);
+  CHECK((residual == base) && constant == 0);
   CHECK(!test_ixs_split_additive_constant_facts(
       facts, ixs_add(ctx, base, ixs_rat(ctx, 1, 2)), &residual, &constant));
   CHECK(residual == NULL && constant == 0);
@@ -10369,8 +10369,8 @@ static void test_public_algebra_helpers_use_facts(void) {
   CHECK(ixs_facts_assume_pred(nonnegative, condition));
   CHECK(test_ixs_affine_decompose_facts(nonnegative, piecewise, i, &coefficient,
                                         &residual));
-  CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
-  CHECK(ixs_same_node(residual, base));
+  CHECK((coefficient == ixs_int(ctx, 8)));
+  CHECK((residual == base));
 
   CHECK(test_simplified_difference(empty, reciprocal, reciprocal, &delta));
   CHECK(delta == 0);
@@ -10439,11 +10439,11 @@ static void test_public_exact_divide_basic(void) {
 
   result = ixs_try_exact_divide_facts(facts, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, expected));
+  CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(facts, expr, -8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, negative_expected));
+  CHECK((result.quotient == negative_expected));
 
   result =
       ixs_try_exact_divide_facts(facts, ixs_add(ctx, item, ixs_int(ctx, 1)), 8);
@@ -10460,7 +10460,7 @@ static void test_public_exact_divide_basic(void) {
   CHECK(ixs_facts_assume_pred(facts, congruence));
   result = ixs_try_exact_divide_facts(facts, k, 32);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, ixs_div(ctx, k, ixs_int(ctx, 32))));
+  CHECK((result.quotient == ixs_div(ctx, k, ixs_int(ctx, 32))));
 
   ixs_ctx_destroy(ctx);
 }
@@ -10536,13 +10536,13 @@ static void test_public_exact_divide_fact_scaled_xor_quotient(void) {
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK(result.quotient != NULL);
-  CHECK(ixs_same_node(result.quotient, expected_with_origin));
+  CHECK((result.quotient == expected_with_origin));
   CHECK(allocations > 0 && allocations < allowance - fault_window);
 
   result = ixs_try_exact_divide_facts(facts, dividend, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK(result.quotient != NULL);
-  CHECK(ixs_same_node(result.quotient, expected));
+  CHECK((result.quotient == expected));
 
   first_fault_budget =
       allocations > fault_window ? allocations - fault_window : 0;
@@ -10571,7 +10571,7 @@ static void test_public_exact_divide_fact_scaled_xor_quotient(void) {
     ixs_arena_set_fail_after(ixs_test_scratch(oom_ctx),
                              IXS_ARENA_FAILURE_DISABLED);
     if (result.status == IXS_EXACT_DIVIDE_PROVEN) {
-      CHECK(ixs_same_node(result.quotient, oom_expected_with_origin));
+      CHECK((result.quotient == oom_expected_with_origin));
       reached_success = true;
       ixs_ctx_destroy(oom_ctx);
       break;
@@ -10584,7 +10584,7 @@ static void test_public_exact_divide_fact_scaled_xor_quotient(void) {
 
     result = ixs_try_exact_divide_facts(oom_facts, oom_dividend_with_origin, 2);
     CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-    CHECK(ixs_same_node(result.quotient, oom_expected_with_origin));
+    CHECK((result.quotient == oom_expected_with_origin));
     ixs_ctx_destroy(oom_ctx);
   }
   CHECK(reached_success);
@@ -10621,7 +10621,7 @@ static void test_public_exact_divide_requires_defined_product(void) {
   CHECK(ixs_facts_assume_pred(covered, condition));
   result = ixs_try_exact_divide_facts(covered, product, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, k));
+  CHECK((result.quotient == k));
 
   ixs_ctx_destroy(ctx);
 }
@@ -10657,12 +10657,12 @@ static void test_public_exact_divide_fact_simplification(void) {
         IXS_CHECK_TRUE);
   result = ixs_try_exact_divide_facts(unknown, scaled_predicate, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, condition));
+  CHECK((result.quotient == condition));
 
   CHECK(ixs_facts_assume_pred(active, in_range));
   result = ixs_try_exact_divide_facts(active, piecewise, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, expected));
+  CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
@@ -10718,16 +10718,16 @@ static void test_public_exact_divide_canonical_nonzero_factor(void) {
   ixs_facts *addition = ixs_facts_create(ctx);
   ixs_exact_divide_result result;
 
-  CHECK(!ixs_same_node(source_base, canonical_base));
+  CHECK(!(source_base == canonical_base));
   CHECK(ixs_facts_assume_preds(product, &base_nonzero, 1));
   CHECK(test_ixs_check_defined_facts(product, dividend) == IXS_CHECK_TRUE);
   result = ixs_try_exact_divide_facts(product, dividend, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, canonical_quotient));
+  CHECK((result.quotient == canonical_quotient));
   CHECK(test_ixs_check_defined_facts(product, result.quotient) ==
         IXS_CHECK_TRUE);
 
-  CHECK(!ixs_same_node(source_piecewise, canonical_piecewise));
+  CHECK(!(source_piecewise == canonical_piecewise));
   CHECK(ixs_facts_assume_preds(piecewise, &piecewise_nonzero, 1));
   CHECK(test_ixs_check_defined_facts(
             piecewise, canonical_piecewise_reciprocal) == IXS_CHECK_TRUE);
@@ -10764,7 +10764,7 @@ static void test_public_exact_divide_scaled_mod_domain(void) {
   result = ixs_try_exact_divide_facts(nonnegative, mod, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   quotient = test_ixs_simplify_facts(nonnegative, result.quotient);
-  CHECK(ixs_same_node(quotient, x));
+  CHECK((quotient == x));
   CHECK(test_ixs_equivalent_facts(nonnegative, result.quotient, x) ==
         IXS_CHECK_TRUE);
 
@@ -10775,7 +10775,7 @@ static void test_public_exact_divide_scaled_mod_domain(void) {
   result = ixs_try_exact_divide_facts(signed_range, mod, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   quotient = test_ixs_simplify_facts(signed_range, result.quotient);
-  CHECK(ixs_same_node(quotient, expected_signed));
+  CHECK((quotient == expected_signed));
   CHECK(test_ixs_equivalent_facts(signed_range, result.quotient, x) ==
         IXS_CHECK_UNKNOWN);
 
@@ -10784,13 +10784,13 @@ static void test_public_exact_divide_scaled_mod_domain(void) {
   result = ixs_try_exact_divide_facts(negative_wrap, mod, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   quotient = test_ixs_simplify_facts(negative_wrap, result.quotient);
-  CHECK(ixs_same_node(quotient, ixs_int(ctx, INT32_MAX)));
+  CHECK((quotient == ixs_int(ctx, INT32_MAX)));
 
   CHECK(ixs_facts_assume_pred(upper_wrap, ixs_cmp(ctx, x, IXS_CMP_EQ, two31)));
   result = ixs_try_exact_divide_facts(upper_wrap, mod, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   quotient = test_ixs_simplify_facts(upper_wrap, result.quotient);
-  CHECK(ixs_same_node(quotient, ixs_int(ctx, 0)));
+  CHECK((quotient == ixs_int(ctx, 0)));
 
   ixs_ctx_destroy(ctx);
 }
@@ -10809,7 +10809,7 @@ static void test_public_exact_divide_extrema_and_overflow(void) {
   result =
       ixs_try_exact_divide_facts(facts, ixs_int(ctx, INT64_MIN), INT64_MIN);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, ixs_int(ctx, 1)));
+  CHECK((result.quotient == ixs_int(ctx, 1)));
   result =
       ixs_try_exact_divide_facts(facts, ixs_int(ctx, INT64_MAX), INT64_MIN);
   CHECK(result.status == IXS_EXACT_DIVIDE_NOT_EXACT);
@@ -10824,7 +10824,7 @@ static void test_public_exact_divide_extrema_and_overflow(void) {
 
   result = ixs_try_exact_divide_facts(facts, large, INT64_MAX);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, ixs_add(ctx, x, y)));
+  CHECK((result.quotient == ixs_add(ctx, x, y)));
 
   CHECK(ixs_facts_assume_pred(
       overflow_facts, ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, INT64_MAX)),
@@ -10901,7 +10901,7 @@ static void test_public_exact_divide_invalid_and_oom(void) {
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   result = ixs_try_exact_divide_facts(positive, guarded, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, floor_reciprocal));
+  CHECK((result.quotient == floor_reciprocal));
 
   result = ixs_try_exact_divide_facts(NULL, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_ERROR);

@@ -2647,12 +2647,6 @@ ixs_tag ixs_node_tag(const ixs_node *node);       // returns the node's type tag
 int64_t ixs_node_int_val(const ixs_node *node);   // IXS_INT value; UB if wrong tag
 uint32_t ixs_node_hash(const ixs_node *node);     // precomputed content hash
 
-// Pointer equality (O(1) — hash-consing guarantees that structurally
-// identical expressions within the same context share the same pointer).
-// Only valid for nodes from the same ixs_ctx. NULL arguments are allowed:
-// ixs_same_node(NULL, NULL) returns true, ixs_same_node(NULL, x) returns false.
-bool ixs_same_node(const ixs_node *a, const ixs_node *b);
-
 // Substitution — single-pass: replaces all occurrences of `target` in
 // `expr` with `replacement`. target can be any node (symbol, constant,
 // subexpression). Matching uses pointer equality (O(1) per node thanks
@@ -3428,7 +3422,7 @@ public:
         return {ctx_, session_,
                 ixs_mul(session_, ixs_int(session_, -1), node_)};
     }
-    bool operator==(Expr rhs) const { return ixs_same_node(node_, rhs.node_); }
+    bool operator==(Expr rhs) const { return node_ == rhs.node_; }
 
     std::string str() const {
         if (!node_) return {};

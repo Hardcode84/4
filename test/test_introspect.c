@@ -59,9 +59,9 @@ static void test_add_accessors(void) {
     ixs_node *coeff = ixs_node_add_term_coeff(expr, i);
     CHECK(ixs_node_tag(coeff) == IXS_INT);
     CHECK(ixs_node_int_val(coeff) == 1);
-    if (ixs_same_node(term, a))
+    if ((term == a))
       found_a = 1;
-    else if (ixs_same_node(term, b))
+    else if ((term == b))
       found_b = 1;
   }
   CHECK(found_a && found_b);
@@ -78,7 +78,7 @@ static void test_mul_accessors(void) {
   CHECK(ixs_node_tag(expr) == IXS_MUL);
   CHECK(ixs_node_int_val(ixs_node_mul_coeff(expr)) == 5);
   CHECK(ixs_node_mul_nfactors(expr) == 1);
-  CHECK(ixs_same_node(ixs_node_mul_factor_base(expr, 0), x));
+  CHECK((ixs_node_mul_factor_base(expr, 0) == x));
   CHECK(ixs_node_mul_factor_exp(expr, 0) == 1);
 
   ixs_ctx_destroy(ctx);
@@ -93,20 +93,20 @@ static void test_unary_accessors(void) {
 
   ixs_node *fl = ixs_floor(ctx, arg);
   CHECK(ixs_node_tag(fl) == IXS_FLOOR);
-  CHECK(ixs_same_node(ixs_node_unary_arg(fl), arg));
+  CHECK((ixs_node_unary_arg(fl) == arg));
 
   ixs_node *ce = ixs_ceil(ctx, arg);
   CHECK(ixs_node_tag(ce) == IXS_CEIL);
-  CHECK(ixs_same_node(ixs_node_unary_arg(ce), arg));
+  CHECK((ixs_node_unary_arg(ce) == arg));
 
   ixs_node *tr = ixs_trunc(ctx, arg);
   CHECK(ixs_node_tag(tr) == IXS_TRUNC);
-  CHECK(ixs_same_node(ixs_node_unary_arg(tr), arg));
+  CHECK((ixs_node_unary_arg(tr) == arg));
 
   ixs_node *xr = ixs_xor(ctx, ixs_sym(ctx, "a"), ixs_sym(ctx, "b"));
   ixs_node *nt = ixs_not(ctx, xr);
   CHECK(ixs_node_tag(nt) == IXS_NOT);
-  CHECK(ixs_same_node(ixs_node_unary_arg(nt), xr));
+  CHECK((ixs_node_unary_arg(nt) == xr));
 
   ixs_ctx_destroy(ctx);
   printf("  unary_accessors: OK\n");
@@ -119,32 +119,29 @@ static void test_binary_accessors(void) {
 
   ixs_node *mod = ixs_mod(ctx, a, b);
   CHECK(ixs_node_tag(mod) == IXS_MOD);
-  CHECK(ixs_same_node(ixs_node_binary_lhs(mod), a));
-  CHECK(ixs_same_node(ixs_node_binary_rhs(mod), b));
+  CHECK((ixs_node_binary_lhs(mod) == a));
+  CHECK((ixs_node_binary_rhs(mod) == b));
 
   ixs_node *mx = ixs_max(ctx, a, b);
   CHECK(ixs_node_tag(mx) == IXS_MAX);
   CHECK(ixs_node_assoc_nargs(mx) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(mx, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(mx, 1), a));
+  CHECK((ixs_node_assoc_arg(mx, 0) == a) || (ixs_node_assoc_arg(mx, 1) == a));
 
   ixs_node *mn = ixs_min(ctx, a, b);
   CHECK(ixs_node_tag(mn) == IXS_MIN);
   CHECK(ixs_node_assoc_nargs(mn) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(mn, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(mn, 1), a));
+  CHECK((ixs_node_assoc_arg(mn, 0) == a) || (ixs_node_assoc_arg(mn, 1) == a));
 
   ixs_node *xr = ixs_xor(ctx, a, b);
   CHECK(ixs_node_tag(xr) == IXS_XOR);
   CHECK(ixs_node_assoc_nargs(xr) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(xr, 0), a) ||
-        ixs_same_node(ixs_node_assoc_arg(xr, 1), a));
+  CHECK((ixs_node_assoc_arg(xr, 0) == a) || (ixs_node_assoc_arg(xr, 1) == a));
 
   ixs_node *diff = ixs_sub(ctx, a, b);
   ixs_node *cmp = ixs_cmp(ctx, diff, IXS_CMP_LT, ixs_int(ctx, 0));
   CHECK(ixs_node_tag(cmp) == IXS_CMP);
-  CHECK(ixs_same_node(ixs_node_binary_lhs(cmp), diff));
-  CHECK(ixs_same_node(ixs_node_binary_rhs(cmp), ixs_int(ctx, 0)));
+  CHECK((ixs_node_binary_lhs(cmp) == diff));
+  CHECK((ixs_node_binary_rhs(cmp) == ixs_int(ctx, 0)));
   CHECK(ixs_node_cmp_op(cmp) == IXS_CMP_LT);
 
   ixs_ctx_destroy(ctx);
@@ -164,10 +161,10 @@ static void test_pw_accessors(void) {
 
   CHECK(ixs_node_tag(pw) == IXS_PIECEWISE);
   CHECK(ixs_node_pw_ncases(pw) == 2);
-  CHECK(ixs_same_node(ixs_node_pw_value(pw, 0), v0));
-  CHECK(ixs_same_node(ixs_node_pw_cond(pw, 0), c0));
-  CHECK(ixs_same_node(ixs_node_pw_value(pw, 1), v1));
-  CHECK(ixs_same_node(ixs_node_pw_cond(pw, 1), c1));
+  CHECK((ixs_node_pw_value(pw, 0) == v0));
+  CHECK((ixs_node_pw_cond(pw, 0) == c0));
+  CHECK((ixs_node_pw_value(pw, 1) == v1));
+  CHECK((ixs_node_pw_cond(pw, 1) == c1));
 
   ixs_ctx_destroy(ctx);
   printf("  pw_accessors: OK\n");
@@ -182,10 +179,10 @@ static void test_logic_accessors(void) {
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_tag(and_node) == IXS_AND);
   CHECK(ixs_node_assoc_nargs(and_node) == 2);
-  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c1) ||
-        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c1));
-  CHECK(ixs_same_node(ixs_node_assoc_arg(and_node, 0), c2) ||
-        ixs_same_node(ixs_node_assoc_arg(and_node, 1), c2));
+  CHECK((ixs_node_assoc_arg(and_node, 0) == c1) ||
+        (ixs_node_assoc_arg(and_node, 1) == c1));
+  CHECK((ixs_node_assoc_arg(and_node, 0) == c2) ||
+        (ixs_node_assoc_arg(and_node, 1) == c2));
 
   ixs_node *or_node = ixs_or(ctx, c1, c2);
   CHECK(ixs_node_tag(or_node) == IXS_OR);
@@ -218,14 +215,12 @@ static void test_nchildren_child_add(void) {
   /* coeff + 2 terms * 2 (coeff,term) each = 5 children */
   CHECK(ixs_node_nchildren(expr) == 5);
   /* child 0 = coeff */
-  CHECK(ixs_same_node(ixs_node_child(expr, 0), ixs_node_add_coeff(expr)));
+  CHECK((ixs_node_child(expr, 0) == ixs_node_add_coeff(expr)));
   /* children match type-specific accessors */
-  CHECK(
-      ixs_same_node(ixs_node_child(expr, 1), ixs_node_add_term_coeff(expr, 0)));
-  CHECK(ixs_same_node(ixs_node_child(expr, 2), ixs_node_add_term(expr, 0)));
-  CHECK(
-      ixs_same_node(ixs_node_child(expr, 3), ixs_node_add_term_coeff(expr, 1)));
-  CHECK(ixs_same_node(ixs_node_child(expr, 4), ixs_node_add_term(expr, 1)));
+  CHECK((ixs_node_child(expr, 1) == ixs_node_add_term_coeff(expr, 0)));
+  CHECK((ixs_node_child(expr, 2) == ixs_node_add_term(expr, 0)));
+  CHECK((ixs_node_child(expr, 3) == ixs_node_add_term_coeff(expr, 1)));
+  CHECK((ixs_node_child(expr, 4) == ixs_node_add_term(expr, 1)));
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_add: OK\n");
 }
@@ -237,9 +232,8 @@ static void test_nchildren_child_mul(void) {
 
   CHECK(ixs_node_tag(expr) == IXS_MUL);
   CHECK(ixs_node_nchildren(expr) == 2);
-  CHECK(ixs_same_node(ixs_node_child(expr, 0), ixs_node_mul_coeff(expr)));
-  CHECK(ixs_same_node(ixs_node_child(expr, 1),
-                      ixs_node_mul_factor_base(expr, 0)));
+  CHECK((ixs_node_child(expr, 0) == ixs_node_mul_coeff(expr)));
+  CHECK((ixs_node_child(expr, 1) == ixs_node_mul_factor_base(expr, 0)));
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_mul: OK\n");
 }
@@ -251,8 +245,8 @@ static void test_nchildren_child_binary(void) {
   ixs_node *mod = ixs_mod(ctx, a, b);
 
   CHECK(ixs_node_nchildren(mod) == 2);
-  CHECK(ixs_same_node(ixs_node_child(mod, 0), a));
-  CHECK(ixs_same_node(ixs_node_child(mod, 1), b));
+  CHECK((ixs_node_child(mod, 0) == a));
+  CHECK((ixs_node_child(mod, 1) == b));
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_binary: OK\n");
 }
@@ -264,12 +258,12 @@ static void test_nchildren_child_unary(void) {
 
   ixs_node *fl = ixs_floor(ctx, arg);
   CHECK(ixs_node_nchildren(fl) == 1);
-  CHECK(ixs_same_node(ixs_node_child(fl, 0), arg));
+  CHECK((ixs_node_child(fl, 0) == arg));
 
   ixs_node *xr = ixs_xor(ctx, ixs_sym(ctx, "a"), ixs_sym(ctx, "b"));
   ixs_node *nt = ixs_not(ctx, xr);
   CHECK(ixs_node_nchildren(nt) == 1);
-  CHECK(ixs_same_node(ixs_node_child(nt, 0), xr));
+  CHECK((ixs_node_child(nt, 0) == xr));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_unary: OK\n");
@@ -287,10 +281,10 @@ static void test_nchildren_child_pw(void) {
   ixs_node *pw = ixs_pw(ctx, 2, vals, conds);
 
   CHECK(ixs_node_nchildren(pw) == 4);
-  CHECK(ixs_same_node(ixs_node_child(pw, 0), v0));
-  CHECK(ixs_same_node(ixs_node_child(pw, 1), c0));
-  CHECK(ixs_same_node(ixs_node_child(pw, 2), v1));
-  CHECK(ixs_same_node(ixs_node_child(pw, 3), c1));
+  CHECK((ixs_node_child(pw, 0) == v0));
+  CHECK((ixs_node_child(pw, 1) == c0));
+  CHECK((ixs_node_child(pw, 2) == v1));
+  CHECK((ixs_node_child(pw, 3) == c1));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_pw: OK\n");
@@ -304,10 +298,8 @@ static void test_nchildren_child_logic(void) {
 
   ixs_node *and_node = ixs_and(ctx, c1, c2);
   CHECK(ixs_node_nchildren(and_node) == 2);
-  CHECK(ixs_same_node(ixs_node_child(and_node, 0),
-                      ixs_node_assoc_arg(and_node, 0)));
-  CHECK(ixs_same_node(ixs_node_child(and_node, 1),
-                      ixs_node_assoc_arg(and_node, 1)));
+  CHECK((ixs_node_child(and_node, 0) == ixs_node_assoc_arg(and_node, 0)));
+  CHECK((ixs_node_child(and_node, 1) == ixs_node_assoc_arg(and_node, 1)));
 
   ixs_ctx_destroy(ctx);
   printf("  nchildren_child_logic: OK\n");
@@ -609,7 +601,7 @@ static void test_immutable_node_api(void) {
   CHECK(ixs_node_rat_den(rat) == 5);
   CHECK(ixs_node_add_nterms(sum) == 1);
   CHECK(ixs_node_int_val(ixs_node_add_coeff(sum)) == 2);
-  CHECK(ixs_same_node(ixs_node_add_term(sum, 0), x));
+  CHECK((ixs_node_add_term(sum, 0) == x));
   CHECK(ixs_node_int_val(ixs_node_add_term_coeff(sum, 0)) == 1);
   CHECK(ixs_node_mul_nfactors(product) == 2);
   CHECK(ixs_node_int_val(ixs_node_mul_coeff(product)) == 1);
@@ -622,8 +614,8 @@ static void test_immutable_node_api(void) {
   CHECK(ixs_node_assoc_nargs(logic) == 2);
   CHECK(ixs_node_assoc_arg(logic, 0) != NULL);
   CHECK(ixs_node_pw_ncases(piecewise) == 2);
-  CHECK(ixs_same_node(ixs_node_pw_value(piecewise, 0), x));
-  CHECK(ixs_same_node(ixs_node_pw_cond(piecewise, 1), ixs_true(ctx)));
+  CHECK((ixs_node_pw_value(piecewise, 0) == x));
+  CHECK((ixs_node_pw_cond(piecewise, 1) == ixs_true(ctx)));
   CHECK(ixs_node_nchildren(sum) == 3);
   child = ixs_node_child(sum, 0);
   CHECK(child != NULL);

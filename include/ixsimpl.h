@@ -457,9 +457,6 @@ const ixs_node *ixs_expand(ixs_session *s, const ixs_node *expr);
 
 /* --- Comparison and substitution --------------------------------------- */
 
-/* Pointer equality on hash-consed nodes.  Safe to call with NULL. */
-bool ixs_same_node(const ixs_node *a, const ixs_node *b);
-
 /* Return expr with all occurrences of target replaced by replacement.
  * target can be any node (symbol, subexpression, constant, etc.).
  * Uses pointer equality (hash-consed), so matching is O(1) per node. */

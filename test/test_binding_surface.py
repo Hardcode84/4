@@ -50,6 +50,9 @@ def test_migration_binding_surface_is_discoverable() -> None:
     }
     assert removed_query_methods.isdisjoint(dir(ixsimpl.Context))
     assert removed_query_methods.isdisjoint(dir(_ixsimpl.Context))
+    assert "same_node" not in ixsimpl.__all__
+    assert not hasattr(ixsimpl, "same_node")
+    assert not hasattr(_ixsimpl, "same_node")
     retained_module_members = {"TRUNC", "trunc"}
     assert retained_module_members <= set(ixsimpl.__all__)
     assert retained_module_members <= set(dir(ixsimpl))

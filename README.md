@@ -143,7 +143,6 @@ API. Key functions:
 | `ixs_import_node` / `ixs_import_many` | Structural import across contexts |
 | `ixs_serialize_node` / `ixs_deserialize_node` | Stable binary serialization |
 | `ixs_print` / `ixs_print_c` | Output as SymPy or C syntax |
-| `ixs_same_node` | Pointer equality (hash-consed) |
 | `ixs_walk_pre` / `ixs_walk_post` | Pre- and post-order tree traversal |
 | `ixs_node_tag`, `ixs_node_child`, ... | Node introspection and generic child access |
 | `ixs_ctx_nstats`, `ixs_ctx_stat` | Rule-hit statistics (requires `-DIXS_STATS`) |

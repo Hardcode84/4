@@ -46,7 +46,6 @@ from ixsimpl._ixsimpl import mod as _mod
 from ixsimpl._ixsimpl import not_ as _not
 from ixsimpl._ixsimpl import or_ as _or
 from ixsimpl._ixsimpl import pw as _pw
-from ixsimpl._ixsimpl import same_node as _same_node
 from ixsimpl._ixsimpl import trunc as _trunc
 from ixsimpl._ixsimpl import xor_ as _xor
 
@@ -226,7 +225,6 @@ if TYPE_CHECKING:
     def or_(a: Expr, *args: Expr | int) -> Expr: ...
     def not_(a: Expr) -> Expr: ...
     def pw(*branches: tuple[Expr | int, Expr | int]) -> Expr: ...
-    def same_node(a: Expr, b: Expr) -> bool: ...
     def lambdify(
         symbols: Sequence[Expr | str] | Expr | str,
         expr: Expr | list[Expr],
@@ -250,7 +248,6 @@ else:
     or_ = _or
     not_ = _not
     pw = _pw
-    same_node = _same_node
 
 __all__ = [
     "ADD",
@@ -292,7 +289,6 @@ __all__ = [
     "not_",
     "or_",
     "pw",
-    "same_node",
     "trunc",
     "xor_",
 ]

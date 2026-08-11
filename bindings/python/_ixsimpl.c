@@ -390,7 +390,7 @@ static int Expr_bool(ExprObject *self) {
   }
   PyErr_SetString(PyExc_TypeError,
                   "cannot determine truth value of symbolic expression; "
-                  "use .simplify() or ixsimpl.same_node()");
+                  "use .simplify() or compare .node_ptr values");
   return -1;
 }
 
@@ -2846,20 +2846,6 @@ static PyObject *mod_pw(PyObject *Py_UNUSED(module), PyObject *args) {
   return (PyObject *)Expr_wrap(ctx_obj, result);
 }
 
-static PyObject *mod_same_node(PyObject *Py_UNUSED(module), PyObject *args) {
-  PyObject *a_obj, *b_obj;
-  if (!PyArg_ParseTuple(args, "OO", &a_obj, &b_obj))
-    return NULL;
-  if (!PyObject_TypeCheck(a_obj, &_ExprType) ||
-      !PyObject_TypeCheck(b_obj, &_ExprType)) {
-    PyErr_SetString(PyExc_TypeError,
-                    "ixsimpl.same_node() requires two Expr arguments");
-    return NULL;
-  }
-  return PyBool_FromLong(
-      ixs_same_node(((ExprObject *)a_obj)->node, ((ExprObject *)b_obj)->node));
-}
-
 static PyObject *mod_set_expr_class(PyObject *Py_UNUSED(module),
                                     PyObject *arg) {
   if (!PyType_Check(arg) ||
@@ -2897,9 +2883,6 @@ static PyMethodDef module_methods[] = {
     {"pw", (PyCFunction)mod_pw, METH_VARARGS,
      "pw((val, cond), ...) -> Expr: piecewise expression. "
      "Each arg is a (value, condition) tuple; last condition should be true."},
-    {"same_node", (PyCFunction)mod_same_node, METH_VARARGS,
-     "same_node(a, b) -> bool: True if a and b are the same node (pointer "
-     "eq)."},
     {"_set_expr_class", (PyCFunction)mod_set_expr_class, METH_O,
      "Register a Python subclass of _Expr as the type instantiated by all "
      "expression-returning operations."},

@@ -369,8 +369,7 @@ static void test_import_many(void) {
   CHECK(dst[1] && ixs_node_tag(dst[1]) == IXS_ADD);
   CHECK(ixs_node_add_nterms(dst[0]) == 1);
   CHECK(ixs_node_add_nterms(dst[1]) == 1);
-  CHECK(ixs_same_node(ixs_node_add_term(dst[0], 0),
-                      ixs_node_add_term(dst[1], 0)));
+  CHECK((ixs_node_add_term(dst[0], 0) == ixs_node_add_term(dst[1], 0)));
 
   destroy_session(dst_ctx, &dst_s);
   destroy_session(src_ctx, &src_s);

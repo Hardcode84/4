@@ -178,7 +178,7 @@ public:
     return Expr(session_ctx(), session_,
                 ixs_mul(session_, ixs_int(session_, -1), node_));
   }
-  bool operator==(Expr rhs) const { return ixs_same_node(node_, rhs.node_); }
+  bool operator==(Expr rhs) const { return node_ == rhs.node_; }
 
   Expr operator>=(Expr rhs) const {
     return Expr(session_ctx(), session_,

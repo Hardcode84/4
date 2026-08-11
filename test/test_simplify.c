@@ -279,7 +279,7 @@ static void test_trunc_rules(void) {
   CHECK(ixs_node_int_val(ixs_trunc(ctx, ixs_rat(ctx, 7, 3))) == 2);
   CHECK(ixs_node_int_val(ixs_trunc(ctx, ixs_rat(ctx, -7, 3))) == -2);
   CHECK(ixs_node_tag(truncated) == IXS_TRUNC);
-  CHECK(ixs_same_node(ixs_node_unary_arg(truncated), third));
+  CHECK((ixs_node_unary_arg(truncated) == third));
   CHECK(ixs_node_tag(ixs_trunc(ctx, ixs_div(ctx, y, ixs_int(ctx, 3)))) ==
         IXS_TRUNC);
 
@@ -2041,7 +2041,7 @@ static void test_floor_drop_small_rational(void) {
   ixs_node *without_r =
       ixs_simplify(ctx, ixs_floor(ctx, ixs_mul(ctx, fx, ixs_rat(ctx, 1, 3))),
                    assumptions, 1);
-  CHECK(!ixs_same_node(r, without_r));
+  CHECK(!(r == without_r));
 }
 
 static void test_floor_drop_small_bounded_term(void) {
@@ -2154,13 +2154,6 @@ static void test_nested_floor_ceil(void) {
   CHECK(e && strcmp(pr(e), "2*floor(1/3*x)") == 0);
 }
 
-static void test_same_node(void) {
-  ixs_ctx *ctx = get_ctx();
-  CHECK(ixs_same_node(NULL, NULL));
-  CHECK(!ixs_same_node(ixs_int(ctx, 1), NULL));
-  CHECK(ixs_same_node(ixs_int(ctx, 42), ixs_int(ctx, 42)));
-}
-
 static void test_print_roundtrip(void) {
   ixs_ctx *ctx = get_ctx();
 
@@ -2179,7 +2172,7 @@ static void test_print_roundtrip(void) {
     /* Re-parse the printed output. */
     ixs_node *n2 = ixs_parse(ctx, out, strlen(out));
     CHECK(n2 && !ixs_is_error(n2));
-    CHECK(ixs_same_node(n, n2));
+    CHECK((n == n2));
   }
 }
 
@@ -3437,7 +3430,7 @@ static void test_exact_divide_fact_piecewise(void) {
   CHECK(ixs_facts_assume_pred(active, in_range));
   result = ixs_try_exact_divide_facts(active, piecewise, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, expected));
+  CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
@@ -3445,7 +3438,7 @@ static void test_exact_divide_fact_piecewise(void) {
 
   result = ixs_try_exact_divide_facts(unknown, total_piecewise, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
-  CHECK(ixs_same_node(result.quotient, total_condition));
+  CHECK((result.quotient == total_condition));
 
   CHECK(ixs_facts_assume_pred(inactive, outside));
   result = ixs_try_exact_divide_facts(inactive, piecewise, 8);
@@ -5186,7 +5179,6 @@ int main(void) {
 #endif
   test_sentinel_propagation();
   test_nested_floor_ceil();
-  test_same_node();
   test_print_roundtrip();
   test_divisibility_assumptions();
   test_large_expressions();

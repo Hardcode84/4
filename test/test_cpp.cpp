@@ -71,8 +71,7 @@ int main() {
   ixs_known_bits bits = {};
   ixs::Expr coefficient = zero;
   ixs::Expr residual = zero;
-  if (!ixs_same_node(facts.simplify((x + eight) - (x + one)).raw(),
-                     seven.raw()) ||
+  if (!(facts.simplify((x + eight) - (x + one)).raw() == seven.raw()) ||
       !facts.affine_decompose(twice_x + one, x, coefficient, residual) ||
       !facts.split_additive_constant(twice_x + eight, residual, constant) ||
       !facts.get_known_bits(x, bits) ||

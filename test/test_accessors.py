@@ -153,11 +153,11 @@ def test_variadic_associative_functions() -> None:
     for func, tag in funcs_and_tags:
         direct = func(c, a, b)
         nested = func(func(a, b), c)
-        assert ixsimpl.same_node(direct, nested)
+        assert direct.node_ptr == nested.node_ptr
         assert direct.tag == tag
         assert direct.nchildren == 3
         assert all(child.tag != tag for child in direct.children)
-        assert ixsimpl.same_node(func(a), a)
+        assert (func(a)).node_ptr == a.node_ptr
         with pytest.raises(TypeError):
             func()
         with pytest.raises(ValueError, match="different context"):
@@ -204,7 +204,7 @@ def test_context_serialize_roundtrip() -> None:
 
     assert isinstance(data, bytes)
     assert str(decoded) == str(expr)
-    assert ixsimpl.same_node(decoded, decoded_again)
+    assert decoded.node_ptr == decoded_again.node_ptr
     assert ctx2.serialize(decoded) == data
 
 
