@@ -305,6 +305,19 @@ static void test_mod_rules(void) {
   /* Mod(17, 5) -> 2 */
   CHECK(ixs_node_int_val(ixs_mod(ctx, ixs_int(ctx, 17), ixs_int(ctx, 5))) == 2);
 
+  /* Mod(x,x) -> 0 on every defined source evaluation. Invalid divisor values
+   * are poison and may refine to the same result. */
+  {
+    ixs_node *y = ixs_sym(ctx, "mod_self_y");
+    ixs_node *self = ixs_mod(ctx, x, x);
+    size_t errors = ixs_ctx_nerrors(ctx);
+    CHECK(self == ixs_int(ctx, 0));
+    CHECK(ixs_subs(ctx, self, x, ixs_int(ctx, 0)) == ixs_int(ctx, 0));
+    CHECK(ixs_subs(ctx, self, x, ixs_int(ctx, -1)) == ixs_int(ctx, 0));
+    CHECK(ixs_ctx_nerrors(ctx) == errors);
+    CHECK(ixs_mod(ctx, x, y) != ixs_int(ctx, 0));
+  }
+
   /* Mod(Mod(x, 5), 5) -> Mod(x, 5) */
   ixs_node *mx5 = ixs_mod(ctx, x, ixs_int(ctx, 5));
   CHECK(ixs_mod(ctx, mx5, ixs_int(ctx, 5)) == mx5);

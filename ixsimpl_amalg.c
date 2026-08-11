@@ -33841,6 +33841,13 @@ static ixs_node *rule_mod_one(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
   return n;
 }
 
+/* Defined Mod requires a positive divisor, where x mod x is zero. Every
+ * remaining self-divisor evaluation is poison and may refine to zero. */
+static ixs_node *rule_mod_self(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
+  (void)bnds;
+  return n->u.binary.lhs == n->u.binary.rhs ? ixs_node_int(ctx, 0) : n;
+}
+
 /* If 1/m is integral, every defined integer lhs is divisible by m. */
 static ixs_node *rule_mod_reciprocal_unit(ixs_ctx *ctx, ixs_bounds *bnds,
                                           ixs_node *n) {
@@ -34130,6 +34137,7 @@ static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
  * strip_multiples and difference-cancellation in simp_add depend on. */
 static const ixs_rule mod_rules[] = {
     {rule_mod_const_fold, "mod_const_fold", false},
+    {rule_mod_self, "mod_self", false},
     {rule_mod_one, "mod_one", false},
     {rule_mod_reciprocal_unit, "mod_reciprocal_unit", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},

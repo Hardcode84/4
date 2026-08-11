@@ -254,6 +254,7 @@ but apply these rules:
 
 ```
 Mod(c, m)           where c,m constant   → c mod m
+Mod(x, x)                                → 0
 Mod(x, 1)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
@@ -319,6 +320,11 @@ Each caller still decides positivity, totality, poison refinement, and
 signed-truncation policy. Compound product and quotient reconstruction use
 O(T) scratch restored before return; row borrowing and direct `Mod` atoms
 allocate nothing.
+
+Self-modulus folding needs no positivity fact. A defined `Mod(x,x)` already
+implies `x > 0` and equals zero; nonpositive evaluations are poison and may
+refine to zero. Immediately literal zero or negative divisors are still
+diagnosed before rule dispatch.
 
 Exact floor/Mod cancellation is valid on every defined source evaluation. If
 the divisor is invalid, the source is poison and may refine to the replacement;
