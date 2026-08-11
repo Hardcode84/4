@@ -8120,6 +8120,68 @@ static void test_modular_remainder_equality_reuses_queries(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_quotient_bucket_oracle_uses_existing_nodes(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *a = ixs_sym(ctx, "bucket_oracle_a");
+  ixs_node *d = ixs_sym(ctx, "bucket_oracle_d");
+  ixs_node *delta = ixs_sym(ctx, "bucket_oracle_delta");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *remainder = ixs_mod(ctx, a, d);
+  ixs_node *shifted = ixs_add(ctx, remainder, delta);
+  ixs_node *upper = ixs_sub(ctx, shifted, d);
+  size_t nodes_before;
+  bool held = false;
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(bounds_modular_quotient_bucket(&bounds, shifted, upper, a, d, delta) ==
+        IXS_ALGEBRA_NO_MATCH);
+  CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+  CHECK(ixs_bounds_add_assumption(&bounds,
+                                  ixs_cmp(ctx, shifted, IXS_CMP_GE, zero)));
+  CHECK(ixs_bounds_add_assumption(&bounds,
+                                  ixs_cmp(ctx, upper, IXS_CMP_LT, zero)));
+  nodes_before = ctx->htab_used;
+  CHECK(bounds_modular_quotient_bucket(&bounds, shifted, upper, a, d, delta) ==
+        IXS_ALGEBRA_MATCH);
+  CHECK(ctx->htab_used == nodes_before);
+  bounds.oom = true;
+  CHECK(bounds_modular_quotient_bucket(&bounds, shifted, upper, a, d, delta) ==
+        IXS_ALGEBRA_OOM);
+  bounds.oom = false;
+
+  CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
+  bounds_query_note_limit(&bounds);
+  CHECK(bounds_modular_quotient_bucket(&bounds, shifted, upper, a, d, delta) ==
+        IXS_ALGEBRA_LIMITED);
+  ixs_bounds_query_hold_end(&bounds);
+  ixs_bounds_destroy(&bounds);
+
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  CHECK(ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, d, IXS_CMP_GT, zero)));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, delta, IXS_CMP_GE, ixs_int(ctx, -3))));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, delta, IXS_CMP_LE, ixs_int(ctx, 4))));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, delta, IXS_CMP_EQ, ixs_floor(ctx, delta))));
+  CHECK(
+      ixs_bounds_add_assumption(&bounds, ixs_cmp(ctx, ixs_mod(ctx, a, eight),
+                                                 IXS_CMP_EQ, ixs_int(ctx, 3))));
+  CHECK(ixs_bounds_add_assumption(
+      &bounds, ixs_cmp(ctx, ixs_mod(ctx, d, eight), IXS_CMP_EQ, zero)));
+  nodes_before = ctx->htab_used;
+  CHECK(bounds_modular_quotient_bucket(&bounds, shifted, upper, a, d, delta) ==
+        IXS_ALGEBRA_MATCH);
+  CHECK(ctx->htab_used == nodes_before);
+  ixs_bounds_destroy(&bounds);
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_symbol_congruence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -12604,6 +12666,7 @@ int main(void) {
   test_public_known_bits_failures();
   test_exact_integer_projection_reuses_bitfacts();
   test_modular_remainder_equality_reuses_queries();
+  test_quotient_bucket_oracle_uses_existing_nodes();
   test_public_symbol_congruence();
   test_public_congruence_query();
   test_public_predicate_tree_query();

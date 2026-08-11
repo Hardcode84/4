@@ -240,15 +240,77 @@ static bool bounds_modular_shift_window_stable(ixs_bounds *bounds,
   return lower >= -(int64_t)residue && upper < (int64_t)(modulus - residue);
 }
 
-IXS_STATIC bool bounds_modular_quotient_shift_stable(ixs_bounds *bounds,
-                                                     ixs_node *dividend,
-                                                     ixs_node *denominator,
-                                                     ixs_node *delta) {
+static ixs_algebra_status
+bounds_modular_current_transport(const ixs_bounds *bounds);
+static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
+                                               ixs_node *denominator);
+
+static ixs_algebra_status
+bounds_modular_bucket_transport(const ixs_bounds *bounds) {
+  ixs_algebra_status status = bounds_modular_current_transport(bounds);
+  if (status == IXS_ALGEBRA_INVALID)
+    abort();
+  return status;
+}
+
+static bool bounds_interval_proves_nonnegative(ixs_interval interval) {
+  return interval.valid && !interval.lo_inf &&
+         ixs_rat_cmp(interval.lo_p, interval.lo_q, 0, 1) >= 0;
+}
+
+static bool bounds_interval_proves_nonpositive(ixs_interval interval) {
+  return interval.valid && !interval.hi_inf &&
+         ixs_rat_cmp(interval.hi_p, interval.hi_q, 0, 1) <= 0;
+}
+
+static bool bounds_interval_proves_negative(ixs_interval interval) {
+  return interval.valid && !interval.hi_inf &&
+         ixs_rat_cmp(interval.hi_p, interval.hi_q, 0, 1) < 0;
+}
+
+IXS_STATIC ixs_algebra_status bounds_modular_quotient_bucket(
+    ixs_bounds *bounds, ixs_node *lower_witness, ixs_node *upper_witness,
+    ixs_node *dividend, ixs_node *denominator, ixs_node *delta) {
+  ixs_interval delta_range = ixs_interval_unknown();
+  bool lower_safe;
+  bool upper_safe;
   int64_t lower;
   int64_t upper;
-  return bounds_integer_enclosure(bounds, delta, &lower, &upper) &&
-         bounds_modular_shift_window_stable(bounds, dividend, denominator,
-                                            lower, upper);
+  ixs_algebra_status status;
+
+  if (!bounds || !lower_witness || !upper_witness || !denominator ||
+      ((dividend == NULL) != (delta == NULL)))
+    abort();
+  status = bounds_modular_bucket_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  if (bounds->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (ixs_bounds_check_integer_valued(bounds, lower_witness) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, denominator) != IXS_CHECK_TRUE ||
+      (dividend &&
+       (ixs_bounds_check_integer_valued(bounds, dividend) != IXS_CHECK_TRUE ||
+        ixs_bounds_check_integer_valued(bounds, delta) != IXS_CHECK_TRUE)))
+    return bounds_modular_bucket_transport(bounds);
+
+  if (!bounds_denominator_proven_positive(bounds, denominator))
+    return bounds_modular_bucket_transport(bounds);
+  if (delta)
+    delta_range = ixs_bounds_get(bounds, delta);
+  lower_safe =
+      bounds_interval_proves_nonnegative(delta_range) ||
+      bounds_interval_proves_nonnegative(ixs_bounds_get(bounds, lower_witness));
+  upper_safe =
+      bounds_interval_proves_nonpositive(delta_range) ||
+      bounds_interval_proves_negative(ixs_bounds_get(bounds, upper_witness));
+  if (lower_safe && upper_safe)
+    return IXS_ALGEBRA_MATCH;
+  if (dividend && bounds_integer_enclosure(bounds, delta, &lower, &upper) &&
+      bounds_modular_shift_window_stable(bounds, dividend, denominator, lower,
+                                         upper))
+    return IXS_ALGEBRA_MATCH;
+  return bounds_modular_bucket_transport(bounds);
 }
 
 static bool bounds_denominator_proven_positive(ixs_bounds *bounds,

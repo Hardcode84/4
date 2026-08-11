@@ -8090,15 +8090,77 @@ static bool bounds_modular_shift_window_stable(ixs_bounds *bounds,
   return lower >= -(int64_t)residue && upper < (int64_t)(modulus - residue);
 }
 
-IXS_STATIC bool bounds_modular_quotient_shift_stable(ixs_bounds *bounds,
-                                                     ixs_node *dividend,
-                                                     ixs_node *denominator,
-                                                     ixs_node *delta) {
+static ixs_algebra_status
+bounds_modular_current_transport(const ixs_bounds *bounds);
+static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
+                                               ixs_node *denominator);
+
+static ixs_algebra_status
+bounds_modular_bucket_transport(const ixs_bounds *bounds) {
+  ixs_algebra_status status = bounds_modular_current_transport(bounds);
+  if (status == IXS_ALGEBRA_INVALID)
+    abort();
+  return status;
+}
+
+static bool bounds_interval_proves_nonnegative(ixs_interval interval) {
+  return interval.valid && !interval.lo_inf &&
+         ixs_rat_cmp(interval.lo_p, interval.lo_q, 0, 1) >= 0;
+}
+
+static bool bounds_interval_proves_nonpositive(ixs_interval interval) {
+  return interval.valid && !interval.hi_inf &&
+         ixs_rat_cmp(interval.hi_p, interval.hi_q, 0, 1) <= 0;
+}
+
+static bool bounds_interval_proves_negative(ixs_interval interval) {
+  return interval.valid && !interval.hi_inf &&
+         ixs_rat_cmp(interval.hi_p, interval.hi_q, 0, 1) < 0;
+}
+
+IXS_STATIC ixs_algebra_status bounds_modular_quotient_bucket(
+    ixs_bounds *bounds, ixs_node *lower_witness, ixs_node *upper_witness,
+    ixs_node *dividend, ixs_node *denominator, ixs_node *delta) {
+  ixs_interval delta_range = ixs_interval_unknown();
+  bool lower_safe;
+  bool upper_safe;
   int64_t lower;
   int64_t upper;
-  return bounds_integer_enclosure(bounds, delta, &lower, &upper) &&
-         bounds_modular_shift_window_stable(bounds, dividend, denominator,
-                                            lower, upper);
+  ixs_algebra_status status;
+
+  if (!bounds || !lower_witness || !upper_witness || !denominator ||
+      ((dividend == NULL) != (delta == NULL)))
+    abort();
+  status = bounds_modular_bucket_transport(bounds);
+  if (status != IXS_ALGEBRA_NO_MATCH)
+    return status;
+  if (bounds->contradiction)
+    return IXS_ALGEBRA_NO_MATCH;
+  if (ixs_bounds_check_integer_valued(bounds, lower_witness) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(bounds, denominator) != IXS_CHECK_TRUE ||
+      (dividend &&
+       (ixs_bounds_check_integer_valued(bounds, dividend) != IXS_CHECK_TRUE ||
+        ixs_bounds_check_integer_valued(bounds, delta) != IXS_CHECK_TRUE)))
+    return bounds_modular_bucket_transport(bounds);
+
+  if (!bounds_denominator_proven_positive(bounds, denominator))
+    return bounds_modular_bucket_transport(bounds);
+  if (delta)
+    delta_range = ixs_bounds_get(bounds, delta);
+  lower_safe =
+      bounds_interval_proves_nonnegative(delta_range) ||
+      bounds_interval_proves_nonnegative(ixs_bounds_get(bounds, lower_witness));
+  upper_safe =
+      bounds_interval_proves_nonpositive(delta_range) ||
+      bounds_interval_proves_negative(ixs_bounds_get(bounds, upper_witness));
+  if (lower_safe && upper_safe)
+    return IXS_ALGEBRA_MATCH;
+  if (dividend && bounds_integer_enclosure(bounds, delta, &lower, &upper) &&
+      bounds_modular_shift_window_stable(bounds, dividend, denominator, lower,
+                                         upper))
+    return IXS_ALGEBRA_MATCH;
+  return bounds_modular_bucket_transport(bounds);
 }
 
 static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
@@ -25556,6 +25618,7 @@ IXS_STATIC void *ixs_query_node_memo_get(ixs_query_node_memo *memo,
 #include "quotient_algebra.h"
 
 #include "additive_row.h"
+#include "bounds_modular.h"
 #include "simplify.h"
 #include <string.h>
 
@@ -25639,6 +25702,12 @@ static bool qa_integer_defined(qa_query *query, ixs_node *node) {
       ixs_bounds_check_integer_valued(query->bounds, node) == IXS_CHECK_TRUE;
   query->oom |= query->bounds->oom;
   return result && !query->oom;
+}
+
+static bool qa_bucket_match(qa_query *query, ixs_algebra_status status) {
+  query->oom |= status == IXS_ALGEBRA_OOM;
+  query->limited |= status == IXS_ALGEBRA_LIMITED;
+  return status == IXS_ALGEBRA_MATCH;
 }
 
 static ixs_node *qa_simplify(qa_query *query, ixs_node *expr) {
@@ -25733,6 +25802,7 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
                                       ixs_node *denominator) {
   ixs_euclidean_row row;
   ixs_node *residual = expr;
+  ixs_node *lower_witness;
   ixs_node *digit_upper = query->ctx->node_zero;
   ixs_interval range;
   uint32_t digits = 0;
@@ -25763,6 +25833,7 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
   residual = qa_simplify(query, residual);
   if (!residual)
     return false;
+  lower_witness = residual;
   range = ixs_bounds_get(query->bounds, residual);
   query->oom |= query->bounds->oom;
   if (!range.valid || range.lo_inf || range.hi_inf ||
@@ -25778,22 +25849,24 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
   digit_upper = digit_upper ? qa_sub(query, digit_upper, denominator) : NULL;
   digit_upper = digit_upper ? qa_simplify(query, digit_upper) : NULL;
   return digit_upper &&
-         qa_cmp(query, digit_upper, IXS_CMP_LT, query->ctx->node_zero);
+         qa_bucket_match(query, bounds_modular_quotient_bucket(
+                                    query->bounds, lower_witness, digit_upper,
+                                    NULL, denominator, NULL));
 }
 
 static bool qa_canonical_remainder(qa_query *query, ixs_node *expr,
                                    ixs_node *denominator) {
   ixs_node *upper;
   ixs_node *quotient;
-  /* qa_admit_term already proved the pivot denominator positive and total. */
-  if (!qa_integer_defined(query, expr))
-    return false;
   upper = qa_sub(query, expr, denominator);
-  if (upper && qa_cmp(query, expr, IXS_CMP_GE, query->ctx->node_zero) &&
-      qa_cmp(query, upper, IXS_CMP_LT, query->ctx->node_zero))
+  if (upper && qa_bucket_match(query, bounds_modular_quotient_bucket(
+                                          query->bounds, expr, upper, NULL,
+                                          denominator, NULL)))
     return true;
   if (!qa_stopped(query) && qa_affine_remainder_range(query, expr, denominator))
     return true;
+  /* A retained quotient fact is independent evidence when interval and
+   * congruence bounds cannot establish either bucket boundary. */
   quotient = qa_build(query, QA_DIV, expr, denominator);
   if (!quotient)
     return false;
@@ -36438,7 +36511,8 @@ static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
 typedef enum {
   FLOOR_SHIFT_UNPROVEN,
   FLOOR_SHIFT_PROVEN,
-  FLOOR_SHIFT_ERROR
+  FLOOR_SHIFT_OOM,
+  FLOOR_SHIFT_LIMITED
 } floor_shift_status;
 
 static ixs_algebra_status round_quotient_parts(ixs_ctx *ctx, ixs_node *round,
@@ -36461,41 +36535,31 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
   ixs_node *remainder;
   ixs_node *shifted;
   ixs_node *upper_difference;
-  bool lower_safe;
-  bool upper_safe;
-  if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
-      ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bnds, denominator) != IXS_CHECK_TRUE)
-    return bnds->oom ? FLOOR_SHIFT_ERROR : FLOOR_SHIFT_UNPROVEN;
+  ixs_algebra_status status;
   remainder = simp_mod_bnds(ctx, bnds, numerator, denominator);
   if (!remainder)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(remainder))
     return FLOOR_SHIFT_UNPROVEN;
   shifted = simp_add(ctx, remainder, shift);
   if (!shifted)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(shifted))
     return FLOOR_SHIFT_UNPROVEN;
   upper_difference = simp_sub(ctx, shifted, denominator);
   if (!upper_difference)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(upper_difference))
     return FLOOR_SHIFT_UNPROVEN;
-  lower_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_GE) ||
-               bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
-  upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
-               bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
-  if ((!lower_safe || !upper_safe) &&
-      bounds_modular_quotient_shift_stable(bnds, numerator, denominator,
-                                           shift)) {
-    lower_safe = true;
-    upper_safe = true;
-  }
-  if (bnds->oom)
-    return FLOOR_SHIFT_ERROR;
-  return lower_safe && upper_safe ? FLOOR_SHIFT_PROVEN : FLOOR_SHIFT_UNPROVEN;
+  status = bounds_modular_quotient_bucket(bnds, shifted, upper_difference,
+                                          numerator, denominator, shift);
+  if (status == IXS_ALGEBRA_MATCH)
+    return FLOOR_SHIFT_PROVEN;
+  if (status == IXS_ALGEBRA_OOM)
+    return FLOOR_SHIFT_OOM;
+  if (status == IXS_ALGEBRA_LIMITED)
+    return FLOOR_SHIFT_LIMITED;
+  return FLOOR_SHIFT_UNPROVEN;
 }
 
 /* One linear scan plus a fixed number of candidate-pair proofs. Quotient
@@ -36508,15 +36572,28 @@ round_shift_stays_in_bucket(ixs_ctx *ctx, ixs_bounds *bnds, ixs_tag round_tag,
     numerator = simp_neg(ctx, numerator);
     shift = simp_neg(ctx, shift);
     if (!numerator || !shift)
-      return FLOOR_SHIFT_ERROR;
+      return FLOOR_SHIFT_OOM;
     if (ixs_node_is_sentinel(numerator) || ixs_node_is_sentinel(shift))
       return FLOOR_SHIFT_UNPROVEN;
   }
   return floor_shift_stays_in_residue(ctx, bnds, numerator, shift, denominator);
 }
 
+static bool round_shift_terminal(floor_shift_status status, ixs_node *original,
+                                 bool *limited, ixs_node **result) {
+  if (status == FLOOR_SHIFT_OOM)
+    *result = NULL;
+  else if (status == FLOOR_SHIFT_LIMITED) {
+    *limited = true;
+    *result = original;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
-                                               ixs_node *add) {
+                                               ixs_node *add, bool *limited) {
   uint32_t i, j;
   size_t inspected = 0;
   if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
@@ -36539,6 +36616,7 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
       ixs_node *right_numerator;
       ixs_node *right_denominator;
       ixs_node *shift;
+      ixs_node *terminal;
       int64_t cp, cq;
       if (inspected++ == EQUAL_FLOOR_PAIR_LIMIT)
         return add;
@@ -36559,8 +36637,8 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
                   : round_shift_stays_in_bucket(ctx, bnds, left->tag,
                                                 left_numerator, shift,
                                                 left_denominator);
-      if (proof == FLOOR_SHIFT_ERROR)
-        return NULL;
+      if (round_shift_terminal(proof, add, limited, &terminal))
+        return terminal;
       if (proof != FLOOR_SHIFT_PROVEN) {
         shift = simp_sub(ctx, left_numerator, right_numerator);
         if (!shift)
@@ -36571,8 +36649,8 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
                                                   right_numerator, shift,
                                                   right_denominator);
       }
-      if (proof == FLOOR_SHIFT_ERROR)
-        return NULL;
+      if (round_shift_terminal(proof, add, limited, &terminal))
+        return terminal;
       if (proof != FLOOR_SHIFT_PROVEN)
         continue;
       IXS_STAT_HIT(ctx);
@@ -37007,7 +37085,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   }
   if (!result || round_candidates < 2u)
     return result;
-  return cancel_equal_round_difference(ctx, bnds, result);
+  return cancel_equal_round_difference(ctx, bnds, result, limited);
 }
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,

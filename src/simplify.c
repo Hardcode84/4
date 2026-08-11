@@ -6932,7 +6932,8 @@ static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
 typedef enum {
   FLOOR_SHIFT_UNPROVEN,
   FLOOR_SHIFT_PROVEN,
-  FLOOR_SHIFT_ERROR
+  FLOOR_SHIFT_OOM,
+  FLOOR_SHIFT_LIMITED
 } floor_shift_status;
 
 static ixs_algebra_status round_quotient_parts(ixs_ctx *ctx, ixs_node *round,
@@ -6955,41 +6956,31 @@ static floor_shift_status floor_shift_stays_in_residue(ixs_ctx *ctx,
   ixs_node *remainder;
   ixs_node *shifted;
   ixs_node *upper_difference;
-  bool lower_safe;
-  bool upper_safe;
-  if (!bounds_proves_zero_cmp(bnds, denominator, IXS_CMP_GT) ||
-      ixs_bounds_check_integer_valued(bnds, numerator) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bnds, shift) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(bnds, denominator) != IXS_CHECK_TRUE)
-    return bnds->oom ? FLOOR_SHIFT_ERROR : FLOOR_SHIFT_UNPROVEN;
+  ixs_algebra_status status;
   remainder = simp_mod_bnds(ctx, bnds, numerator, denominator);
   if (!remainder)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(remainder))
     return FLOOR_SHIFT_UNPROVEN;
   shifted = simp_add(ctx, remainder, shift);
   if (!shifted)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(shifted))
     return FLOOR_SHIFT_UNPROVEN;
   upper_difference = simp_sub(ctx, shifted, denominator);
   if (!upper_difference)
-    return FLOOR_SHIFT_ERROR;
+    return FLOOR_SHIFT_OOM;
   if (ixs_node_is_sentinel(upper_difference))
     return FLOOR_SHIFT_UNPROVEN;
-  lower_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_GE) ||
-               bounds_proves_zero_cmp(bnds, shifted, IXS_CMP_GE);
-  upper_safe = bounds_proves_zero_cmp(bnds, shift, IXS_CMP_LE) ||
-               bounds_proves_zero_cmp(bnds, upper_difference, IXS_CMP_LT);
-  if ((!lower_safe || !upper_safe) &&
-      bounds_modular_quotient_shift_stable(bnds, numerator, denominator,
-                                           shift)) {
-    lower_safe = true;
-    upper_safe = true;
-  }
-  if (bnds->oom)
-    return FLOOR_SHIFT_ERROR;
-  return lower_safe && upper_safe ? FLOOR_SHIFT_PROVEN : FLOOR_SHIFT_UNPROVEN;
+  status = bounds_modular_quotient_bucket(bnds, shifted, upper_difference,
+                                          numerator, denominator, shift);
+  if (status == IXS_ALGEBRA_MATCH)
+    return FLOOR_SHIFT_PROVEN;
+  if (status == IXS_ALGEBRA_OOM)
+    return FLOOR_SHIFT_OOM;
+  if (status == IXS_ALGEBRA_LIMITED)
+    return FLOOR_SHIFT_LIMITED;
+  return FLOOR_SHIFT_UNPROVEN;
 }
 
 /* One linear scan plus a fixed number of candidate-pair proofs. Quotient
@@ -7002,15 +6993,28 @@ round_shift_stays_in_bucket(ixs_ctx *ctx, ixs_bounds *bnds, ixs_tag round_tag,
     numerator = simp_neg(ctx, numerator);
     shift = simp_neg(ctx, shift);
     if (!numerator || !shift)
-      return FLOOR_SHIFT_ERROR;
+      return FLOOR_SHIFT_OOM;
     if (ixs_node_is_sentinel(numerator) || ixs_node_is_sentinel(shift))
       return FLOOR_SHIFT_UNPROVEN;
   }
   return floor_shift_stays_in_residue(ctx, bnds, numerator, shift, denominator);
 }
 
+static bool round_shift_terminal(floor_shift_status status, ixs_node *original,
+                                 bool *limited, ixs_node **result) {
+  if (status == FLOOR_SHIFT_OOM)
+    *result = NULL;
+  else if (status == FLOOR_SHIFT_LIMITED) {
+    *limited = true;
+    *result = original;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
-                                               ixs_node *add) {
+                                               ixs_node *add, bool *limited) {
   uint32_t i, j;
   size_t inspected = 0;
   if (!bnds || add->tag != IXS_ADD || ixs_bounds_has_empty(bnds))
@@ -7033,6 +7037,7 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
       ixs_node *right_numerator;
       ixs_node *right_denominator;
       ixs_node *shift;
+      ixs_node *terminal;
       int64_t cp, cq;
       if (inspected++ == EQUAL_FLOOR_PAIR_LIMIT)
         return add;
@@ -7053,8 +7058,8 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
                   : round_shift_stays_in_bucket(ctx, bnds, left->tag,
                                                 left_numerator, shift,
                                                 left_denominator);
-      if (proof == FLOOR_SHIFT_ERROR)
-        return NULL;
+      if (round_shift_terminal(proof, add, limited, &terminal))
+        return terminal;
       if (proof != FLOOR_SHIFT_PROVEN) {
         shift = simp_sub(ctx, left_numerator, right_numerator);
         if (!shift)
@@ -7065,8 +7070,8 @@ static ixs_node *cancel_equal_round_difference(ixs_ctx *ctx, ixs_bounds *bnds,
                                                   right_numerator, shift,
                                                   right_denominator);
       }
-      if (proof == FLOOR_SHIFT_ERROR)
-        return NULL;
+      if (round_shift_terminal(proof, add, limited, &terminal))
+        return terminal;
       if (proof != FLOOR_SHIFT_PROVEN)
         continue;
       IXS_STAT_HIT(ctx);
@@ -7501,7 +7506,7 @@ static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   }
   if (!result || round_candidates < 2u)
     return result;
-  return cancel_equal_round_difference(ctx, bnds, result);
+  return cancel_equal_round_difference(ctx, bnds, result, limited);
 }
 
 static ixs_node *rewrite_mul_factor(ixs_ctx *ctx, ixs_node *result,

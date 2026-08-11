@@ -4,6 +4,7 @@
 #include "quotient_algebra.h"
 
 #include "additive_row.h"
+#include "bounds_modular.h"
 #include "simplify.h"
 #include <string.h>
 
@@ -87,6 +88,12 @@ static bool qa_integer_defined(qa_query *query, ixs_node *node) {
       ixs_bounds_check_integer_valued(query->bounds, node) == IXS_CHECK_TRUE;
   query->oom |= query->bounds->oom;
   return result && !query->oom;
+}
+
+static bool qa_bucket_match(qa_query *query, ixs_algebra_status status) {
+  query->oom |= status == IXS_ALGEBRA_OOM;
+  query->limited |= status == IXS_ALGEBRA_LIMITED;
+  return status == IXS_ALGEBRA_MATCH;
 }
 
 static ixs_node *qa_simplify(qa_query *query, ixs_node *expr) {
@@ -181,6 +188,7 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
                                       ixs_node *denominator) {
   ixs_euclidean_row row;
   ixs_node *residual = expr;
+  ixs_node *lower_witness;
   ixs_node *digit_upper = query->ctx->node_zero;
   ixs_interval range;
   uint32_t digits = 0;
@@ -211,6 +219,7 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
   residual = qa_simplify(query, residual);
   if (!residual)
     return false;
+  lower_witness = residual;
   range = ixs_bounds_get(query->bounds, residual);
   query->oom |= query->bounds->oom;
   if (!range.valid || range.lo_inf || range.hi_inf ||
@@ -226,22 +235,24 @@ static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
   digit_upper = digit_upper ? qa_sub(query, digit_upper, denominator) : NULL;
   digit_upper = digit_upper ? qa_simplify(query, digit_upper) : NULL;
   return digit_upper &&
-         qa_cmp(query, digit_upper, IXS_CMP_LT, query->ctx->node_zero);
+         qa_bucket_match(query, bounds_modular_quotient_bucket(
+                                    query->bounds, lower_witness, digit_upper,
+                                    NULL, denominator, NULL));
 }
 
 static bool qa_canonical_remainder(qa_query *query, ixs_node *expr,
                                    ixs_node *denominator) {
   ixs_node *upper;
   ixs_node *quotient;
-  /* qa_admit_term already proved the pivot denominator positive and total. */
-  if (!qa_integer_defined(query, expr))
-    return false;
   upper = qa_sub(query, expr, denominator);
-  if (upper && qa_cmp(query, expr, IXS_CMP_GE, query->ctx->node_zero) &&
-      qa_cmp(query, upper, IXS_CMP_LT, query->ctx->node_zero))
+  if (upper && qa_bucket_match(query, bounds_modular_quotient_bucket(
+                                          query->bounds, expr, upper, NULL,
+                                          denominator, NULL)))
     return true;
   if (!qa_stopped(query) && qa_affine_remainder_range(query, expr, denominator))
     return true;
+  /* A retained quotient fact is independent evidence when interval and
+   * congruence bounds cannot establish either bucket boundary. */
   quotient = qa_build(query, QA_DIV, expr, denominator);
   if (!quotient)
     return false;

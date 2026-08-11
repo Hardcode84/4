@@ -6,12 +6,13 @@
 
 #include "bounds.h"
 
-/* After the caller proves integer operands and a positive denominator, prove
- * that every bounded integer delta stays in the current quotient bucket. */
-IXS_STATIC bool bounds_modular_quotient_shift_stable(ixs_bounds *bounds,
-                                                     ixs_node *dividend,
-                                                     ixs_node *denominator,
-                                                     ixs_node *delta);
+/* Prove one Euclidean quotient bucket from existing boundary witnesses. The
+ * optional dividend/delta pair enables the stride-congruence fallback. This
+ * query constructs and simplifies no nodes and returns only MATCH, NO_MATCH,
+ * OOM, or LIMITED. */
+IXS_STATIC ixs_algebra_status bounds_modular_quotient_bucket(
+    ixs_bounds *bounds, ixs_node *lower_witness, ixs_node *upper_witness,
+    ixs_node *dividend, ixs_node *denominator, ixs_node *delta);
 
 /* Prove one exact delta through relation residuals and paired Mod terms.
  * Failure leaves delta unchanged and reports only live transport failures. */

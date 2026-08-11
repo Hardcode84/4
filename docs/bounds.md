@@ -627,12 +627,14 @@ This enables rules like:
   congruence fallback for `A-B ≡ 0 (mod m)`.
 - Opposite-coefficient `floor` or `ceiling` quotients with one positive integer
   denominator cancel when a bounded integer numerator shift stays in the same
-  quotient bucket. The direct proof bounds `Mod(n,d) + delta` inside `[0,d)`.
-  The shared modular fallback uses `n == r (mod m)`, `m | d`, and the complete
-  shift interval `-r <= delta < m-r`; `ceiling` uses the exact `-n`, `-delta`
-  dual. Sign-proven `trunc` reaches the same machinery through its canonical
-  `floor` or `ceiling` form. The fallback performs only range, residue, and
-  divisibility queries and cannot re-enter simplification.
+  quotient bucket. One modular oracle checks the existing lower and upper
+  boundary witnesses for `Mod(n,d) + delta` inside `[0,d)`. Its fallback uses
+  `n == r (mod m)`, `m | d`, and the complete shift interval
+  `-r <= delta < m-r`; `ceiling` uses the exact `-n`, `-delta` dual.
+  Sign-proven `trunc` reaches the same machinery through its canonical `floor`
+  or `ceiling` form. The oracle performs a fixed number of cached integer,
+  range, residue, and divisibility queries, constructs no expressions, and
+  cannot re-enter simplification.
 
 **Bitwise-fact extraction and consumers**:
 
@@ -947,10 +949,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   Canonical mixed-radix ranges use the same row. Each positive integer digit
   `c*Mod(n,m)` contributes `[0,c*(m-1)]`; the ordinary interval engine bounds
   the residual once, and the symbolic upper bound is simplified as
-  `upper-d < 0`. Thus the rule is not keyed to a particular radix, literal
-  divisor, or term count. A separate `floor(expr/d) == 0` fact may certify a
-  canonical remainder when interval correlation alone is insufficient. This
-  proves, for example,
+  `upper-d < 0`. The shared modular bucket oracle checks those already-built
+  lower and upper witnesses, so quotient algebra no longer owns a second
+  `[0,d)` policy. Thus the rule is not keyed to a particular radix, literal
+  divisor, or term count. A separate `floor(expr/d) == 0` fact remains an
+  independent algebraic certificate when interval correlation is
+  insufficient. This proves, for example,
   `Mod(4*x+Mod(seed,4),32) == 4*Mod(x,8)+Mod(seed,4)` when the required domain
   and range facts hold, while a missing upper bound remains unknown.
 
@@ -1005,6 +1009,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   finite-domain equivalence, and it adds no context-wide scan.
 
   `bounds_modular.c` implements the following exact strategy.
+  Its quotient-bucket oracle consumes existing lower and upper boundary
+  witnesses. It performs no construction or simplification and returns only
+  match, no-match, OOM, or query-limit status. Both ADD cancellation and
+  quotient algebra use this boundary, while exact paired-Mod projection shares
+  its stride/residue window calculation.
+
   Constant-difference and equivalence queries pair equally scaled,
   opposite-sign `Mod(A, D)` terms in a normalized residual. They first prove
   the exact difference between the two dividends. For a positive literal `D`,

@@ -235,6 +235,12 @@ floor((A+s)/D) - floor(A/D) → 0
 The same-bucket floor scan is linear in the normalized ADD size and inspects
 at most 256 candidate pairs. Quotient reconstruction caps repeated powers at
 `MAX_FOLD_EXP`; reaching either bound leaves the expression unchanged.
+Once a pair supplies its existing shifted remainder and upper-bound witness,
+the shared modular bucket oracle performs the proof. It checks integer and
+positive-divisor facts, the two `[0,D)` boundaries, then the stride/residue
+fallback. The oracle constructs no nodes, invokes no simplifier, and reports
+query exhaustion separately from OOM. Ceiling uses the same proof after the
+exact `-A`, `-s` dual.
 
 ## 4.5 Mod Rules
 
