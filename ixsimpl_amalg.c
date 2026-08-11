@@ -5791,14 +5791,23 @@ static bool equivalence_low_bits_domain(equivalence_state *state,
   return status == IXS_ALGEBRA_MATCH;
 }
 
+static ixs_node *equivalence_low_bits_rebuild(void *user, ixs_node *root,
+                                              uint32_t count,
+                                              ixs_node *const *targets,
+                                              ixs_node *const *replacements) {
+  equivalence_state *state = user;
+  return simp_subs_multi(state->ctx, root, count, targets, replacements);
+}
+
 /* The original outer operations own the domain certificate. Projection never
  * substitutes a normalized root for that source obligation. */
 static ixs_check_result equivalence_low_bits(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
   ixs_algebra_status status;
-  ixs_node *projected_lhs;
-  ixs_node *projected_rhs;
+  ixs_node *roots[2];
+  ixs_node *projected[2];
+  ixs_low_bits_algebra_ops ops;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   bool saved_unrepresentable;
   unsigned bits;
@@ -5808,20 +5817,24 @@ static ixs_check_result equivalence_low_bits(equivalence_state *state,
       !equivalence_low_bits_domain(state, lhs->u.binary.lhs) ||
       !equivalence_low_bits_domain(state, rhs->u.binary.lhs))
     return result;
-  status = ixs_low_bits_algebra_project(state->ctx, state->bounds,
-                                        lhs->u.binary.lhs, rhs->u.binary.lhs,
-                                        bits, &projected_lhs, &projected_rhs);
+  roots[0] = lhs->u.binary.lhs;
+  roots[1] = rhs->u.binary.lhs;
+  ops.user = state;
+  ops.rebuild = equivalence_low_bits_rebuild;
+  ops.project_leaf = NULL;
+  status = ixs_low_bits_algebra_project(state->ctx, state->bounds, roots, 2u,
+                                        bits, &ops, projected);
   equivalence_note_algebra_status(state, status);
   if (status != IXS_ALGEBRA_MATCH ||
-      !equivalence_low_bits_domain(state, projected_lhs) ||
-      !equivalence_low_bits_domain(state, projected_rhs))
+      !equivalence_low_bits_domain(state, projected[0]) ||
+      !equivalence_low_bits_domain(state, projected[1]))
     return result;
-  if (projected_lhs == projected_rhs)
+  if (projected[0] == projected[1])
     return IXS_CHECK_TRUE;
   saved_unrepresentable = state->arithmetic_unrepresentable;
   state->arithmetic_unrepresentable = false;
   result =
-      equivalence_bounded_core(state, projected_lhs, projected_rhs, depth + 1u);
+      equivalence_bounded_core(state, projected[0], projected[1], depth + 1u);
   state->arithmetic_unrepresentable =
       saved_unrepresentable || state->arithmetic_unrepresentable;
   return result == IXS_CHECK_TRUE ? result : IXS_CHECK_UNKNOWN;
@@ -21021,7 +21034,7 @@ IXS_STATIC ixs_interval iv_hull(ixs_interval a, ixs_interval b) {
  */
 #include "low_bits_algebra.h"
 
-#include "simplify.h"
+#include "bounds_query.h"
 #include <assert.h>
 #include <string.h>
 
@@ -21043,7 +21056,9 @@ typedef struct {
   size_t capacity;
   size_t count;
   unsigned bits;
+  const ixs_low_bits_algebra_ops *ops;
   ixs_algebra_status status;
+  bool rejected;
 } lb_query;
 
 static void lb_note(lb_query *query, ixs_algebra_status status) {
@@ -21052,7 +21067,7 @@ static void lb_note(lb_query *query, ixs_algebra_status status) {
 }
 
 static bool lb_stopped(const lb_query *query) {
-  return query->status >= IXS_ALGEBRA_LIMITED;
+  return query->rejected || query->status >= IXS_ALGEBRA_LIMITED;
 }
 
 static bool lb_domain(lb_query *query, ixs_node *node) {
@@ -21060,6 +21075,25 @@ static bool lb_domain(lb_query *query, ixs_node *node) {
       ixs_bounds_check_integer_domain(query->bounds, node);
   lb_note(query, status);
   return status == IXS_ALGEBRA_MATCH;
+}
+
+static bool lb_integer(lb_query *query, ixs_node *node) {
+  bool result = query->bounds
+                    ? ixs_bounds_is_integer_with_divinfo(query->bounds, node)
+                    : ixs_node_is_integer_valued(node);
+  if (!result && query->bounds) {
+    ixs_bounds_transport_status transport =
+        bounds_query_state_transport(query->bounds);
+    if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+      lb_note(query, IXS_ALGEBRA_INVALID);
+    else if (transport == IXS_BOUNDS_TRANSPORT_OOM || query->bounds->oom)
+      lb_note(query, IXS_ALGEBRA_OOM);
+    else if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+      lb_note(query, IXS_ALGEBRA_LIMITED);
+  }
+  if (!result && !lb_stopped(query))
+    query->rejected = true;
+  return result;
 }
 
 static lb_entry *lb_slot(const lb_query *query, ixs_node *node) {
@@ -21133,9 +21167,25 @@ static ixs_node *lb_child(ixs_node *node, uint32_t index) {
   return node->u.assoc.args[index];
 }
 
+static bool lb_propagates_residue(lb_query *query, ixs_node *node,
+                                  uint32_t *count) {
+  uint32_t i;
+  if (node->tag != IXS_XOR && node->tag != IXS_AND && node->tag != IXS_OR)
+    return false;
+  if (!lb_integer(query, node))
+    return false;
+  *count = node->u.assoc.nargs;
+  for (i = 0; i < *count; i++)
+    if (!lb_integer(query, node->u.assoc.args[i]))
+      return false;
+  return *count != 0u;
+}
+
 static bool lb_propagates(lb_query *query, ixs_node *node, uint32_t *count) {
   uint32_t i;
   *count = 0u;
+  if (query->ops->project_leaf)
+    return lb_propagates_residue(query, node, count);
   if (node->tag == IXS_ADD) {
     if (!ixs_node_is_integer_valued(node->u.add.coeff) ||
         !lb_domain(query, node))
@@ -21208,8 +21258,8 @@ static ixs_node *lb_rebuild(lb_query *query, const lb_entry *entry) {
   /* Every immediate edge is a target, including opaque unchanged children.
    * Substitution therefore cannot leak through a shared opaque occurrence. */
   if (changed)
-    result = simp_subs_multi(query->ctx, entry->key, entry->child_count,
-                             targets, replacements);
+    result = query->ops->rebuild(query->ops->user, entry->key,
+                                 entry->child_count, targets, replacements);
   if (!result)
     lb_note(query, IXS_ALGEBRA_OOM);
   else if (ixs_node_is_sentinel(result)) {
@@ -21230,8 +21280,17 @@ static ixs_node *lb_normalize(lb_query *query, ixs_node *root) {
     ixs_node *child;
     entry = lb_slot(query, node);
     if (!entry->value && entry->child_count == 0u &&
-        !lb_propagates(query, node, &entry->child_count))
-      entry->value = node;
+        !lb_propagates(query, node, &entry->child_count) && !query->rejected) {
+      entry->value = query->ops->project_leaf
+                         ? query->ops->project_leaf(query->ops->user, node)
+                         : node;
+      if (!entry->value)
+        lb_note(query, IXS_ALGEBRA_OOM);
+      else if (ixs_node_is_sentinel(entry->value)) {
+        lb_note(query, IXS_ALGEBRA_INVALID);
+        entry->value = NULL;
+      }
+    }
     if (lb_stopped(query))
       break;
     if (!entry->value && entry->next_child < entry->child_count) {
@@ -21262,25 +21321,26 @@ static ixs_node *lb_normalize(lb_query *query, ixs_node *root) {
 }
 
 IXS_STATIC ixs_algebra_status ixs_low_bits_algebra_project(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
-    unsigned bits, ixs_node **projected_lhs, ixs_node **projected_rhs) {
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *const *roots, size_t count,
+    unsigned bits, const ixs_low_bits_algebra_ops *ops, ixs_node **projected) {
   lb_query query;
   ixs_arena_mark mark;
   ixs_algebra_status status;
-  assert(ctx && bounds && lhs && rhs && projected_lhs && projected_rhs &&
+  size_t i;
+  assert(ctx && roots && count != 0u && ops && ops->rebuild && projected &&
          bits <= 62u);
   memset(&query, 0, sizeof(query));
   query.ctx = ctx;
   query.bounds = bounds;
   query.bits = bits;
+  query.ops = ops;
   mark = ixs_arena_save(&ctx->scratch);
-  *projected_lhs = lb_normalize(&query, lhs);
-  *projected_rhs = *projected_lhs ? lb_normalize(&query, rhs) : NULL;
-  status = *projected_lhs && *projected_rhs ? IXS_ALGEBRA_MATCH : query.status;
-  if (status != IXS_ALGEBRA_MATCH) {
-    *projected_lhs = lhs;
-    *projected_rhs = rhs;
-  }
+  for (i = 0; i < count && !lb_stopped(&query); i++)
+    projected[i] = lb_normalize(&query, roots[i]);
+  status = i == count && !lb_stopped(&query) ? IXS_ALGEBRA_MATCH : query.status;
+  if (status != IXS_ALGEBRA_MATCH)
+    for (i = 0; i < count; i++)
+      projected[i] = roots[i];
   ixs_arena_restore(&ctx->scratch, mark);
   return status;
 }
@@ -29020,6 +29080,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
 #include "bounds_query.h"
 #include "bounds_store.h"
 #include "hash.h"
+#include "low_bits_algebra.h"
 #include "query_transaction.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -29070,6 +29131,8 @@ static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_trunc_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
                                     ixs_node *const *args);
+static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
+                               ixs_node *b);
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -33167,6 +33230,61 @@ static ixs_node *rule_mod_idempotent(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  ixs_node *modulus;
+} mod_low_bits_adapter;
+
+static ixs_node *mod_low_bits_rebuild(void *user, ixs_node *root,
+                                      uint32_t count, ixs_node *const *targets,
+                                      ixs_node *const *replacements) {
+  mod_low_bits_adapter *adapter = user;
+  return simp_subs_multi(adapter->ctx, root, count, targets, replacements);
+}
+
+static ixs_node *mod_low_bits_project_leaf(void *user, ixs_node *leaf) {
+  mod_low_bits_adapter *adapter = user;
+  return simp_mod_bnds(adapter->ctx, adapter->bounds, leaf, adapter->modulus);
+}
+
+/* XOR, AND, and OR commute with reduction modulo 2^k. The shared low-bit
+ * engine projects nested bitwise DAGs iteratively and materializes every
+ * opaque integer leaf as a residue. The result is already in [0, 2^k). */
+static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
+                                             ixs_node *n) {
+  ixs_node *dividend = n->u.binary.lhs;
+  ixs_node *modulus = n->u.binary.rhs;
+  ixs_node *roots[1] = {dividend};
+  ixs_node *projected[1];
+  ixs_low_bits_algebra_ops ops;
+  mod_low_bits_adapter adapter;
+  ixs_algebra_status status;
+  uint64_t value;
+  unsigned bits = 0u;
+
+  if (modulus->tag != IXS_INT || !ixs_int64_is_positive_pow2(modulus->u.ival) ||
+      (dividend->tag != IXS_XOR && dividend->tag != IXS_AND &&
+       dividend->tag != IXS_OR))
+    return n;
+  value = (uint64_t)modulus->u.ival;
+  while (value > 1u) {
+    value >>= 1u;
+    bits++;
+  }
+  adapter.ctx = ctx;
+  adapter.bounds = bnds;
+  adapter.modulus = modulus;
+  ops.user = &adapter;
+  ops.rebuild = mod_low_bits_rebuild;
+  ops.project_leaf = mod_low_bits_project_leaf;
+  status =
+      ixs_low_bits_algebra_project(ctx, bnds, roots, 1u, bits, &ops, projected);
+  if (status == IXS_ALGEBRA_OOM)
+    return NULL;
+  return status == IXS_ALGEBRA_MATCH ? projected[0] : n;
+}
+
 /* Mod(c + k*Mod(x, m), m) -> Mod(c + k*x, m) for integer k. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
@@ -33249,6 +33367,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_reciprocal_unit, "mod_reciprocal_unit", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},
     {rule_mod_idempotent, "mod_idempotent", false},
+    {rule_mod_bitwise_projection, "mod_bitwise_projection", false},
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},

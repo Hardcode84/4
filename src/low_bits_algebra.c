@@ -3,7 +3,7 @@
  */
 #include "low_bits_algebra.h"
 
-#include "simplify.h"
+#include "bounds_query.h"
 #include <assert.h>
 #include <string.h>
 
@@ -25,7 +25,9 @@ typedef struct {
   size_t capacity;
   size_t count;
   unsigned bits;
+  const ixs_low_bits_algebra_ops *ops;
   ixs_algebra_status status;
+  bool rejected;
 } lb_query;
 
 static void lb_note(lb_query *query, ixs_algebra_status status) {
@@ -34,7 +36,7 @@ static void lb_note(lb_query *query, ixs_algebra_status status) {
 }
 
 static bool lb_stopped(const lb_query *query) {
-  return query->status >= IXS_ALGEBRA_LIMITED;
+  return query->rejected || query->status >= IXS_ALGEBRA_LIMITED;
 }
 
 static bool lb_domain(lb_query *query, ixs_node *node) {
@@ -42,6 +44,25 @@ static bool lb_domain(lb_query *query, ixs_node *node) {
       ixs_bounds_check_integer_domain(query->bounds, node);
   lb_note(query, status);
   return status == IXS_ALGEBRA_MATCH;
+}
+
+static bool lb_integer(lb_query *query, ixs_node *node) {
+  bool result = query->bounds
+                    ? ixs_bounds_is_integer_with_divinfo(query->bounds, node)
+                    : ixs_node_is_integer_valued(node);
+  if (!result && query->bounds) {
+    ixs_bounds_transport_status transport =
+        bounds_query_state_transport(query->bounds);
+    if (transport == IXS_BOUNDS_TRANSPORT_INVALID)
+      lb_note(query, IXS_ALGEBRA_INVALID);
+    else if (transport == IXS_BOUNDS_TRANSPORT_OOM || query->bounds->oom)
+      lb_note(query, IXS_ALGEBRA_OOM);
+    else if (transport == IXS_BOUNDS_TRANSPORT_LIMITED)
+      lb_note(query, IXS_ALGEBRA_LIMITED);
+  }
+  if (!result && !lb_stopped(query))
+    query->rejected = true;
+  return result;
 }
 
 static lb_entry *lb_slot(const lb_query *query, ixs_node *node) {
@@ -115,9 +136,25 @@ static ixs_node *lb_child(ixs_node *node, uint32_t index) {
   return node->u.assoc.args[index];
 }
 
+static bool lb_propagates_residue(lb_query *query, ixs_node *node,
+                                  uint32_t *count) {
+  uint32_t i;
+  if (node->tag != IXS_XOR && node->tag != IXS_AND && node->tag != IXS_OR)
+    return false;
+  if (!lb_integer(query, node))
+    return false;
+  *count = node->u.assoc.nargs;
+  for (i = 0; i < *count; i++)
+    if (!lb_integer(query, node->u.assoc.args[i]))
+      return false;
+  return *count != 0u;
+}
+
 static bool lb_propagates(lb_query *query, ixs_node *node, uint32_t *count) {
   uint32_t i;
   *count = 0u;
+  if (query->ops->project_leaf)
+    return lb_propagates_residue(query, node, count);
   if (node->tag == IXS_ADD) {
     if (!ixs_node_is_integer_valued(node->u.add.coeff) ||
         !lb_domain(query, node))
@@ -190,8 +227,8 @@ static ixs_node *lb_rebuild(lb_query *query, const lb_entry *entry) {
   /* Every immediate edge is a target, including opaque unchanged children.
    * Substitution therefore cannot leak through a shared opaque occurrence. */
   if (changed)
-    result = simp_subs_multi(query->ctx, entry->key, entry->child_count,
-                             targets, replacements);
+    result = query->ops->rebuild(query->ops->user, entry->key,
+                                 entry->child_count, targets, replacements);
   if (!result)
     lb_note(query, IXS_ALGEBRA_OOM);
   else if (ixs_node_is_sentinel(result)) {
@@ -212,8 +249,17 @@ static ixs_node *lb_normalize(lb_query *query, ixs_node *root) {
     ixs_node *child;
     entry = lb_slot(query, node);
     if (!entry->value && entry->child_count == 0u &&
-        !lb_propagates(query, node, &entry->child_count))
-      entry->value = node;
+        !lb_propagates(query, node, &entry->child_count) && !query->rejected) {
+      entry->value = query->ops->project_leaf
+                         ? query->ops->project_leaf(query->ops->user, node)
+                         : node;
+      if (!entry->value)
+        lb_note(query, IXS_ALGEBRA_OOM);
+      else if (ixs_node_is_sentinel(entry->value)) {
+        lb_note(query, IXS_ALGEBRA_INVALID);
+        entry->value = NULL;
+      }
+    }
     if (lb_stopped(query))
       break;
     if (!entry->value && entry->next_child < entry->child_count) {
@@ -244,25 +290,26 @@ static ixs_node *lb_normalize(lb_query *query, ixs_node *root) {
 }
 
 IXS_STATIC ixs_algebra_status ixs_low_bits_algebra_project(
-    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *lhs, ixs_node *rhs,
-    unsigned bits, ixs_node **projected_lhs, ixs_node **projected_rhs) {
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *const *roots, size_t count,
+    unsigned bits, const ixs_low_bits_algebra_ops *ops, ixs_node **projected) {
   lb_query query;
   ixs_arena_mark mark;
   ixs_algebra_status status;
-  assert(ctx && bounds && lhs && rhs && projected_lhs && projected_rhs &&
+  size_t i;
+  assert(ctx && roots && count != 0u && ops && ops->rebuild && projected &&
          bits <= 62u);
   memset(&query, 0, sizeof(query));
   query.ctx = ctx;
   query.bounds = bounds;
   query.bits = bits;
+  query.ops = ops;
   mark = ixs_arena_save(&ctx->scratch);
-  *projected_lhs = lb_normalize(&query, lhs);
-  *projected_rhs = *projected_lhs ? lb_normalize(&query, rhs) : NULL;
-  status = *projected_lhs && *projected_rhs ? IXS_ALGEBRA_MATCH : query.status;
-  if (status != IXS_ALGEBRA_MATCH) {
-    *projected_lhs = lhs;
-    *projected_rhs = rhs;
-  }
+  for (i = 0; i < count && !lb_stopped(&query); i++)
+    projected[i] = lb_normalize(&query, roots[i]);
+  status = i == count && !lb_stopped(&query) ? IXS_ALGEBRA_MATCH : query.status;
+  if (status != IXS_ALGEBRA_MATCH)
+    for (i = 0; i < count; i++)
+      projected[i] = roots[i];
   ixs_arena_restore(&ctx->scratch, mark);
   return status;
 }

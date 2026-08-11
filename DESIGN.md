@@ -987,6 +987,10 @@ Mod(x, 1)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
+Mod(bitop(a1, ..., an), 2^k)             → bitop(Mod(a1, 2^k), ...,
+                                                    Mod(an, 2^k))
+                     when every ai is integer-valued and
+                     bitop is XOR, AND, or OR
 Mod((p/q)*(c + sum(ci*ti)), m)           → Mod(c' + sum(ci'*ti), m)
                      when all scaled coefficients are integral
 Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
@@ -1038,6 +1042,15 @@ load, giving expected O(N) work. Rebuilding after one match composes complete
 digit chains of any length through the same rule. Wrong coefficients, different
 carriers, noninteger radices or carriers, incomplete chains, and quotient
 normalizations that do not recover the original carrier remain unchanged.
+
+Power-of-two bitwise projection is one quotient-ring rule, not three
+operator-specific matchers. The shared low-bit engine walks nested XOR/AND/OR
+DAGs once and materializes every opaque integer leaf as a residue. Each
+projected operand and the rebuilt result lies in `[0, 2^k)`, so the outer
+`Mod` disappears. Bounds may prove an otherwise structural operand
+integer-valued. Totalness is not required: the rewrite is exact on every
+defined source evaluation and may refine poison elsewhere. Non-power-of-two or
+dynamic moduli and operands not proven integer-valued remain unchanged.
 
 Refinement happens when a node is constructed. Thus symbolic `k/k` becomes
 `1`, and substituting `k = 0` later leaves `1`; directly constructing `0/0`
@@ -2252,15 +2265,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   expression DAG and exact residuals use the weighted equality forest rather
   than inequality adjacency or context-wide scans.
 
-  After those exact strategies miss, the private `src/low_bits_algebra.c`
+  After those exact strategies miss, the shared `src/low_bits_algebra.c`
   component handles two original outer `Mod` nodes with the same positive,
   representable power-of-two literal modulus. The bounds adapter proves the
   original outer operations and both original dividends defined and
   integer-valued over the complete fact domain; normalized roots never replace
   those source obligations. The component then projects the dividends through
-  the typed ring `Z/(2^k)`. It propagates through integer-coefficient `ADD`,
-  integer-coefficient `MUL` with only positive powers, numeric `XOR`/`AND`/`OR`,
-  and a nested literal `Mod` whose modulus is divisible by the outer modulus.
+  the typed ring `Z/(2^k)`. In equality mode it propagates through
+  integer-coefficient `ADD`, integer-coefficient `MUL` with only positive
+  powers, numeric `XOR`/`AND`/`OR`, and a nested literal `Mod` whose modulus is
+  divisible by the outer modulus.
   Every supported node and immediate child is independently re-proved total
   and integer-valued, and the adapter re-proves both projected roots. Other
   nodes, including rounding,
@@ -2269,6 +2283,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   subtrees can still participate in a successful exact proof. The rule sees
   the original pair because fact-backed simplification can remove only one of
   the matching outer operations.
+
+  The Mod simplifier uses the same engine in residue mode. Only XOR/AND/OR
+  propagate in that mode; the caller maps every other proven-integer subtree
+  to its residue, then uses the ordinary canonical constructors to rebuild.
+  Equality and simplification therefore share admission, traversal, memo,
+  cycle detection, and transport behavior rather than maintaining separate
+  bit algebras.
 
   Low-bit normalization is iterative and uses a growable query-local,
   expected-O(1) pointer memo whose temporary parent links replace a recursive

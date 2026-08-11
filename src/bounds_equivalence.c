@@ -1265,14 +1265,23 @@ static bool equivalence_low_bits_domain(equivalence_state *state,
   return status == IXS_ALGEBRA_MATCH;
 }
 
+static ixs_node *equivalence_low_bits_rebuild(void *user, ixs_node *root,
+                                              uint32_t count,
+                                              ixs_node *const *targets,
+                                              ixs_node *const *replacements) {
+  equivalence_state *state = user;
+  return simp_subs_multi(state->ctx, root, count, targets, replacements);
+}
+
 /* The original outer operations own the domain certificate. Projection never
  * substitutes a normalized root for that source obligation. */
 static ixs_check_result equivalence_low_bits(equivalence_state *state,
                                              ixs_node *lhs, ixs_node *rhs,
                                              unsigned depth) {
   ixs_algebra_status status;
-  ixs_node *projected_lhs;
-  ixs_node *projected_rhs;
+  ixs_node *roots[2];
+  ixs_node *projected[2];
+  ixs_low_bits_algebra_ops ops;
   ixs_check_result result = IXS_CHECK_UNKNOWN;
   bool saved_unrepresentable;
   unsigned bits;
@@ -1282,20 +1291,24 @@ static ixs_check_result equivalence_low_bits(equivalence_state *state,
       !equivalence_low_bits_domain(state, lhs->u.binary.lhs) ||
       !equivalence_low_bits_domain(state, rhs->u.binary.lhs))
     return result;
-  status = ixs_low_bits_algebra_project(state->ctx, state->bounds,
-                                        lhs->u.binary.lhs, rhs->u.binary.lhs,
-                                        bits, &projected_lhs, &projected_rhs);
+  roots[0] = lhs->u.binary.lhs;
+  roots[1] = rhs->u.binary.lhs;
+  ops.user = state;
+  ops.rebuild = equivalence_low_bits_rebuild;
+  ops.project_leaf = NULL;
+  status = ixs_low_bits_algebra_project(state->ctx, state->bounds, roots, 2u,
+                                        bits, &ops, projected);
   equivalence_note_algebra_status(state, status);
   if (status != IXS_ALGEBRA_MATCH ||
-      !equivalence_low_bits_domain(state, projected_lhs) ||
-      !equivalence_low_bits_domain(state, projected_rhs))
+      !equivalence_low_bits_domain(state, projected[0]) ||
+      !equivalence_low_bits_domain(state, projected[1]))
     return result;
-  if (projected_lhs == projected_rhs)
+  if (projected[0] == projected[1])
     return IXS_CHECK_TRUE;
   saved_unrepresentable = state->arithmetic_unrepresentable;
   state->arithmetic_unrepresentable = false;
   result =
-      equivalence_bounded_core(state, projected_lhs, projected_rhs, depth + 1u);
+      equivalence_bounded_core(state, projected[0], projected[1], depth + 1u);
   state->arithmetic_unrepresentable =
       saved_unrepresentable || state->arithmetic_unrepresentable;
   return result == IXS_CHECK_TRUE ? result : IXS_CHECK_UNKNOWN;

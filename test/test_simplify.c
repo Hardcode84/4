@@ -524,6 +524,96 @@ static void test_mod_rules(void) {
   }
 }
 
+static void test_mod_bitwise_projection(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "mod_bitwise_x");
+  ixs_node *y = ixs_sym(ctx, "mod_bitwise_y");
+  ixs_node *z = ixs_sym(ctx, "mod_bitwise_z");
+  ixs_node *dynamic = ixs_sym(ctx, "mod_bitwise_dynamic");
+  ixs_node *modulus = ixs_int(ctx, 8);
+  ixs_node *args[3] = {x, y, z};
+  ixs_node *projected[3] = {ixs_mod(ctx, x, modulus), ixs_mod(ctx, y, modulus),
+                            ixs_mod(ctx, z, modulus)};
+  ixs_node *source;
+
+  CHECK(ixs_mod(ctx, ixs_xor_many(ctx, 3, args), modulus) ==
+        ixs_xor_many(ctx, 3, projected));
+  CHECK(ixs_mod(ctx, ixs_and_many(ctx, 3, args), modulus) ==
+        ixs_and_many(ctx, 3, projected));
+  CHECK(ixs_mod(ctx, ixs_or_many(ctx, 3, args), modulus) ==
+        ixs_or_many(ctx, 3, projected));
+  {
+    ixs_node *nested = ixs_and(ctx, ixs_or(ctx, x, y), z);
+    ixs_node *nested_expected =
+        ixs_and(ctx, ixs_or(ctx, projected[0], projected[1]), projected[2]);
+    CHECK(ixs_mod(ctx, nested, modulus) == nested_expected);
+  }
+
+  {
+    ixs_node *masked[2] = {x, ixs_int(ctx, 15)};
+    ixs_node *expected[2] = {projected[0], ixs_int(ctx, 7)};
+    CHECK(ixs_mod(ctx, ixs_or_many(ctx, 2, masked), modulus) ==
+          ixs_or_many(ctx, 2, expected));
+  }
+
+  source = ixs_mod(ctx, ixs_and(ctx, x, y), ixs_int(ctx, 6));
+  CHECK(ixs_node_tag(source) == IXS_MOD);
+  source = ixs_mod(ctx, ixs_or(ctx, x, y), dynamic);
+  CHECK(ixs_node_tag(source) == IXS_MOD);
+  source =
+      ixs_mod(ctx, ixs_and(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)), y), modulus);
+  CHECK(ixs_node_tag(source) == IXS_MOD);
+  {
+    ixs_node *half = ixs_div(ctx, x, ixs_int(ctx, 2));
+    ixs_node *even = ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 2)), IXS_CMP_EQ,
+                             ixs_int(ctx, 0));
+    ixs_node *expected_args[2] = {ixs_mod(ctx, half, modulus), projected[1]};
+    CHECK(ixs_simplify(ctx, source, &even, 1) ==
+          ixs_and_many(ctx, 2, expected_args));
+  }
+
+  /* Projection is exact wherever the partial operand is defined. Elsewhere,
+   * replacing poison remains a valid refinement. */
+  {
+    ixs_node *partial = ixs_mod(ctx, x, dynamic);
+    ixs_node *expected_args[2] = {ixs_mod(ctx, partial, modulus), projected[1]};
+    CHECK(ixs_mod(ctx, ixs_or(ctx, partial, y), modulus) ==
+          ixs_or_many(ctx, 2, expected_args));
+  }
+}
+
+#ifdef IXS_TEST_INTERNAL
+static void test_mod_bitwise_projection_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *x = ixs_sym(ctx, "mod_bitwise_retry_x");
+  ixs_node *y = ixs_sym(ctx, "mod_bitwise_retry_y");
+  ixs_node *modulus = ixs_int(ctx, 8);
+  ixs_node *source = ixs_or(ctx, x, y);
+  ixs_node *expected =
+      ixs_or(ctx, ixs_mod(ctx, x, modulus), ixs_mod(ctx, y, modulus));
+  size_t allowance = 4096u;
+  size_t allocations;
+  size_t budget;
+
+  ixs_arena_set_fail_after(scratch, allowance);
+  CHECK(ixs_mod(ctx, source, modulus) == expected);
+  allocations = allowance - scratch->fail_after;
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(allocations > 0u && allocations < allowance);
+  for (budget = 0; budget < allocations; budget++) {
+    ixs_arena_set_fail_after(scratch, budget);
+    CHECK(ixs_mod(ctx, source, modulus) == NULL);
+    ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(ixs_mod(ctx, source, modulus) == expected);
+  }
+  ixs_arena_set_fail_after(scratch, allocations);
+  CHECK(ixs_mod(ctx, source, modulus) == expected);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_destroy(ctx);
+}
+#endif
+
 static void test_rational_carrier_factoring(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "rational_carrier_x");
@@ -5281,6 +5371,10 @@ int main(void) {
   test_floor_rules();
   test_trunc_rules();
   test_mod_rules();
+  test_mod_bitwise_projection();
+#ifdef IXS_TEST_INTERNAL
+  test_mod_bitwise_projection_failure_retry();
+#endif
   test_rational_carrier_factoring();
   test_mod_extract_constant_residue();
   test_mod_divisor_contract();

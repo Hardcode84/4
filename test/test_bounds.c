@@ -9825,6 +9825,12 @@ static ixs_node *test_low_bit_wrap(ixs_ctx *ctx, ixs_node *value,
   return ixs_mod(ctx, value, ixs_int(ctx, modulus));
 }
 
+static ixs_node *test_low_bits_rebuild(void *user, ixs_node *root,
+                                       uint32_t count, ixs_node *const *targets,
+                                       ixs_node *const *replacements) {
+  return simp_subs_multi(user, root, count, targets, replacements);
+}
+
 static void test_low_bits_algebra_status_and_opaque_edges(void) {
   const int64_t modulus = INT64_C(4294967296);
   ixs_ctx *ctx = ixs_ctx_create();
@@ -9842,22 +9848,36 @@ static void test_low_bits_algebra_status_and_opaque_edges(void) {
                                test_low_bit_wrap(ctx, x, 16));
   ixs_node *projected_lhs = NULL;
   ixs_node *projected_rhs = NULL;
+  ixs_node *roots[2];
+  ixs_node *projected[2];
+  ixs_low_bits_algebra_ops ops;
   ixs_algebra_status status;
 
   CHECK(ctx && x && wrapped && opaque_wrapped && opaque_plain && lhs && rhs &&
         expected_lhs && overflow);
   CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
   CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+  ops.user = ctx;
+  ops.rebuild = test_low_bits_rebuild;
+  ops.project_leaf = NULL;
 
-  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
-                                        &projected_lhs, &projected_rhs);
+  roots[0] = lhs;
+  roots[1] = rhs;
+  status = ixs_low_bits_algebra_project(ctx, &bounds, roots, 2u, 32u, &ops,
+                                        projected);
+  projected_lhs = projected[0];
+  projected_rhs = projected[1];
   CHECK(status == IXS_ALGEBRA_MATCH);
   CHECK(projected_lhs == expected_lhs && projected_rhs == rhs);
   CHECK(projected_lhs != projected_rhs);
 
   ixs_ctx_clear_errors(ctx);
-  status = ixs_low_bits_algebra_project(ctx, &bounds, overflow, x, 4u,
-                                        &projected_lhs, &projected_rhs);
+  roots[0] = overflow;
+  roots[1] = x;
+  status = ixs_low_bits_algebra_project(ctx, &bounds, roots, 2u, 4u, &ops,
+                                        projected);
+  projected_lhs = projected[0];
+  projected_rhs = projected[1];
   CHECK(status == IXS_ALGEBRA_INVALID);
   CHECK(projected_lhs == overflow && projected_rhs == x);
   CHECK(ixs_ctx_nerrors(ctx) == 1u);
@@ -9866,14 +9886,20 @@ static void test_low_bits_algebra_status_and_opaque_edges(void) {
 
   ixs_ctx_clear_errors(ctx);
   ixs_arena_set_fail_after(&ctx->scratch, 0u);
-  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
-                                        &projected_lhs, &projected_rhs);
+  roots[0] = lhs;
+  roots[1] = rhs;
+  status = ixs_low_bits_algebra_project(ctx, &bounds, roots, 2u, 32u, &ops,
+                                        projected);
+  projected_lhs = projected[0];
+  projected_rhs = projected[1];
   ixs_arena_set_fail_after(&ctx->scratch, IXS_ARENA_FAILURE_DISABLED);
   CHECK(status == IXS_ALGEBRA_OOM);
   CHECK(projected_lhs == lhs && projected_rhs == rhs);
   CHECK(ixs_ctx_nerrors(ctx) == 0u);
-  status = ixs_low_bits_algebra_project(ctx, &bounds, lhs, rhs, 32u,
-                                        &projected_lhs, &projected_rhs);
+  status = ixs_low_bits_algebra_project(ctx, &bounds, roots, 2u, 32u, &ops,
+                                        projected);
+  projected_lhs = projected[0];
+  projected_rhs = projected[1];
   CHECK(status == IXS_ALGEBRA_MATCH);
   CHECK(projected_lhs == expected_lhs && projected_rhs == rhs);
 

@@ -8,6 +8,7 @@
 #include "bounds_query.h"
 #include "bounds_store.h"
 #include "hash.h"
+#include "low_bits_algebra.h"
 #include "query_transaction.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -58,6 +59,8 @@ static ixs_node *simp_ceil_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_trunc_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *x);
 static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
                                     ixs_node *const *args);
+static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
+                               ixs_node *b);
 static bool bounds_int_nonnegative_finite(ixs_bounds *bnds, ixs_node *expr);
 static ixs_node *mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n);
 static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -4155,6 +4158,61 @@ static ixs_node *rule_mod_idempotent(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
+typedef struct {
+  ixs_ctx *ctx;
+  ixs_bounds *bounds;
+  ixs_node *modulus;
+} mod_low_bits_adapter;
+
+static ixs_node *mod_low_bits_rebuild(void *user, ixs_node *root,
+                                      uint32_t count, ixs_node *const *targets,
+                                      ixs_node *const *replacements) {
+  mod_low_bits_adapter *adapter = user;
+  return simp_subs_multi(adapter->ctx, root, count, targets, replacements);
+}
+
+static ixs_node *mod_low_bits_project_leaf(void *user, ixs_node *leaf) {
+  mod_low_bits_adapter *adapter = user;
+  return simp_mod_bnds(adapter->ctx, adapter->bounds, leaf, adapter->modulus);
+}
+
+/* XOR, AND, and OR commute with reduction modulo 2^k. The shared low-bit
+ * engine projects nested bitwise DAGs iteratively and materializes every
+ * opaque integer leaf as a residue. The result is already in [0, 2^k). */
+static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
+                                             ixs_node *n) {
+  ixs_node *dividend = n->u.binary.lhs;
+  ixs_node *modulus = n->u.binary.rhs;
+  ixs_node *roots[1] = {dividend};
+  ixs_node *projected[1];
+  ixs_low_bits_algebra_ops ops;
+  mod_low_bits_adapter adapter;
+  ixs_algebra_status status;
+  uint64_t value;
+  unsigned bits = 0u;
+
+  if (modulus->tag != IXS_INT || !ixs_int64_is_positive_pow2(modulus->u.ival) ||
+      (dividend->tag != IXS_XOR && dividend->tag != IXS_AND &&
+       dividend->tag != IXS_OR))
+    return n;
+  value = (uint64_t)modulus->u.ival;
+  while (value > 1u) {
+    value >>= 1u;
+    bits++;
+  }
+  adapter.ctx = ctx;
+  adapter.bounds = bnds;
+  adapter.modulus = modulus;
+  ops.user = &adapter;
+  ops.rebuild = mod_low_bits_rebuild;
+  ops.project_leaf = mod_low_bits_project_leaf;
+  status =
+      ixs_low_bits_algebra_project(ctx, bnds, roots, 1u, bits, &ops, projected);
+  if (status == IXS_ALGEBRA_OOM)
+    return NULL;
+  return status == IXS_ALGEBRA_MATCH ? projected[0] : n;
+}
+
 /* Mod(c + k*Mod(x, m), m) -> Mod(c + k*x, m) for integer k. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
@@ -4237,6 +4295,7 @@ static const ixs_rule mod_rules[] = {
     {rule_mod_reciprocal_unit, "mod_reciprocal_unit", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},
     {rule_mod_idempotent, "mod_idempotent", false},
+    {rule_mod_bitwise_projection, "mod_bitwise_projection", false},
     {rule_mod_flatten_nested, "mod_flatten_nested", false},
     {rule_mod_clear_rational_add_scale, "mod_clear_rational_add_scale", false},
     {rule_mod_strip_multiples, "mod_strip_multiples", false},
