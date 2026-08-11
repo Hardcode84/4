@@ -313,6 +313,56 @@ static void test_mod_rules(void) {
   CHECK(ixs_mod(ctx, ixs_add(ctx, ixs_int(ctx, 2), mx5), ixs_int(ctx, 5)) ==
         ixs_mod(ctx, ixs_add(ctx, ixs_int(ctx, 2), x), ixs_int(ctx, 5)));
 
+  /* Mod(y + 3*Mod(x,8),12) -> Mod(y + 3*x,12): 12 divides 3*8. */
+  {
+    ixs_node *y = ixs_sym(ctx, "mod_projection_y");
+    ixs_node *m8 = ixs_mod(ctx, x, ixs_int(ctx, 8));
+    ixs_node *projected =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 3), m8)),
+                ixs_int(ctx, 12));
+    ixs_node *expected =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 3), x)),
+                ixs_int(ctx, 12));
+    ixs_node *uncovered =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 2), m8)),
+                ixs_int(ctx, 12));
+    ixs_node *rational =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_rat(ctx, 3, 2), m8)),
+                ixs_int(ctx, 12));
+    ixs_node *rational_expected =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_rat(ctx, 3, 2), x)),
+                ixs_int(ctx, 12));
+    ixs_node *rational_uncovered =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_rat(ctx, 1, 2), m8)),
+                ixs_int(ctx, 12));
+    ixs_node *rational_wrong =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_rat(ctx, 1, 2), x)),
+                ixs_int(ctx, 12));
+    ixs_node *wrong =
+        ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 2), x)),
+                ixs_int(ctx, 12));
+    CHECK(projected == expected);
+    CHECK(uncovered != wrong);
+    CHECK(rational == rational_expected);
+    CHECK(rational_uncovered != rational_wrong);
+    CHECK(ixs_node_int_val(
+              ixs_subs(ctx, ixs_subs(ctx, uncovered, x, ixs_int(ctx, 8)), y,
+                       ixs_int(ctx, 0))) == 0);
+    CHECK(
+        ixs_node_int_val(ixs_subs(ctx, ixs_subs(ctx, wrong, x, ixs_int(ctx, 8)),
+                                  y, ixs_int(ctx, 0))) == 4);
+  }
+
+  /* Pointer-identical symbolic divisors discharge the same obligation. */
+  {
+    ixs_node *d = ixs_sym(ctx, "mod_projection_d");
+    ixs_node *y = ixs_sym(ctx, "mod_projection_symbolic_y");
+    ixs_node *nested = ixs_mod(ctx, x, d);
+    CHECK(ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 2), nested)),
+                  d) ==
+          ixs_mod(ctx, ixs_add(ctx, y, ixs_mul(ctx, ixs_int(ctx, 2), x)), d));
+  }
+
   /* Mod with non-integer argument must NOT fold to 0.
    * Mod(x*(x+1/3), 1) is NOT zero -- e.g. at x=2 it equals 2/3.
    * Regression: mod_bounds_elim called is_known_divisible without

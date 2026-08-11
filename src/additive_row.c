@@ -573,6 +573,50 @@ ixs_euclidean_plan_addterm(ixs_ctx *ctx, const ixs_addterm *term, unsigned mask,
   return IXS_ALGEBRA_MATCH;
 }
 
+IXS_STATIC ixs_algebra_status ixs_euclidean_congruence_term_borrow(
+    ixs_ctx *ctx, const ixs_addterm *term, ixs_node *target_denominator,
+    ixs_euclidean_congruence_term *view) {
+  ixs_euclidean_congruence_term result;
+  ixs_algebra_status status;
+  assert(ctx && term && target_denominator && view);
+  status = ixs_euclidean_plan_addterm(
+      ctx, term, IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, &result.plan);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  if (result.plan.atom->tag != IXS_MOD)
+    return IXS_ALGEBRA_NO_MATCH;
+  result.target_denominator = target_denominator;
+  *view = result;
+  return IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC bool ixs_euclidean_congruence_literal_covered(
+    const ixs_euclidean_congruence_term *view) {
+  int64_t scale_p, scale_q;
+  int64_t source;
+  int64_t target;
+  int64_t required;
+  assert(view && view->plan.scale && view->plan.denominator &&
+         view->target_denominator);
+  if (!ixs_node_is_const(view->plan.scale))
+    return false;
+  ixs_node_get_rat(view->plan.scale, &scale_p, &scale_q);
+  if (view->plan.denominator == view->target_denominator)
+    return scale_q == 1;
+  if (view->plan.denominator->tag != IXS_INT ||
+      view->target_denominator->tag != IXS_INT)
+    return false;
+  source = view->plan.denominator->u.ival;
+  target = view->target_denominator->u.ival;
+  if (source <= 0 || target <= 0)
+    return false;
+  if (scale_q <= 0 || source % scale_q != 0)
+    return false;
+  source /= scale_q;
+  required = target / ixs_gcd(source, target);
+  return scale_p % required == 0;
+}
+
 IXS_STATIC ixs_algebra_status ixs_euclidean_plan_outer(
     ixs_ctx *ctx, const ixs_euclidean_term_plan *plan, ixs_node **outer) {
   ixs_arena_mark mark;

@@ -4293,7 +4293,7 @@ static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
   return status == IXS_ALGEBRA_MATCH ? projected[0] : n;
 }
 
-/* Replace k*Mod(x, m) by k*x under Mod(..., d) when d divides k*m. */
+/* Replace s*Mod(n,m) by s*n under Mod(...,d) when d divides s*m. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
   ixs_node *dividend = n->u.binary.lhs;
@@ -4318,22 +4318,25 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     return NULL;
   }
   for (i = 0; i < dividend->u.add.nterms; i++) {
-    ixs_node *term = dividend->u.add.terms[i].term;
-    int64_t coefficient_p;
-    int64_t coefficient_q;
+    ixs_euclidean_congruence_term projection;
+    ixs_algebra_status status;
     terms[i] = dividend->u.add.terms[i];
-    ixs_node_get_rat(terms[i].coeff, &coefficient_p, &coefficient_q);
-    bool congruent = term->tag == IXS_MOD && term->u.binary.rhs == denominator;
-    if (!congruent && coefficient_q == 1 && term->tag == IXS_MOD &&
-        term->u.binary.rhs->tag == IXS_INT && denominator->tag == IXS_INT &&
-        term->u.binary.rhs->u.ival > 0 && denominator->u.ival > 0) {
-      int64_t required =
-          denominator->u.ival /
-          ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
-      congruent = coefficient_p % required == 0;
+    /* This constructor rule historically admits only direct ADD atoms. The
+     * quotient prover may use the same view with a compound exact scale. */
+    if (terms[i].term->tag != IXS_MOD)
+      continue;
+    status = ixs_euclidean_congruence_term_borrow(
+        ctx, &dividend->u.add.terms[i], denominator, &projection);
+    if (status == IXS_ALGEBRA_OOM) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
     }
-    if (coefficient_q == 1 && congruent) {
-      terms[i].term = term->u.binary.lhs;
+    if (status == IXS_ALGEBRA_INVALID)
+      abort();
+    if (status == IXS_ALGEBRA_MATCH &&
+        ixs_euclidean_congruence_literal_covered(&projection)) {
+      terms[i].coeff = projection.plan.scale;
+      terms[i].term = projection.plan.numerator;
       changed = true;
     }
   }

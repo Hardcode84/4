@@ -583,6 +583,50 @@ ixs_euclidean_plan_addterm(ixs_ctx *ctx, const ixs_addterm *term, unsigned mask,
   return IXS_ALGEBRA_MATCH;
 }
 
+IXS_STATIC ixs_algebra_status ixs_euclidean_congruence_term_borrow(
+    ixs_ctx *ctx, const ixs_addterm *term, ixs_node *target_denominator,
+    ixs_euclidean_congruence_term *view) {
+  ixs_euclidean_congruence_term result;
+  ixs_algebra_status status;
+  assert(ctx && term && target_denominator && view);
+  status = ixs_euclidean_plan_addterm(
+      ctx, term, IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, &result.plan);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  if (result.plan.atom->tag != IXS_MOD)
+    return IXS_ALGEBRA_NO_MATCH;
+  result.target_denominator = target_denominator;
+  *view = result;
+  return IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC bool ixs_euclidean_congruence_literal_covered(
+    const ixs_euclidean_congruence_term *view) {
+  int64_t scale_p, scale_q;
+  int64_t source;
+  int64_t target;
+  int64_t required;
+  assert(view && view->plan.scale && view->plan.denominator &&
+         view->target_denominator);
+  if (!ixs_node_is_const(view->plan.scale))
+    return false;
+  ixs_node_get_rat(view->plan.scale, &scale_p, &scale_q);
+  if (view->plan.denominator == view->target_denominator)
+    return scale_q == 1;
+  if (view->plan.denominator->tag != IXS_INT ||
+      view->target_denominator->tag != IXS_INT)
+    return false;
+  source = view->plan.denominator->u.ival;
+  target = view->target_denominator->u.ival;
+  if (source <= 0 || target <= 0)
+    return false;
+  if (scale_q <= 0 || source % scale_q != 0)
+    return false;
+  source /= scale_q;
+  required = target / ixs_gcd(source, target);
+  return scale_p % required == 0;
+}
+
 IXS_STATIC ixs_algebra_status ixs_euclidean_plan_outer(
     ixs_ctx *ctx, const ixs_euclidean_term_plan *plan, ixs_node **outer) {
   ixs_arena_mark mark;
@@ -25724,12 +25768,8 @@ static ixs_node *qa_simplify(qa_query *query, ixs_node *expr) {
 /* The shape plan owns no proof policy. This boundary admits its borrowed
  * numerator, denominator, and scale only after the operand-domain checks used
  * by quotient algebra. */
-static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
-                          uint32_t index, qa_basis basis,
-                          ixs_euclidean_term_plan *plan) {
-  ixs_algebra_status status =
-      ixs_euclidean_plan_addterm(query->ctx, &row->terms[index],
-                                 IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, plan);
+static bool qa_admit_plan(qa_query *query, ixs_algebra_status status,
+                          qa_basis basis, ixs_euclidean_term_plan *plan) {
   if (status == IXS_ALGEBRA_OOM)
     query->oom = true;
   else if (status == IXS_ALGEBRA_INVALID)
@@ -25745,6 +25785,15 @@ static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
   return qa_integer_defined(query, plan->numerator) &&
          qa_integer_defined(query, plan->denominator) &&
          qa_cmp(query, plan->denominator, IXS_CMP_GT, query->ctx->node_zero);
+}
+
+static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
+                          uint32_t index, qa_basis basis,
+                          ixs_euclidean_term_plan *plan) {
+  ixs_algebra_status status =
+      ixs_euclidean_plan_addterm(query->ctx, &row->terms[index],
+                                 IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, plan);
+  return qa_admit_plan(query, status, basis, plan);
 }
 
 static ixs_node *qa_replacement(qa_query *query,
@@ -25900,22 +25949,27 @@ static bool qa_reduce_congruence(qa_query *query, ixs_node *expr,
   uint32_t i;
   ixs_euclidean_row_borrow(query->ctx, expr, &row);
   for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-    ixs_euclidean_term_plan pivot;
+    ixs_euclidean_congruence_term term;
+    ixs_algebra_status status;
     ixs_node *covered;
     ixs_node *coverage;
     ixs_node *scaled;
     ixs_node *replacement;
     ixs_node *delta;
-    if (!qa_admit_term(query, &row, i, QA_QUOTIENT_BASIS, &pivot))
+    status = ixs_euclidean_congruence_term_borrow(query->ctx, &row.terms[i],
+                                                  denominator, &term);
+    if (!qa_admit_plan(query, status, QA_QUOTIENT_BASIS, &term.plan))
       continue;
-    covered = qa_build(query, QA_MUL, pivot.scale, pivot.denominator);
-    coverage = covered ? qa_build(query, QA_DIV, covered, denominator) : NULL;
+    covered = qa_build(query, QA_MUL, term.plan.scale, term.plan.denominator);
+    coverage = covered
+                   ? qa_build(query, QA_DIV, covered, term.target_denominator)
+                   : NULL;
     if (!coverage || !qa_integer_defined(query, coverage))
       continue;
     if (!qa_has_capacity(query, reductions))
       return false;
-    scaled = qa_build(query, QA_MUL, pivot.scale, pivot.atom);
-    replacement = qa_build(query, QA_MUL, pivot.scale, pivot.numerator);
+    scaled = qa_build(query, QA_MUL, term.plan.scale, term.plan.atom);
+    replacement = qa_build(query, QA_MUL, term.plan.scale, term.plan.numerator);
     delta = scaled && replacement ? qa_sub(query, replacement, scaled) : NULL;
     result = delta ? qa_build(query, QA_ADD, result, delta) : NULL;
     if (!result)
@@ -33872,7 +33926,7 @@ static ixs_node *rule_mod_bitwise_projection(ixs_ctx *ctx, ixs_bounds *bnds,
   return status == IXS_ALGEBRA_MATCH ? projected[0] : n;
 }
 
-/* Replace k*Mod(x, m) by k*x under Mod(..., d) when d divides k*m. */
+/* Replace s*Mod(n,m) by s*n under Mod(...,d) when d divides s*m. */
 static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
                                          ixs_node *n) {
   ixs_node *dividend = n->u.binary.lhs;
@@ -33897,22 +33951,25 @@ static ixs_node *rule_mod_flatten_nested(ixs_ctx *ctx, ixs_bounds *bnds,
     return NULL;
   }
   for (i = 0; i < dividend->u.add.nterms; i++) {
-    ixs_node *term = dividend->u.add.terms[i].term;
-    int64_t coefficient_p;
-    int64_t coefficient_q;
+    ixs_euclidean_congruence_term projection;
+    ixs_algebra_status status;
     terms[i] = dividend->u.add.terms[i];
-    ixs_node_get_rat(terms[i].coeff, &coefficient_p, &coefficient_q);
-    bool congruent = term->tag == IXS_MOD && term->u.binary.rhs == denominator;
-    if (!congruent && coefficient_q == 1 && term->tag == IXS_MOD &&
-        term->u.binary.rhs->tag == IXS_INT && denominator->tag == IXS_INT &&
-        term->u.binary.rhs->u.ival > 0 && denominator->u.ival > 0) {
-      int64_t required =
-          denominator->u.ival /
-          ixs_gcd(term->u.binary.rhs->u.ival, denominator->u.ival);
-      congruent = coefficient_p % required == 0;
+    /* This constructor rule historically admits only direct ADD atoms. The
+     * quotient prover may use the same view with a compound exact scale. */
+    if (terms[i].term->tag != IXS_MOD)
+      continue;
+    status = ixs_euclidean_congruence_term_borrow(
+        ctx, &dividend->u.add.terms[i], denominator, &projection);
+    if (status == IXS_ALGEBRA_OOM) {
+      ixs_arena_restore(&ctx->scratch, mark);
+      return NULL;
     }
-    if (coefficient_q == 1 && congruent) {
-      terms[i].term = term->u.binary.lhs;
+    if (status == IXS_ALGEBRA_INVALID)
+      abort();
+    if (status == IXS_ALGEBRA_MATCH &&
+        ixs_euclidean_congruence_literal_covered(&projection)) {
+      terms[i].coeff = projection.plan.scale;
+      terms[i].term = projection.plan.numerator;
       changed = true;
     }
   }

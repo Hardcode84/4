@@ -933,7 +933,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   integer-valued and `n-d*q` in `[0,d)`. Exact closure may replace all direct
   floor atoms in one row by `(n-Mod(n,d))/d`. Congruence closure may replace a
   direct `c*Mod(n,m)` by `c*n` modulo a target `d` only after proving
-  `(c*m)/d` integer-valued; unchecked nested occurrences remain opaque.
+  `(c*m)/d` integer-valued; unchecked nested occurrences remain opaque. This
+  path and fact-free nested-Mod simplification consume the same borrowed
+  congruence-term view. The view owns the direct term and obligation
+  `d | c*m`; quotient algebra retains domain and symbolic coverage proofs.
 
   Fact-backed simplification applies the same integer-ring law to a genuine
   product under a positive literal modulus. It first proves the coefficient

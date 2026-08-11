@@ -110,12 +110,8 @@ static ixs_node *qa_simplify(qa_query *query, ixs_node *expr) {
 /* The shape plan owns no proof policy. This boundary admits its borrowed
  * numerator, denominator, and scale only after the operand-domain checks used
  * by quotient algebra. */
-static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
-                          uint32_t index, qa_basis basis,
-                          ixs_euclidean_term_plan *plan) {
-  ixs_algebra_status status =
-      ixs_euclidean_plan_addterm(query->ctx, &row->terms[index],
-                                 IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, plan);
+static bool qa_admit_plan(qa_query *query, ixs_algebra_status status,
+                          qa_basis basis, ixs_euclidean_term_plan *plan) {
   if (status == IXS_ALGEBRA_OOM)
     query->oom = true;
   else if (status == IXS_ALGEBRA_INVALID)
@@ -131,6 +127,15 @@ static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
   return qa_integer_defined(query, plan->numerator) &&
          qa_integer_defined(query, plan->denominator) &&
          qa_cmp(query, plan->denominator, IXS_CMP_GT, query->ctx->node_zero);
+}
+
+static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
+                          uint32_t index, qa_basis basis,
+                          ixs_euclidean_term_plan *plan) {
+  ixs_algebra_status status =
+      ixs_euclidean_plan_addterm(query->ctx, &row->terms[index],
+                                 IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, plan);
+  return qa_admit_plan(query, status, basis, plan);
 }
 
 static ixs_node *qa_replacement(qa_query *query,
@@ -286,22 +291,27 @@ static bool qa_reduce_congruence(qa_query *query, ixs_node *expr,
   uint32_t i;
   ixs_euclidean_row_borrow(query->ctx, expr, &row);
   for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-    ixs_euclidean_term_plan pivot;
+    ixs_euclidean_congruence_term term;
+    ixs_algebra_status status;
     ixs_node *covered;
     ixs_node *coverage;
     ixs_node *scaled;
     ixs_node *replacement;
     ixs_node *delta;
-    if (!qa_admit_term(query, &row, i, QA_QUOTIENT_BASIS, &pivot))
+    status = ixs_euclidean_congruence_term_borrow(query->ctx, &row.terms[i],
+                                                  denominator, &term);
+    if (!qa_admit_plan(query, status, QA_QUOTIENT_BASIS, &term.plan))
       continue;
-    covered = qa_build(query, QA_MUL, pivot.scale, pivot.denominator);
-    coverage = covered ? qa_build(query, QA_DIV, covered, denominator) : NULL;
+    covered = qa_build(query, QA_MUL, term.plan.scale, term.plan.denominator);
+    coverage = covered
+                   ? qa_build(query, QA_DIV, covered, term.target_denominator)
+                   : NULL;
     if (!coverage || !qa_integer_defined(query, coverage))
       continue;
     if (!qa_has_capacity(query, reductions))
       return false;
-    scaled = qa_build(query, QA_MUL, pivot.scale, pivot.atom);
-    replacement = qa_build(query, QA_MUL, pivot.scale, pivot.numerator);
+    scaled = qa_build(query, QA_MUL, term.plan.scale, term.plan.atom);
+    replacement = qa_build(query, QA_MUL, term.plan.scale, term.plan.numerator);
     delta = scaled && replacement ? qa_sub(query, replacement, scaled) : NULL;
     result = delta ? qa_build(query, QA_ADD, result, delta) : NULL;
     if (!result)

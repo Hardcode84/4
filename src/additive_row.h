@@ -28,6 +28,11 @@ typedef struct {
   uint32_t factor_index;
 } ixs_euclidean_term_plan;
 
+typedef struct {
+  ixs_euclidean_term_plan plan;
+  ixs_node *target_denominator;
+} ixs_euclidean_congruence_term;
+
 /* Recognizers allocate nothing; failure is an ordinary shape miss. */
 IXS_STATIC bool ixs_additive_row_unit_value(ixs_node *expr, ixs_node **term,
                                             int64_t *value);
@@ -68,6 +73,17 @@ IXS_STATIC ixs_algebra_status ixs_euclidean_quotient_parts(
 IXS_STATIC ixs_algebra_status
 ixs_euclidean_plan_addterm(ixs_ctx *ctx, const ixs_addterm *term, unsigned mask,
                            ixs_euclidean_term_plan *plan);
+/* Borrow one scaled Mod term and the target divisor for the obligation
+ * target_denominator | plan.scale * plan.denominator. The view owns shape
+ * only; callers retain domain and proof policy. */
+IXS_STATIC ixs_algebra_status ixs_euclidean_congruence_term_borrow(
+    ixs_ctx *ctx, const ixs_addterm *term, ixs_node *target_denominator,
+    ixs_euclidean_congruence_term *view);
+/* Discharge the obligation without constructing the potentially overflowing
+ * scale*denominator product. Unequal divisors must be positive literals;
+ * rational scales are reduced by divisibility before the integer test. */
+IXS_STATIC bool ixs_euclidean_congruence_literal_covered(
+    const ixs_euclidean_congruence_term *view);
 /* Rebuild only the source product factors outside the selected atom. The ADD
  * coefficient is deliberately excluded. */
 IXS_STATIC ixs_algebra_status ixs_euclidean_plan_outer(

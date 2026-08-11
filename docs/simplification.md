@@ -268,6 +268,8 @@ Mod(C + sum(ci*ti), m)                   → r + Mod(C-r + sum(ci*ti), m)
                      where g = gcd(m, |ci|), r = C mod g, 0 < r < g,
                      and every ti is integer-valued
 Mod(a*m + b, m)     where a contains no IXS_MOD node → Mod(b, m)
+Mod(... + s*Mod(n,m) + ..., d)           → Mod(... + s*n + ..., d)
+                     when d divides s*m
 Mod(g*x + r, g*m)   where g > 1, 0 <= r < g,
                      all terms integer   → g*Mod(x, m) + r
 Mod(c*x, c*m)       where c > 1         → c*Mod(x, m)
@@ -304,14 +306,19 @@ c*Mod(A, m) - c*Mod(B, m)               → 0
 ```
 
 The reverse identities, exact floor/Mod cancellation, consecutive-digit
-composition, signed-division certificates, and quotient algebra all consume
-the same private Euclidean row plan from `src/additive_row.c`. The plan borrows
-canonical ADD terms, locates exactly one exponent-one `floor`, `ceiling`, or
-`Mod` atom, and recovers its numerator, denominator, and exact scale. It owns
-shape and representability only. Each caller still decides positivity,
-integer-valuedness, totality, poison refinement, and signed-truncation policy.
-Compound product and quotient reconstruction use O(T) scratch restored before
-return; row borrowing and direct `Mod` atoms allocate nothing.
+composition, nested-Mod congruence, signed-division certificates, and quotient
+algebra all consume the same private Euclidean row plan from
+`src/additive_row.c`. The plan borrows canonical ADD terms, locates exactly one
+exponent-one `floor`, `ceiling`, or `Mod` atom, and recovers its numerator,
+denominator, and exact scale. Its congruence view also carries the target
+divisor for the single obligation `d | s*m`. It owns shape and
+representability only. For `s=p/q`, the fact-free simplifier first requires
+`q | m`, then discharges literal coverage as `d/gcd(m/q,d) | p` without
+forming `s*m`; quotient algebra retains the symbolic integer-valued proof.
+Each caller still decides positivity, totality, poison refinement, and
+signed-truncation policy. Compound product and quotient reconstruction use
+O(T) scratch restored before return; row borrowing and direct `Mod` atoms
+allocate nothing.
 
 Exact floor/Mod cancellation is valid on every defined source evaluation. If
 the divisor is invalid, the source is poison and may refine to the replacement;
