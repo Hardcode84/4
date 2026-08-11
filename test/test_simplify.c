@@ -741,6 +741,37 @@ static void test_mod_product_factor_reduction_failure_retry(void) {
         test_ixs_simplify_facts(facts, expected));
   ixs_ctx_destroy(ctx);
 }
+
+static void test_xor_binary_linear_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *axis = ixs_sym(ctx, "xor_linear_retry_axis");
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, axis, IXS_CMP_EQ, ixs_floor(ctx, axis)),
+      ixs_cmp(ctx, axis, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, axis, IXS_CMP_LE, ixs_int(ctx, 7)),
+  };
+  ixs_node *b0 = ixs_mod(ctx, axis, ixs_int(ctx, 2));
+  ixs_node *b1 =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 2))),
+              ixs_int(ctx, 2));
+  ixs_node *b2 = ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 4)));
+  ixs_node *args[] = {
+      ixs_mul(ctx, ixs_int(ctx, 2), ixs_xor(ctx, b0, b1)),
+      ixs_mul(ctx, ixs_int(ctx, 3), ixs_xor(ctx, b2, b0)),
+      ixs_mul(ctx, ixs_int(ctx, 7), b2),
+  };
+  ixs_node *layout = ixs_xor_many(ctx, 3, args);
+
+  CHECK(ctx && axis && b0 && b1 && b2 && layout);
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(ixs_simplify(ctx, layout, assumes, 3) == NULL);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_simplify(ctx, layout, assumes, 3) == axis);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  ixs_ctx_destroy(ctx);
+}
 #endif
 
 static void test_rational_carrier_factoring(void) {
@@ -1419,6 +1450,103 @@ static void test_xor_known_bit_simplification(void) {
         ixs_node_tag(ixs_simplify(
             ctx, ixs_xor(ctx, ixs_sub(ctx, ixs_int(ctx, 32), four_b), eight_c),
             assumes, 6)) == IXS_XOR);
+  }
+}
+
+static void test_xor_binary_linear_form(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *axis = ixs_sym(ctx, "xor_linear_axis");
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, axis, IXS_CMP_EQ, ixs_floor(ctx, axis)),
+      ixs_cmp(ctx, axis, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, axis, IXS_CMP_LE, ixs_int(ctx, 7)),
+  };
+  ixs_node *b0 = ixs_mod(ctx, axis, ixs_int(ctx, 2));
+  ixs_node *b1 =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 2))),
+              ixs_int(ctx, 2));
+  ixs_node *b2 = ixs_floor(ctx, ixs_div(ctx, axis, ixs_int(ctx, 4)));
+  ixs_node *inner01 = ixs_xor(ctx, b0, b1);
+  ixs_node *inner20 = ixs_xor(ctx, b2, b0);
+  ixs_node *layout_args[] = {
+      ixs_mul(ctx, ixs_int(ctx, 2), inner01),
+      ixs_mul(ctx, ixs_int(ctx, 3), inner20),
+      ixs_mul(ctx, ixs_int(ctx, 7), b2),
+  };
+  ixs_node *layout = ixs_xor_many(ctx, 3, layout_args);
+  ixs_node *mask_pair = ixs_xor(ctx, b0, ixs_mul(ctx, ixs_int(ctx, 3), b0));
+  ixs_node *mask_expected = ixs_mul(ctx, ixs_int(ctx, 2), b0);
+  ixs_node *equality = ixs_cmp(ctx, layout, IXS_CMP_EQ, axis);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(layout && mask_pair && mask_expected && equality && facts);
+  CHECK(ixs_simplify(ctx, layout, assumes, 3) == axis);
+  CHECK(ixs_simplify(ctx, mask_pair, assumes, 3) == mask_expected);
+  CHECK(ixs_facts_assume_preds(facts, assumes, 3));
+  CHECK(test_ixs_check_predicate_facts(facts, equality) == IXS_CHECK_TRUE);
+  CHECK(ixs_check(ctx, equality, assumes, 3) == IXS_CHECK_TRUE);
+
+  {
+    ixs_node *wide = ixs_sym(ctx, "xor_linear_wide");
+    ixs_node *wide_assumes[] = {
+        ixs_cmp(ctx, wide, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, wide, IXS_CMP_LE, ixs_int(ctx, 2)),
+        ixs_cmp(ctx, wide, IXS_CMP_EQ, ixs_floor(ctx, wide)),
+    };
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 2), wide),
+                             ixs_mul(ctx, ixs_int(ctx, 3), wide));
+    CHECK(ixs_simplify(ctx, expr, wide_assumes, 3) == expr);
+  }
+
+  {
+    ixs_node *source = ixs_sym(ctx, "xor_linear_fractional_source");
+    ixs_node *fractional = ixs_div(ctx, source, ixs_int(ctx, 2));
+    ixs_node *fractional_assumes[] = {
+        ixs_cmp(ctx, source, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, source, IXS_CMP_LE, ixs_int(ctx, 2)),
+    };
+    ixs_node *expr = ixs_xor(
+        ctx, ixs_mul(ctx, ixs_int(ctx, 3), ixs_xor(ctx, fractional, b0)),
+        ixs_mul(ctx, ixs_int(ctx, 3), b0));
+    CHECK(ixs_simplify(ctx, expr, fractional_assumes, 2) == expr);
+  }
+
+  {
+    ixs_node *negative = ixs_sym(ctx, "xor_linear_negative");
+    ixs_node *negative_assumes[] = {
+        ixs_cmp(ctx, negative, IXS_CMP_GE, ixs_int(ctx, -1)),
+        ixs_cmp(ctx, negative, IXS_CMP_LE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, negative, IXS_CMP_EQ, ixs_floor(ctx, negative)),
+    };
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 3), negative),
+                             ixs_mul(ctx, ixs_int(ctx, 5), negative));
+    CHECK(ixs_simplify(ctx, expr, negative_assumes, 3) == expr);
+  }
+
+  {
+    ixs_node *x = ixs_sym(ctx, "xor_linear_nonbinary_x");
+    ixs_node *y = ixs_sym(ctx, "xor_linear_nonbinary_y");
+    ixs_node *xy_assumes[] = {
+        ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 3)),
+        ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x)),
+        ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0)),
+        ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 3)),
+        ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_floor(ctx, y)),
+    };
+    ixs_node *inner = ixs_xor(ctx, x, y);
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 3), inner),
+                             ixs_mul(ctx, ixs_int(ctx, 3), x));
+    CHECK(ixs_simplify(ctx, expr, xy_assumes, 6) == expr);
+  }
+
+  {
+    ixs_node *divisor = ixs_sym(ctx, "xor_linear_partial_divisor");
+    ixs_node *partial = ixs_cmp(ctx, ixs_div(ctx, ixs_int(ctx, 1), divisor),
+                                IXS_CMP_GT, ixs_int(ctx, 0));
+    ixs_node *expr = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 3), partial),
+                             ixs_mul(ctx, ixs_int(ctx, 5), partial));
+    CHECK(ixs_simplify(ctx, expr, NULL, 0) == expr);
   }
 }
 
@@ -5574,6 +5702,7 @@ int main(void) {
 #ifdef IXS_TEST_INTERNAL
   test_mod_bitwise_projection_failure_retry();
   test_mod_product_factor_reduction_failure_retry();
+  test_xor_binary_linear_failure_retry();
 #endif
   test_rational_carrier_factoring();
   test_mod_extract_constant_residue();
@@ -5583,6 +5712,7 @@ int main(void) {
   test_flat_associative_nodes();
   test_xor_nested_cancellation();
   test_xor_known_bit_simplification();
+  test_xor_binary_linear_form();
   test_simplify_with_bounds();
   test_eq_substitution();
   test_pw_branch_eq_substitution();

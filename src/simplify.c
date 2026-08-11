@@ -16,6 +16,7 @@
 
 #define EQUAL_FLOOR_PAIR_LIMIT 256u
 #define FLOOR_MOD_PAIR_LIMIT 256u
+#define XOR_LINEAR_TERM_LIMIT 256u
 
 /* ---- Rule-chain dispatch ----------------------------------------- */
 /* Rule-chain functions (rules and the helpers they call):
@@ -4805,6 +4806,176 @@ static ixs_node *xor_build_result(ixs_ctx *ctx, ixs_node **items,
   return ixs_node_assoc(ctx, IXS_XOR, count, items);
 }
 
+typedef struct {
+  ixs_node *base;
+  uint64_t coefficient;
+} xor_linear_term;
+
+typedef struct {
+  xor_linear_term *linear;
+  size_t linear_count;
+  ixs_node **items;
+  uint32_t item_count;
+  int64_t constant;
+} xor_linear_form;
+
+static const ixs_node *xor_linear_term_sort_key(const void *item) {
+  return ((const xor_linear_term *)item)->base;
+}
+
+static bool bounds_binary_integer(ixs_bounds *bnds, ixs_node *expr) {
+  ixs_interval range;
+
+  if (!bnds || !expr ||
+      ixs_bounds_check_integer_domain(bnds, expr) != IXS_ALGEBRA_MATCH)
+    return false;
+  range = ixs_bounds_get(bnds, expr);
+  return ixs_bounds_query_transport_clean(bnds) && range.valid &&
+         !range.lo_inf && !range.hi_inf &&
+         ixs_rat_cmp(range.lo_p, range.lo_q, 0, 1) >= 0 &&
+         ixs_rat_cmp(range.hi_p, range.hi_q, 1, 1) <= 0;
+}
+
+static ixs_node *xor_nonnegative_scale_base(ixs_node *expr,
+                                            uint64_t *coefficient) {
+  *coefficient = 1u;
+  if (expr->tag != IXS_MUL || expr->u.mul.coeff->tag != IXS_INT ||
+      expr->u.mul.coeff->u.ival <= 0 || expr->u.mul.nfactors != 1u ||
+      expr->u.mul.factors[0].exp != 1)
+    return expr;
+  *coefficient = (uint64_t)expr->u.mul.coeff->u.ival;
+  return expr->u.mul.factors[0].base;
+}
+
+static bool xor_all_binary(ixs_bounds *bnds, ixs_node *xor_node) {
+  uint32_t i;
+
+  if (xor_node->tag != IXS_XOR || xor_node->u.assoc.nargs == 0u ||
+      !xor_node->u.assoc.args)
+    return false;
+  for (i = 0; i < xor_node->u.assoc.nargs; i++)
+    if (!bounds_binary_integer(bnds, xor_node->u.assoc.args[i]))
+      return false;
+  return true;
+}
+
+/* Bound storage before asking any domain oracle. Unsupported scaled terms may
+ * remain opaque, so planning uses their largest possible local expansion. */
+static bool xor_binary_linear_plan(ixs_node *xor_node, size_t *planned) {
+  bool candidate = false;
+  uint32_t i;
+
+  *planned = 0u;
+  if (xor_node->u.assoc.nargs > XOR_LINEAR_TERM_LIMIT)
+    return false;
+  for (i = 0; i < xor_node->u.assoc.nargs; i++) {
+    ixs_node *arg = xor_node->u.assoc.args[i];
+    uint64_t coefficient;
+    ixs_node *base = xor_nonnegative_scale_base(arg, &coefficient);
+    size_t contribution =
+        base != arg && base->tag == IXS_XOR ? base->u.assoc.nargs : 1u;
+
+    (void)coefficient;
+    candidate |= base != arg;
+    if (contribution > XOR_LINEAR_TERM_LIMIT - *planned)
+      return false;
+    *planned += contribution;
+  }
+  return candidate;
+}
+
+static bool xor_binary_linear_collect(ixs_bounds *bnds, ixs_node *xor_node,
+                                      xor_linear_form *form) {
+  uint32_t i;
+
+  for (i = 0; i < xor_node->u.assoc.nargs; i++) {
+    ixs_node *arg = xor_node->u.assoc.args[i];
+    uint64_t coefficient;
+    ixs_node *base = xor_nonnegative_scale_base(arg, &coefficient);
+    uint32_t j;
+
+    if (arg->tag == IXS_INT) {
+      form->constant ^= arg->u.ival;
+    } else if (base != arg && base->tag == IXS_XOR &&
+               xor_all_binary(bnds, base)) {
+      for (j = 0; j < base->u.assoc.nargs; j++) {
+        form->linear[form->linear_count].base = base->u.assoc.args[j];
+        form->linear[form->linear_count++].coefficient = coefficient;
+      }
+    } else if (bounds_binary_integer(bnds, base)) {
+      form->linear[form->linear_count].base = base;
+      form->linear[form->linear_count++].coefficient = coefficient;
+    } else {
+      form->items[form->item_count++] = arg;
+    }
+    if (bnds->oom)
+      return false;
+  }
+  return true;
+}
+
+static ixs_node *xor_binary_linear_reduce(ixs_ctx *ctx, xor_linear_form *form) {
+  size_t i;
+
+  if (!node_key_sort(ctx, form->linear, form->linear_count,
+                     sizeof(*form->linear), xor_linear_term_sort_key))
+    return NULL;
+  for (i = 0; i < form->linear_count;) {
+    ixs_node *base = form->linear[i].base;
+    uint64_t coefficient = 0u;
+    size_t end = i;
+
+    while (end < form->linear_count && form->linear[end].base == base)
+      coefficient ^= form->linear[end++].coefficient;
+    if (coefficient != 0u) {
+      ixs_node *coefficient_node = ixs_node_int(ctx, (int64_t)coefficient);
+      ixs_node *term =
+          coefficient_node ? simp_mul(ctx, coefficient_node, base) : NULL;
+      if (!term)
+        return NULL;
+      if (term->tag == IXS_INT)
+        form->constant ^= term->u.ival;
+      else
+        form->items[form->item_count++] = term;
+    }
+    i = end;
+  }
+  if (!node_key_sort(ctx, form->items, form->item_count, sizeof(*form->items),
+                     node_ptr_sort_key))
+    return NULL;
+  form->item_count = xor_cancel_pairs(form->items, form->item_count);
+  return xor_build_result(ctx, form->items, form->item_count, form->constant);
+}
+
+/* Multiplication by an integer mask is GF(2)-linear for a defined binary
+ * integer factor. Expand one scaled XOR level, then XOR-combine masks attached
+ * to identical factors. Intrinsic work is O(T log T) for T <= 256 terms. */
+static ixs_node *xor_binary_linear_canonicalize(ixs_ctx *ctx, ixs_bounds *bnds,
+                                                ixs_node *result) {
+  ixs_arena_mark mark;
+  xor_linear_form form;
+  ixs_node *canonical;
+  size_t planned;
+
+  if (!bnds || result->tag != IXS_XOR ||
+      !xor_binary_linear_plan(result, &planned))
+    return result;
+  mark = ixs_arena_save(&ctx->scratch);
+  memset(&form, 0, sizeof(form));
+  form.linear = ixs_arena_alloc(&ctx->scratch, planned * sizeof(*form.linear),
+                                sizeof(void *));
+  form.items = ixs_arena_alloc(
+      &ctx->scratch, (planned + 1u) * sizeof(*form.items), sizeof(void *));
+  if (!form.linear || !form.items ||
+      !xor_binary_linear_collect(bnds, result, &form)) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
+  canonical = xor_binary_linear_reduce(ctx, &form);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return canonical;
+}
+
 static ixs_node *xor_disjoint_bits_sum(ixs_ctx *ctx, ixs_bounds *bnds,
                                        ixs_node *result) {
   ixs_node *xor_node = result;
@@ -4861,6 +5032,8 @@ static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
   }
   write = xor_cancel_pairs(flat.items, write);
   result = xor_build_result(ctx, flat.items, write, constant);
+  if (result)
+    result = xor_binary_linear_canonicalize(ctx, bnds, result);
   if (result)
     result = xor_disjoint_bits_sum(ctx, bnds, result);
   ixs_arena_restore(&ctx->scratch, mark);

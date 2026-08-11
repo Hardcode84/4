@@ -1208,6 +1208,11 @@ xor(..., xor(args...), ...) → xor(..., args..., ...)
 xor(..., 0, ...)            → xor(...)
 xor(..., constants, ...)    → fold constants with ^
 xor(..., a repeated n, ...) → keep a iff n is odd
+xor(..., c*xor(b...), ...)  → xor(..., c*b, ...)
+                  when c is a positive integer literal and every b is a
+                  defined integer proven in [0,1]
+xor(..., c1*b, c2*b, ...)   → xor(..., (c1 xor c2)*b, ...)
+                  under the same mask and binary-factor conditions
 xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
 
 k*xor(a, b + 2^n) - k*xor(a, b)
@@ -1218,6 +1223,19 @@ k*xor(a, b + 2^n) - k*xor(a, b)
 Parity reduction replaces the old nested-cancellation rule and handles the
 whole flat list in one pass. An even run disappears under the common poison-
 refinement contract.
+
+The bounds-aware XOR canonicalizer also treats defined binary integers as a
+local GF(2) basis. It distributes a positive literal mask through one directly
+scaled XOR level and XOR-combines masks attached to pointer-identical factors.
+The structural planning pass caps the prospective form at 256 terms before any
+domain query or allocation. Collection proves each admitted factor defined,
+integer-valued, and bounded in `[0,1]`; wider, fractional, negative, or partial
+factors remain opaque. Reduction uses `O(T)` query scratch and `O(T log T)`
+intrinsic work for `T <= 256`, without value enumeration, recursion, or a
+context-wide scan. Allocation failure aborts the simplification and permits a
+clean retry. Equivalence consumes the same fact-backed simplifier, so an
+invertible binary basis is proved through its canonical reconstruction rather
+than a second XOR prover.
 
 The known-bit query merges exact interval facts and propagates low 64-bit
 facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
