@@ -286,6 +286,9 @@ F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
 O*Mod(X,A) + O*A*Mod(floor(X/A),B)        → O*Mod(X,A*B)
                      when X, A, and B are integer-valued and the quotient
                      decomposition recovers the same X and A
+Mod(X,r0) + r0*d1 + ... + rk*dk           → Mod(X,R)
+                     for a complete literal digit row extracted from
+                     enclosing Mod(X,M) values, with R dividing every M
 
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
@@ -307,6 +310,17 @@ load, giving expected O(N) work. Rebuilding after one match composes complete
 digit chains of any length through the same rule. Wrong coefficients, different
 carriers, noninteger radices or carriers, incomplete chains, and quotient
 normalizations that do not recover the original carrier remain unchanged.
+
+Complete literal rows of at most eight terms use the same direct `Mod`
+canonical target. Each place must be unique, every later digit must come from
+an enclosing `Mod` whose modulus is divisible by the next accumulated radix,
+and a terminal bare floor must end exactly at that enclosing modulus. Shape
+recognition is allocation-free O(T^2). Construction requires the shared carrier
+to be structurally integer-valued or proved integer-valued by active facts;
+overflow, a fractional carrier, an incomplete row, or an unrelated term is a
+no-match. Equivalence therefore needs no separate mixed-radix tactic: after its
+ordinary definedness admission, fact simplification produces the same interned
+direct `Mod` on both sides.
 
 Power-of-two bitwise projection is one quotient-ring rule, not three
 operator-specific matchers. The shared low-bit engine walks nested XOR/AND/OR

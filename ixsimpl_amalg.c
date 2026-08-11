@@ -4542,7 +4542,6 @@ IXS_STATIC void bounds_difference_add_range(ixs_bounds *b, ixs_node *expr,
 #include "query_transaction.h"
 #include "query_walk.h"
 #include "quotient_algebra.h"
-#include "radix_algebra.h"
 #include "simplify.h"
 #include <limits.h>
 #include <string.h>
@@ -4574,8 +4573,6 @@ typedef struct {
 static ixs_check_result
 equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
                                        ixs_node *rhs);
-static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
-                                                  ixs_node *lhs, ixs_node *rhs);
 
 /* Algebraic bridge
  * rules may nest
@@ -6287,34 +6284,11 @@ equivalence_quotient_remainder_algebra(equivalence_state *state, ixs_node *lhs,
   return result.check;
 }
 
-static ixs_check_result equivalence_radix_algebra(equivalence_state *state,
-                                                  ixs_node *lhs,
-                                                  ixs_node *rhs) {
-  ixs_bounds *bounds = state->bounds;
-  ixs_bounds_transport_snapshot transport =
-      ixs_bounds_query_transport_snapshot(bounds);
-  ixs_radix_algebra_result result =
-      ixs_radix_algebra_equivalent(bounds, lhs, rhs);
-
-  state->limited |=
-      result.limited || bounds_query_limited_since(bounds, transport);
-  state->invalid |= bounds_query_invalid_since(bounds, transport);
-  state->oom |= result.oom;
-  if (state->limited || state->invalid || state->oom)
-    return IXS_CHECK_UNKNOWN;
-  return result.check;
-}
-
 static ixs_check_result
 equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
                               ixs_node *rhs, ixs_node *simplified_lhs,
                               ixs_node *simplified_rhs, unsigned depth) {
   ixs_check_result result;
-
-  result = equivalence_radix_algebra(state, simplified_lhs, simplified_rhs);
-  if (result != IXS_CHECK_UNKNOWN || state->limited || state->invalid ||
-      state->oom)
-    return result;
 
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
@@ -25684,11 +25658,6 @@ typedef struct {
   int64_t floor_divisor;
 } radix_slot;
 
-typedef struct {
-  const ixs_node *carrier;
-  int64_t total;
-} radix_partition;
-
 /* Borrow one bounded canonical ADD row and validate its scalar coefficients.
  * The row owns no storage and remains valid while its interned expression does.
  */
@@ -25745,113 +25714,6 @@ static bool radix_floor_parts(const ixs_node *node, const ixs_node **base,
   *base = argument->u.mul.factors[0].base;
   *divisor = denominator;
   return true;
-}
-
-static bool radix_positive_int(const ixs_node *node, int64_t *value) {
-  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
-    return false;
-  *value = node->u.ival;
-  return true;
-}
-
-static bool radix_positive_mod(const ixs_node *node, const ixs_node *carrier,
-                               int64_t *modulus) {
-  return node && node->tag == IXS_MOD && node->u.binary.lhs == carrier &&
-         radix_positive_int(node->u.binary.rhs, modulus);
-}
-
-static bool radix_row_unique_place(const radix_row *row, int64_t place,
-                                   const ixs_node **digit) {
-  bool found = false;
-  uint32_t i;
-
-  for (i = 0; i < row->nterms; i++) {
-    radix_term candidate = radix_row_term(row, i);
-    if (candidate.coefficient != place)
-      continue;
-    if (found)
-      return false;
-    *digit = candidate.node;
-    found = true;
-  }
-  return found;
-}
-
-static bool radix_partition_step(const radix_row *row, const ixs_node **carrier,
-                                 int64_t place, uint32_t matched,
-                                 int64_t *next) {
-  const ixs_node *digit = NULL;
-  const ixs_node *rounded;
-  const ixs_node *numerator;
-  bool terminal = false;
-  int64_t digit_count;
-  int64_t enclosing = 0;
-  int64_t divisor;
-
-  if (!radix_row_unique_place(row, place, &digit))
-    return false;
-  if (place == 1) {
-    if (!digit || digit->tag != IXS_MOD ||
-        !radix_positive_int(digit->u.binary.rhs, &digit_count))
-      return false;
-    *carrier = digit->u.binary.lhs;
-  } else {
-    rounded = digit;
-    if (digit && digit->tag == IXS_MOD &&
-        radix_positive_int(digit->u.binary.rhs, &digit_count))
-      rounded = digit->u.binary.lhs;
-    else
-      terminal = true;
-    if (!radix_floor_parts(rounded, &numerator, &divisor) || divisor != place ||
-        !radix_positive_mod(numerator, *carrier, &enclosing))
-      return false;
-    if (terminal) {
-      if (enclosing % place != 0)
-        return false;
-      digit_count = enclosing / place;
-    }
-  }
-  return digit_count > 1 && ixs_safe_mul(place, digit_count, next) &&
-         (place == 1 || enclosing % *next == 0) &&
-         (!terminal || (enclosing == *next && matched + 1u == row->nterms));
-}
-
-/* Recognize one complete adjacent digit chain. Each place is unique, later
- * digits come from a containing residue, and the terminal bare floor must end
- * exactly at that residue's modulus. */
-static ixs_algebra_status radix_partition_extract(ixs_bounds *bounds,
-                                                  const ixs_node *expr,
-                                                  radix_partition *partition) {
-  radix_row row;
-  const ixs_node *carrier = NULL;
-  int64_t place = 1;
-  uint32_t matched = 0u;
-
-  if (!expr || !partition)
-    return IXS_ALGEBRA_NO_MATCH;
-  if (expr->tag == IXS_MOD &&
-      radix_positive_int(expr->u.binary.rhs, &partition->total)) {
-    partition->carrier = expr->u.binary.lhs;
-    return ixs_bounds_check_integer_domain(bounds,
-                                           (ixs_node *)partition->carrier);
-  }
-  if (!radix_row_borrow(expr, RADIX_ALGEBRA_MAX_INPUT_TERMS, &row) ||
-      row.nterms < 2u || row.constant_p != 0 || row.constant_q != 1)
-    return IXS_ALGEBRA_NO_MATCH;
-
-  while (matched < row.nterms) {
-    int64_t next;
-    if (!radix_partition_step(&row, &carrier, place, matched, &next))
-      return IXS_ALGEBRA_NO_MATCH;
-    place = next;
-    matched++;
-  }
-
-  if (!carrier || place <= 1)
-    return IXS_ALGEBRA_NO_MATCH;
-  partition->carrier = carrier;
-  partition->total = place;
-  return ixs_bounds_check_integer_domain(bounds, (ixs_node *)carrier);
 }
 
 static bool radix_orient_coefficient(int64_t coefficient, int orientation,
@@ -26192,38 +26054,6 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
   result = radix_reduce_nonnegative(bounds, &row, orientation);
   if (result.check == IXS_CHECK_TRUE)
     result.check = proven;
-  return result;
-}
-
-/* T is bounded by RADIX_ALGEBRA_MAX_INPUT_TERMS. Recognition is O(T^2), uses
- * no storage, and performs one inherited domain query per operand. */
-/* hot */
-IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_equivalent(
-    ixs_bounds *bounds, const ixs_node *lhs, const ixs_node *rhs) {
-  ixs_radix_algebra_result result = {IXS_CHECK_UNKNOWN, false, false};
-  radix_partition left;
-  radix_partition right;
-  ixs_algebra_status status;
-
-  if (!bounds || !lhs || !rhs || !bounds->scratch ||
-      !ixs_bounds_query_transport_clean(bounds)) {
-    result.oom = bounds && bounds->oom;
-    return result;
-  }
-  status = radix_partition_extract(bounds, lhs, &left);
-  if (status != IXS_ALGEBRA_MATCH)
-    goto status;
-  status = radix_partition_extract(bounds, rhs, &right);
-  if (status != IXS_ALGEBRA_MATCH)
-    goto status;
-  if (left.carrier == right.carrier && left.total == right.total)
-    result.check = IXS_CHECK_TRUE;
-
-status:
-  result.limited = status == IXS_ALGEBRA_LIMITED;
-  result.oom = status == IXS_ALGEBRA_OOM || bounds->oom;
-  if (!ixs_bounds_query_transport_clean(bounds))
-    result.check = IXS_CHECK_UNKNOWN;
   return result;
 }
 
@@ -29616,9 +29446,11 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                uint32_t nterms, int64_t const_p,
                                int64_t const_q);
-static int combine_nested_mod_remainders(ixs_ctx *ctx, ixs_addterm *terms,
-                                         uint32_t nterms, int64_t const_p,
-                                         int64_t const_q, ixs_node **result);
+static int canonicalize_radix_chain(ixs_ctx *ctx, ixs_addterm *terms,
+                                    uint32_t nterms, int64_t const_p,
+                                    int64_t const_q, ixs_bounds *bnds,
+                                    ixs_node **result);
+static bool node_is_integer(ixs_bounds *bnds, ixs_node *n);
 static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
                                    ixs_cmp_op op);
 static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
@@ -29825,8 +29657,8 @@ static int add_try_rewrites(ixs_ctx *ctx, add_accum *acc, ixs_node **result) {
       recognize_mod(ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
   if (*result)
     return 1;
-  status = combine_nested_mod_remainders(ctx, acc->terms, acc->nterms,
-                                         acc->const_p, acc->const_q, result);
+  status = canonicalize_radix_chain(ctx, acc->terms, acc->nterms, acc->const_p,
+                                    acc->const_q, NULL, result);
   if (status != 0)
     return status;
   status = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
@@ -30643,6 +30475,187 @@ static ixs_node *rebuild_add_from_terms(ixs_ctx *ctx, ixs_addterm *terms,
   return result;
 }
 
+#define RADIX_CHAIN_MAX_COMPLETE_TERMS 8u
+static const char radix_chain_stat_name[] = "canonicalize_radix_chain";
+
+static void radix_chain_stat_hit(ixs_ctx *ctx) {
+#ifdef IXS_STATS
+  ixs_stat_hit(ctx->stats, radix_chain_stat_name);
+#else
+  (void)ctx;
+#endif
+}
+
+typedef struct {
+  ixs_node *carrier;
+  int64_t total;
+} radix_chain_complete_plan;
+
+static bool radix_chain_positive_int(ixs_node *node, int64_t *value) {
+  if (!node || node->tag != IXS_INT || node->u.ival <= 0)
+    return false;
+  *value = node->u.ival;
+  return true;
+}
+
+static bool radix_chain_floor_parts(ixs_node *node, ixs_node **base,
+                                    int64_t *divisor) {
+  ixs_node *argument;
+  int64_t numerator;
+  int64_t denominator;
+
+  if (!node || node->tag != IXS_FLOOR)
+    return false;
+  argument = node->u.unary.arg;
+  if (!argument || argument->tag != IXS_MUL || argument->u.mul.nfactors != 1u ||
+      argument->u.mul.factors[0].exp != 1)
+    return false;
+  ixs_node_get_rat(argument->u.mul.coeff, &numerator, &denominator);
+  if (numerator != 1 || denominator <= 1)
+    return false;
+  *base = argument->u.mul.factors[0].base;
+  *divisor = denominator;
+  return true;
+}
+
+static bool radix_chain_term_at_place(const ixs_addterm *terms, uint32_t nterms,
+                                      int64_t place, ixs_node **digit) {
+  bool found = false;
+  uint32_t i;
+
+  for (i = 0; i < nterms; i++) {
+    int64_t coefficient;
+    int64_t denominator;
+    ixs_node_get_rat(terms[i].coeff, &coefficient, &denominator);
+    if (denominator != 1 || coefficient != place)
+      continue;
+    if (found)
+      return false;
+    *digit = terms[i].term;
+    found = true;
+  }
+  return found;
+}
+
+static bool radix_chain_complete_step(const ixs_addterm *terms, uint32_t nterms,
+                                      ixs_node **carrier, int64_t place,
+                                      uint32_t matched, int64_t *next) {
+  ixs_node *digit = NULL;
+  ixs_node *rounded;
+  ixs_node *numerator;
+  bool terminal = false;
+  int64_t digit_count;
+  int64_t enclosing = 0;
+  int64_t divisor;
+
+  if (!radix_chain_term_at_place(terms, nterms, place, &digit))
+    return false;
+  if (place == 1) {
+    if (!digit || digit->tag != IXS_MOD ||
+        !radix_chain_positive_int(digit->u.binary.rhs, &digit_count))
+      return false;
+    *carrier = digit->u.binary.lhs;
+  } else {
+    rounded = digit;
+    if (digit && digit->tag == IXS_MOD &&
+        radix_chain_positive_int(digit->u.binary.rhs, &digit_count))
+      rounded = digit->u.binary.lhs;
+    else
+      terminal = true;
+    if (!radix_chain_floor_parts(rounded, &numerator, &divisor) ||
+        divisor != place || !numerator || numerator->tag != IXS_MOD ||
+        numerator->u.binary.lhs != *carrier ||
+        !radix_chain_positive_int(numerator->u.binary.rhs, &enclosing))
+      return false;
+    if (terminal) {
+      if (enclosing % place != 0)
+        return false;
+      digit_count = enclosing / place;
+    }
+  }
+  return digit_count > 1 && ixs_safe_mul(place, digit_count, next) &&
+         (place == 1 || enclosing % *next == 0) &&
+         (!terminal || (enclosing == *next && matched + 1u == nterms));
+}
+
+/* Recognize a complete literal mixed-radix row. The preferred direct Mod is
+ * built by the simplifier; proof callers get the same result by simplifying
+ * after their ordinary definedness admission. */
+static bool radix_chain_complete_extract(const ixs_addterm *terms,
+                                         uint32_t nterms, int64_t const_p,
+                                         int64_t const_q,
+                                         radix_chain_complete_plan *plan) {
+  ixs_node *carrier = NULL;
+  int64_t place = 1;
+  uint32_t matched = 0u;
+
+  if (!terms || !plan || nterms < 2u ||
+      nterms > RADIX_CHAIN_MAX_COMPLETE_TERMS || const_p != 0 || const_q != 1)
+    return false;
+  while (matched < nterms) {
+    int64_t next;
+    if (!radix_chain_complete_step(terms, nterms, &carrier, place, matched,
+                                   &next))
+      return false;
+    place = next;
+    matched++;
+  }
+  if (!carrier || place <= 1)
+    return false;
+  plan->carrier = carrier;
+  plan->total = place;
+  return true;
+}
+
+static int radix_chain_complete_build(ixs_ctx *ctx, ixs_bounds *bnds,
+                                      const ixs_addterm *terms, uint32_t nterms,
+                                      int64_t const_p, int64_t const_q,
+                                      ixs_node **result) {
+  radix_chain_complete_plan plan;
+  ixs_node *modulus;
+
+  *result = NULL;
+  if (!radix_chain_complete_extract(terms, nterms, const_p, const_q, &plan) ||
+      !node_is_integer(bnds, plan.carrier))
+    return bnds && bnds->oom ? -1 : 0;
+  modulus = ixs_node_int(ctx, plan.total);
+  if (!modulus)
+    return -1;
+  *result = simp_mod(ctx, plan.carrier, modulus);
+  if (!*result)
+    return -1;
+  if (ixs_node_is_sentinel(*result)) {
+    *result = NULL;
+    return 0;
+  }
+  radix_chain_stat_hit(ctx);
+  return 1;
+}
+
+static ixs_node *radix_chain_complete_node(ixs_ctx *ctx, ixs_bounds *bnds,
+                                           ixs_node *add) {
+  ixs_query_transaction transaction;
+  ixs_query_observation observation;
+  ixs_node *result = NULL;
+  int64_t const_p;
+  int64_t const_q;
+  int status;
+
+  if (!bnds || !add || add->tag != IXS_ADD)
+    return add;
+  ixs_node_get_rat(add->u.add.coeff, &const_p, &const_q);
+  ixs_query_transaction_begin(&transaction, ctx, bnds, NULL);
+  status =
+      radix_chain_complete_build(ctx, bnds, add->u.add.terms, add->u.add.nterms,
+                                 const_p, const_q, &result);
+  observation = ixs_query_transaction_finish(&transaction, false);
+  if (status < 0 || observation.new_oom)
+    return NULL;
+  if (observation.limited || observation.invalid)
+    return add;
+  return status > 0 ? result : add;
+}
+
 typedef struct {
   ixs_node *node;
   ixs_node *numerator;
@@ -30650,18 +30663,18 @@ typedef struct {
   ixs_node *scale;
   uint32_t term_index;
   size_t next_plus_one;
-} nested_remainder_entry;
+} radix_chain_entry;
 
 typedef struct {
   ixs_ctx *ctx;
-  nested_remainder_entry *entries;
+  radix_chain_entry *entries;
   size_t *buckets;
   size_t capacity;
   size_t count;
-} nested_remainder_index;
+} radix_chain_index;
 
-static size_t nested_remainder_hash(const ixs_node *numerator,
-                                    const ixs_node *modulus) {
+static size_t radix_chain_hash(const ixs_node *numerator,
+                               const ixs_node *modulus) {
   size_t value = ixs_hash_ptr(numerator);
   value ^= ixs_hash_ptr(modulus) + (value << 6u) + (value >> 2u);
   return value;
@@ -30669,8 +30682,8 @@ static size_t nested_remainder_hash(const ixs_node *numerator,
 
 /* 1 is a usable product, 0 is an optional unrepresentable/domain miss, and
  * -1 is allocation failure. */
-static int nested_remainder_try_mul(ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
-                                    ixs_node **result) {
+static int radix_chain_try_mul(ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+                               ixs_node **result) {
   bool unrepresentable = false;
   *result = simp_try_mul(ctx, lhs, rhs, &unrepresentable);
   if (unrepresentable || (*result && ixs_node_is_sentinel(*result))) {
@@ -30680,15 +30693,14 @@ static int nested_remainder_try_mul(ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
   return *result ? 1 : -1;
 }
 
-static bool nested_remainder_candidate(ixs_node *term) {
+static bool radix_chain_adjacent_candidate(ixs_node *term) {
   return term &&
          (term->tag == IXS_MOD ||
           (term->tag == IXS_MUL && find_pow1_factor(term, IXS_MOD) >= 0));
 }
 
-static int nested_remainder_index_init(nested_remainder_index *index,
-                                       ixs_ctx *ctx, ixs_addterm *terms,
-                                       uint32_t nterms) {
+static int radix_chain_index_init(radix_chain_index *index, ixs_ctx *ctx,
+                                  ixs_addterm *terms, uint32_t nterms) {
   size_t candidate_count = 0;
   size_t entry_bytes;
   size_t bucket_bytes;
@@ -30697,7 +30709,7 @@ static int nested_remainder_index_init(nested_remainder_index *index,
   memset(index, 0, sizeof(*index));
   index->ctx = ctx;
   for (i = 0; i < nterms; i++)
-    if (nested_remainder_candidate(terms[i].term))
+    if (radix_chain_adjacent_candidate(terms[i].term))
       candidate_count++;
   if (candidate_count < 2u)
     return 0;
@@ -30725,13 +30737,12 @@ static int nested_remainder_index_init(nested_remainder_index *index,
       return -1;
     if (status == 0)
       continue;
-    status = nested_remainder_try_mul(ctx, terms[i].coeff, parts.outer, &scale);
+    status = radix_chain_try_mul(ctx, terms[i].coeff, parts.outer, &scale);
     if (status < 0)
       return -1;
     if (status == 0)
       continue;
-    slot = nested_remainder_hash(parts.arg, parts.modulus) &
-           (index->capacity - 1u);
+    slot = radix_chain_hash(parts.arg, parts.modulus) & (index->capacity - 1u);
     index->entries[index->count].node = parts.node;
     index->entries[index->count].numerator = parts.arg;
     index->entries[index->count].modulus = parts.modulus;
@@ -30743,10 +30754,10 @@ static int nested_remainder_index_init(nested_remainder_index *index,
   return index->count >= 2u ? 1 : 0;
 }
 
-static int nested_remainder_compose(nested_remainder_index *index,
-                                    nested_remainder_entry *high,
-                                    uint32_t *low_term_index,
-                                    ixs_node **replacement) {
+static int radix_chain_compose_adjacent(radix_chain_index *index,
+                                        radix_chain_entry *high,
+                                        uint32_t *low_term_index,
+                                        ixs_node **replacement) {
   ixs_ctx *ctx = index->ctx;
   ixs_node *numerator;
   ixs_node *inner_modulus;
@@ -30767,11 +30778,10 @@ static int nested_remainder_compose(nested_remainder_index *index,
       !ixs_node_is_integer_valued(inner_modulus))
     return 0;
 
-  slot =
-      nested_remainder_hash(numerator, inner_modulus) & (index->capacity - 1u);
+  slot = radix_chain_hash(numerator, inner_modulus) & (index->capacity - 1u);
   for (link = index->buckets[slot]; link != 0u;
        link = index->entries[link - 1u].next_plus_one) {
-    nested_remainder_entry *low = &index->entries[link - 1u];
+    radix_chain_entry *low = &index->entries[link - 1u];
     ixs_node *expected_scale;
     ixs_node *combined_modulus;
     ixs_node *combined;
@@ -30779,14 +30789,14 @@ static int nested_remainder_compose(nested_remainder_index *index,
     if (low->term_index == high->term_index || low->numerator != numerator ||
         low->modulus != inner_modulus)
       continue;
-    status = nested_remainder_try_mul(ctx, low->scale, inner_modulus,
-                                      &expected_scale);
+    status =
+        radix_chain_try_mul(ctx, low->scale, inner_modulus, &expected_scale);
     if (status < 0)
       return -1;
     if (status == 0 || expected_scale != high->scale)
       continue;
-    status = nested_remainder_try_mul(ctx, inner_modulus, high->modulus,
-                                      &combined_modulus);
+    status = radix_chain_try_mul(ctx, inner_modulus, high->modulus,
+                                 &combined_modulus);
     if (status <= 0)
       return status;
     combined = simp_mod(ctx, numerator, combined_modulus);
@@ -30794,7 +30804,7 @@ static int nested_remainder_compose(nested_remainder_index *index,
       return -1;
     if (ixs_node_is_sentinel(combined))
       return 0;
-    status = nested_remainder_try_mul(ctx, low->scale, combined, replacement);
+    status = radix_chain_try_mul(ctx, low->scale, combined, replacement);
     if (status <= 0)
       return status;
     *low_term_index = low->term_index;
@@ -30811,27 +30821,33 @@ static int nested_remainder_compose(nested_remainder_index *index,
  * x are integer-valued so exact quotient decomposition preserves the shared
  * carrier; they and the common scale O may still be symbolic or partial.
  * Rebuilding through simp_add lets the same index reduce longer chains. */
-static int combine_nested_mod_remainders(ixs_ctx *ctx, ixs_addterm *terms,
-                                         uint32_t nterms, int64_t const_p,
-                                         int64_t const_q, ixs_node **result) {
+static int canonicalize_radix_chain(ixs_ctx *ctx, ixs_addterm *terms,
+                                    uint32_t nterms, int64_t const_p,
+                                    int64_t const_q, ixs_bounds *bnds,
+                                    ixs_node **result) {
   ixs_query_transaction transaction;
+  ixs_query_observation observation;
   ixs_arena_mark mark;
-  nested_remainder_index index;
+  radix_chain_index index;
   size_t i;
   int status;
 
   *result = NULL;
-  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  ixs_query_transaction_begin(&transaction, ctx, bnds, NULL);
   mark = ixs_arena_save(&ctx->scratch);
-  status = nested_remainder_index_init(&index, ctx, terms, nterms);
+  status = radix_chain_complete_build(ctx, bnds, terms, nterms, const_p,
+                                      const_q, result);
+  if (status != 0)
+    goto cleanup;
+  status = radix_chain_index_init(&index, ctx, terms, nterms);
   if (status > 0)
     status = 0;
   for (i = 0; status == 0 && i < index.count; i++) {
     ixs_node *replacement;
     ixs_node *one;
     uint32_t low_term_index;
-    int matched = nested_remainder_compose(&index, &index.entries[i],
-                                           &low_term_index, &replacement);
+    int matched = radix_chain_compose_adjacent(&index, &index.entries[i],
+                                               &low_term_index, &replacement);
     if (matched < 0) {
       status = -1;
       break;
@@ -30846,14 +30862,17 @@ static int combine_nested_mod_remainders(ixs_ctx *ctx, ixs_addterm *terms,
     terms[low_term_index].term = replacement;
     terms[low_term_index].coeff = one;
     terms[index.entries[i].term_index].term = NULL;
-    IXS_STAT_HIT(ctx);
+    radix_chain_stat_hit(ctx);
     *result = rebuild_add_from_terms(ctx, terms, nterms, const_p, const_q);
     status = *result ? 1 : -1;
     break;
   }
 
+cleanup:
   ixs_arena_restore(&ctx->scratch, mark);
-  (void)ixs_query_transaction_finish(&transaction, false);
+  observation = ixs_query_transaction_finish(&transaction, false);
+  if (observation.new_oom)
+    status = -1;
   return status;
 }
 
@@ -34482,11 +34501,12 @@ static const ixs_rule cmp_rules[] = {
 /* Ad-hoc transforms tracked via IXS_STAT_HIT (not in rule tables). */
 static const char *extra_transforms[] = {
     "recognize_mod",
-    "combine_nested_mod_remainders",
+    radix_chain_stat_name,
     "cancel_floor_mod_pairs",
     "cancel_congruent_mod_difference",
     "cancel_equal_round_difference",
     "cancel_scaled_mod_quotient",
+    "xor_difference_in_add",
     "simp_normalize_rational_carrier",
     "not_cmp_flip",
 };
@@ -36794,12 +36814,18 @@ simp_normalize_rational_carrier(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *add) {
 static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                                   rewrite_memo_slot *memo,
                                   rewrite_shared_cache *shared, bool *limited) {
-  /* Recognize exact floor/Mod pairs before facts can poison their children. */
-  ixs_node *exact = cancel_floor_mod_node(ctx, bnds, n);
+  /* Recognize exact radix and floor/Mod identities before facts can poison
+   * their children. */
+  ixs_node *exact = radix_chain_complete_node(ctx, bnds, n);
   uint32_t i;
   unsigned round_candidates = 0;
   ixs_node *result;
 
+  if (!exact)
+    return NULL;
+  if (exact != n)
+    return rewrite(ctx, exact, bnds, memo, shared, limited);
+  exact = cancel_floor_mod_node(ctx, bnds, n);
   if (!exact)
     return NULL;
   if (exact != n)

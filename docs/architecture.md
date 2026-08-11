@@ -695,7 +695,7 @@ ixsimpl/
 │   ├── quotient_algebra.h
 │   ├── query_walk.c         # shared iterative stacks, node sets, and vectors
 │   ├── query_walk.h
-│   ├── radix_algebra.c      # bounded mixed-radix order and equality proofs
+│   ├── radix_algebra.c      # bounded mixed-radix order proofs
 │   ├── radix_algebra.h
 │   ├── relation_algebra.c   # indexed exact additive relations
 │   ├── relation_algebra.h

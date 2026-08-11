@@ -1280,7 +1280,7 @@ static ixs_node *enclosed_radix_digit(ixs_ctx *ctx, ixs_node *carrier,
   return terminal ? digit : ixs_mod(ctx, digit, ixs_int(ctx, radix));
 }
 
-static void test_relational_enclosed_radix_partition_contract(void) {
+static void test_relational_enclosed_radix_canonicalization_contract(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "relation_enclosed_radix_x");
   ixs_node *other = ixs_sym(ctx, "relation_enclosed_radix_other");
@@ -1343,6 +1343,15 @@ static void test_relational_enclosed_radix_partition_contract(void) {
   CHECK(ixs_facts_assume_pred(at_six,
                               ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 6))));
 
+  CHECK(binary == direct8);
+  CHECK(mixed == direct30);
+  CHECK(compact == direct30);
+  CHECK(ixs_node_tag(wrong_enclosing) == IXS_ADD);
+  CHECK(ixs_node_tag(missing) == IXS_ADD);
+  CHECK(ixs_node_tag(wrong_scale) == IXS_ADD);
+  CHECK(ixs_node_tag(duplicate) == IXS_ADD);
+  CHECK(ixs_node_tag(fractional_partition) == IXS_ADD);
+  CHECK(ixs_node_tag(overflow) == IXS_ADD);
   CHECK(test_ixs_equivalent_facts(integer, direct8, binary) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(integer, binary_equality) ==
         IXS_CHECK_TRUE);
@@ -1422,7 +1431,7 @@ int main(void) {
   test_relational_finite_symbol_domain_contract();
   test_relational_modular_floor_partition_contract();
   test_relational_modular_product_reduction_contract();
-  test_relational_enclosed_radix_partition_contract();
+  test_relational_enclosed_radix_canonicalization_contract();
   test_relational_scaled_mod_depth_guard();
 
   printf("test_relational_contract: %d/%d passed\n", tests_passed, tests_run);

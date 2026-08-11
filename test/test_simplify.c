@@ -4513,6 +4513,34 @@ static void test_nested_mod_remainder_composition(void) {
   ixs_node *bits =
       ixs_add(ctx, ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 2), bit1)),
               ixs_mul(ctx, ixs_int(ctx, 4), bit2));
+  ixs_node *enclosed_bit1 =
+      ixs_mod(ctx,
+              ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
+                                     ixs_int(ctx, 2))),
+              ixs_int(ctx, 2));
+  ixs_node *enclosed_bit2 =
+      ixs_mod(ctx,
+              ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
+                                     ixs_int(ctx, 4))),
+              ixs_int(ctx, 2));
+  ixs_node *enclosed_bits =
+      ixs_add(ctx, bit0,
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), enclosed_bit1),
+                      ixs_mul(ctx, ixs_int(ctx, 4), enclosed_bit2)));
+  ixs_node *terminal_bit2 = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), ixs_int(ctx, 4)));
+  ixs_node *compact_bits =
+      ixs_add(ctx, bit0,
+              ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), enclosed_bit1),
+                      ixs_mul(ctx, ixs_int(ctx, 4), terminal_bit2)));
+  ixs_node *wrong_enclosing = ixs_add(
+      ctx, bit0,
+      ixs_mul(
+          ctx, ixs_int(ctx, 2),
+          ixs_mod(ctx,
+                  ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 6)),
+                                         ixs_int(ctx, 2))),
+                  ixs_int(ctx, 2))));
   size_t errors = ixs_ctx_nerrors(ctx);
   ixs_node *overflow_low = ixs_mod(ctx, x, ixs_int(ctx, INT64_MAX));
   ixs_node *overflow_high =
@@ -4534,6 +4562,8 @@ static void test_nested_mod_remainder_composition(void) {
                     ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, partial, three)),
                             five)))) == IXS_ADD);
   CHECK(bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
+  CHECK(enclosed_bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
+  CHECK(compact_bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
 
   CHECK(ixs_node_tag(ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 2), high))) ==
         IXS_ADD);
@@ -4567,6 +4597,7 @@ static void test_nested_mod_remainder_composition(void) {
                             five)))) == IXS_ADD);
   CHECK(ixs_node_tag(ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 4), bit2))) ==
         IXS_ADD);
+  CHECK(ixs_node_tag(wrong_enclosing) == IXS_ADD);
   CHECK(ixs_node_tag(overflow) == IXS_ADD);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 }

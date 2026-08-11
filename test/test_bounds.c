@@ -2759,17 +2759,21 @@ static void test_bounds_enclosed_radix_retry(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "enclosed_radix_retry_x");
   ixs_node *two = ixs_int(ctx, 2);
-  ixs_node *low = ixs_mod(ctx, x, two);
+  ixs_node *carrier = ixs_div(ctx, x, two);
+  ixs_node *low = ixs_mod(ctx, carrier, two);
   ixs_node *high = ixs_mod(
-      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)), two)),
+      ctx,
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, carrier, ixs_int(ctx, 8)), two)),
       two);
   ixs_node *partition = ixs_add(ctx, low, ixs_mul(ctx, two, high));
-  ixs_node *direct = ixs_mod(ctx, x, ixs_int(ctx, 4));
+  ixs_node *direct = ixs_mod(ctx, carrier, ixs_int(ctx, 4));
   ixs_facts *facts = ixs_facts_create(ctx);
 
-  CHECK(ctx && x && two && low && high && partition && direct && facts);
-  CHECK(ixs_facts_assume_pred(facts,
-                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_floor(ctx, x))));
+  CHECK(ctx && x && two && carrier && low && high && partition && direct &&
+        facts);
+  CHECK(ixs_node_tag(partition) == IXS_ADD);
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, ixs_mod(ctx, x, two), IXS_CMP_EQ, ixs_int(ctx, 0))));
   ixs_ctx_clear_errors(ctx);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
   CHECK(test_ixs_equivalent_facts(facts, direct, partition) ==
@@ -2777,6 +2781,7 @@ static void test_bounds_enclosed_radix_retry(void) {
   CHECK(!facts->bounds.oom && ixs_ctx_nerrors(ctx) == 1);
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
   ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_simplify_facts(facts, partition) == direct);
   CHECK(test_ixs_equivalent_facts(facts, direct, partition) == IXS_CHECK_TRUE);
   CHECK(!facts->bounds.oom && ixs_ctx_nerrors(ctx) == 0);
 

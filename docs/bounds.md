@@ -187,19 +187,12 @@ layout, load factor, and allocation remain consumer-owned.
   ordinary `UNKNOWN`; nested range-query allocation failure is reported as
   OOM.
 
-  The same component certifies complete literal mixed-radix reconstructions.
-  A direct `Mod(A,R)` and a digit row describe the same residue when the row
-  starts with `Mod(A,r0)`, each later term has the exact accumulated place as
-  its coefficient, and its digit is extracted from `Mod(A,M)` where the next
-  accumulated radix divides `M`. The last digit may omit a redundant outer
-  `Mod` only when its enclosing modulus ends exactly at the reconstructed
-  radix. Every row term must be consumed, the accumulated radix must remain
-  representable, and the shared carrier must be defined and integer-valued.
-  Recognition is `O(T^2)` for at most eight immediate terms, allocates no
-  storage, and returns `UNKNOWN` for incomplete, duplicate, fractional, or
-  unrelated carriers. This is an equality certificate, not a preferred global
-  normal form. Dynamic floor radices, XOR and mask projections, products, and
-  Piecewise retain their existing proof domains.
+  Complete literal mixed-radix reconstructions are canonical simplifier input,
+  not a separate equality tactic. After equivalence proves both operands
+  defined, fact simplification uses any proved carrier integrality and reduces a
+  complete digit row to its direct `Mod(A,R)` form. Pointer equality then closes
+  the proof. The exact row shape, bounded O(T^2) recognition, and negative-case
+  contracts are specified in [Simplification](simplification.md).
 - **Bitwise facts**: Power-of-two and mask assumptions use a small
   bitfact domain stored alongside per-symbol bounds:
 
