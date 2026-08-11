@@ -8334,6 +8334,102 @@ static void test_public_predicate_implication_oom_is_reusable(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_fact_simplify_projects_finite_root_predicates(void) {
+  enum { FINITE_LIMIT = 64, OVER_LIMIT = 65 };
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "finite_root_x");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *one = ixs_int(ctx, 1);
+  ixs_node *equals_zero = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  ixs_node *equals_one = ixs_cmp(ctx, x, IXS_CMP_EQ, one);
+  ixs_node *is_endpoint = ixs_or(ctx, equals_zero, equals_one);
+  ixs_node *is_neither = ixs_and(ctx, ixs_cmp(ctx, x, IXS_CMP_NE, zero),
+                                 ixs_cmp(ctx, x, IXS_CMP_NE, one));
+  ixs_node *partial = ixs_or(
+      ctx, equals_zero, ixs_cmp(ctx, ixs_div(ctx, one, x), IXS_CMP_GT, zero));
+  ixs_node *limit_terms[OVER_LIMIT];
+  ixs_node *at_limit;
+  ixs_node *over_limit;
+  ixs_facts *two_points = ixs_facts_create(ctx);
+  ixs_facts *limit_facts = ixs_facts_create(ctx);
+  ixs_facts *over_limit_facts = ixs_facts_create(ctx);
+  ixs_range_result range = {0};
+  ixs_node *batch[4] = {is_endpoint, is_neither, equals_zero, partial};
+  const ixs_node *result;
+  size_t errors;
+  size_t i;
+  bool held = false;
+
+  CHECK(ctx && x && zero && one && equals_zero && equals_one && is_endpoint &&
+        is_neither && partial && two_points && limit_facts && over_limit_facts);
+  range.has_lower = true;
+  range.has_upper = true;
+  range.lower_q = 1;
+  range.upper_q = 1;
+  range.upper_p = 1;
+  CHECK(ixs_facts_assume_range(two_points, x, &range));
+
+  CHECK(test_ixs_check_predicate_facts(two_points, is_endpoint) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(two_points, is_endpoint) == ixs_true(ctx));
+  CHECK(test_ixs_check_predicate_facts(two_points, is_neither) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_simplify_facts(two_points, is_neither) == ixs_false(ctx));
+  CHECK(test_ixs_check_predicate_facts(two_points, equals_zero) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_simplify_facts(two_points, equals_zero) == equals_zero);
+  errors = ixs_ctx_nerrors(ctx);
+  CHECK(test_ixs_check_predicate_facts(two_points, partial) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_simplify_facts(two_points, partial) == partial);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+  ixs_simplify_batch_facts(two_points, batch, 4);
+  CHECK(batch[0] == ixs_true(ctx));
+  CHECK(batch[1] == ixs_false(ctx));
+  CHECK(batch[2] == equals_zero);
+  CHECK(batch[3] == partial);
+
+  for (i = 0; i < OVER_LIMIT; i++)
+    limit_terms[i] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, (int64_t)i));
+  at_limit = ixs_or_many(ctx, FINITE_LIMIT, limit_terms);
+  over_limit = ixs_or_many(ctx, OVER_LIMIT, limit_terms);
+  range.upper_p = FINITE_LIMIT - 1;
+  CHECK(ixs_facts_assume_range(limit_facts, x, &range));
+  range.upper_p = OVER_LIMIT - 1;
+  CHECK(ixs_facts_assume_range(over_limit_facts, x, &range));
+  CHECK(test_ixs_simplify_facts(limit_facts, at_limit) == ixs_true(ctx));
+  CHECK(test_ixs_check_predicate_facts(over_limit_facts, over_limit) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_simplify_facts(over_limit_facts, over_limit) == over_limit);
+
+  errors = ixs_ctx_nerrors(ctx);
+  ixs_arena_set_fail_after(&two_points->bounds.query_arena, 0);
+  result = ixs_simplify_facts(two_points, is_endpoint);
+  CHECK(result == NULL);
+  ixs_arena_set_fail_after(&two_points->bounds.query_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+  if (ixs_ctx_nerrors(ctx) > errors)
+    CHECK(strstr(ixs_ctx_error(ctx, errors), "out of memory") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_simplify_facts(two_points, is_endpoint) == ixs_true(ctx));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  CHECK(bounds_query_force_hold_begin(&two_points->bounds, &held) && held);
+  bounds_query_note_limit(&two_points->bounds);
+  result = ixs_simplify_facts(two_points, is_endpoint);
+  CHECK(result == NULL);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  if (ixs_ctx_nerrors(ctx) != 0u)
+    CHECK(strstr(ixs_ctx_error(ctx, 0), "resource limit") != NULL);
+  ixs_bounds_query_hold_end(&two_points->bounds);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_simplify_facts(two_points, is_endpoint) == ixs_true(ctx));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_predicate_comparison_implications(void) {
   static const ixs_cmp_op operations[] = {
       IXS_CMP_GT, IXS_CMP_GE, IXS_CMP_LT, IXS_CMP_LE, IXS_CMP_EQ, IXS_CMP_NE,
@@ -12421,6 +12517,7 @@ int main(void) {
   test_public_predicate_tree_query();
   test_public_predicate_implications();
   test_public_predicate_implication_oom_is_reusable();
+  test_fact_simplify_projects_finite_root_predicates();
   test_public_predicate_comparison_implications();
   test_public_equivalence_congruent_signed_no_wrap();
   test_public_equivalence_ordered_congruence_forms();

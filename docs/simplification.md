@@ -586,3 +586,12 @@ value. Normalization is opportunistic: if the exact `a - b` rational form
 exceeds the node representation, the original structurally valid comparison
 is retained and the failed fold's diagnostic is discarded. Operand errors and
 allocation failure still propagate.
+
+After fact-backed rewriting finishes, a predicate root receives one bounded
+truth projection at the caller boundary. Structural predicate evaluation and
+the existing finite-domain proof may replace the root with canonical `0` or
+`1`; they are not simplifier rules and cannot recurse into rewriting. The
+finite fallback inspects at most 4096 nodes and 8 finite-range symbols and
+enumerates at most 64 Cartesian points. Varying predicates, eager partial
+operands, larger domains, proof limits, and allocation failure retain the
+ordinary query status instead of manufacturing a constant.

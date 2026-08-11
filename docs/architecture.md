@@ -656,7 +656,7 @@ ixsimpl/
 │   ├── simplify.h
 │   ├── expand.c             # MUL-over-ADD distribution
 │   ├── expand.h
-│   ├── facts_query.c        # fact-set reads, simplification, public query API
+│   ├── facts_query.c        # fact reads, rewriting, root projection, public API
 │   ├── facts_store.c        # persistent facts lifetime, transactions, closure
 │   ├── facts_store.h
 │   ├── bounds.h             # aggregate private bounds state

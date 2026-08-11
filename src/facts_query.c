@@ -172,6 +172,14 @@ static ixs_node *
 facts_simplify_truncating_remainders(ixs_ctx *ctx, ixs_bounds *bounds,
                                      ixs_node *source, ixs_node *root,
                                      ixs_fact_query_status *status);
+static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
+                                                          ixs_node *source,
+                                                          ixs_node *rewritten,
+                                                          bool *limited);
+static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
+                                               ixs_node *source,
+                                               ixs_node *rewritten,
+                                               bool *limited);
 
 static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
                                      ixs_node *expr,
@@ -250,8 +258,11 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
     value = facts_simplify_truncating_remainders(ctx, &facts->bounds, expr,
                                                  value, &result.status);
   if (!limited && result.status == IXS_FACT_QUERY_COMPLETE && value &&
-      !ixs_node_is_sentinel(value))
+      !ixs_node_is_sentinel(value)) {
     value = simp_normalize_rational_carrier(ctx, &facts->bounds, value);
+    value = facts_project_simplified_root(ctx, &facts->bounds, expr, value,
+                                          &limited);
+  }
   if (limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
   } else if (result.status != IXS_FACT_QUERY_COMPLETE) {
@@ -323,6 +334,26 @@ static bool facts_simplify_batch_is_clean(ixs_node *const *exprs, size_t n) {
   return true;
 }
 
+static bool facts_simplify_batch_finalize(ixs_ctx *ctx, ixs_bounds *bounds,
+                                          ixs_node *const *sources,
+                                          ixs_node **exprs, size_t n,
+                                          ixs_fact_query_status *status) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    bool limited = false;
+    exprs[i] = simp_normalize_rational_carrier(ctx, bounds, exprs[i]);
+    if (!exprs[i])
+      return false;
+    exprs[i] = facts_project_simplified_root(ctx, bounds, sources[i], exprs[i],
+                                             &limited);
+    if (limited) {
+      *status = IXS_FACT_QUERY_LIMITED;
+      return false;
+    }
+  }
+  return true;
+}
+
 static ixs_fact_query_status
 facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   ixs_session_binding binding;
@@ -378,15 +409,9 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   if (ok)
     ok = facts_simplify_batch_remainders(ctx, &facts->bounds, originals, exprs,
                                          n, &status);
-  if (ok) {
-    for (i = 0; i < n; i++) {
-      exprs[i] = simp_normalize_rational_carrier(ctx, &facts->bounds, exprs[i]);
-      if (!exprs[i]) {
-        ok = false;
-        break;
-      }
-    }
-  }
+  if (ok)
+    ok = facts_simplify_batch_finalize(ctx, &facts->bounds, originals, exprs, n,
+                                       &status);
   if (!ok || (!old_oom && facts->bounds.oom)) {
     if (status == IXS_FACT_QUERY_COMPLETE)
       status = bounds_query_limited_since(&facts->bounds,
@@ -459,6 +484,36 @@ facts_predicate_eval(ixs_bounds *bounds, ixs_node *predicate, bool *limited) {
   return result;
 }
 
+/* Project only after the caller's one fact rewrite. This is deliberately a
+ * root operation: finite-domain proof must not re-enter per-node rewriting. */
+static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
+                                                          ixs_node *source,
+                                                          ixs_node *rewritten,
+                                                          bool *limited) {
+  ixs_check_result result = facts_predicate_eval(bounds, rewritten, limited);
+  if (!*limited && result == IXS_CHECK_UNKNOWN)
+    result = bounds_predicate_bounded_finite_domain(bounds, source);
+  return result;
+}
+
+static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
+                                               ixs_node *source,
+                                               ixs_node *rewritten,
+                                               bool *limited) {
+  ixs_check_result projected;
+  if (!rewritten || ixs_node_is_sentinel(rewritten) ||
+      !ixs_node_is_pred_kind(source) || ixs_node_is_known_true(rewritten) ||
+      ixs_node_is_known_false(rewritten))
+    return rewritten;
+  projected =
+      facts_project_rewritten_predicate(bounds, source, rewritten, limited);
+  if (projected == IXS_CHECK_TRUE)
+    return ctx->node_true;
+  if (projected == IXS_CHECK_FALSE)
+    return ctx->node_false;
+  return rewritten;
+}
+
 static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
                                                          ixs_node *predicate) {
   ixs_session_binding binding;
@@ -520,11 +575,8 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
   } else if (ixs_node_is_sentinel(simplified)) {
     result.status = IXS_FACT_QUERY_INVALID;
   } else {
-    result.check =
-        facts_predicate_eval(&facts->bounds, simplified, &predicate_limited);
-    if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
-      result.check =
-          bounds_predicate_bounded_finite_domain(&facts->bounds, predicate);
+    result.check = facts_project_rewritten_predicate(
+        &facts->bounds, predicate, simplified, &predicate_limited);
     result.status =
         predicate_limited ? IXS_FACT_QUERY_LIMITED : IXS_FACT_QUERY_COMPLETE;
   }

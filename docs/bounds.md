@@ -762,15 +762,24 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 - **Public predicate-tree checking** (`ixs_check_predicate_facts`, Python
   `Context.check_predicate`, C++ `Facts::check_predicate`): accepts only nodes
   classified by `ixs_node_is_pred`. It simplifies once against the reusable
-  facts, then evaluates `AND`, `OR`, and `NOT` with conservative tri-state
-  truth tables. `AND` is true only when every child is true and false when any
-  child is false; `OR` is true when any child is true and false only when every
-  child is false; `NOT` inverts true and false. Predicate-valued `Piecewise`
-  nodes that do not collapse during fact-backed simplification remain
-  unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a `predicate:`
-  diagnostic rather than interpreted as boolean trees. The evaluator is
-  iterative and memoized over the predicate DAG using query-arena storage;
-  allocation failure returns unknown.
+  facts, then passes the rewritten root to the same caller-layer projector used
+  by scalar and batch fact simplification. The projector evaluates `AND`, `OR`,
+  and `NOT` with conservative tri-state truth tables, then applies the bounded
+  finite-domain fallback only when the root remains unknown. It never re-enters
+  per-node simplification. `AND` is true only when every child is true and false
+  when any child is false; `OR` is true when any child is true and false only
+  when every child is false; `NOT` inverts true and false. Predicate-valued
+  `Piecewise` nodes that do not collapse during fact-backed simplification
+  remain unknown. Numeric bitwise `AND`/`OR` nodes are rejected with a
+  `predicate:` diagnostic rather than interpreted as boolean trees. The
+  evaluator is iterative and memoized over the predicate DAG using query-arena
+  storage; allocation failure returns unknown.
+
+  Fact simplification replaces a projected root with canonical `0` or `1` only
+  when every enumerated source valuation agrees. A varying result, a partial
+  eager operand, transport failure, or a domain beyond the fixed finite limits
+  leaves the rewritten predicate intact. Scalar and batch simplification use
+  the same one-shot root operation.
 
   An otherwise unknown binary `OR` also admits one bounded implication step.
   An explicit `NOT(A)` disjunct supplies `A`; a comparison disjunct supplies
