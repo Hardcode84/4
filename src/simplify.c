@@ -7,6 +7,7 @@
 #include "bounds_modular.h"
 #include "bounds_query.h"
 #include "bounds_store.h"
+#include "hash.h"
 #include "query_transaction.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -98,6 +99,21 @@ static void *scratch_grow(ixs_arena *a, void *ptr, size_t *cap,
   if (p)
     *cap = next;
   return p;
+}
+
+static bool add_index_capacity(size_t count, size_t *capacity) {
+  size_t target;
+  size_t result = 16u;
+  if (count > SIZE_MAX / 2u)
+    return false;
+  target = count * 2u;
+  while (result < target) {
+    if (result > SIZE_MAX / 2u)
+      return false;
+    result *= 2u;
+  }
+  *capacity = result;
+  return true;
 }
 
 static inline ixs_node *make_const(ixs_ctx *ctx, int64_t p, int64_t q) {
@@ -347,6 +363,9 @@ static uint32_t flatten_mul_add_terms(ixs_ctx *ctx, ixs_addterm **terms_p,
 static ixs_node *recognize_mod(ixs_ctx *ctx, ixs_addterm *terms,
                                uint32_t nterms, int64_t const_p,
                                int64_t const_q);
+static int combine_nested_mod_remainders(ixs_ctx *ctx, ixs_addterm *terms,
+                                         uint32_t nterms, int64_t const_p,
+                                         int64_t const_q, ixs_node **result);
 static bool bounds_proves_zero_cmp(ixs_bounds *bnds, ixs_node *lhs,
                                    ixs_cmp_op op);
 static int cancel_floor_mod_pairs(ixs_ctx *ctx, ixs_addterm *terms,
@@ -553,6 +572,10 @@ static int add_try_rewrites(ixs_ctx *ctx, add_accum *acc, ixs_node **result) {
       recognize_mod(ctx, acc->terms, acc->nterms, acc->const_p, acc->const_q);
   if (*result)
     return 1;
+  status = combine_nested_mod_remainders(ctx, acc->terms, acc->nterms,
+                                         acc->const_p, acc->const_q, result);
+  if (status != 0)
+    return status;
   status = cancel_floor_mod_pairs(ctx, acc->terms, acc->nterms, acc->const_p,
                                   acc->const_q, false, result);
   if (status != 0)
@@ -1367,6 +1390,220 @@ static ixs_node *rebuild_add_from_terms(ixs_ctx *ctx, ixs_addterm *terms,
   return result;
 }
 
+typedef struct {
+  ixs_node *node;
+  ixs_node *numerator;
+  ixs_node *modulus;
+  ixs_node *scale;
+  uint32_t term_index;
+  size_t next_plus_one;
+} nested_remainder_entry;
+
+typedef struct {
+  ixs_ctx *ctx;
+  nested_remainder_entry *entries;
+  size_t *buckets;
+  size_t capacity;
+  size_t count;
+} nested_remainder_index;
+
+static size_t nested_remainder_hash(const ixs_node *numerator,
+                                    const ixs_node *modulus) {
+  size_t value = ixs_hash_ptr(numerator);
+  value ^= ixs_hash_ptr(modulus) + (value << 6u) + (value >> 2u);
+  return value;
+}
+
+/* 1 is a usable product, 0 is an optional unrepresentable/domain miss, and
+ * -1 is allocation failure. */
+static int nested_remainder_try_mul(ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+                                    ixs_node **result) {
+  bool unrepresentable = false;
+  *result = simp_try_mul(ctx, lhs, rhs, &unrepresentable);
+  if (unrepresentable || (*result && ixs_node_is_sentinel(*result))) {
+    *result = NULL;
+    return 0;
+  }
+  return *result ? 1 : -1;
+}
+
+static bool nested_remainder_candidate(ixs_node *term) {
+  return term &&
+         (term->tag == IXS_MOD ||
+          (term->tag == IXS_MUL && find_pow1_factor(term, IXS_MOD) >= 0));
+}
+
+static int nested_remainder_index_init(nested_remainder_index *index,
+                                       ixs_ctx *ctx, ixs_addterm *terms,
+                                       uint32_t nterms) {
+  size_t candidate_count = 0;
+  size_t entry_bytes;
+  size_t bucket_bytes;
+  uint32_t i;
+
+  memset(index, 0, sizeof(*index));
+  index->ctx = ctx;
+  for (i = 0; i < nterms; i++)
+    if (nested_remainder_candidate(terms[i].term))
+      candidate_count++;
+  if (candidate_count < 2u)
+    return 0;
+  if (!add_index_capacity(candidate_count, &index->capacity) ||
+      candidate_count > SIZE_MAX / sizeof(*index->entries) ||
+      index->capacity > SIZE_MAX / sizeof(*index->buckets))
+    return -1;
+  entry_bytes = candidate_count * sizeof(*index->entries);
+  bucket_bytes = index->capacity * sizeof(*index->buckets);
+  if (entry_bytes > SIZE_MAX - bucket_bytes)
+    return -1;
+  index->entries = ixs_arena_alloc(&ctx->scratch, entry_bytes + bucket_bytes,
+                                   sizeof(void *));
+  if (!index->entries)
+    return -1;
+  index->buckets = (size_t *)((unsigned char *)index->entries + entry_bytes);
+  memset(index->buckets, 0, index->capacity * sizeof(*index->buckets));
+
+  for (i = 0; i < nterms; i++) {
+    mod_term_parts parts;
+    ixs_node *scale;
+    size_t slot;
+    int status = mod_parts_from_addterm(ctx, &terms[i], &parts);
+    if (status < 0)
+      return -1;
+    if (status == 0)
+      continue;
+    status = nested_remainder_try_mul(ctx, terms[i].coeff, parts.outer, &scale);
+    if (status < 0)
+      return -1;
+    if (status == 0)
+      continue;
+    slot = nested_remainder_hash(parts.arg, parts.modulus) &
+           (index->capacity - 1u);
+    index->entries[index->count].node = parts.node;
+    index->entries[index->count].numerator = parts.arg;
+    index->entries[index->count].modulus = parts.modulus;
+    index->entries[index->count].scale = scale;
+    index->entries[index->count].term_index = i;
+    index->entries[index->count].next_plus_one = index->buckets[slot];
+    index->buckets[slot] = ++index->count;
+  }
+  return index->count >= 2u ? 1 : 0;
+}
+
+static int nested_remainder_compose(nested_remainder_index *index,
+                                    nested_remainder_entry *high,
+                                    uint32_t *low_term_index,
+                                    ixs_node **replacement) {
+  ixs_ctx *ctx = index->ctx;
+  ixs_node *numerator;
+  ixs_node *inner_modulus;
+  size_t slot;
+  size_t link;
+  ixs_quotient_parts_status parts_status;
+
+  *replacement = NULL;
+  if (high->node->u.binary.lhs->tag != IXS_FLOOR ||
+      !ixs_node_is_integer_valued(high->modulus))
+    return 0;
+  parts_status = simp_exact_quotient_parts(
+      ctx, high->node->u.binary.lhs->u.unary.arg, &numerator, &inner_modulus);
+  if (parts_status == IXS_QUOTIENT_PARTS_OOM)
+    return -1;
+  if (parts_status != IXS_QUOTIENT_PARTS_MATCH ||
+      !ixs_node_is_integer_valued(numerator) ||
+      !ixs_node_is_integer_valued(inner_modulus))
+    return 0;
+
+  slot =
+      nested_remainder_hash(numerator, inner_modulus) & (index->capacity - 1u);
+  for (link = index->buckets[slot]; link != 0u;
+       link = index->entries[link - 1u].next_plus_one) {
+    nested_remainder_entry *low = &index->entries[link - 1u];
+    ixs_node *expected_scale;
+    ixs_node *combined_modulus;
+    ixs_node *combined;
+    int status;
+    if (low->term_index == high->term_index || low->numerator != numerator ||
+        low->modulus != inner_modulus)
+      continue;
+    status = nested_remainder_try_mul(ctx, low->scale, inner_modulus,
+                                      &expected_scale);
+    if (status < 0)
+      return -1;
+    if (status == 0 || expected_scale != high->scale)
+      continue;
+    status = nested_remainder_try_mul(ctx, inner_modulus, high->modulus,
+                                      &combined_modulus);
+    if (status <= 0)
+      return status;
+    combined = simp_mod(ctx, numerator, combined_modulus);
+    if (!combined)
+      return -1;
+    if (ixs_node_is_sentinel(combined))
+      return 0;
+    status = nested_remainder_try_mul(ctx, low->scale, combined, replacement);
+    if (status <= 0)
+      return status;
+    *low_term_index = low->term_index;
+    return 1;
+  }
+  return 0;
+}
+
+/* Compose adjacent Euclidean digits in expected O(N) ADD work:
+ *
+ *   O*Mod(x,a) + O*a*Mod(floor(x/a),b) = O*Mod(x,a*b).
+ *
+ * On every defined source evaluation a and b are positive. Both radices and
+ * x are integer-valued so exact quotient decomposition preserves the shared
+ * carrier; they and the common scale O may still be symbolic or partial.
+ * Rebuilding through simp_add lets the same index reduce longer chains. */
+static int combine_nested_mod_remainders(ixs_ctx *ctx, ixs_addterm *terms,
+                                         uint32_t nterms, int64_t const_p,
+                                         int64_t const_q, ixs_node **result) {
+  ixs_query_transaction transaction;
+  ixs_arena_mark mark;
+  nested_remainder_index index;
+  size_t i;
+  int status;
+
+  *result = NULL;
+  ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
+  mark = ixs_arena_save(&ctx->scratch);
+  status = nested_remainder_index_init(&index, ctx, terms, nterms);
+  if (status > 0)
+    status = 0;
+  for (i = 0; status == 0 && i < index.count; i++) {
+    ixs_node *replacement;
+    ixs_node *one;
+    uint32_t low_term_index;
+    int matched = nested_remainder_compose(&index, &index.entries[i],
+                                           &low_term_index, &replacement);
+    if (matched < 0) {
+      status = -1;
+      break;
+    }
+    if (matched == 0)
+      continue;
+    one = ixs_node_int(ctx, 1);
+    if (!one) {
+      status = -1;
+      break;
+    }
+    terms[low_term_index].term = replacement;
+    terms[low_term_index].coeff = one;
+    terms[index.entries[i].term_index].term = NULL;
+    IXS_STAT_HIT(ctx);
+    *result = rebuild_add_from_terms(ctx, terms, nterms, const_p, const_q);
+    status = *result ? 1 : -1;
+    break;
+  }
+
+  ixs_arena_restore(&ctx->scratch, mark);
+  (void)ixs_query_transaction_finish(&transaction, false);
+  return status;
+}
+
 static ixs_node *rebuild_add_without_pair(ixs_ctx *ctx, ixs_node *add,
                                           uint32_t skip_a, uint32_t skip_b) {
   uint32_t i;
@@ -1413,21 +1650,6 @@ static size_t congruent_mod_key_hash(const ixs_node *modulus,
   return (size_t)mixed;
 }
 
-static bool congruent_mod_bucket_capacity(size_t count, size_t *capacity) {
-  size_t target;
-  size_t result = 16u;
-  if (count > SIZE_MAX / 2u)
-    return false;
-  target = count * 2u;
-  while (result < target) {
-    if (result > SIZE_MAX / 2u)
-      return false;
-    result *= 2u;
-  }
-  *capacity = result;
-  return true;
-}
-
 /* Index eligible terms by (modulus, rational coefficient).  Each term probes
  * only the chain for its exact opposite coefficient, so unrelated wide ADDs
  * remain linear without an arbitrary pair ceiling hiding later proofs. */
@@ -1454,7 +1676,7 @@ static ixs_node *cancel_congruent_mod_difference(ixs_ctx *ctx, ixs_bounds *bnds,
   }
   if (eligible < 2u)
     return add;
-  if (!congruent_mod_bucket_capacity(eligible, &bucket_capacity) ||
+  if (!add_index_capacity(eligible, &bucket_capacity) ||
       eligible > SIZE_MAX / sizeof(*entries) ||
       bucket_capacity > SIZE_MAX / sizeof(*buckets))
     return NULL;
@@ -4655,6 +4877,7 @@ static const ixs_rule cmp_rules[] = {
 /* Ad-hoc transforms tracked via IXS_STAT_HIT (not in rule tables). */
 static const char *extra_transforms[] = {
     "recognize_mod",
+    "combine_nested_mod_remainders",
     "cancel_floor_mod_pairs",
     "cancel_congruent_mod_difference",
     "cancel_equal_floor_difference",

@@ -4058,6 +4058,136 @@ static void test_floor_mod_cancel(void) {
   CHECK(ixs_node_tag(e) == IXS_ADD);
 }
 
+/* Consecutive Euclidean digits compose through symbolic integer radices and a
+ * shared symbolic scale. */
+static void test_nested_mod_remainder_composition(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *x = ixs_sym(ctx, "nested_remainder_x");
+  ixs_node *y = ixs_sym(ctx, "nested_remainder_y");
+  ixs_node *outer = ixs_sym(ctx, "nested_remainder_outer");
+  ixs_node *a_symbol = ixs_sym(ctx, "nested_remainder_a");
+  ixs_node *b_symbol = ixs_sym(ctx, "nested_remainder_b");
+  ixs_node *partial = ixs_floor(ctx, ixs_div(ctx, ixs_int(ctx, 1), outer));
+  ixs_node *three = ixs_int(ctx, 3);
+  ixs_node *five = ixs_int(ctx, 5);
+  ixs_node *low = ixs_mod(ctx, x, three);
+  ixs_node *high = ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, three)), five);
+  ixs_node *expected = ixs_mod(ctx, x, ixs_int(ctx, 15));
+  ixs_node *composed = ixs_add(ctx, low, ixs_mul(ctx, three, high));
+  ixs_node *scaled = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, -2), low),
+                             ixs_mul(ctx, ixs_int(ctx, -6), high));
+  ixs_node *rational_scaled =
+      ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 2, 3), low),
+              ixs_mul(ctx, ixs_int(ctx, 2), high));
+  ixs_node *symbolic_scale =
+      ixs_add(ctx, ixs_mul(ctx, outer, low),
+              ixs_mul(ctx, ixs_mul(ctx, outer, three), high));
+  ixs_node *partial_scale = ixs_div(ctx, ixs_int(ctx, 1), outer);
+  ixs_node *partial_scaled =
+      ixs_add(ctx, ixs_mul(ctx, partial_scale, low),
+              ixs_mul(ctx, ixs_mul(ctx, partial_scale, three), high));
+  ixs_node *symbolic_low = ixs_mod(ctx, x, a_symbol);
+  ixs_node *symbolic_high =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, a_symbol)), b_symbol);
+  ixs_node *bit0 = ixs_mod(ctx, x, ixs_int(ctx, 2));
+  ixs_node *bit1 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2))), ixs_int(ctx, 2));
+  ixs_node *bit2 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))), ixs_int(ctx, 2));
+  ixs_node *bits =
+      ixs_add(ctx, ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 2), bit1)),
+              ixs_mul(ctx, ixs_int(ctx, 4), bit2));
+  size_t errors = ixs_ctx_nerrors(ctx);
+  ixs_node *overflow_low = ixs_mod(ctx, x, ixs_int(ctx, INT64_MAX));
+  ixs_node *overflow_high =
+      ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, INT64_MAX))),
+              ixs_int(ctx, 2));
+  ixs_node *overflow = ixs_add(
+      ctx, overflow_low, ixs_mul(ctx, ixs_int(ctx, INT64_MAX), overflow_high));
+
+  CHECK(composed == expected);
+  CHECK(scaled == ixs_mul(ctx, ixs_int(ctx, -2), expected));
+  CHECK(rational_scaled == ixs_mul(ctx, ixs_rat(ctx, 2, 3), expected));
+  CHECK(symbolic_scale == ixs_mul(ctx, outer, expected));
+  CHECK(partial_scaled == ixs_mul(ctx, partial_scale, expected));
+  CHECK(ixs_add(ctx, symbolic_low, ixs_mul(ctx, a_symbol, symbolic_high)) ==
+        ixs_mod(ctx, x, ixs_mul(ctx, a_symbol, b_symbol)));
+  CHECK(ixs_node_tag(ixs_add(
+            ctx, ixs_mod(ctx, partial, three),
+            ixs_mul(ctx, three,
+                    ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, partial, three)),
+                            five)))) == IXS_ADD);
+  CHECK(bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
+
+  CHECK(ixs_node_tag(ixs_add(ctx, low, ixs_mul(ctx, ixs_int(ctx, 2), high))) ==
+        IXS_ADD);
+  CHECK(ixs_node_tag(ixs_add(ctx, ixs_mul(ctx, outer, low),
+                             ixs_mul(ctx, ixs_mul(ctx, y, three), high))) ==
+        IXS_ADD);
+  CHECK(ixs_node_tag(
+            ixs_add(ctx, low,
+                    ixs_mul(ctx, three,
+                            ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, y, three)),
+                                    five)))) == IXS_ADD);
+  CHECK(ixs_node_tag(
+            ixs_add(ctx, low,
+                    ixs_mul(ctx, three,
+                            ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, three)),
+                                    ixs_rat(ctx, 2, 3))))) == IXS_ADD);
+  CHECK(ixs_node_tag(ixs_add(
+            ctx, ixs_mod(ctx, x, ixs_rat(ctx, 3, 2)),
+            ixs_mul(ctx, ixs_rat(ctx, 3, 2),
+                    ixs_mod(ctx,
+                            ixs_floor(ctx, ixs_div(ctx, x, ixs_rat(ctx, 3, 2))),
+                            five)))) == IXS_ADD);
+  CHECK(ixs_node_tag(ixs_add(
+            ctx, ixs_mod(ctx, ixs_add(ctx, x, ixs_rat(ctx, 1, 2)), three),
+            ixs_mul(ctx, three,
+                    ixs_mod(ctx,
+                            ixs_floor(ctx, ixs_div(ctx,
+                                                   ixs_add(ctx, x,
+                                                           ixs_rat(ctx, 1, 2)),
+                                                   three)),
+                            five)))) == IXS_ADD);
+  CHECK(ixs_node_tag(ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 4), bit2))) ==
+        IXS_ADD);
+  CHECK(ixs_node_tag(overflow) == IXS_ADD);
+  CHECK(ixs_ctx_nerrors(ctx) == errors);
+}
+
+#ifdef IXS_TEST_INTERNAL
+static void test_nested_mod_remainder_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *x = ixs_sym(ctx, "nested_remainder_retry_x");
+  ixs_node *three = ixs_int(ctx, 3);
+  ixs_node *five = ixs_int(ctx, 5);
+  ixs_node *low = ixs_mod(ctx, x, three);
+  ixs_node *high = ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, three)), five);
+  ixs_node *scaled_high = ixs_mul(ctx, three, high);
+  ixs_node *expected = ixs_mod(ctx, x, ixs_int(ctx, 15));
+  size_t allowance = 4096u;
+  size_t allocations;
+  size_t budget;
+
+  ixs_arena_set_fail_after(scratch, allowance);
+  CHECK(ixs_add(ctx, low, scaled_high) == expected);
+  allocations = allowance - scratch->fail_after;
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  CHECK(allocations > 0u && allocations < allowance);
+  for (budget = 0; budget < allocations; budget++) {
+    ixs_arena_set_fail_after(scratch, budget);
+    CHECK(ixs_add(ctx, low, scaled_high) == NULL);
+    ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(ixs_add(ctx, low, scaled_high) == expected);
+  }
+  ixs_arena_set_fail_after(scratch, allocations);
+  CHECK(ixs_add(ctx, low, scaled_high) == expected);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_destroy(ctx);
+}
+#endif
+
 /* Exact floor-Mod cancellation is independent of the divisor domain. */
 static void test_floor_mod_cancel_symbolic(void) {
   ixs_ctx *ctx = get_ctx();
@@ -5176,6 +5306,7 @@ int main(void) {
   test_simplify_assumption_cache();
   test_substitution_failure_retry();
   test_floor_mod_partial_failure_retry();
+  test_nested_mod_remainder_failure_retry();
 #endif
   test_sentinel_propagation();
   test_nested_floor_ceil();
@@ -5208,6 +5339,7 @@ int main(void) {
   test_mod_difference_congruence();
   test_subs_power_overflow();
   test_floor_mod_cancel();
+  test_nested_mod_remainder_composition();
   test_floor_mod_cancel_symbolic();
   test_floor_drop_const_divinfo();
   test_floor_extract_divinfo();

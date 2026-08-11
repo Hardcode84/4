@@ -1013,6 +1013,11 @@ F*floor(E/m) + C*Mod(E, m)               → C*E + (F-C*m)*floor(E/m)
                      F/(C*m) is an exact rational greater than one,
                      and the residual stays a constant or one MUL
 
+(consecutive Euclidean digits, in simp_add)
+O*Mod(X,A) + O*A*Mod(floor(X/A),B)        → O*Mod(X,A*B)
+                     when X, A, and B are integer-valued and the quotient
+                     decomposition recovers the same X and A
+
 (bounds-aware ADD cancellation)
 c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
@@ -1022,6 +1027,17 @@ Exact floor/Mod cancellation is valid on every defined source evaluation. If
 the divisor is invalid, the source is poison and may refine to the replacement;
 domain-error detection is best effort. Partial cancellation still requires a
 positive integer literal because its residual algebra is not the exact identity.
+
+Consecutive-digit composition admits symbolic integer radices and a symbolic or
+partial common scale. A defined source already implies `A > 0` and `B > 0`, so
+the exact identity may refine the remaining domain to poison elsewhere. The
+product `A*B` uses checked optional arithmetic: an unrepresentable product is a
+no-match without a diagnostic, while allocation failure is propagated.
+Mod-bearing ADD terms are indexed by carrier and modulus at no more than 50%
+load, giving expected O(N) work. Rebuilding after one match composes complete
+digit chains of any length through the same rule. Wrong coefficients, different
+carriers, noninteger radices or carriers, incomplete chains, and quotient
+normalizations that do not recover the original carrier remain unchanged.
 
 Refinement happens when a node is constructed. Thus symbolic `k/k` becomes
 `1`, and substituting `k = 0` later leaves `1`; directly constructing `0/0`

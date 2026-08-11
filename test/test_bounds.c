@@ -10489,8 +10489,8 @@ static void test_public_exact_divide_basic(void) {
 
 static void test_public_exact_divide_fact_integer_bitwise_factor(void) {
   static const char integer_xor[] =
-      "xor(1/8*(8*Mod(raw, 2) + 32*Mod(floor(1/4*raw), 2) + "
-      "16*Mod(floor(1/2*raw), 2)), Mod(floor(1/16*raw), 8))";
+      "xor(1/8*(8*Mod(raw, 2) + 32*Mod(floor(1/4*raw), 2)), "
+      "Mod(floor(1/16*raw), 8))";
   static const char noninteger_xor[] = "xor(1/8*raw, Mod(floor(1/16*raw), 8))";
   ixs_ctx *ctx = ixs_ctx_create();
   const ixs_node *integer =
