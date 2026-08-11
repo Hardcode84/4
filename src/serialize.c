@@ -420,8 +420,7 @@ static bool serial_validate_assoc(ixs_ctx *ctx, const ixs_node *node) {
     equal_run++;
     if (node->tag != IXS_XOR)
       return serial_error(ctx, "idempotent associative node has duplicates");
-    if (equal_run > 2u || (equal_run == 2u && ixs_node_is_integer_valued(arg) &&
-                           ixs_node_is_known_total(arg)))
+    if (equal_run > 1u)
       return serial_error(ctx, "XOR node has reducible duplicates");
   }
   return true;
@@ -1404,15 +1403,6 @@ static ixs_node *decode_build_pw(ixs_ctx *ctx, const decode_node *node,
   for (i = 0; i < node->u.pw.ncases; i++) {
     values[i] = built[node->u.pw.cases[i].value];
     conds[i] = built[node->u.pw.cases[i].cond];
-  }
-  if (node->u.pw.ncases == 2u && values[0] == values[1] &&
-      ixs_node_is_known_true(conds[1])) {
-    ixs_pwcase carrier[2];
-    carrier[0].value = values[0];
-    carrier[0].cond = conds[0];
-    carrier[1].value = values[1];
-    carrier[1].cond = conds[1];
-    return ixs_node_pw(ctx, 2u, carrier);
   }
   return simp_pw(ctx, node->u.pw.ncases, values, conds);
 }

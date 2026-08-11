@@ -188,6 +188,58 @@ static void test_expand_sentinel(void) {
 }
 
 #ifndef IXS_TEST_AMALGAMATION
+static void test_expand_skips_dead_sentinel_branch(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "dead_sentinel_x");
+  ixs_pwcase cases[2];
+  ixs_node *expr;
+
+  cases[0].value = ixs_mod(ctx, x, ixs_int(ctx, 0));
+  cases[0].cond = ixs_false(ctx);
+  cases[1].value = ixs_int(ctx, 42);
+  cases[1].cond = ixs_true(ctx);
+  expr = ixs_node_pw(ctx, 2, cases);
+  CHECK(expr != NULL && ixs_node_tag(expr) == IXS_PIECEWISE);
+  CHECK(ixs_expand(ctx, expr) == ixs_int(ctx, 42));
+
+  {
+    ixs_node *condition = ixs_cmp(ctx, x, IXS_CMP_GT, ixs_int(ctx, 0));
+    ixs_pwcase branch_error_cases[2];
+    ixs_pwcase condition_error_cases[2];
+    ixs_pwcase value_error_cases[2];
+    ixs_node *branch_error;
+    ixs_node *condition_error;
+    ixs_node *value_error;
+
+    branch_error_cases[0].value = cases[0].value;
+    branch_error_cases[0].cond = condition;
+    branch_error_cases[1].value = ixs_int(ctx, 42);
+    branch_error_cases[1].cond = ixs_true(ctx);
+    condition_error_cases[0].value = ixs_int(ctx, 42);
+    condition_error_cases[0].cond = condition;
+    condition_error_cases[1].value = ixs_int(ctx, 7);
+    condition_error_cases[1].cond = cases[0].value;
+    value_error_cases[0].value = ixs_int(ctx, 42);
+    value_error_cases[0].cond = condition;
+    value_error_cases[1].value = cases[0].value;
+    value_error_cases[1].cond = ixs_true(ctx);
+    branch_error = ixs_expand(ctx, ixs_node_pw(ctx, 2, branch_error_cases));
+    condition_error =
+        ixs_expand(ctx, ixs_node_pw(ctx, 2, condition_error_cases));
+    value_error = ixs_expand(ctx, ixs_node_pw(ctx, 2, value_error_cases));
+    CHECK(ixs_node_tag(branch_error) == IXS_PIECEWISE);
+    CHECK(condition_error == cases[0].value);
+    CHECK(ixs_node_tag(value_error) == IXS_PIECEWISE);
+    CHECK(ixs_subs(ctx, branch_error, x, ixs_int(ctx, 1)) == cases[0].value);
+    CHECK(ixs_subs(ctx, branch_error, x, ixs_int(ctx, -1)) == ixs_int(ctx, 42));
+    CHECK(ixs_subs(ctx, value_error, x, ixs_int(ctx, 1)) == ixs_int(ctx, 42));
+    CHECK(ixs_subs(ctx, value_error, x, ixs_int(ctx, -1)) == cases[0].value);
+  }
+  ixs_ctx_destroy(ctx);
+}
+#endif
+
+#ifndef IXS_TEST_AMALGAMATION
 static void test_expand_cache(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_session other;
@@ -502,6 +554,7 @@ int main(void) {
   test_expand_sentinel();
   test_expand_associative_nodes();
 #ifndef IXS_TEST_AMALGAMATION
+  test_expand_skips_dead_sentinel_branch();
   test_expand_cache();
   test_expand_cache_failure_semantics();
   test_expand_deep_iterative();

@@ -412,12 +412,12 @@ static ixs_node *parse_atom(parser *p) {
   if (match_str(p, "floor")) {
     result = parse_func_1(p, "floor");
     depth_pop(p);
-    return result ? simp_floor_strict(p->ctx, result) : NULL;
+    return result ? simp_floor(p->ctx, result) : NULL;
   }
   if (match_str(p, "ceiling")) {
     result = parse_func_1(p, "ceiling");
     depth_pop(p);
-    return result ? simp_ceil_strict(p->ctx, result) : NULL;
+    return result ? simp_ceil(p->ctx, result) : NULL;
   }
   if (match_str(p, "Trunc")) {
     result = parse_func_1(p, "Trunc");
@@ -425,7 +425,7 @@ static ixs_node *parse_atom(parser *p) {
     return result ? simp_trunc(p->ctx, result) : NULL;
   }
   if (match_str(p, "Mod")) {
-    result = parse_func_2(p, "Mod", simp_mod_strict);
+    result = parse_func_2(p, "Mod", simp_mod);
     depth_pop(p);
     return result;
   }
@@ -520,7 +520,7 @@ static ixs_node *parse_term(parser *p) {
       ixs_node *right = parse_unary(p);
       if (!right)
         return NULL;
-      left = simp_mul_strict(p->ctx, left, right);
+      left = simp_mul(p->ctx, left, right);
       if (!left)
         return NULL;
     } else if (peek(p) == '/') {
@@ -528,7 +528,7 @@ static ixs_node *parse_term(parser *p) {
       ixs_node *right = parse_unary(p);
       if (!right)
         return NULL;
-      left = simp_div_strict(p->ctx, left, right);
+      left = simp_div(p->ctx, left, right);
       if (!left)
         return NULL;
     } else {
@@ -550,7 +550,7 @@ static ixs_node *parse_arith_expr(parser *p) {
       ixs_node *right = parse_term(p);
       if (!right)
         return NULL;
-      left = simp_add_strict(p->ctx, left, right);
+      left = simp_add(p->ctx, left, right);
       if (!left)
         return NULL;
     } else if (peek(p) == '-') {
@@ -558,7 +558,7 @@ static ixs_node *parse_arith_expr(parser *p) {
       ixs_node *right = parse_term(p);
       if (!right)
         return NULL;
-      left = simp_sub_strict(p->ctx, left, right);
+      left = simp_sub(p->ctx, left, right);
       if (!left)
         return NULL;
     } else {

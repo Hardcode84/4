@@ -617,7 +617,7 @@ static void test_depth_limit_covers_signed_and_condition_parens(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_parser_preserves_erased_domain(void) {
+static void test_parser_uses_poison_refinement(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *expr;
   ixs_node *k;
@@ -626,11 +626,10 @@ static void test_parser_preserves_erased_domain(void) {
   if (!ctx)
     return;
   expr = ixs_parse_expr(ctx, "K/(K/32)", 8);
-  CHECK(expr && ixs_node_tag(expr) == IXS_PIECEWISE);
-  CHECK(expr && ixs_node_pw_value(expr, 0) == ixs_int(ctx, 32));
+  CHECK(expr == ixs_int(ctx, 32));
   k = ixs_sym(ctx, "K");
   invalid = ixs_subs(ctx, expr, k, ixs_int(ctx, 0));
-  CHECK(ixs_is_domain_error(invalid));
+  CHECK(invalid == ixs_int(ctx, 32));
   ixs_ctx_destroy(ctx);
 }
 
@@ -650,7 +649,7 @@ int main(void) {
   test_signed_wrap64_roundtrip();
   test_negation();
   test_depth_limit_covers_signed_and_condition_parens();
-  test_parser_preserves_erased_domain();
+  test_parser_uses_poison_refinement();
 
   printf("test_parser: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;

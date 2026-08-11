@@ -648,7 +648,7 @@ static void test_truncating_remainder_intersects_explicit_range(void) {
 
   CHECK(ixs_facts_assume_pred(disjoint, d_is_four));
   CHECK(ixs_facts_assume_range(disjoint, remainder, &exact_four));
-  CHECK(test_ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(disjoint, remainder_is_four) == IXS_CHECK_FALSE);
   CHECK(!test_ixs_range_facts(disjoint, remainder, &range));
 
   ixs_ctx_destroy(ctx);

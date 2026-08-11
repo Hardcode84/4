@@ -8153,12 +8153,12 @@ static void test_public_predicate_tree_query(void) {
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_check_predicate_facts(partial, both) == IXS_CHECK_UNKNOWN);
 
-  CHECK(ixs_node_tag(guarded_false) == IXS_AND);
-  CHECK(ixs_node_tag(guarded_true) == IXS_OR);
+  CHECK(ixs_node_is_zero(guarded_false));
+  CHECK(ixs_node_is_known_true(guarded_true));
   CHECK(test_ixs_check_predicate_facts(no_domain, guarded_false) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_FALSE);
   CHECK(test_ixs_check_predicate_facts(no_domain, guarded_true) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_facts_assume_pred(defined,
                               ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
   CHECK(test_ixs_check_predicate_facts(defined, guarded_false) ==
@@ -11833,9 +11833,9 @@ static void test_associative_constructor_oom(void) {
   CHECK(ixs_xor_many(ctx, 2, constants) == ixs_int(ctx, 3));
 
   ixs_arena_set_fail_after(&ctx->arena, 0);
-  CHECK(ixs_and(ctx, partial, minus_one) == NULL);
+  CHECK(ixs_and(ctx, partial, minus_one) == partial);
   ixs_arena_set_fail_after(&ctx->arena, IXS_ARENA_FAILURE_DISABLED);
-  CHECK(ixs_node_tag(ixs_and(ctx, partial, minus_one)) == IXS_AND);
+  CHECK(ixs_and(ctx, partial, minus_one) == partial);
 
   ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
   CHECK(ixs_is_domain_error(ixs_pw(ctx, 0, NULL, NULL)));

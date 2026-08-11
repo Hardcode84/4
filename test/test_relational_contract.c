@@ -721,7 +721,7 @@ static void test_relational_totality_predicate_contract(void) {
 
   ixs_ctx_clear_errors(ctx);
   errors = ixs_ctx_nerrors(ctx);
-  CHECK(test_ixs_check_predicate_facts(negative, total) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(negative, total) == IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
   CHECK(test_ixs_check_predicate_facts(positive, total) == IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);

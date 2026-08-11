@@ -1353,6 +1353,7 @@ static void test_compound_sentinel_rejected_on_serialize(void) {
   CHECK(!serialize_to_buffer(&s, bad, &buf));
   CHECK(buf.len == 0);
   CHECK(ixs_session_nerrors(&s) == 1);
+
   if (ixs_session_nerrors(&s) != 0)
     CHECK(strstr(ixs_session_error(&s, 0), "sentinel child") != NULL);
 
@@ -1414,6 +1415,15 @@ static void test_noncanonical_assoc_rejected_on_serialize(void) {
   CHECK(ixs_session_nerrors(&s) == 1);
 
   args[0] = rat;
+  args[1] = x;
+  bad = ixs_node_assoc(ctx, IXS_XOR, 2, args);
+  CHECK(bad != NULL);
+  ixs_session_clear_errors(&s);
+  CHECK(!serialize_to_buffer(&s, bad, &buf));
+  CHECK(buf.len == 0);
+  CHECK(ixs_session_nerrors(&s) == 1);
+
+  args[0] = x;
   args[1] = x;
   bad = ixs_node_assoc(ctx, IXS_XOR, 2, args);
   CHECK(bad != NULL);
@@ -1559,7 +1569,7 @@ static void test_node_limit_rejected_without_pollution(void) {
   destroy_session(ctx, &s);
 }
 
-static void test_roundtrip_preserves_erased_domain(void) {
+static void test_roundtrip_uses_poison_refinement(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
   byte_buffer buf = {0};
@@ -1572,12 +1582,11 @@ static void test_roundtrip_preserves_erased_domain(void) {
   buf.fail_after = (size_t)-1;
   k = ixs_sym(&s, "K");
   expr = ixs_div(&s, k, ixs_div(&s, k, ixs_int(&s, 32)));
-  CHECK(expr && ixs_node_tag(expr) == IXS_PIECEWISE);
+  CHECK(expr == ixs_int(&s, 32));
   CHECK(serialize_to_buffer(&s, expr, &buf));
   decoded = deserialize_from_buffer(&s, &buf);
   CHECK(decoded == expr);
-  CHECK(ixs_is_domain_error(ixs_subs(&s, decoded, k, ixs_int(&s, 0))));
-  ixs_session_clear_errors(&s);
+  CHECK(ixs_subs(&s, decoded, k, ixs_int(&s, 0)) == ixs_int(&s, 32));
 
   {
     ixs_node *t0 = ixs_sym(&s, "t0");
@@ -1585,7 +1594,7 @@ static void test_roundtrip_preserves_erased_domain(void) {
     ixs_node *modulus = ixs_div(&s, k, ixs_int(&s, 32));
     ixs_node *multiple = ixs_mul(&s, ixs_int(&s, 8), ixs_mul(&s, k, t1));
     expr = ixs_mod(&s, ixs_add(&s, t0, multiple), modulus);
-    CHECK(expr && ixs_node_tag(expr) == IXS_PIECEWISE);
+    CHECK(expr && ixs_node_tag(expr) == IXS_MOD);
     CHECK(serialize_to_buffer(&s, expr, &buf));
     decoded = deserialize_from_buffer(&s, &buf);
     CHECK(decoded == expr);
@@ -1617,7 +1626,7 @@ int main(void) {
 #endif
   test_nonpositive_mod_rejected_on_deserialize();
   test_node_limit_rejected_without_pollution();
-  test_roundtrip_preserves_erased_domain();
+  test_roundtrip_uses_poison_refinement();
   if (failures) {
     fprintf(stderr, "%d serialize test(s) failed\n", failures);
     return 1;

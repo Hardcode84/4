@@ -2245,6 +2245,35 @@ def test_cancel_floor_mod_pairs_shared_outer() -> None:
     assert ixsimpl.same_node(wide.simplify(), unrelated + expected)
 
 
+def test_exact_floor_mod_refines_poison_before_child_rewrite() -> None:
+    ctx = ixsimpl.Context()
+    x, k, scale, unrelated = (
+        ctx.sym("poison_floor_mod_x"),
+        ctx.sym("poison_floor_mod_k"),
+        ctx.sym("poison_floor_mod_scale"),
+        ctx.sym("poison_floor_mod_unrelated"),
+    )
+    outer = 3 * scale
+    source = unrelated + outer * k * ixsimpl.floor(x / k) + outer * (x % k)
+    expected = unrelated + outer * x
+    zero = ctx.eq(k, 0)
+    negative = ctx.eq(k, -1)
+
+    assert source.simplify(assumptions=[zero]) == expected
+    assert source.simplify(assumptions=[negative]) == expected
+    assert source.subs({k: 0}) == expected
+    assert source.subs({k: -1}) == expected
+
+    facts = ctx.facts()
+    facts.assume(zero)
+    assert source.simplify(facts=facts) == expected
+    batch = [source, source]
+    ctx.simplify_batch(batch, facts=facts)
+    assert batch == [expected, expected]
+
+    assert (x / k).simplify(assumptions=[zero]).is_domain_error
+
+
 @given(
     m=st.integers(min_value=2, max_value=32),
     denominator=st.integers(min_value=1, max_value=4),

@@ -130,13 +130,19 @@ reusable session.
 
 Node construction and simplification are **one logical layer**: every
 constructor (e.g., `ixs_add`, `ixs_floor`) applies canonicalization rules
-before hash-consing. Public, parser, expansion, and substitution entry points
-also preserve the domain of every eagerly evaluated source operand. When a
-canonical rewrite removes a possibly partial operand, the source boundary
-retains that exact obligation in a two-arm Piecewise carrier whose values are
-identical. `ixs_simplify()` runs an additional top-down pass that uses
-assumptions to discharge the carrier or return a domain error when the
-obligation is false.
+before hash-consing. Every rewrite is a poison refinement: wherever the source
+has a defined value, the replacement has the same value; where the source is
+undefined, the replacement may be any value. Constructors, parsing, expansion,
+substitution, ordinary simplification, and fact-backed simplification all use
+this contract. Domain diagnostics are best effort and never block an exact
+refinement. Public boundaries still reject malformed input, wrong ownership,
+and operations that are immediately known invalid; sentinels and transport
+failures remain explicit values and are not latent poison.
+
+`ixs_simplify()` runs an additional top-down pass that uses assumptions for
+bounds-dependent refinements. A conditional algebraic rewrite still requires
+its stated preconditions: poison permits replacing an undefined source, not
+changing a defined source value.
 
 **Implementation dependency split**: Public constructors (in `ctx.c`) call
 rule functions (in `simplify.c`), which call internal node allocators (in
@@ -554,15 +560,13 @@ is retained. Every association and permutation of the same operands therefore
 has the same node identity.
 
 MAX/MIN/AND/OR are idempotent. XOR is not: equal operands are reduced by
-parity, and constants are folded together. Bitwise reductions are strict over
-the integer domain; a rewrite that removes the last occurrence of an operand
-must also prove that operand defined and integer-valued. AND/OR absorbers keep
-unproved domain witnesses, and an unproved even XOR run keeps two copies.
+parity, and constants are folded together. Bitwise reductions use the same
+poison-refinement rule as arithmetic. If an operand is partial or non-integral,
+the source operation is undefined there, so parity, complement, absorber, and
+identity rewrites do not retain it merely to preserve a diagnostic.
 
 Empty AND, OR, and XOR use identities `-1`, `0`, and `0`; empty MAX/MIN is an
-error. A single MAX/MIN operand returns directly. A single bitwise operand does
-so only when its integer-domain obligation is proven; otherwise the identity is
-kept as a two-operand guard.
+error. A single operand returns directly.
 
 The binary C functions remain convenience wrappers. Producers that already
 have a list -- parser, import, deserializer, bindings, rewrite, and substitution
@@ -734,8 +738,7 @@ The parser collects each associative chain or argument list and calls its
 ### Layer 4: Simplification Engine
 
 Simplification is **table-driven**. Each node type has an ordered array of
-`ixs_rule` entries (function pointer, name, needs-bounds flag,
-erases-domain flag). The
+`ixs_rule` entries (function pointer, name, needs-bounds flag). The
 `try_rules()` dispatch walks the array, tries each rule, records an
 `IXS_STATS` hit when one fires, and returns. Rules that require bounds
 are skipped when `bnds == NULL`.
@@ -748,19 +751,16 @@ optional `ixs_bounds *` and calls `try_rules(ctx, bnds, ...)` so
 bounds-dependent rules also fire. `rewrite_impl` is just:
 ```c
 case IXS_FLOOR:
-    return simp_floor_bnds_strict(ctx, bnds, rewrite(ctx, arg, ...));
+    return simp_floor_bnds(ctx, bnds, rewrite(ctx, arg, ...));
 case IXS_TRUNC:
     return simp_trunc_bnds(ctx, bnds, rewrite(ctx, arg, ...));
 ```
 There is one rule table per type, used by both construction and rewriting.
 
-Internal proof builders use the canonical constructors directly. Source
-rebuilders use the strict variants, which add a carrier only when the selected
-rule or arithmetic cancellation actually removes a non-total child. A carrier
-has the raw form `Piecewise((value, witness), (value, True))`; first-match
-evaluation forces `witness` without changing `value`. Multiple obligations are
-combined in one eager comparison condition. Import copies this ordinary DAG
-shape, and serialization preserves it rather than re-running the erasing rule.
+All producers use the same canonical constructors. There is no strict variant
+and no synthetic Piecewise domain carrier. Import and deserialization validate
+their external representation, then preserve an accepted DAG's structural
+semantics; rebuilding or simplifying it uses the same refinement contract.
 
 **Termination guarantee**: The top-down rewrite pass in `ixs_simplify()` runs
 a fixed-point loop with a configurable iteration limit (default 64). Each
@@ -933,15 +933,18 @@ provably divisible; any selected value then preserves the divisor.
 
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
-    when every ti is integer-valued, D is symbolic, all terms share D^{-1},
-    and C' = C - (C mod gcd(g, L)) where g = gcd of base numerator
-    coefficients and L = lcm of rational coefficient denominators.
+    when every ti and D are integer-valued, D is proven nonnegative, D is
+    symbolic, all terms share D^{-1}, and C' = C - (C mod gcd(g, L)) where
+    g = gcd of base numerator coefficients and L = lcm of rational coefficient
+    denominators. A defined source division excludes D = 0.
     (Proof: N = sum(ni*ti) is always a multiple of g; adding
     r < gcd(g, L) to N cannot push past the next floor boundary.)
 ```
 
 The symbolic-denominator constant-drop rule is implemented in
-`floor_drop_const_sym`, also registered in `floor_rules[]`.
+`floor_drop_const_sym`, also registered in `floor_rules[]`. Nonnegativity and
+integrality are semantic preconditions: negative and positive fractional
+denominators have defined counterexamples.
 
 `round_extract_mul_add` also distributes `floor(outer * (const + terms))`
 when `outer` is non-integer and the ADD has a nonzero constant, even if no
@@ -1020,6 +1023,11 @@ Exact floor/Mod cancellation is valid on every defined source evaluation. If
 the divisor is invalid, the source is poison and may refine to the replacement;
 domain-error detection is best effort. Partial cancellation still requires a
 positive integer literal because its residual algebra is not the exact identity.
+
+Refinement happens when a node is constructed. Thus symbolic `k/k` becomes
+`1`, and substituting `k = 0` later leaves `1`; directly constructing `0/0`
+still produces a domain-error sentinel. Both results satisfy the refinement
+contract, and no later pass recreates an operand already removed.
 
 Bounds-aware elimination accepts symbolic integer moduli: proofs of `m > 0`,
 `x >= 0`, and `x-m < 0` reduce `Mod(x,m)` to `x`. Interval propagation also
@@ -1142,11 +1150,13 @@ forces `ceil(M/256) >= 1`, so `floor(C/32)` must be zero.  This lets the
 branch value `floor(-32*floor(C/32)*...) = floor(0) = 0` collapse,
 eliminating the entire Piecewise when the branch matches the default.
 
-**Sentinel handling**: Sentinels do not eagerly propagate through Piecewise
-(see Error Model). A sentinel value in a branch whose condition folds to
-`False` is silently dropped. A sentinel condition in an unreachable branch
-(preceded by a `True` condition) is silently dropped. Only when the sentinel
-is in the "live" path does the Piecewise become sentinel.
+**Sentinel handling**: Value sentinels do not propagate through Piecewise (see
+Error Model). A branch whose condition folds to `False` is silently dropped.
+When at least one value branch is not poison, a sentinel value under an
+unresolved condition remains contained in the Piecewise. Once folding selects
+that branch, the sentinel propagates. If all value branches are poison, the
+whole expression is poison. A sentinel condition still propagates because
+branch selection itself is poisoned.
 
 #### 4.7 Max / Min Rules
 
@@ -1178,8 +1188,8 @@ k*xor(a, b + 2^n) - k*xor(a, b)
 ```
 
 Parity reduction replaces the old nested-cancellation rule and handles the
-whole flat list in one pass. The strict-domain guard in the representation
-section applies when an even run would disappear.
+whole flat list in one pass. An even run disappears under the common poison-
+refinement contract.
 
 The known-bit query merges exact interval facts and propagates low 64-bit
 facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
@@ -1232,13 +1242,13 @@ a > b   → (a - b) > 0   (normalize to compare against 0)
 ```
 
 Then apply constant folding when `a - b` reduces to a constant, or bound
-analysis when the sign of `a - b` is provable. Identity folding,
-normalization, and bounds resolution require the compared operands to be
-defined; otherwise the comparison retains the domain witness. Normalization
-is opportunistic: if the exact `a - b` rational form exceeds the node
-representation, the original structurally valid comparison is retained and
-the failed fold's diagnostic is discarded. Operand errors and allocation
-failure still propagate.
+analysis when the sign of `a - b` is provable. Identity folding, normalization,
+and bounds resolution are poison refinements: defined source evaluations keep
+the same truth value, while an undefined comparison may refine to either truth
+value. Normalization is opportunistic: if the exact `a - b` rational form
+exceeds the node representation, the original structurally valid comparison
+is retained and the failed fold's diagnostic is discarded. Operand errors and
+allocation failure still propagate.
 
 ### Layer 5: Bound Analysis (Phase 4)
 
@@ -2458,17 +2468,23 @@ never masked by anything.
 Only the operation that **originates** the error appends to the error list.
 Propagation through downstream constructors is silent.
 
-**Piecewise exception** — sentinels do NOT eagerly propagate through
-`ixs_pw`. A Piecewise branch may contain a sentinel value or sentinel
-condition without poisoning the entire expression, similar to LLVM's poison
-semantics in `select`:
+These sentinels report failures already detected at a public construction or
+validation boundary. They are not the same as a symbolic expression that may
+be undefined for some later substitution. Explicit sentinels propagate; latent
+undefinedness is poison and may disappear through a valid refinement.
+
+**Piecewise exception** — sentinel values do not eagerly propagate through
+`ixs_pw`. A Piecewise branch may contain a sentinel value without poisoning
+the entire expression, similar to LLVM's poison semantics in `select`:
 
 - If a condition folds to `False`, the branch is dropped — sentinel in its
   value disappears harmlessly.
-- If a condition folds to `True`, the branch value (sentinel or not) becomes
-  the result.
-- If the first non-eliminated condition is a sentinel, the Piecewise cannot
-  determine which branch to take and becomes that sentinel.
+- If a condition folds to `True`, its branch value becomes the result,
+  including a sentinel value when no earlier unresolved branch remains.
+- A sentinel condition always propagates, even after an earlier constant-true
+  branch. Branch selection itself is poisoned.
+- Sentinel branch values propagate when selected or when every value branch is
+  a sentinel. Otherwise an unresolved sentinel arm stays inside the Piecewise.
 - `Piecewise((sentinel, x > 0), (42, True))` with `x = -1` simplifies to
   `42`, not sentinel.
 
@@ -4211,13 +4227,14 @@ not a restart from Phase 1.
 - Canonical Add/Mul construction with flattening and term collection
 - Basic constant folding
 - SymPy-format printer
-- Generate `test/corpus_expected.txt` by running SymPy on all 615 corpus
+- Seed `test/corpus_expected.txt` by running SymPy on all 615 corpus
   expressions (one-time script `scripts/gen_expected.py`, checked in). The
   script reads `corpus.txt` and `corpus_assumptions.txt`, applies the
   `Mod(p, q, evaluate=False)` workaround (see SymPy #28744 section), and
   writes one simplified expression per line. The SymPy version is pinned in
-  `scripts/requirements-gen.txt` (e.g., `sympy==1.14.0`). This is the ground
-  truth for all subsequent phases.
+  `scripts/requirements-gen.txt` (e.g., `sympy==1.14.0`). Audited canonical
+  refinements may update individual checked-in lines when SymPy retains an
+  equivalent expression or does not model poison refinement.
 
 **Milestone**: Can construct `3*x + 2*x + 1` and get `5*x + 1`. Corpus
 expected outputs are available for comparison.
@@ -4272,8 +4289,9 @@ met (< 50ms total).
 ## Testing Strategy
 
 1. **Unit tests**: Each rule in isolation (test_rational, test_simplify).
-2. **Corpus test**: Parse all 615 expressions, simplify, verify output matches
-   SymPy's output (or is provably equivalent via random evaluation).
+2. **Corpus test**: Parse all 615 expressions, simplify, and verify the exact
+   checked-in canonical outputs. The initial outputs come from SymPy; audited
+   poison refinements and branch-local proofs may be more canonical.
 
    **Corpus file format** — `corpus.txt` uses one expression per non-blank
    line, prefixed with timing info: `simplify time: X.XXXXs: <expression>`.
@@ -4306,9 +4324,8 @@ met (< 50ms total).
    and the `corpus_expected.txt` generation script. Using a shared
    assumption file ensures SymPy and ixsimpl see identical constraints.
 3. **Equivalence oracle**: For any simplified expression `s` from input `e`,
-   verify `s == e` by substituting random values for all variables and
-   checking numerical equality. This catches bugs without requiring
-   exact output matching.
+   substitute random values for all variables and check equality wherever `e`
+   is defined. This catches bugs without requiring exact output matching.
 4. **Negative/error-path tests**: Verify correct behavior for invalid inputs:
    - Parse errors: `"foo bar +"` → `IXS_PARSE_ERROR`
    - Depth limit: deeply nested input → `IXS_PARSE_ERROR`
@@ -4322,7 +4339,7 @@ met (< 50ms total).
    - `ixs_is_error` true for both, `ixs_is_parse_error` / `ixs_is_domain_error` specific
 5. **Associative tests**: Every permutation and parenthesization of
    MAX/MIN/XOR/AND/OR has the same pointer; XOR parity, AND/OR idempotence,
-   strict-domain witnesses, and version rejection are covered directly.
+   poison refinement, and version rejection are covered directly.
 6. **Fuzz testing**: Hypothesis-based (see below).
 7. **Benchmark**: Time all 615 expressions, compare against SymPy baseline.
    `bench_corpus --batch` measures shared-cache batch simplification;
