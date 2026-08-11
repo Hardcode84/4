@@ -527,11 +527,13 @@ const ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r);
 
 /* --- Output ------------------------------------------------------------ */
 
-/* Print in SymPy-compatible syntax.  Returns bytes written (excl. NUL).
- * Output is truncated if bufsize is insufficient. */
+/* Print in SymPy-compatible syntax. Returns bytes written (excl. NUL), or
+ * SIZE_MAX if the private traversal arena cannot grow. Output is truncated if
+ * bufsize is insufficient; traversal failure clears a nonempty buffer. */
 size_t ixs_print(const ixs_node *expr, char *buf, size_t bufsize);
 
-/* Print in C syntax where possible; falls back to SymPy style. */
+/* Print in C syntax where possible; falls back to SymPy style. The return and
+ * failure contract is identical to ixs_print. */
 size_t ixs_print_c(const ixs_node *expr, char *buf, size_t bufsize);
 
 /* --- Introspection ----------------------------------------------------- */

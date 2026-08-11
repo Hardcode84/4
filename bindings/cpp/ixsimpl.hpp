@@ -201,8 +201,11 @@ public:
     if (!node_)
       return std::string();
     size_t n = ixs_print(node_, nullptr, 0);
+    if (n == SIZE_MAX)
+      throw std::bad_alloc();
     std::string s(n + 1, '\0');
-    ixs_print(node_, s.data(), n + 1);
+    if (ixs_print(node_, s.data(), n + 1) == SIZE_MAX)
+      throw std::bad_alloc();
     s.resize(n);
     return s;
   }
@@ -210,8 +213,11 @@ public:
     if (!node_)
       return std::string();
     size_t n = ixs_print_c(node_, nullptr, 0);
+    if (n == SIZE_MAX)
+      throw std::bad_alloc();
     std::string s(n + 1, '\0');
-    ixs_print_c(node_, s.data(), n + 1);
+    if (ixs_print_c(node_, s.data(), n + 1) == SIZE_MAX)
+      throw std::bad_alloc();
     s.resize(n);
     return s;
   }

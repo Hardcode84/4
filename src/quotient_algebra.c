@@ -461,8 +461,8 @@ static bool qa_contains_atom(qa_query *query, ixs_node *expr) {
 }
 
 /* The row engine adds a fixed number of O(T) scans. Simplification,
- * substitution, and bounds queries keep their existing reachable-DAG costs,
- * including the rewrite's expression-depth recursion. This component adds no
+ * substitution, and bounds queries keep their existing reachable-DAG costs;
+ * their input-depth traversal is scratch-backed. This component adds no
  * recursive call edge. */
 static ixs_check_result qa_check_impl(qa_query *query, ixs_node *lhs,
                                       ixs_node *rhs) {

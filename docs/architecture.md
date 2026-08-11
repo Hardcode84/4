@@ -67,10 +67,12 @@ or subtracts pointers from unrelated allocations.
 **Depth limit**: The parser enforces a recursion depth limit (default 256) for
 nested grammar recursion. Long chains of unary `-` and predicate `~` prefixes
 are consumed iteratively. Trees built programmatically via the API have no
-depth limit. The simplifier, printer, and `ixs_subs` traverse the DAG
-recursively. `ixs_subs` uses a 256-slot direct-mapped memo cache (4 KB on the
-stack) keyed by node pointer to avoid exponential re-traversal of shared
-subexpressions; collisions only cause redundant work, never incorrect results.
+depth limit. Simplification and substitution use growable session-scratch frame
+stacks. Printing has no session argument, so it owns a private transient arena
+and reports `SIZE_MAX` if its action stack cannot grow. Structural integrality
+normally reads the canonical node-property bit in O(1); its internal raw-node
+fallback uses a private transient work stack and returns conservative false on
+allocation failure. None of these consumers ties input depth to the C stack.
 Successful deterministic node transforms use a context-local open-addressed
 cache keyed by source-node identity. Current slots memoize top-level expansion,
 removal of an ADD constant for shifted bounds, proportional ADD primitives,
@@ -82,9 +84,8 @@ Successful results survive session reset; failures and sentinels are not
 cached. Cache-allocation failure leaves the result uncached without failing
 the query. Statistics reset clears the cache so rule-hit counters remain
 observable.
-For expressions built from the corpus (max depth 11) this is safe.
-Deliberately constructing extremely deep trees (depth > ~10,000) via the API
-may cause stack overflow. This is considered acceptable for the target domain.
+Deep programmatically constructed DAGs are therefore bounded by arena memory,
+not process-stack size.
 
 ## Layer 0: Memory — Arena Allocator
 
@@ -328,11 +329,13 @@ mark. The scratch arena never leaks across wrapper boundaries.
 **Lifecycle**: Initialized in `ixs_session_init`, restored to the base mark by
 `ixs_session_reset`, and destroyed in `ixs_session_destroy`.
 
-**Status**: Fully implemented. All smart constructors, the parser, `subs`,
-`rewrite_impl`, and `walk` use session-backed scratch. The remaining internal
-helpers still take `ixs_ctx *`, so public entry points bind the active session
-onto the context on entry and copy the final scratch/diagnostic state back out
-on exit.
+**Status**: Fully implemented. All smart constructors, the parser, `subs`, the
+iterative rewrite driver, and `walk` use session-backed scratch. Printing and
+the raw-node structural-integrality fallback use operation-local transient
+arenas because their public entry points have no session. The remaining
+internal helpers still take `ixs_ctx *`, so public session entry points bind the
+active session onto the context on entry and copy the final scratch/diagnostic
+state back out on exit.
 `MAX_TERMS` and `ixs_limits.h` have been removed.
 
 ## Layer 1: Expression Representation — Hash-Consed DAG

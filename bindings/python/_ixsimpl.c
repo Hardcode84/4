@@ -288,12 +288,17 @@ static PyObject *print_to_pystr(const ixs_node *node,
                                              size_t)) {
   char stack_buf[8192];
   size_t n = fn(node, stack_buf, sizeof(stack_buf));
+  if (n == SIZE_MAX)
+    return PyErr_NoMemory();
   if (n < sizeof(stack_buf))
     return PyUnicode_FromStringAndSize(stack_buf, (Py_ssize_t)n);
   char *heap = PyMem_Malloc(n + 1);
   if (!heap)
     return PyErr_NoMemory();
-  fn(node, heap, n + 1);
+  if (fn(node, heap, n + 1) == SIZE_MAX) {
+    PyMem_Free(heap);
+    return PyErr_NoMemory();
+  }
   PyObject *result = PyUnicode_FromStringAndSize(heap, (Py_ssize_t)n);
   PyMem_Free(heap);
   return result;

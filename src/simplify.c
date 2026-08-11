@@ -6847,10 +6847,6 @@ static void add_cond_to_bounds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *cond) {
   }
 }
 
-static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                              rewrite_memo_slot *memo,
-                              rewrite_shared_cache *shared, bool *limited);
-
 static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
                                                ixs_bounds *bnds,
                                                bool *limited) {
@@ -6872,29 +6868,7 @@ static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
 
 static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
                          rewrite_memo_slot *memo, rewrite_shared_cache *shared,
-                         bool *limited) {
-  ixs_node *result;
-  uint32_t slot;
-  if (!n || ixs_node_is_sentinel(n))
-    return n;
-  slot = n->hash & REWRITE_MEMO_MASK;
-  if (memo[slot].key == n)
-    return memo[slot].val;
-  result = rewrite_shared_cache_lookup(shared, n);
-  if (result) {
-    memo[slot].key = n;
-    memo[slot].val = result;
-    return result;
-  }
-  result = rewrite_impl(ctx, n, bnds, memo, shared, limited);
-  if (result)
-    result = rewrite_project_exact_integer(ctx, result, bnds, limited);
-  if (result && !rewrite_shared_cache_store(shared, n, result))
-    return NULL;
-  memo[slot].key = n;
-  memo[slot].val = result;
-  return result;
-}
+                         bool *limited);
 
 /* Collapse floor or ceil to a constant when bounds pin it to one value. */
 static ixs_node *try_floor_ceil_collapse(ixs_ctx *ctx, ixs_bounds *bnds,
@@ -7147,13 +7121,9 @@ static ixs_node *cmp_bounds_resolve(ixs_ctx *ctx, ixs_bounds *bnds,
   return n;
 }
 
-static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                rewrite_memo_slot *memo,
-                                rewrite_shared_cache *shared, bool *limited) {
-  ixs_node *l = rewrite(ctx, n->u.binary.lhs, bnds, memo, shared, limited);
-  ixs_node *r = rewrite(ctx, n->u.binary.rhs, bnds, memo, shared, limited);
-  if (!l || !r)
-    return NULL;
+static ixs_node *rewrite_binary_result(ixs_ctx *ctx, ixs_node *n,
+                                       ixs_bounds *bnds, ixs_node *l,
+                                       ixs_node *r) {
   switch (n->tag) {
   case IXS_MOD:
     return simp_mod_bnds(ctx, bnds, l, r);
@@ -7164,78 +7134,16 @@ static ixs_node *rewrite_binary(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   }
 }
 
-static ixs_node *rewrite_piecewise(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                   rewrite_memo_slot *memo,
-                                   rewrite_shared_cache *shared,
-                                   bool *limited) {
-  uint32_t i, nc = n->u.pw.ncases;
-  ixs_arena_mark sm = ixs_arena_save(&ctx->scratch);
-  ixs_node **vals =
-      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*vals), sizeof(void *));
-  ixs_node **cds =
-      ixs_arena_alloc(&ctx->scratch, nc * sizeof(*cds), sizeof(void *));
-  if (!vals || !cds) {
-    ixs_arena_restore(&ctx->scratch, sm);
-    return NULL;
-  }
-  for (i = 0; i < nc; i++) {
-    cds[i] = rewrite(ctx, n->u.pw.cases[i].cond, bnds, memo, shared, limited);
-    if (!cds[i]) {
-      ixs_arena_restore(&ctx->scratch, sm);
-      return NULL;
-    }
-    /* For guarded branches, fork bounds with condition assumptions so
-     * that e.g. Max(1, E) collapses when the condition proves E >= 1.
-     * Fork and per-branch memo allocation are optimization-only: on scratch
-     * OOM we rewrite under parent bounds, which is less precise but sound. */
-    if (bnds && !ixs_node_is_known_true(cds[i]) &&
-        !ixs_node_is_known_false(cds[i])) {
-      ixs_arena_mark bm = ixs_arena_save(&ctx->scratch);
-      ixs_bounds bbnds;
-      bool bbnds_ready = ixs_bounds_fork(&bbnds, bnds);
-      if (bbnds_ready) {
-        rewrite_memo_slot *bmemo = ixs_arena_alloc(
-            &ctx->scratch, REWRITE_MEMO_SIZE * sizeof(*bmemo), sizeof(void *));
-        if (bmemo) {
-          add_cond_to_bounds(ctx, &bbnds, cds[i]);
-          memset(bmemo, 0, REWRITE_MEMO_SIZE * sizeof(*bmemo));
-          /* Forked facts are branch-local and cannot populate the parent-fact
-           * cache. */
-          vals[i] = rewrite(ctx, n->u.pw.cases[i].value, &bbnds, bmemo, NULL,
-                            limited);
-        } else {
-          vals[i] =
-              rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared, limited);
-        }
-      } else {
-        vals[i] =
-            rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared, limited);
-      }
-      if (bbnds_ready)
-        ixs_bounds_destroy(&bbnds);
-      ixs_arena_restore(&ctx->scratch, bm);
-    } else {
-      vals[i] =
-          rewrite(ctx, n->u.pw.cases[i].value, bnds, memo, shared, limited);
-    }
-    if (!vals[i]) {
-      ixs_arena_restore(&ctx->scratch, sm);
-      return NULL;
-    }
-  }
-  {
-    ixs_node *pw;
-    /* A two-arm scalar selector has the same partiality as its predicate and
-     * a total constant multiplier.  Canonicalizing it to arithmetic lets the
-     * ordinary multiplication rules cancel surrounding rational scales. */
-    if (nc == 2u && ixs_node_is_known_true(cds[1]) &&
-        ixs_node_is_zero(vals[1]) && ixs_node_is_const(vals[0]))
-      pw = simp_mul(ctx, vals[0], cds[0]);
-    else
-      pw = simp_pw(ctx, nc, vals, cds);
-    ixs_arena_restore(&ctx->scratch, sm);
-    return pw;
-  }
+static ixs_node *rewrite_piecewise_result(ixs_ctx *ctx, uint32_t count,
+                                          ixs_node **values,
+                                          ixs_node **conditions) {
+  /* A two-arm scalar selector has the same partiality as its predicate and a
+   * total constant multiplier. Canonicalizing it to arithmetic lets ordinary
+   * multiplication rules cancel surrounding rational scales. */
+  if (count == 2u && ixs_node_is_known_true(conditions[1]) &&
+      ixs_node_is_zero(values[1]) && ixs_node_is_const(values[0]))
+    return simp_mul(ctx, values[0], conditions[0]);
+  return simp_pw(ctx, count, values, conditions);
 }
 
 static ixs_node *rewrite_symbol(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds) {
@@ -7452,53 +7360,10 @@ simp_normalize_rational_carrier(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *add) {
   return result;
 }
 
-static ixs_node *rewrite_add_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo,
-                                  rewrite_shared_cache *shared, bool *limited) {
-  /* Recognize exact radix and floor/Mod identities before facts can poison
-   * their children. */
-  ixs_node *exact = radix_chain_complete_node(ctx, bnds, n);
-  uint32_t i;
-  unsigned round_candidates = 0;
-  ixs_node *result;
-
-  if (!exact)
-    return NULL;
-  if (exact != n)
-    return rewrite(ctx, exact, bnds, memo, shared, limited);
-  exact = cancel_floor_mod_node(ctx, bnds, n);
-  if (!exact)
-    return NULL;
-  if (exact != n)
-    return rewrite(ctx, exact, bnds, memo, shared, limited);
-  result = rewrite(ctx, n->u.add.coeff, bnds, memo, shared, limited);
-  if (!result)
-    return NULL;
-  for (i = 0; i < n->u.add.nterms; i++) {
-    ixs_node *t =
-        rewrite(ctx, n->u.add.terms[i].term, bnds, memo, shared, limited);
-    ixs_node *rewritten_term;
-    ixs_node *c = n->u.add.terms[i].coeff;
-    if (!t)
-      return NULL;
-    if ((t->tag == IXS_FLOOR || t->tag == IXS_CEIL) && round_candidates < 2u)
-      round_candidates++;
-    rewritten_term = t;
-    t = simp_mul(ctx, c, t);
-    if (!t)
-      return NULL;
-    /* An ADD stores each term's rational coefficient outside the child node.
-     * Re-run the generic rewrite on the reconstructed scalar term so rules
-     * that consume the complete product also apply below an additive root. */
-    if (t != rewritten_term) {
-      t = rewrite(ctx, t, bnds, memo, shared, limited);
-      if (!t)
-        return NULL;
-    }
-    result = simp_add(ctx, result, t);
-    if (!result)
-      return NULL;
-  }
+static ixs_node *rewrite_add_complete(ixs_ctx *ctx, ixs_bounds *bnds,
+                                      ixs_node *result,
+                                      unsigned round_candidates,
+                                      bool *limited) {
   result = cancel_ceil_remainder_node(ctx, bnds, result);
   if (!result)
     return NULL;
@@ -7613,33 +7478,8 @@ static ixs_node *cancel_scaled_xor_quotient(ixs_ctx *ctx, ixs_bounds *bnds,
   return reduced;
 }
 
-static ixs_node *rewrite_mul_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo,
-                                  rewrite_shared_cache *shared, bool *limited) {
-  uint32_t i;
-  ixs_node *result = rewrite(ctx, n->u.mul.coeff, bnds, memo, shared, limited);
-  if (!result)
-    return NULL;
-  for (i = 0; i < n->u.mul.nfactors; i++) {
-    ixs_node *base =
-        rewrite(ctx, n->u.mul.factors[i].base, bnds, memo, shared, limited);
-    if (!base)
-      return NULL;
-    result = rewrite_mul_factor(ctx, result, base, n->u.mul.factors[i].exp);
-    if (!result)
-      return NULL;
-  }
-  result = cancel_scaled_mod_quotient(ctx, bnds, result);
-  return result ? cancel_scaled_xor_quotient(ctx, bnds, result) : NULL;
-}
-
-static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                    rewrite_memo_slot *memo,
-                                    rewrite_shared_cache *shared, ixs_tag tag,
-                                    bool *limited) {
-  ixs_node *arg = rewrite(ctx, n->u.unary.arg, bnds, memo, shared, limited);
-  if (!arg)
-    return NULL;
+static ixs_node *rewrite_round_result(ixs_ctx *ctx, ixs_bounds *bnds,
+                                      ixs_tag tag, ixs_node *arg) {
   if (tag == IXS_FLOOR)
     return simp_floor_bnds(ctx, bnds, arg);
   if (tag == IXS_CEIL)
@@ -7647,86 +7487,447 @@ static ixs_node *rewrite_round_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
   return simp_trunc_bnds(ctx, bnds, arg);
 }
 
-static ixs_node *rewrite_assoc_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                    rewrite_memo_slot *memo,
-                                    rewrite_shared_cache *shared,
-                                    bool *limited) {
-  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
-  uint32_t nargs = n->u.assoc.nargs;
-  uint32_t i;
+static ixs_node *rewrite_assoc_result(ixs_ctx *ctx, ixs_bounds *bnds,
+                                      ixs_tag tag, uint32_t count,
+                                      ixs_node **args) {
+  if (tag == IXS_MAX || tag == IXS_MIN)
+    return simp_extrema_many_bnds(ctx, bnds, tag, count, args);
+  if (tag == IXS_XOR)
+    return simp_xor_many_bnds(ctx, bnds, count, args);
+  if (tag == IXS_AND)
+    return simp_and_many(ctx, count, args);
+  return simp_or_many(ctx, count, args);
+}
+
+typedef enum {
+  REWRITE_ENTER,
+  REWRITE_REDIRECT,
+  REWRITE_ADD_COEFF,
+  REWRITE_ADD_TERM,
+  REWRITE_ADD_PRODUCT,
+  REWRITE_MUL_COEFF,
+  REWRITE_MUL_FACTOR,
+  REWRITE_ROUND_ARG,
+  REWRITE_BINARY_LHS,
+  REWRITE_BINARY_RHS,
+  REWRITE_PW_CONDITION,
+  REWRITE_PW_VALUE,
+  REWRITE_ASSOC_CHILD,
+  REWRITE_NOT_ARG
+} rewrite_stage;
+
+typedef struct {
+  ixs_node *node;
+  ixs_bounds *bnds;
+  rewrite_memo_slot *memo;
+  rewrite_shared_cache *shared;
+  rewrite_stage stage;
+  uint32_t index;
+  unsigned round_candidates;
+  ixs_node *child;
   ixs_node *result;
-  ixs_node **args =
-      ixs_arena_alloc(&ctx->scratch, nargs * sizeof(*args), sizeof(void *));
-  if (!args && nargs != 0) {
-    ixs_arena_restore(&ctx->scratch, mark);
-    return NULL;
+  ixs_node *lhs;
+  ixs_node **values;
+  ixs_node **conditions;
+  ixs_node **args;
+  ixs_bounds *branch_bounds;
+  rewrite_memo_slot *branch_memo;
+  bool child_ready;
+  bool branch_ready;
+} rewrite_frame;
+
+typedef struct {
+  ixs_ctx *ctx;
+  rewrite_frame *frames;
+  size_t depth;
+  size_t capacity;
+  ixs_node *result;
+  bool *limited;
+  bool failed;
+} rewrite_query;
+
+#define REWRITE_INLINE_DEPTH 16u
+
+static rewrite_frame *rewrite_top(rewrite_query *query) {
+  return &query->frames[query->depth - 1u];
+}
+
+static bool rewrite_deliver(rewrite_query *query, ixs_node *result) {
+  if (!result) {
+    query->failed = true;
+    return false;
   }
-  for (i = 0; i < nargs; i++) {
-    args[i] = rewrite(ctx, n->u.assoc.args[i], bnds, memo, shared, limited);
-    if (!args[i]) {
-      ixs_arena_restore(&ctx->scratch, mark);
-      return NULL;
+  if (query->depth != 0) {
+    rewrite_frame *parent = rewrite_top(query);
+    parent->child = result;
+    parent->child_ready = true;
+  } else {
+    query->result = result;
+  }
+  return true;
+}
+
+static bool rewrite_push(rewrite_query *query, ixs_node *node, ixs_bounds *bnds,
+                         rewrite_memo_slot *memo,
+                         rewrite_shared_cache *shared) {
+  ixs_node *cached;
+  uint32_t slot;
+  rewrite_frame *frame;
+  if (!node || ixs_node_is_sentinel(node))
+    return rewrite_deliver(query, node);
+  slot = node->hash & REWRITE_MEMO_MASK;
+  if (memo[slot].key == node)
+    return rewrite_deliver(query, memo[slot].val);
+  cached = rewrite_shared_cache_lookup(shared, node);
+  if (cached) {
+    memo[slot].key = node;
+    memo[slot].val = cached;
+    return rewrite_deliver(query, cached);
+  }
+  if (query->depth == query->capacity) {
+    size_t capacity = query->capacity * 2u;
+    rewrite_frame *grown;
+    if (capacity <= query->capacity ||
+        capacity > SIZE_MAX / sizeof(*query->frames))
+      return rewrite_deliver(query, NULL);
+    grown = ixs_arena_grow(&query->ctx->scratch, query->frames,
+                           query->capacity * sizeof(*query->frames),
+                           capacity * sizeof(*query->frames), sizeof(void *));
+    if (!grown)
+      return rewrite_deliver(query, NULL);
+    query->frames = grown;
+    query->capacity = capacity;
+  }
+  frame = &query->frames[query->depth++];
+  memset(frame, 0, sizeof(*frame));
+  frame->node = node;
+  frame->bnds = bnds;
+  frame->memo = memo;
+  frame->shared = shared;
+  return true;
+}
+
+static bool rewrite_finish(rewrite_query *query, ixs_node *result) {
+  rewrite_frame *frame = rewrite_top(query);
+  uint32_t slot = frame->node->hash & REWRITE_MEMO_MASK;
+  if (result)
+    result = rewrite_project_exact_integer(query->ctx, result, frame->bnds,
+                                           query->limited);
+  if (result && !rewrite_shared_cache_store(frame->shared, frame->node, result))
+    result = NULL;
+  frame->memo[slot].key = frame->node;
+  frame->memo[slot].val = result;
+  query->depth--;
+  return rewrite_deliver(query, result);
+}
+
+static bool rewrite_schedule(rewrite_query *query, rewrite_frame *frame,
+                             ixs_node *node, ixs_bounds *bnds,
+                             rewrite_memo_slot *memo,
+                             rewrite_shared_cache *shared) {
+  frame->child = NULL;
+  frame->child_ready = false;
+  return rewrite_push(query, node, bnds, memo, shared);
+}
+
+static bool rewrite_add_next(rewrite_query *query, rewrite_frame *frame) {
+  ixs_node *complete;
+  if (frame->index < frame->node->u.add.nterms) {
+    frame->stage = REWRITE_ADD_TERM;
+    return rewrite_schedule(query, frame,
+                            frame->node->u.add.terms[frame->index].term,
+                            frame->bnds, frame->memo, frame->shared);
+  }
+  complete = rewrite_add_complete(query->ctx, frame->bnds, frame->result,
+                                  frame->round_candidates, query->limited);
+  return rewrite_finish(query, complete);
+}
+
+static bool rewrite_advance_add(rewrite_query *query, rewrite_frame *frame) {
+  ixs_node *term;
+  if (frame->stage == REWRITE_ADD_COEFF) {
+    frame->result = frame->child;
+    frame->index = 0;
+    return rewrite_add_next(query, frame);
+  }
+  term = frame->child;
+  if (frame->stage == REWRITE_ADD_TERM) {
+    ixs_node *product;
+    if ((term->tag == IXS_FLOOR || term->tag == IXS_CEIL) &&
+        frame->round_candidates < 2u)
+      frame->round_candidates++;
+    product = simp_mul(query->ctx, frame->node->u.add.terms[frame->index].coeff,
+                       term);
+    if (!product)
+      return rewrite_deliver(query, NULL);
+    if (product != term) {
+      frame->stage = REWRITE_ADD_PRODUCT;
+      return rewrite_schedule(query, frame, product, frame->bnds, frame->memo,
+                              frame->shared);
+    }
+    term = product;
+  }
+  frame->result = simp_add(query->ctx, frame->result, term);
+  if (!frame->result)
+    return rewrite_deliver(query, NULL);
+  frame->index++;
+  return rewrite_add_next(query, frame);
+}
+
+static bool rewrite_mul_next(rewrite_query *query, rewrite_frame *frame) {
+  ixs_node *result;
+  if (frame->index < frame->node->u.mul.nfactors) {
+    frame->stage = REWRITE_MUL_FACTOR;
+    return rewrite_schedule(query, frame,
+                            frame->node->u.mul.factors[frame->index].base,
+                            frame->bnds, frame->memo, frame->shared);
+  }
+  result = cancel_scaled_mod_quotient(query->ctx, frame->bnds, frame->result);
+  if (result)
+    result = cancel_scaled_xor_quotient(query->ctx, frame->bnds, result);
+  return rewrite_finish(query, result);
+}
+
+static bool rewrite_advance_mul(rewrite_query *query, rewrite_frame *frame) {
+  if (frame->stage == REWRITE_MUL_COEFF) {
+    frame->result = frame->child;
+    frame->index = 0;
+  } else {
+    frame->result =
+        rewrite_mul_factor(query->ctx, frame->result, frame->child,
+                           frame->node->u.mul.factors[frame->index].exp);
+    if (!frame->result)
+      return rewrite_deliver(query, NULL);
+    frame->index++;
+  }
+  return rewrite_mul_next(query, frame);
+}
+
+static bool rewrite_piecewise_next(rewrite_query *query, rewrite_frame *frame) {
+  if (frame->index < frame->node->u.pw.ncases) {
+    frame->stage = REWRITE_PW_CONDITION;
+    return rewrite_schedule(query, frame,
+                            frame->node->u.pw.cases[frame->index].cond,
+                            frame->bnds, frame->memo, frame->shared);
+  }
+  return rewrite_finish(
+      query, rewrite_piecewise_result(query->ctx, frame->node->u.pw.ncases,
+                                      frame->values, frame->conditions));
+}
+
+static bool rewrite_piecewise_value(rewrite_query *query,
+                                    rewrite_frame *frame) {
+  ixs_bounds *value_bounds = frame->bnds;
+  rewrite_memo_slot *value_memo = frame->memo;
+  rewrite_shared_cache *value_shared = frame->shared;
+  ixs_node *condition = frame->conditions[frame->index];
+  if (frame->bnds && !ixs_node_is_known_true(condition) &&
+      !ixs_node_is_known_false(condition)) {
+    if (!frame->branch_bounds)
+      frame->branch_bounds = ixs_arena_alloc(
+          &query->ctx->scratch, sizeof(*frame->branch_bounds), sizeof(void *));
+    if (frame->branch_bounds &&
+        ixs_bounds_fork(frame->branch_bounds, frame->bnds)) {
+      if (!frame->branch_memo)
+        frame->branch_memo = ixs_arena_alloc(
+            &query->ctx->scratch,
+            REWRITE_MEMO_SIZE * sizeof(*frame->branch_memo), sizeof(void *));
+      if (frame->branch_memo) {
+        add_cond_to_bounds(query->ctx, frame->branch_bounds, condition);
+        memset(frame->branch_memo, 0,
+               REWRITE_MEMO_SIZE * sizeof(*frame->branch_memo));
+        frame->branch_ready = true;
+        value_bounds = frame->branch_bounds;
+        value_memo = frame->branch_memo;
+        value_shared = NULL;
+      } else {
+        ixs_bounds_destroy(frame->branch_bounds);
+      }
     }
   }
-  if (n->tag == IXS_MAX)
-    result = simp_extrema_many_bnds(ctx, bnds, IXS_MAX, nargs, args);
-  else if (n->tag == IXS_MIN)
-    result = simp_extrema_many_bnds(ctx, bnds, IXS_MIN, nargs, args);
-  else if (n->tag == IXS_XOR)
-    result = simp_xor_many_bnds(ctx, bnds, nargs, args);
-  else if (n->tag == IXS_AND)
-    result = simp_and_many(ctx, nargs, args);
-  else
-    result = simp_or_many(ctx, nargs, args);
-  ixs_arena_restore(&ctx->scratch, mark);
-  return result;
+  frame->stage = REWRITE_PW_VALUE;
+  return rewrite_schedule(query, frame,
+                          frame->node->u.pw.cases[frame->index].value,
+                          value_bounds, value_memo, value_shared);
 }
 
-static ixs_node *rewrite_not_node(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                                  rewrite_memo_slot *memo,
-                                  rewrite_shared_cache *shared, bool *limited) {
-  ixs_node *arg =
-      rewrite(ctx, n->u.unary_bool.arg, bnds, memo, shared, limited);
-  return arg ? simp_not(ctx, arg) : NULL;
+static bool rewrite_advance_piecewise(rewrite_query *query,
+                                      rewrite_frame *frame) {
+  if (frame->stage == REWRITE_PW_CONDITION) {
+    frame->conditions[frame->index] = frame->child;
+    return rewrite_piecewise_value(query, frame);
+  }
+  frame->values[frame->index] = frame->child;
+  if (frame->branch_ready) {
+    ixs_bounds_destroy(frame->branch_bounds);
+    frame->branch_ready = false;
+  }
+  frame->index++;
+  return rewrite_piecewise_next(query, frame);
 }
 
-static ixs_node *rewrite_impl(ixs_ctx *ctx, ixs_node *n, ixs_bounds *bnds,
-                              rewrite_memo_slot *memo,
-                              rewrite_shared_cache *shared, bool *limited) {
-  switch (n->tag) {
+static bool rewrite_assoc_next(rewrite_query *query, rewrite_frame *frame) {
+  if (frame->index < frame->node->u.assoc.nargs) {
+    frame->stage = REWRITE_ASSOC_CHILD;
+    return rewrite_schedule(query, frame,
+                            frame->node->u.assoc.args[frame->index],
+                            frame->bnds, frame->memo, frame->shared);
+  }
+  return rewrite_finish(
+      query, rewrite_assoc_result(query->ctx, frame->bnds, frame->node->tag,
+                                  frame->node->u.assoc.nargs, frame->args));
+}
+
+static bool rewrite_enter_add(rewrite_query *query, rewrite_frame *frame) {
+  ixs_node *exact =
+      radix_chain_complete_node(query->ctx, frame->bnds, frame->node);
+  /* Parent recognition precedes child rewriting so a child poison cannot hide
+   * an exact radix or floor/Mod identity. */
+  if (exact == frame->node)
+    exact = cancel_floor_mod_node(query->ctx, frame->bnds, frame->node);
+  if (!exact)
+    return rewrite_deliver(query, NULL);
+  if (exact != frame->node) {
+    frame->stage = REWRITE_REDIRECT;
+    return rewrite_schedule(query, frame, exact, frame->bnds, frame->memo,
+                            frame->shared);
+  }
+  frame->stage = REWRITE_ADD_COEFF;
+  return rewrite_schedule(query, frame, frame->node->u.add.coeff, frame->bnds,
+                          frame->memo, frame->shared);
+}
+
+static bool rewrite_advance_enter(rewrite_query *query, rewrite_frame *frame) {
+  uint32_t count;
+  switch (frame->node->tag) {
   case IXS_INT:
   case IXS_RAT:
   case IXS_ERROR:
   case IXS_PARSE_ERROR:
-    return n;
-
+    return rewrite_finish(query, frame->node);
   case IXS_SYM:
-    return rewrite_symbol(ctx, n, bnds);
+    return rewrite_finish(query,
+                          rewrite_symbol(query->ctx, frame->node, frame->bnds));
   case IXS_ADD:
-    return rewrite_add_node(ctx, n, bnds, memo, shared, limited);
+    return rewrite_enter_add(query, frame);
   case IXS_MUL:
-    return rewrite_mul_node(ctx, n, bnds, memo, shared, limited);
+    frame->stage = REWRITE_MUL_COEFF;
+    return rewrite_schedule(query, frame, frame->node->u.mul.coeff, frame->bnds,
+                            frame->memo, frame->shared);
   case IXS_FLOOR:
-    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_FLOOR, limited);
   case IXS_CEIL:
-    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_CEIL, limited);
   case IXS_TRUNC:
-    return rewrite_round_node(ctx, n, bnds, memo, shared, IXS_TRUNC, limited);
+    frame->stage = REWRITE_ROUND_ARG;
+    return rewrite_schedule(query, frame, frame->node->u.unary.arg, frame->bnds,
+                            frame->memo, frame->shared);
   case IXS_MOD:
   case IXS_CMP:
-    return rewrite_binary(ctx, n, bnds, memo, shared, limited);
+    frame->stage = REWRITE_BINARY_LHS;
+    return rewrite_schedule(query, frame, frame->node->u.binary.lhs,
+                            frame->bnds, frame->memo, frame->shared);
   case IXS_PIECEWISE:
-    return rewrite_piecewise(ctx, n, bnds, memo, shared, limited);
+    count = frame->node->u.pw.ncases;
+    frame->values =
+        ixs_arena_alloc(&query->ctx->scratch,
+                        (size_t)count * sizeof(*frame->values), sizeof(void *));
+    frame->conditions = ixs_arena_alloc(
+        &query->ctx->scratch, (size_t)count * sizeof(*frame->conditions),
+        sizeof(void *));
+    if (!frame->values || !frame->conditions)
+      return rewrite_deliver(query, NULL);
+    return rewrite_piecewise_next(query, frame);
   case IXS_MAX:
   case IXS_MIN:
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return rewrite_assoc_node(ctx, n, bnds, memo, shared, limited);
+    count = frame->node->u.assoc.nargs;
+    frame->args =
+        ixs_arena_alloc(&query->ctx->scratch,
+                        (size_t)count * sizeof(*frame->args), sizeof(void *));
+    if (!frame->args && count != 0)
+      return rewrite_deliver(query, NULL);
+    return rewrite_assoc_next(query, frame);
   case IXS_NOT:
-    return rewrite_not_node(ctx, n, bnds, memo, shared, limited);
+    frame->stage = REWRITE_NOT_ARG;
+    return rewrite_schedule(query, frame, frame->node->u.unary_bool.arg,
+                            frame->bnds, frame->memo, frame->shared);
   }
-  return n;
+  return rewrite_finish(query, frame->node);
+}
+
+static bool rewrite_advance(rewrite_query *query) {
+  rewrite_frame *frame = rewrite_top(query);
+  if (frame->stage == REWRITE_ENTER)
+    return rewrite_advance_enter(query, frame);
+  if (!frame->child_ready)
+    return rewrite_deliver(query, NULL);
+  frame->child_ready = false;
+  switch (frame->stage) {
+  case REWRITE_REDIRECT:
+    return rewrite_finish(query, frame->child);
+  case REWRITE_ADD_COEFF:
+  case REWRITE_ADD_TERM:
+  case REWRITE_ADD_PRODUCT:
+    return rewrite_advance_add(query, frame);
+  case REWRITE_MUL_COEFF:
+  case REWRITE_MUL_FACTOR:
+    return rewrite_advance_mul(query, frame);
+  case REWRITE_ROUND_ARG:
+    return rewrite_finish(query,
+                          rewrite_round_result(query->ctx, frame->bnds,
+                                               frame->node->tag, frame->child));
+  case REWRITE_BINARY_LHS:
+    frame->lhs = frame->child;
+    frame->stage = REWRITE_BINARY_RHS;
+    return rewrite_schedule(query, frame, frame->node->u.binary.rhs,
+                            frame->bnds, frame->memo, frame->shared);
+  case REWRITE_BINARY_RHS:
+    return rewrite_finish(query, rewrite_binary_result(query->ctx, frame->node,
+                                                       frame->bnds, frame->lhs,
+                                                       frame->child));
+  case REWRITE_PW_CONDITION:
+  case REWRITE_PW_VALUE:
+    return rewrite_advance_piecewise(query, frame);
+  case REWRITE_ASSOC_CHILD:
+    frame->args[frame->index++] = frame->child;
+    return rewrite_assoc_next(query, frame);
+  case REWRITE_NOT_ARG:
+    return rewrite_finish(query, simp_not(query->ctx, frame->child));
+  case REWRITE_ENTER:
+    break;
+  }
+  return rewrite_deliver(query, NULL);
+}
+
+static void rewrite_abort(rewrite_query *query) {
+  while (query->depth != 0) {
+    rewrite_frame *frame = rewrite_top(query);
+    if (frame->branch_ready)
+      ixs_bounds_destroy(frame->branch_bounds);
+    query->depth--;
+  }
+}
+
+/* Frames and child results live in session scratch. Each loop iteration
+ * finishes one frame or schedules one child, so expression depth consumes
+ * arena space rather than C call frames. */
+static ixs_node *rewrite(ixs_ctx *ctx, ixs_node *node, ixs_bounds *bnds,
+                         rewrite_memo_slot *memo, rewrite_shared_cache *shared,
+                         bool *limited) {
+  rewrite_frame inline_frames[REWRITE_INLINE_DEPTH];
+  rewrite_query query;
+  memset(&query, 0, sizeof(query));
+  query.ctx = ctx;
+  query.frames = inline_frames;
+  query.capacity = REWRITE_INLINE_DEPTH;
+  query.limited = limited;
+  (void)rewrite_push(&query, node, bnds, memo, shared);
+  while (!query.failed && query.depth != 0)
+    (void)rewrite_advance(&query);
+  if (query.failed)
+    rewrite_abort(&query);
+  return query.failed ? NULL : query.result;
 }
 
 static ixs_node *simp_simplify_bounds_cached(ixs_ctx *ctx, ixs_node *expr,

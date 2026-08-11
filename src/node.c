@@ -1623,58 +1623,90 @@ static bool node_rat_is_integer(const ixs_node *n) {
   return q == 1;
 }
 
-static bool assoc_is_integer_valued(const ixs_node *n) {
-  uint32_t i;
-  if (n->u.assoc.nargs == 0)
+static bool integer_stack_push(ixs_arena *arena, const ixs_node ***stack,
+                               size_t *count, size_t *capacity,
+                               const ixs_node *node) {
+  const ixs_node **grown;
+  size_t next;
+  if (!node)
     return false;
-  for (i = 0; i < n->u.assoc.nargs; i++) {
-    if (!ixs_node_is_integer_valued(n->u.assoc.args[i]))
-      return false;
+  if ((node->properties & IXS_NODE_PROPERTY_VALID) != 0)
+    return (node->properties & IXS_NODE_PROPERTY_INTEGER) != 0;
+  if (*count < *capacity) {
+    (*stack)[(*count)++] = node;
+    return true;
   }
+  next = *capacity * 2u;
+  if (next <= *capacity || next > SIZE_MAX / sizeof(**stack))
+    return false;
+  grown = ixs_arena_grow(arena, (void *)*stack, *capacity * sizeof(**stack),
+                         next * sizeof(**stack), sizeof(void *));
+  if (!grown)
+    return false;
+  *stack = grown;
+  *capacity = next;
+  (*stack)[(*count)++] = node;
   return true;
 }
 
-static bool add_is_integer_valued(const ixs_node *n) {
+static bool integer_assoc_children(ixs_arena *arena, const ixs_node *node,
+                                   const ixs_node ***stack, size_t *count,
+                                   size_t *capacity) {
   uint32_t i;
-  if (!node_rat_is_integer(n->u.add.coeff))
+  if (node->u.assoc.nargs == 0)
     return false;
-  for (i = 0; i < n->u.add.nterms; i++) {
-    if (!node_rat_is_integer(n->u.add.terms[i].coeff))
+  for (i = 0; i < node->u.assoc.nargs; i++)
+    if (!integer_stack_push(arena, stack, count, capacity,
+                            node->u.assoc.args[i]))
       return false;
-    if (!ixs_node_is_integer_valued(n->u.add.terms[i].term))
-      return false;
-  }
   return true;
 }
 
-static bool mul_is_integer_valued(const ixs_node *n) {
+static bool integer_add_children(ixs_arena *arena, const ixs_node *node,
+                                 const ixs_node ***stack, size_t *count,
+                                 size_t *capacity) {
   uint32_t i;
-  if (!node_rat_is_integer(n->u.mul.coeff))
+  if (!node_rat_is_integer(node->u.add.coeff))
     return false;
-  for (i = 0; i < n->u.mul.nfactors; i++) {
-    if (n->u.mul.factors[i].exp < 0)
+  for (i = 0; i < node->u.add.nterms; i++)
+    if (!node_rat_is_integer(node->u.add.terms[i].coeff) ||
+        !integer_stack_push(arena, stack, count, capacity,
+                            node->u.add.terms[i].term))
       return false;
-    if (!ixs_node_is_integer_valued(n->u.mul.factors[i].base))
-      return false;
-  }
   return true;
 }
 
-static bool pw_is_integer_valued(const ixs_node *n) {
+static bool integer_mul_children(ixs_arena *arena, const ixs_node *node,
+                                 const ixs_node ***stack, size_t *count,
+                                 size_t *capacity) {
   uint32_t i;
-  for (i = 0; i < n->u.pw.ncases; i++) {
-    if (!ixs_node_is_integer_valued(n->u.pw.cases[i].value))
+  if (!node_rat_is_integer(node->u.mul.coeff))
+    return false;
+  for (i = 0; i < node->u.mul.nfactors; i++)
+    if (node->u.mul.factors[i].exp < 0 ||
+        !integer_stack_push(arena, stack, count, capacity,
+                            node->u.mul.factors[i].base))
       return false;
-  }
-  return n->u.pw.ncases > 0;
+  return true;
 }
 
-bool ixs_node_is_integer_valued(const ixs_node *n) {
-  if (!n)
+static bool integer_piecewise_children(ixs_arena *arena, const ixs_node *node,
+                                       const ixs_node ***stack, size_t *count,
+                                       size_t *capacity) {
+  uint32_t i;
+  if (node->u.pw.ncases == 0)
     return false;
-  if ((n->properties & IXS_NODE_PROPERTY_VALID) != 0)
-    return (n->properties & IXS_NODE_PROPERTY_INTEGER) != 0;
-  switch (n->tag) {
+  for (i = 0; i < node->u.pw.ncases; i++)
+    if (!integer_stack_push(arena, stack, count, capacity,
+                            node->u.pw.cases[i].value))
+      return false;
+  return true;
+}
+
+static bool integer_node_children(ixs_arena *arena, const ixs_node *node,
+                                  const ixs_node ***stack, size_t *count,
+                                  size_t *capacity) {
+  switch (node->tag) {
   case IXS_INT:
   case IXS_FLOOR:
   case IXS_CEIL:
@@ -1688,19 +1720,43 @@ bool ixs_node_is_integer_valued(const ixs_node *n) {
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
-    return assoc_is_integer_valued(n);
+    return integer_assoc_children(arena, node, stack, count, capacity);
   case IXS_ADD:
-    return add_is_integer_valued(n);
+    return integer_add_children(arena, node, stack, count, capacity);
   case IXS_MUL:
-    return mul_is_integer_valued(n);
+    return integer_mul_children(arena, node, stack, count, capacity);
   case IXS_MOD:
-    return ixs_node_is_integer_valued(n->u.binary.lhs) &&
-           ixs_node_is_integer_valued(n->u.binary.rhs);
+    return integer_stack_push(arena, stack, count, capacity,
+                              node->u.binary.lhs) &&
+           integer_stack_push(arena, stack, count, capacity,
+                              node->u.binary.rhs);
   case IXS_PIECEWISE:
-    return pw_is_integer_valued(n);
+    return integer_piecewise_children(arena, node, stack, count, capacity);
   default:
     return false;
   }
+}
+
+/* Canonical nodes stop at the cached property.  Only trusted raw probes use
+ * the transient iterative traversal. */
+bool ixs_node_is_integer_valued(const ixs_node *node) {
+  const ixs_node *inline_stack[16];
+  const ixs_node **stack = inline_stack;
+  size_t count = 0;
+  size_t capacity = sizeof(inline_stack) / sizeof(inline_stack[0]);
+  ixs_arena arena;
+  bool result = true;
+  if (!node)
+    return false;
+  if ((node->properties & IXS_NODE_PROPERTY_VALID) != 0)
+    return (node->properties & IXS_NODE_PROPERTY_INTEGER) != 0;
+  ixs_arena_init(&arena, IXS_ARENA_DEFAULT_SIZE);
+  stack[count++] = node;
+  while (count != 0 && result)
+    result = integer_node_children(&arena, stack[--count], &stack, &count,
+                                   &capacity);
+  ixs_arena_destroy_transient(&arena);
+  return result;
 }
 
 /* ------------------------------------------------------------------ */

@@ -101,8 +101,10 @@ public:
     std::string str() const {
         if (!node_) return {};
         size_t n = ixs_print(node_, nullptr, 0);
+        if (n == SIZE_MAX) throw std::bad_alloc();
         std::string s(n + 1, '\0');
-        ixs_print(node_, s.data(), n + 1);
+        if (ixs_print(node_, s.data(), n + 1) == SIZE_MAX)
+            throw std::bad_alloc();
         s.resize(n);
         return s;
     }
@@ -240,7 +242,8 @@ Implementation:
   destructor destroys the session and then the store.
 - `Expr` Python object holds a reference to its `Context` (preventing
   premature GC) and wraps `ixs_node*`.
-- `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`.
+- `__repr__` and `__str__` call `ixs_print`. Sentinel prints as `"<error>"`;
+  traversal-arena OOM raises `MemoryError`.
 - `__int__` returns the integer value if the node is `IXS_INT`; raises
   `TypeError` otherwise. Used by `eval_ixs` for numerical evaluation.
 - `__eq__` is pointer comparison (O(1) via hash-consing).

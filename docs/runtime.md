@@ -125,6 +125,7 @@ Each string includes the error kind and location, e.g.:
 | Sentinel input | same sentinel | unchanged | propagation |
 | Sentinel in Piecewise value | Piecewise kept | unchanged | dead branch |
 | `ixs_print(sentinel)` | writes `"<error>"` | unchanged | round-trip safe |
+| Print traversal OOM | `SIZE_MAX`, buffer cleared | unchanged | action-stack growth |
 
 ### ixs_parse Return Values
 

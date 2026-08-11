@@ -587,6 +587,63 @@ static void test_mod_rules(void) {
   }
 }
 
+#ifdef IXS_TEST_INTERNAL
+static void test_deep_iterative_node_consumers(void) {
+  enum { DEPTH = 8192 };
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_node *expr = ixs_sym(ctx, "deep_consumer_x");
+  ixs_node *one = ixs_int(ctx, 1);
+  struct ixs_node_impl *raw = calloc(DEPTH, sizeof(*raw));
+  ixs_node *raw_child = expr;
+  char tiny[8];
+  size_t length;
+  unsigned i;
+
+  CHECK(expr && one && raw);
+  if (!expr || !one || !raw) {
+    free(raw);
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+  for (i = 0; i < DEPTH && expr; i++)
+    expr = ixs_mod(ctx, expr, ixs_int(ctx, 1000003 + 2 * (int64_t)i));
+  CHECK(i == DEPTH && expr);
+  if (i != DEPTH || !expr) {
+    free(raw);
+    ixs_ctx_destroy(ctx);
+    return;
+  }
+
+  length = ixs_print(expr, tiny, sizeof(tiny));
+  CHECK(length != SIZE_MAX && length > sizeof(tiny));
+  length = ixs_print_c(expr, tiny, sizeof(tiny));
+  CHECK(length != SIZE_MAX && length > sizeof(tiny));
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) != NULL);
+
+  /* A scratch failure terminates the explicit rewrite traversal, and the same
+   * immutable DAG remains retryable after the operation-local failure. */
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) == NULL);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(ixs_simplify(ctx, expr, NULL, 0) != NULL);
+
+  /* Canonical nodes answer from cached properties. This raw internal chain
+   * exercises the depth-safe structural fallback used by trusted probes. */
+  for (i = 0; i < DEPTH; i++) {
+    raw[i].tag = IXS_MOD;
+    raw[i].u.binary.lhs = raw_child;
+    raw[i].u.binary.rhs = one;
+    raw_child = &raw[i];
+  }
+  CHECK(ixs_node_is_integer_valued(raw_child));
+  raw[0].u.binary.rhs = NULL;
+  CHECK(!ixs_node_is_integer_valued(raw_child));
+
+  free(raw);
+  ixs_ctx_destroy(ctx);
+}
+#endif
+
 static void test_mod_bitwise_projection(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "mod_bitwise_x");
@@ -5878,6 +5935,7 @@ int main(void) {
   test_mod_bitwise_projection();
   test_mod_product_factor_reduction();
 #ifdef IXS_TEST_INTERNAL
+  test_deep_iterative_node_consumers();
   test_mod_bitwise_projection_failure_retry();
   test_mod_product_factor_reduction_failure_retry();
   test_xor_binary_linear_failure_retry();
