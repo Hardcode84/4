@@ -176,7 +176,7 @@ static ixs_node *da_piecewise_argument(da_query *query, ixs_node *round) {
 static bool da_round_parts(da_query *query, ixs_node *round,
                            bool allow_piecewise, da_certificate *certificate) {
   ixs_node *argument = NULL;
-  ixs_quotient_parts_status parts_status;
+  ixs_algebra_status parts_status;
   if (round->tag == IXS_TRUNC) {
     argument = round->u.unary.arg;
   } else if (round->tag == IXS_FLOOR || round->tag == IXS_CEIL) {
@@ -192,12 +192,11 @@ static bool da_round_parts(da_query *query, ixs_node *round,
   }
   if (!argument)
     return false;
-  parts_status = simp_exact_quotient_parts(
+  parts_status = ixs_euclidean_quotient_parts(
       query->ctx, argument, &certificate->numerator, &certificate->denominator);
-  if (parts_status != IXS_QUOTIENT_PARTS_MATCH) {
-    da_note_status(query, parts_status == IXS_QUOTIENT_PARTS_OOM
-                              ? IXS_ALGEBRA_OOM
-                          : parts_status == IXS_QUOTIENT_PARTS_UNREPRESENTABLE
+  if (parts_status != IXS_ALGEBRA_MATCH) {
+    da_note_status(query, parts_status == IXS_ALGEBRA_OOM ? IXS_ALGEBRA_OOM
+                          : parts_status == IXS_ALGEBRA_UNREPRESENTABLE
                               ? IXS_ALGEBRA_UNREPRESENTABLE
                               : IXS_ALGEBRA_NO_MATCH);
     return false;

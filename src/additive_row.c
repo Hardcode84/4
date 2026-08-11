@@ -4,6 +4,7 @@
 #include "additive_row.h"
 
 #include "simplify.h"
+#include <assert.h>
 #include <string.h>
 
 /* Canonical row recognition is allocation-free and O(1). */
@@ -249,4 +250,373 @@ no_match:
 cleanup:
   ixs_arena_restore(scratch, mark);
   return status;
+}
+
+IXS_STATIC void ixs_euclidean_row_borrow(ixs_ctx *ctx, ixs_node *expr,
+                                         ixs_euclidean_row *row) {
+  assert(ctx && expr && row);
+  if (expr->tag == IXS_ADD) {
+    row->terms = expr->u.add.terms;
+    row->nterms = expr->u.add.nterms;
+    return;
+  }
+  row->singleton.term = expr;
+  row->singleton.coeff = ctx->node_one;
+  row->terms = &row->singleton;
+  row->nterms = 1u;
+}
+
+IXS_STATIC void ixs_euclidean_row_borrow_terms(const ixs_addterm *terms,
+                                               uint32_t nterms,
+                                               ixs_euclidean_row *row) {
+  assert(row && (terms || nterms == 0u));
+  row->terms = terms;
+  row->nterms = nterms;
+}
+
+static ixs_node *euclidean_build_product(ixs_ctx *ctx, ixs_node *coefficient,
+                                         uint32_t nfactors,
+                                         const ixs_mulfactor *factors) {
+  if (nfactors == 0u)
+    return coefficient;
+  if (nfactors == 1u && factors[0].exp == 1 && ixs_node_is_one(coefficient))
+    return factors[0].base;
+  return ixs_node_mul(ctx, coefficient, nfactors, factors);
+}
+
+/* Partition one canonical product in two linear passes. Reusing the sorted
+ * factor array avoids repeated multiplication and supports every representable
+ * exponent magnitude. */
+static ixs_algebra_status euclidean_product_parts(ixs_ctx *ctx, ixs_node *expr,
+                                                  ixs_node **numerator,
+                                                  ixs_node **denominator) {
+  ixs_arena_mark mark;
+  ixs_mulfactor *factors;
+  ixs_mulfactor *positive;
+  ixs_mulfactor *negative;
+  ixs_node *num_coefficient;
+  ixs_node *denom_coefficient;
+  ixs_node *num;
+  ixs_node *denom;
+  int64_t p, q;
+  uint32_t npositive = 0;
+  uint32_t nnegative = 0;
+  uint32_t i;
+
+  if (ixs_node_is_const(expr)) {
+    ixs_node_get_rat(expr, &p, &q);
+    if (q == 1)
+      return IXS_ALGEBRA_NO_MATCH;
+    num = ixs_node_int(ctx, p);
+    denom = ixs_node_int(ctx, q);
+    if (!num || !denom)
+      return IXS_ALGEBRA_OOM;
+    *numerator = num;
+    *denominator = denom;
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (expr->tag != IXS_MUL)
+    return IXS_ALGEBRA_NO_MATCH;
+  ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    int32_t exponent = expr->u.mul.factors[i].exp;
+    if (exponent == INT32_MIN)
+      return IXS_ALGEBRA_NO_MATCH;
+    if (exponent > 0)
+      npositive++;
+    else
+      nnegative++;
+  }
+  if (q == 1 && nnegative == 0)
+    return IXS_ALGEBRA_NO_MATCH;
+
+  mark = ixs_arena_save(&ctx->scratch);
+  factors = ixs_arena_alloc(
+      &ctx->scratch, expr->u.mul.nfactors * sizeof(*factors), sizeof(void *));
+  if (!factors) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return IXS_ALGEBRA_OOM;
+  }
+  positive = factors;
+  negative = factors + npositive;
+  npositive = 0;
+  nnegative = 0;
+  for (i = 0; i < expr->u.mul.nfactors; i++) {
+    ixs_mulfactor factor = expr->u.mul.factors[i];
+    if (factor.exp > 0) {
+      positive[npositive++] = factor;
+    } else {
+      factor.exp = -factor.exp;
+      negative[nnegative++] = factor;
+    }
+  }
+  num_coefficient = ixs_node_int(ctx, p);
+  denom_coefficient = ixs_node_int(ctx, q);
+  if (!num_coefficient || !denom_coefficient) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return IXS_ALGEBRA_OOM;
+  }
+  num = euclidean_build_product(ctx, num_coefficient, npositive, positive);
+  denom = euclidean_build_product(ctx, denom_coefficient, nnegative, negative);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!num || !denom)
+    return IXS_ALGEBRA_OOM;
+  *numerator = num;
+  *denominator = denom;
+  return IXS_ALGEBRA_MATCH;
+}
+
+static ixs_algebra_status euclidean_exact_parts(ixs_ctx *ctx, ixs_node *expr,
+                                                ixs_node **numerator,
+                                                ixs_node **denominator) {
+  ixs_node *num;
+  ixs_node *denom = NULL;
+  ixs_node *constant_numerator;
+  uint32_t i;
+
+  if (expr->tag != IXS_ADD)
+    return euclidean_product_parts(ctx, expr, numerator, denominator);
+  if (expr->u.add.nterms == 0u)
+    return IXS_ALGEBRA_NO_MATCH;
+  num = ixs_node_int(ctx, 0);
+  if (!num)
+    return IXS_ALGEBRA_OOM;
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    ixs_algebra_status status;
+    bool unrepresentable = false;
+    ixs_node *scaled =
+        simp_try_mul(ctx, expr->u.add.terms[i].coeff, expr->u.add.terms[i].term,
+                     &unrepresentable);
+    ixs_node *term_numerator;
+    ixs_node *term_denominator;
+    if (unrepresentable)
+      return IXS_ALGEBRA_UNREPRESENTABLE;
+    if (!scaled)
+      return IXS_ALGEBRA_OOM;
+    if (ixs_node_is_sentinel(scaled))
+      return IXS_ALGEBRA_NO_MATCH;
+    status = euclidean_product_parts(ctx, scaled, &term_numerator,
+                                     &term_denominator);
+    if (status != IXS_ALGEBRA_MATCH)
+      return status;
+    if (denom && term_denominator != denom)
+      return IXS_ALGEBRA_NO_MATCH;
+    denom = term_denominator;
+    num = simp_try_add(ctx, num, term_numerator, &unrepresentable);
+    if (unrepresentable)
+      return IXS_ALGEBRA_UNREPRESENTABLE;
+    if (!num)
+      return IXS_ALGEBRA_OOM;
+    if (ixs_node_is_sentinel(num))
+      return IXS_ALGEBRA_NO_MATCH;
+  }
+  if (!denom)
+    return IXS_ALGEBRA_NO_MATCH;
+  {
+    bool unrepresentable = false;
+    constant_numerator =
+        simp_try_mul(ctx, expr->u.add.coeff, denom, &unrepresentable);
+    if (unrepresentable)
+      return IXS_ALGEBRA_UNREPRESENTABLE;
+  }
+  if (!constant_numerator)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(constant_numerator))
+    return IXS_ALGEBRA_NO_MATCH;
+  {
+    bool unrepresentable = false;
+    num = simp_try_add(ctx, num, constant_numerator, &unrepresentable);
+    if (unrepresentable)
+      return IXS_ALGEBRA_UNREPRESENTABLE;
+  }
+  if (!num)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(num))
+    return IXS_ALGEBRA_NO_MATCH;
+  *numerator = num;
+  *denominator = denom;
+  return IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status
+ixs_euclidean_quotient_parts(ixs_ctx *ctx, ixs_node *expr, ixs_node **numerator,
+                             ixs_node **denominator) {
+  ixs_arena_mark mark;
+  ixs_node *result_numerator = NULL;
+  ixs_node *result_denominator = NULL;
+  ixs_algebra_status status;
+  assert(ctx && expr && numerator && denominator);
+  mark = ixs_arena_save(&ctx->scratch);
+  *numerator = NULL;
+  *denominator = NULL;
+  status =
+      euclidean_exact_parts(ctx, expr, &result_numerator, &result_denominator);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (status == IXS_ALGEBRA_MATCH) {
+    *numerator = result_numerator;
+    *denominator = result_denominator;
+  }
+  return status;
+}
+
+static unsigned euclidean_atom_mask(ixs_tag tag) {
+  if (tag == IXS_FLOOR)
+    return IXS_EUCLIDEAN_FLOOR;
+  if (tag == IXS_CEIL)
+    return IXS_EUCLIDEAN_CEIL;
+  if (tag == IXS_MOD)
+    return IXS_EUCLIDEAN_MOD;
+  return 0u;
+}
+
+static bool euclidean_term_atom(ixs_node *term, unsigned mask,
+                                uint32_t *factor_index, ixs_node **atom) {
+  uint32_t found = UINT32_MAX;
+  uint32_t i;
+  unsigned selected;
+  if (!term)
+    return false;
+  selected = euclidean_atom_mask(term->tag);
+  if (selected && (selected & mask)) {
+    *factor_index = UINT32_MAX;
+    *atom = term;
+    return true;
+  }
+  if (term->tag != IXS_MUL)
+    return false;
+  for (i = 0; i < term->u.mul.nfactors; i++) {
+    ixs_node *base = term->u.mul.factors[i].base;
+    selected = euclidean_atom_mask(base->tag);
+    if (!(selected & mask))
+      continue;
+    if (found != UINT32_MAX || term->u.mul.factors[i].exp != 1)
+      return false;
+    found = i;
+  }
+  if (found == UINT32_MAX)
+    return false;
+  *factor_index = found;
+  *atom = term->u.mul.factors[found].base;
+  return true;
+}
+
+static ixs_algebra_status euclidean_term_scale(ixs_ctx *ctx,
+                                               const ixs_addterm *term,
+                                               uint32_t factor_index,
+                                               ixs_node **scale) {
+  ixs_arena_mark mark;
+  ixs_mulfactor *factors;
+  ixs_node *coefficient;
+  bool unrepresentable = false;
+  uint32_t i;
+  uint32_t write = 0;
+  if (factor_index == UINT32_MAX) {
+    *scale = term->coeff;
+    return IXS_ALGEBRA_MATCH;
+  }
+  coefficient =
+      simp_try_mul(ctx, term->coeff, term->term->u.mul.coeff, &unrepresentable);
+  if (unrepresentable)
+    return IXS_ALGEBRA_UNREPRESENTABLE;
+  if (!coefficient)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(coefficient))
+    return IXS_ALGEBRA_INVALID;
+  if (term->term->u.mul.nfactors == 1u) {
+    *scale = coefficient;
+    return IXS_ALGEBRA_MATCH;
+  }
+  mark = ixs_arena_save(&ctx->scratch);
+  factors = ixs_arena_alloc(
+      &ctx->scratch, (term->term->u.mul.nfactors - 1u) * sizeof(*factors),
+      sizeof(void *));
+  if (!factors) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return IXS_ALGEBRA_OOM;
+  }
+  for (i = 0; i < term->term->u.mul.nfactors; i++)
+    if (i != factor_index)
+      factors[write++] = term->term->u.mul.factors[i];
+  *scale = euclidean_build_product(ctx, coefficient, write, factors);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!*scale)
+    return IXS_ALGEBRA_OOM;
+  return ixs_node_is_sentinel(*scale) ? IXS_ALGEBRA_INVALID : IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status
+ixs_euclidean_plan_addterm(ixs_ctx *ctx, const ixs_addterm *term, unsigned mask,
+                           ixs_euclidean_term_plan *plan) {
+  ixs_euclidean_term_plan result;
+  uint32_t factor_index;
+  ixs_algebra_status status;
+  assert(ctx && term && plan);
+  if (!euclidean_term_atom(term->term, mask, &factor_index, &result.atom))
+    return IXS_ALGEBRA_NO_MATCH;
+  status = euclidean_term_scale(ctx, term, factor_index, &result.scale);
+  if (status != IXS_ALGEBRA_MATCH)
+    return status;
+  if (result.atom->tag == IXS_MOD) {
+    result.numerator = result.atom->u.binary.lhs;
+    result.denominator = result.atom->u.binary.rhs;
+  } else {
+    status = ixs_euclidean_quotient_parts(
+        ctx, result.atom->u.unary.arg, &result.numerator, &result.denominator);
+    if (status == IXS_ALGEBRA_UNREPRESENTABLE)
+      return IXS_ALGEBRA_NO_MATCH;
+    if (status != IXS_ALGEBRA_MATCH)
+      return status;
+  }
+  result.source = term;
+  result.factor_index = factor_index;
+  *plan = result;
+  return IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC ixs_algebra_status ixs_euclidean_plan_outer(
+    ixs_ctx *ctx, const ixs_euclidean_term_plan *plan, ixs_node **outer) {
+  ixs_arena_mark mark;
+  ixs_mulfactor *factors;
+  uint32_t i;
+  uint32_t write = 0;
+  assert(ctx && plan && plan->source && outer);
+  if (plan->factor_index == UINT32_MAX) {
+    *outer = ctx->node_one;
+    return IXS_ALGEBRA_MATCH;
+  }
+  if (plan->source->term->u.mul.nfactors == 1u) {
+    *outer = plan->source->term->u.mul.coeff;
+    return IXS_ALGEBRA_MATCH;
+  }
+  mark = ixs_arena_save(&ctx->scratch);
+  factors = ixs_arena_alloc(&ctx->scratch,
+                            (plan->source->term->u.mul.nfactors - 1u) *
+                                sizeof(*factors),
+                            sizeof(void *));
+  if (!factors) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return IXS_ALGEBRA_OOM;
+  }
+  for (i = 0; i < plan->source->term->u.mul.nfactors; i++)
+    if (i != plan->factor_index)
+      factors[write++] = plan->source->term->u.mul.factors[i];
+  *outer = euclidean_build_product(ctx, plan->source->term->u.mul.coeff, write,
+                                   factors);
+  ixs_arena_restore(&ctx->scratch, mark);
+  if (!*outer)
+    return IXS_ALGEBRA_OOM;
+  return ixs_node_is_sentinel(*outer) ? IXS_ALGEBRA_INVALID : IXS_ALGEBRA_MATCH;
+}
+
+IXS_STATIC bool ixs_euclidean_row_contains(const ixs_euclidean_row *row,
+                                           unsigned mask) {
+  uint32_t i;
+  assert(row);
+  for (i = 0; i < row->nterms; i++) {
+    uint32_t factor_index;
+    ixs_node *atom;
+    if (euclidean_term_atom(row->terms[i].term, mask, &factor_index, &atom))
+      return true;
+  }
+  return false;
 }

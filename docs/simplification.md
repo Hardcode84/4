@@ -295,6 +295,16 @@ c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
 ```
 
+The reverse identities, exact floor/Mod cancellation, consecutive-digit
+composition, signed-division certificates, and quotient algebra all consume
+the same private Euclidean row plan from `src/additive_row.c`. The plan borrows
+canonical ADD terms, locates exactly one exponent-one `floor`, `ceiling`, or
+`Mod` atom, and recovers its numerator, denominator, and exact scale. It owns
+shape and representability only. Each caller still decides positivity,
+integer-valuedness, totality, poison refinement, and signed-truncation policy.
+Compound product and quotient reconstruction use O(T) scratch restored before
+return; row borrowing and direct `Mod` atoms allocate nothing.
+
 Exact floor/Mod cancellation is valid on every defined source evaluation. If
 the divisor is invalid, the source is poison and may refine to the replacement;
 domain-error detection is best effort. Partial cancellation still requires a
@@ -306,8 +316,10 @@ the exact identity may refine the remaining domain to poison elsewhere. The
 product `A*B` uses checked optional arithmetic: an unrepresentable product is a
 no-match without a diagnostic, while allocation failure is propagated.
 Mod-bearing ADD terms are indexed by carrier and modulus at no more than 50%
-load, giving expected O(N) work. Rebuilding after one match composes complete
-digit chains of any length through the same rule. Wrong coefficients, different
+load, giving expected O(N) work. Reverse floor/ceiling recognition likewise
+indexes the borrowed row by carrier at no more than 50% load instead of pairing
+every round with every term. Rebuilding after one match composes complete digit
+chains of any length through the same rule. Wrong coefficients, different
 carriers, noninteger radices or carriers, incomplete chains, and quotient
 normalizations that do not recover the original carrier remain unchanged.
 

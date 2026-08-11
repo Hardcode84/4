@@ -640,7 +640,7 @@ ixsimpl/
 ├── include/
 │   └── ixsimpl.h            # public C API (single header)
 ├── src/
-│   ├── additive_row.c       # canonical additive-row operations
+│   ├── additive_row.c       # canonical additive and Euclidean row plans
 │   ├── additive_row.h
 │   ├── algebra_status.h     # shared private algebra result ordering
 │   ├── arena.c              # arena allocator

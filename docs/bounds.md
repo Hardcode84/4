@@ -840,15 +840,23 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   stored offset remains representable. Arithmetic that cannot be represented
   has an explicit `UNREPRESENTABLE` result, allocation failure is OOM, and no
   component operation performs a bounds query or changes definedness policy.
+  The same component owns the neutral Euclidean row view used by simplification
+  and proof algebra. It borrows canonical ADD terms, extracts one exponent-one
+  `floor`, `ceil`, or `Mod` atom with its exact scale, and partitions exact
+  quotient products into numerator and denominator. It performs no positivity,
+  integer-domain, totality, poison, or signed-truncation admission; those remain
+  caller policy.
   Recognition and cache hits are O(1), while constant-drop cache misses,
-  affine-round splitting, and relation sign partitioning are O(T).
+  affine-round splitting, Euclidean product partitioning, and relation sign
+  partitioning are O(T).
   Constructing the relation residual inherits the simplifier's O(T^2) worst
   case; partitioning uses O(T) query scratch.
 
   Signed truncating division is implemented by the private
   `src/division_algebra.c` component around the exact relation `N = D*Q + R`.
-  Its exact quotient-parts parser is shared with positive-divisor quotient
-  algebra and reports representability misses separately from allocation.
+  Its exact quotient-parts parser is the neutral `additive_row.c` operation
+  shared with positive-divisor quotient algebra and reports representability
+  misses separately from allocation.
   A certificate admits direct `trunc(N/D)`, a `floor` or `ceil` whose argument
   sign makes it truncation, or the canonical two-arm `floor`/`ceil` Piecewise
   protocol. The Piecewise matcher accepts only the complete same-sign guard or
@@ -900,7 +908,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   factor structurally produces its exact scale without dividing by the atom
   and therefore without inventing a nonzero precondition. Rational pivot
   scales divide the row by scaling its existing coefficients in one rebuild,
-  preserving sparse form without internal expansion.
+  preserving sparse form without internal expansion. Row borrowing, atom
+  extraction, scale construction, and exact quotient partitioning come from
+  the neutral additive-row plan; quotient algebra retains every proof and
+  status decision.
 
   Every admitted atom requires `n` and `d` to be defined and integer-valued
   and `d > 0`. Isolating `Mod(n,d) = r` succeeds only when `r` is the unique

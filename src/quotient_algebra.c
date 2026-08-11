@@ -3,6 +3,7 @@
  */
 #include "quotient_algebra.h"
 
+#include "additive_row.h"
 #include "simplify.h"
 #include <string.h>
 
@@ -21,22 +22,6 @@ typedef struct {
   bool oom;
   bool unrepresentable;
 } qa_query;
-
-/* Canonical ADD is already a sorted sparse affine row. Non-ADD expressions
- * borrow one synthetic coefficient-one term instead of changing form. */
-typedef struct {
-  ixs_node *constant;
-  const ixs_addterm *terms;
-  ixs_addterm one;
-  uint32_t nterms;
-} qa_row;
-
-typedef struct {
-  ixs_node *atom;
-  ixs_node *numerator;
-  ixs_node *denominator;
-  ixs_node *scale;
-} qa_pivot;
 
 static bool qa_stopped(const qa_query *query) {
   return query->exhausted || query->limited || query->invalid || query->oom ||
@@ -115,116 +100,34 @@ static ixs_node *qa_simplify(qa_query *query, ixs_node *expr) {
   return qa_node(query, expr, !limited);
 }
 
-static void qa_row_init(qa_query *query, ixs_node *expr, qa_row *row) {
-  if (expr->tag == IXS_ADD) {
-    row->constant = expr->u.add.coeff;
-    row->terms = expr->u.add.terms;
-    row->nterms = expr->u.add.nterms;
-    return;
-  }
-  row->constant = query->ctx->node_zero;
-  row->one.term = expr;
-  row->one.coeff = query->ctx->node_one;
-  row->terms = &row->one;
-  row->nterms = 1u;
+/* The shape plan owns no proof policy. This boundary admits its borrowed
+ * numerator, denominator, and scale only after the operand-domain checks used
+ * by quotient algebra. */
+static bool qa_admit_term(qa_query *query, const ixs_euclidean_row *row,
+                          uint32_t index, qa_basis basis,
+                          ixs_euclidean_term_plan *plan) {
+  ixs_algebra_status status =
+      ixs_euclidean_plan_addterm(query->ctx, &row->terms[index],
+                                 IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD, plan);
+  if (status == IXS_ALGEBRA_OOM)
+    query->oom = true;
+  else if (status == IXS_ALGEBRA_INVALID)
+    query->invalid = true;
+  else if (status == IXS_ALGEBRA_UNREPRESENTABLE)
+    query->unrepresentable = true;
+  if (status != IXS_ALGEBRA_MATCH)
+    return false;
+  /* A mixed Floor/Mod product is rejected by the shared unique-atom scan.
+   * The selected atom must also belong to this projection pass. */
+  if (plan->atom->tag != (basis == QA_REMAINDER_BASIS ? IXS_FLOOR : IXS_MOD))
+    return false;
+  return qa_integer_defined(query, plan->numerator) &&
+         qa_integer_defined(query, plan->denominator) &&
+         qa_cmp(query, plan->denominator, IXS_CMP_GT, query->ctx->node_zero);
 }
 
-static bool qa_parts(qa_query *query, ixs_node *atom, ixs_node **numerator,
-                     ixs_node **denominator) {
-  ixs_quotient_parts_status status;
-  if (atom->tag == IXS_MOD) {
-    *numerator = atom->u.binary.lhs;
-    *denominator = atom->u.binary.rhs;
-  } else if (atom->tag == IXS_FLOOR) {
-    status = simp_exact_quotient_parts(query->ctx, atom->u.unary.arg, numerator,
-                                       denominator);
-    if (status == IXS_QUOTIENT_PARTS_OOM)
-      query->oom = true;
-    /* Representability rejects only this floor pivot; another row pivot may
-     * still supply a complete certificate. */
-    if (status != IXS_QUOTIENT_PARTS_MATCH)
-      return false;
-  } else {
-    return false;
-  }
-  return qa_integer_defined(query, *numerator) &&
-         qa_integer_defined(query, *denominator) &&
-         qa_cmp(query, *denominator, IXS_CMP_GT, query->ctx->node_zero);
-}
-
-static bool qa_basis_matches(ixs_node *node, qa_basis basis, bool either) {
-  if (either)
-    return node->tag == IXS_MOD || node->tag == IXS_FLOOR;
-  /* The enum names the destination basis: eliminating Floor leaves a
-   * remainder basis, while eliminating Mod leaves a quotient basis. */
-  return node->tag == (basis == QA_REMAINDER_BASIS ? IXS_FLOOR : IXS_MOD);
-}
-
-/* Remove the unique quotient/remainder factor from a canonical product. The
- * remaining sorted factors are its exact algebraic scale; division by the
- * atom would add a spurious nonzero obligation. */
-static bool qa_row_pivot(qa_query *query, const qa_row *row, uint32_t index,
-                         qa_basis basis, bool either, qa_pivot *pivot) {
-  ixs_node *term = row->terms[index].term;
-  ixs_node *outer = row->terms[index].coeff;
-  ixs_node *coefficient;
-  ixs_arena_mark mark;
-  ixs_mulfactor *factors;
-  uint32_t found = UINT32_MAX;
-  uint32_t i;
-  uint32_t write = 0;
-  if (qa_basis_matches(term, basis, either)) {
-    pivot->atom = term;
-    if (either)
-      return true;
-    pivot->scale = outer;
-    return qa_parts(query, term, &pivot->numerator, &pivot->denominator);
-  }
-  if (term->tag != IXS_MUL)
-    return false;
-  for (i = 0; i < term->u.mul.nfactors; i++) {
-    ixs_node *base = term->u.mul.factors[i].base;
-    if (base->tag != IXS_MOD && base->tag != IXS_FLOOR)
-      continue;
-    if (found != UINT32_MAX || term->u.mul.factors[i].exp != 1)
-      return false;
-    found = i;
-  }
-  if (found == UINT32_MAX ||
-      !qa_basis_matches(term->u.mul.factors[found].base, basis, either))
-    return false;
-  if (either)
-    return true;
-  coefficient = qa_build(query, QA_MUL, outer, term->u.mul.coeff);
-  if (!coefficient)
-    return false;
-  pivot->atom = term->u.mul.factors[found].base;
-  if (term->u.mul.nfactors == 1u) {
-    pivot->scale = coefficient;
-  } else {
-    mark = ixs_arena_save(&query->ctx->scratch);
-    factors = ixs_arena_alloc(&query->ctx->scratch,
-                              (term->u.mul.nfactors - 1u) * sizeof(*factors),
-                              sizeof(void *));
-    if (!factors) {
-      query->oom = true;
-      ixs_arena_restore(&query->ctx->scratch, mark);
-      return false;
-    }
-    for (i = 0; i < term->u.mul.nfactors; i++)
-      if (i != found)
-        factors[write++] = term->u.mul.factors[i];
-    pivot->scale = ixs_node_mul(query->ctx, coefficient, write, factors);
-    ixs_arena_restore(&query->ctx->scratch, mark);
-    if (!pivot->scale) {
-      query->oom = true;
-      return false;
-    }
-  }
-  return qa_parts(query, pivot->atom, &pivot->numerator, &pivot->denominator);
-}
-
-static ixs_node *qa_replacement(qa_query *query, const qa_pivot *pivot) {
+static ixs_node *qa_replacement(qa_query *query,
+                                const ixs_euclidean_term_plan *pivot) {
   ixs_node *opposite = qa_node(
       query, simp_mod(query->ctx, pivot->numerator, pivot->denominator), true);
   ixs_node *residual;
@@ -241,15 +144,15 @@ static ixs_node *qa_replacement(qa_query *query, const qa_pivot *pivot) {
 static bool qa_project(qa_query *query, ixs_node *expr, ixs_node **projected) {
   ixs_node *targets[IXS_QUOTIENT_ALGEBRA_MAX_CANDIDATES];
   ixs_node *replacements[IXS_QUOTIENT_ALGEBRA_MAX_CANDIDATES];
-  qa_row row;
+  ixs_euclidean_row row;
   uint32_t count = 0;
   uint32_t i;
   uint32_t j;
   *projected = expr;
-  qa_row_init(query, expr, &row);
+  ixs_euclidean_row_borrow(query->ctx, expr, &row);
   for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-    qa_pivot pivot;
-    if (!qa_row_pivot(query, &row, i, QA_REMAINDER_BASIS, false, &pivot))
+    ixs_euclidean_term_plan pivot;
+    if (!qa_admit_term(query, &row, i, QA_REMAINDER_BASIS, &pivot))
       continue;
     for (j = 0; j < count && targets[j] != pivot.atom; j++)
       ;
@@ -276,19 +179,19 @@ static bool qa_project(qa_query *query, ixs_node *expr, ixs_node **projected) {
  * [0,c*(m-1)]; the ordinary interval engine bounds the residual once. */
 static bool qa_affine_remainder_range(qa_query *query, ixs_node *expr,
                                       ixs_node *denominator) {
-  qa_row row;
+  ixs_euclidean_row row;
   ixs_node *residual = expr;
   ixs_node *digit_upper = query->ctx->node_zero;
   ixs_interval range;
   uint32_t digits = 0;
   uint32_t i;
-  qa_row_init(query, expr, &row);
+  ixs_euclidean_row_borrow(query->ctx, expr, &row);
   for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-    qa_pivot pivot;
+    ixs_euclidean_term_plan pivot;
     ixs_node *digit;
     ixs_node *width;
     ixs_node *upper;
-    if (!qa_row_pivot(query, &row, i, QA_QUOTIENT_BASIS, false, &pivot) ||
+    if (!qa_admit_term(query, &row, i, QA_QUOTIENT_BASIS, &pivot) ||
         !qa_integer_defined(query, pivot.scale) ||
         !qa_cmp(query, pivot.scale, IXS_CMP_GT, query->ctx->node_zero))
       continue;
@@ -330,7 +233,7 @@ static bool qa_canonical_remainder(qa_query *query, ixs_node *expr,
                                    ixs_node *denominator) {
   ixs_node *upper;
   ixs_node *quotient;
-  /* qa_parts already proved the pivot denominator positive and total. */
+  /* qa_admit_term already proved the pivot denominator positive and total. */
   if (!qa_integer_defined(query, expr))
     return false;
   upper = qa_sub(query, expr, denominator);
@@ -366,19 +269,19 @@ static bool qa_multiple(qa_query *query, ixs_node *expr,
  * At most four row deltas are built, keeping this O(T). */
 static bool qa_reduce_congruence(qa_query *query, ixs_node *expr,
                                  ixs_node *denominator, ixs_node **reduced) {
-  qa_row row;
+  ixs_euclidean_row row;
   ixs_node *result = expr;
   unsigned reductions = 0;
   uint32_t i;
-  qa_row_init(query, expr, &row);
+  ixs_euclidean_row_borrow(query->ctx, expr, &row);
   for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-    qa_pivot pivot;
+    ixs_euclidean_term_plan pivot;
     ixs_node *covered;
     ixs_node *coverage;
     ixs_node *scaled;
     ixs_node *replacement;
     ixs_node *delta;
-    if (!qa_row_pivot(query, &row, i, QA_QUOTIENT_BASIS, false, &pivot))
+    if (!qa_admit_term(query, &row, i, QA_QUOTIENT_BASIS, &pivot))
       continue;
     covered = qa_build(query, QA_MUL, pivot.scale, pivot.denominator);
     coverage = covered ? qa_build(query, QA_DIV, covered, denominator) : NULL;
@@ -412,7 +315,8 @@ static bool qa_exact_zero(qa_query *query, ixs_node *expr) {
 
 /* Euclidean uniqueness gives Mod(n,d)=r iff r is in [0,d) and d divides
  * n-r, with all operands defined and integer-valued. */
-static bool qa_remainder_value(qa_query *query, const qa_pivot *pivot,
+static bool qa_remainder_value(qa_query *query,
+                               const ixs_euclidean_term_plan *pivot,
                                ixs_node *candidate) {
   ixs_node *difference;
   ixs_node *reduced;
@@ -433,7 +337,8 @@ static bool qa_remainder_value(qa_query *query, const qa_pivot *pivot,
 }
 
 /* Euclidean uniqueness gives floor(n/d)=q iff n-d*q is in [0,d). */
-static bool qa_quotient_value(qa_query *query, const qa_pivot *pivot,
+static bool qa_quotient_value(qa_query *query,
+                              const ixs_euclidean_term_plan *pivot,
                               ixs_node *candidate) {
   ixs_node *product;
   ixs_node *residual;
@@ -448,8 +353,9 @@ static bool qa_quotient_value(qa_query *query, const qa_pivot *pivot,
 /* Divide a borrowed affine row by a rational pivot scale in one canonical
  * rebuild. This preserves sparsity when simplification does not distribute a
  * common rational factor. */
-static ixs_node *qa_row_candidate(qa_query *query, const qa_row *row,
-                                  uint32_t index, const qa_pivot *pivot,
+static ixs_node *qa_row_candidate(qa_query *query, const ixs_euclidean_row *row,
+                                  uint32_t index,
+                                  const ixs_euclidean_term_plan *pivot,
                                   ixs_node *difference) {
   ixs_node *inverse;
   ixs_node *constant;
@@ -466,7 +372,8 @@ static ixs_node *qa_row_candidate(qa_query *query, const qa_row *row,
     return rest ? qa_build(query, QA_DIV, rest, pivot->scale) : NULL;
   }
   inverse = qa_build(query, QA_DIV, query->minus_one, pivot->scale);
-  constant = inverse ? qa_build(query, QA_MUL, inverse, row->constant) : NULL;
+  constant = inverse ? qa_build(query, QA_MUL, inverse, difference->u.add.coeff)
+                     : NULL;
   if (!constant)
     return NULL;
   mark = ixs_arena_save(&query->ctx->scratch);
@@ -497,16 +404,16 @@ static ixs_node *qa_row_candidate(qa_query *query, const qa_row *row,
 }
 
 static bool qa_solve_row(qa_query *query, ixs_node *difference) {
-  qa_row row;
+  ixs_euclidean_row row;
   unsigned pass;
   uint32_t i;
-  qa_row_init(query, difference, &row);
+  ixs_euclidean_row_borrow(query->ctx, difference, &row);
   for (pass = 0; pass < 2u; pass++)
     for (i = 0; i < row.nterms && !qa_stopped(query); i++) {
-      qa_pivot pivot;
+      ixs_euclidean_term_plan pivot;
       ixs_node *candidate;
       qa_basis match = pass == 0u ? QA_QUOTIENT_BASIS : QA_REMAINDER_BASIS;
-      if (!qa_row_pivot(query, &row, i, match, false, &pivot))
+      if (!qa_admit_term(query, &row, i, match, &pivot))
         continue;
       if (!qa_has_capacity(query, query->candidates))
         return false;
@@ -526,14 +433,10 @@ static bool qa_solve_row(qa_query *query, ixs_node *difference) {
 }
 
 static bool qa_contains_atom(qa_query *query, ixs_node *expr) {
-  qa_row row;
-  qa_pivot pivot;
-  uint32_t i;
-  qa_row_init(query, expr, &row);
-  for (i = 0; i < row.nterms; i++)
-    if (qa_row_pivot(query, &row, i, QA_REMAINDER_BASIS, true, &pivot))
-      return true;
-  return false;
+  ixs_euclidean_row row;
+  ixs_euclidean_row_borrow(query->ctx, expr, &row);
+  return ixs_euclidean_row_contains(&row,
+                                    IXS_EUCLIDEAN_FLOOR | IXS_EUCLIDEAN_MOD);
 }
 
 /* The row engine adds a fixed number of O(T) scans. Simplification,

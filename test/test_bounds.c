@@ -1087,7 +1087,7 @@ static void test_division_projection_transport_precedence(void) {
   errors = ixs_ctx_nerrors(ctx);
 
   /* The wide sibling exhausts scratch after the earlier arithmetic miss. */
-  ixs_arena_set_fail_after(&ctx->scratch, 179u);
+  ixs_arena_set_fail_after(&ctx->scratch, 173u);
   result =
       ixs_division_algebra_project(ctx, &bounds, root, root, ctx->node_zero,
                                    ctx->node_zero, IXS_DIVISION_PROJECT_ALL);

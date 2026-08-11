@@ -130,15 +130,4 @@ IXS_STATIC ixs_node *simp_subs_multi_outermost(ixs_ctx *ctx, ixs_node *expr,
                                                ixs_node *const *replacements,
                                                bool *unrepresentable);
 
-typedef enum {
-  IXS_QUOTIENT_PARTS_NO_MATCH,
-  IXS_QUOTIENT_PARTS_MATCH,
-  IXS_QUOTIENT_PARTS_UNREPRESENTABLE,
-  IXS_QUOTIENT_PARTS_OOM
-} ixs_quotient_parts_status;
-
-/* Internal quotient partitioning for Trunc and exact equivalence proofs. */
-IXS_STATIC ixs_quotient_parts_status simp_exact_quotient_parts(
-    ixs_ctx *ctx, ixs_node *expr, ixs_node **numerator, ixs_node **denominator);
-
 #endif /* IXS_SIMPLIFY_H */
