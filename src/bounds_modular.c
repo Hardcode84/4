@@ -222,12 +222,12 @@ static bool bounds_unique_modular_delta(ixs_bounds *bounds, ixs_node *lhs,
   return true;
 }
 
-/* If the dividend and positive divisor share a stride class, a shift which
- * stays within one stride bucket cannot cross a divisor boundary. */
-static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
-                                           ixs_node *dividend,
-                                           ixs_node *denominator,
-                                           int64_t shift) {
+/* With n == r (mod m) and m | d, every possible Mod(n,d) is r+k*m.
+ * Bounding delta inside [-r,m-r) excludes both quotient boundaries. */
+static bool bounds_modular_shift_window_stable(ixs_bounds *bounds,
+                                               ixs_node *dividend,
+                                               ixs_node *denominator,
+                                               int64_t lower, int64_t upper) {
   uint64_t modulus;
   uint64_t residue;
   if (!bounds_known_stride(bounds, dividend, &modulus) || modulus <= 1u ||
@@ -236,11 +236,18 @@ static bool bounds_mod_shift_by_congruence(ixs_bounds *bounds,
       ixs_bounds_check_divisible(bounds, denominator, (int64_t)modulus) !=
           IXS_CHECK_TRUE)
     return false;
-  if (shift >= 0) {
-    uint64_t positive = (uint64_t)shift;
-    return positive < modulus && residue < modulus - positive;
-  }
-  return ixs_int64_magnitude(shift) <= residue;
+  return lower >= -(int64_t)residue && upper < (int64_t)(modulus - residue);
+}
+
+IXS_STATIC bool bounds_modular_quotient_shift_stable(ixs_bounds *bounds,
+                                                     ixs_node *dividend,
+                                                     ixs_node *denominator,
+                                                     ixs_node *delta) {
+  int64_t lower;
+  int64_t upper;
+  return bounds_integer_enclosure(bounds, delta, &lower, &upper) &&
+         bounds_modular_shift_window_stable(bounds, dividend, denominator,
+                                            lower, upper);
 }
 
 static bool bounds_denominator_proven_positive(ixs_bounds *bounds,
@@ -640,8 +647,9 @@ static bool bounds_delta_project_mod_pair(bounds_delta_query *query,
       return false;
   } else {
     if (!bounds_denominator_proven_positive(query->bounds, denominator) ||
-        !bounds_mod_shift_by_congruence(query->bounds, rhs_representative,
-                                        denominator, query->child_delta))
+        !bounds_modular_shift_window_stable(query->bounds, rhs_representative,
+                                            denominator, query->child_delta,
+                                            query->child_delta))
       return false;
     modular_delta = query->child_delta;
   }

@@ -1900,8 +1900,14 @@ This enables rules like:
   integer per congruence and can be extracted from the floor)
 - `c*Mod(A,m) - c*Mod(B,m)` → `0` when `A-B ≡ 0 (mod m)` is proven
   for the shared positive literal modulus
-- Opposite-coefficient floors with one denominator cancel when a remainder
-  proof shows the numerator shift stays in the same quotient bucket
+- Opposite-coefficient `floor` or `ceiling` quotients with one positive integer
+  denominator cancel when a bounded integer numerator shift stays in the same
+  quotient bucket. The direct proof bounds `Mod(n,d) + delta` inside `[0,d)`.
+  The shared modular fallback uses `n == r (mod m)`, `m | d`, and the complete
+  shift interval `-r <= delta < m-r`; `ceiling` uses the exact `-n`, `-delta`
+  dual. Sign-proven `trunc` reaches the same machinery through its canonical
+  `floor` or `ceiling` form. The fallback performs only range, residue, and
+  divisibility queries and cannot re-enter simplification.
 
 **Bitwise-fact extraction and consumers**:
 

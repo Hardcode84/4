@@ -2194,6 +2194,75 @@ static void test_floor_shift_xor(void) {
   CHECK(ixs_simplify(ctx, source_wave, assumptions, 2) == expected);
 }
 
+static void test_bounded_quotient_stability(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *a = ixs_sym(ctx, "bounded_quotient_a");
+  ixs_node *d = ixs_sym(ctx, "bounded_quotient_d");
+  ixs_node *delta = ixs_sym(ctx, "bounded_quotient_delta");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *floor_difference =
+      ixs_sub(ctx, ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, a, delta), d)),
+              ixs_floor(ctx, ixs_div(ctx, a, d)));
+  ixs_node *fractional_delta = ixs_div(ctx, delta, ixs_int(ctx, 2));
+  ixs_node *fractional_difference = ixs_sub(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, a, fractional_delta), d)),
+      ixs_floor(ctx, ixs_div(ctx, a, d)));
+  ixs_node *ceil_difference =
+      ixs_sub(ctx, ixs_ceil(ctx, ixs_div(ctx, ixs_add(ctx, a, delta), d)),
+              ixs_ceil(ctx, ixs_div(ctx, a, d)));
+  ixs_node *aligned[] = {
+      ixs_cmp(ctx, d, IXS_CMP_GT, zero),
+      ixs_cmp(ctx, delta, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, delta, IXS_CMP_LE, ixs_int(ctx, 7)),
+      ixs_cmp(ctx, delta, IXS_CMP_EQ, ixs_floor(ctx, delta)),
+      ixs_cmp(ctx, ixs_mod(ctx, a, eight), IXS_CMP_EQ, zero),
+      ixs_cmp(ctx, ixs_mod(ctx, d, eight), IXS_CMP_EQ, zero),
+  };
+  ixs_node *residue_window[] = {
+      aligned[0],
+      ixs_cmp(ctx, delta, IXS_CMP_GE, ixs_int(ctx, -3)),
+      ixs_cmp(ctx, delta, IXS_CMP_LE, ixs_int(ctx, 4)),
+      aligned[3],
+      ixs_cmp(ctx, ixs_mod(ctx, a, eight), IXS_CMP_EQ, ixs_int(ctx, 3)),
+      aligned[5],
+  };
+  ixs_node *ceil_window[] = {
+      aligned[0],
+      ixs_cmp(ctx, delta, IXS_CMP_GE, ixs_int(ctx, -7)),
+      ixs_cmp(ctx, delta, IXS_CMP_LE, zero),
+      aligned[3],
+      aligned[4],
+      aligned[5],
+  };
+  ixs_node *crossing[] = {
+      aligned[0], aligned[1], ixs_cmp(ctx, delta, IXS_CMP_LE, eight),
+      aligned[3], aligned[4], aligned[5],
+  };
+  ixs_node *missing_integer[] = {
+      aligned[0],
+      ixs_cmp(ctx, fractional_delta, IXS_CMP_GE, zero),
+      ixs_cmp(ctx, fractional_delta, IXS_CMP_LE, ixs_int(ctx, 7)),
+      aligned[4],
+      aligned[5],
+  };
+  ixs_node *negative_denominator[] = {
+      ixs_cmp(ctx, d, IXS_CMP_LT, zero),
+      aligned[1],
+      aligned[2],
+      aligned[3],
+      aligned[4],
+      aligned[5],
+  };
+
+  CHECK(ixs_simplify(ctx, floor_difference, aligned, 6) == zero);
+  CHECK(ixs_simplify(ctx, floor_difference, residue_window, 6) == zero);
+  CHECK(ixs_simplify(ctx, ceil_difference, ceil_window, 6) == zero);
+  CHECK(ixs_simplify(ctx, floor_difference, crossing, 6) != zero);
+  CHECK(ixs_simplify(ctx, fractional_difference, missing_integer, 5) != zero);
+  CHECK(ixs_simplify(ctx, floor_difference, negative_denominator, 6) != zero);
+}
+
 static void test_nested_floor_ceil(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
@@ -5392,6 +5461,7 @@ int main(void) {
   test_floor_drop_small_rational();
   test_floor_drop_small_bounded_term();
   test_floor_shift_xor();
+  test_bounded_quotient_stability();
   test_substitution();
   test_subs_multi();
   test_substitution_deep_iterative();

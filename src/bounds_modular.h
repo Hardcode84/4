@@ -6,6 +6,13 @@
 
 #include "bounds.h"
 
+/* After the caller proves integer operands and a positive denominator, prove
+ * that every bounded integer delta stays in the current quotient bucket. */
+IXS_STATIC bool bounds_modular_quotient_shift_stable(ixs_bounds *bounds,
+                                                     ixs_node *dividend,
+                                                     ixs_node *denominator,
+                                                     ixs_node *delta);
+
 /* Prove one exact delta through relation residuals and paired Mod terms.
  * Failure leaves delta unchanged and reports only live transport failures. */
 IXS_STATIC bool bounds_modular_exact_delta_detail(
