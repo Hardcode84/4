@@ -920,16 +920,15 @@ are provably integer via congruence (e.g. `floor(x/3 + K/32)` ->
 since `32 | K` makes `K/32` integer).  The helper `addterm_is_integer_valued`
 encapsulates this check for both the detection and extraction passes.
 
-Both `is_integer_with_divinfo` and `is_known_divisible` handle multi-factor
-MUL nodes: for `p/q * f1^e1 * ... * fn^en`, each positive-exponent factor
-is checked for integer-valued-ness, and any single factor whose congruence
-absorbs the remaining denominator suffices to prove the whole product
-integer-valued (or divisible by a given modulus).  This is a sufficient
-OR-of-factors test, not full product factorization: `6 | (2*3)` cannot
-be proved when neither factor alone is divisible by 6.
-
-`is_known_divisible` also handles `Max` and `Min` when every operand is
-provably divisible; any selected value then preserves the divisor.
+`is_integer_with_divinfo`, `is_known_divisible`, and target-modulus residue
+queries run in one compound proof graph. `DIVISIBLE(x, m)` first proves
+`INTEGER(x)`, then proves `RESIDUE(x, m) == 0`; coefficient cancellation alone
+cannot certify a nonintegral product. For `p/q * f1^e1 * ... * fn^en`, an
+integer proof requests factor residues inside that graph to cancel `q`, while a
+residue proof first proves every factor integer before accepting a zero
+coefficient or reduced modulus of one. `Max` and `Min` have a known residue only
+when every operand has that same residue, which also proves divisibility when
+the common residue is zero.
 
 ```
 floor(C/D + sum(ci * ti / D))  →  floor(C'/D + sum(ci * ti / D))
@@ -1272,7 +1271,9 @@ cursor traversal, equality projection, and the projection-cache lifecycle.
 `bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
 `bounds_defined.c` owns iterative domain proofs, Piecewise partition coverage,
 depth-safe range subqueries, and definedness projection-cache publication.
-`bounds_integer.c` owns exact integer and divisibility proofs.
+`bounds_integer.c` owns the compound integer, divisibility, and residue
+scheduler plus exact integer and divisibility transitions. `bounds_proof.h`
+owns its internal obligation, frame, and memo representation.
 `bounds_predicate.c` owns iterative tri-state predicate evaluation, bounded
 implication branches, and finite-domain enumeration over range/nonzero atoms.
 It does not call equivalence. The facts-facing query boundary applies the
@@ -1288,10 +1289,10 @@ owns equivalence query policy, exact EQ/NE fallback, ordered-congruence, and
 Piecewise selector proofs. `bounds_modular.c` owns generic normalized
 exact-value projection, paired-Mod exact-delta search, wide signed arithmetic,
 dynamic no-wrap lifts, and its growable progress stack.
-`bounds_residue.c` owns target-modulus residue queries, including
+`bounds_residue.c` owns target-modulus residue transitions, including
 proof-independent rational cancellation and branch-sensitive Piecewise
-evaluation. `bounds_stride.c` owns phase-free stride queries and coefficient
-scaling.
+evaluation. It does not start a second proof driver. `bounds_stride.c` owns
+phase-free stride queries and coefficient scaling.
 `bounds_assume.c` owns canonical alias creation and passes canonical nodes or
 trusted symbols to the leaf owners.
 `bounds_range.c` owns relation endpoint admission, direct interval caching and
@@ -1472,26 +1473,34 @@ layout, load factor, and allocation remain consumer-owned.
   Typed frames keep the expression pointer first; storage starts at the
   consumer's configured capacity, doubles with checked arena growth at pointer
   alignment, and is zeroed before the expression is published. Bitfacts,
-  stride, residue, and interval queries start at 16 frames. `bounds_integer.c`
-  runs exact integer proofs with 16 inline frames and scratch growth.
+  stride, residue, and interval queries start at 16 frames. The compound exact
+  proof query keeps 16 integer/divisibility frames inline; its residue pool
+  starts at 16 scratch frames. Both typed pools share one active-frame
+  discriminator and driver while retaining their previous frame sizes and
+  growth cutoffs.
   Definedness, predicate, and AND-assumption walks start at 32 frames.
 
   The structural driver owns push/pop, growth, and optional LIFO abort. Its
   `run` entry owns one scratch mark; memo-first consumers use the mark-free
   seeded driver inside a caller-owned mark. Definedness, predicate, and
   AND-assumption walks allocate a per-query node-identity memo before their
-  stack. Exact integer proofs keep an inline 32-entry compound-key memo over
-  `(node, relation, modulus)`. Bitfacts, stride, residue, and interval walks use
-  the central `bounds_query` cache because their keys and values belong to that
-  environment. Local identity and compound memos share the stack's caller-owned
-  mark and die at its restore. The central cache is generation-scoped and
-  owner-keyed; forks share its query state while those keys isolate bounds
-  owners and generations.
+  stack. The compound proof query keeps an inline 32-entry memo over
+  `(bounds owner, node, obligation, modulus)`. It memoizes integer and
+  divisibility obligations, and proof-independent residue obligations, for one
+  scratch lifetime. Ordinary residue frames retain the central `bounds_query`
+  cache because their results belong to the active environment; exact
+  subobligations remain in the local compound memo. Local identity and compound
+  memos share the stack's caller-owned mark and die at its restore. The central
+  cache is generation-scoped and owner-keyed; forks share its query state while
+  the local bounds-owner key prevents branch results from aliasing.
 
-  `bounds_residue.c` keeps the requested modulus in each typed frame. ADD
-  coefficients are reduced before recursive queries, equal representatives are
-  grouped in scratch storage, and reachable Piecewise branches run in bounds
-  forks. Its proof-independent mode consults only structural and stored facts.
+  `bounds_residue.c` keeps the requested modulus in each typed frame. Rational
+  ADD coefficients use one synthetic scaled-residue obligation inside the same
+  graph; equal representatives are grouped in scratch storage after required
+  integrality obligations are discharged. MUL proves every factor integer
+  before a zero coefficient or reduced modulus of one can finish the residue.
+  Reachable Piecewise branches run in bounds forks. Proof-independent mode
+  consults only structural and stored facts.
   `bounds_stride.c` joins ADD and Piecewise operands with gcd, scales linear
   products without overflowing the retained stride, and maps literal `Mod`
   through the gcd of dividend stride and modulus.

@@ -6660,11 +6660,9 @@ IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
 #include "bounds_integer.h"
 
 #include "bounds.h"
-#include "bounds_bitfacts.h"
+#include "bounds_proof.h"
 #include "bounds_query.h"
-#include "bounds_store.h"
 #include "hash.h"
-#include "query_walk.h"
 #include "rational.h"
 
 #include <assert.h>
@@ -6672,97 +6670,36 @@ IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
 #include <stdint.h>
 #include <string.h>
 
-typedef enum {
-  BOUNDS_EXACT_PROOF_INTEGER,
-  BOUNDS_EXACT_PROOF_DIVISIBLE
-} bounds_exact_proof_kind;
-
-typedef enum {
-  BOUNDS_EXACT_PROOF_INITIAL,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE,
-  BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER,
-  BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE,
-  BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN,
-  BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD,
-  BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS,
-  BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD,
-  BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN
-} bounds_exact_proof_stage;
-
-typedef struct {
-  ixs_node *expr;
-  int64_t modulus;
-  bounds_exact_proof_kind kind;
-  bool result;
-  bool active;
-  bool complete;
-} bounds_exact_proof_memo_entry;
-
-typedef struct {
-  bounds_exact_proof_memo_entry *entries;
-  size_t count;
-  size_t capacity;
-} bounds_exact_proof_memo;
-
-typedef struct {
-  ixs_node *expr;
-  int64_t modulus;
-  int64_t denominator;
-  uint32_t index;
-  bounds_exact_proof_kind kind;
-  bounds_exact_proof_stage stage;
-  bool denominator_cancelled;
-  bool reachable;
-  bool terminal_branch;
-} bounds_exact_proof_frame;
-
-typedef struct {
-  ixs_bounds *bounds;
-  ixs_query_walk walk;
-  bounds_exact_proof_memo memo;
-  bool child_result;
-  bool stack_oom;
-  bounds_exact_proof_frame inline_frames[16];
-  bounds_exact_proof_memo_entry inline_memo[32];
-} bounds_exact_proof_query;
-
-static size_t bounds_exact_proof_hash(ixs_node *expr,
-                                      bounds_exact_proof_kind kind,
-                                      int64_t modulus) {
+static size_t bounds_exact_proof_hash(ixs_bounds *bounds, ixs_node *expr,
+                                      bounds_proof_kind kind,
+                                      uint64_t modulus) {
   size_t hash = ixs_hash_ptr(expr);
+  hash ^= ixs_hash_ptr(bounds) + (hash << 6u) + (hash >> 2u);
   hash ^= (size_t)(uint64_t)modulus + (hash << 6u) + (hash >> 2u);
   hash ^= (size_t)kind + (hash << 6u) + (hash >> 2u);
   return hash;
 }
 
-static bool bounds_exact_proof_memo_grow(bounds_exact_proof_query *query) {
+static bool bounds_proof_memo_grow(bounds_proof_query *query) {
   size_t capacity = query->memo.capacity ? query->memo.capacity * 2u : 32u;
-  bounds_exact_proof_memo_entry *grown;
+  bounds_proof_memo_entry *grown;
   size_t i;
   if (capacity <= query->memo.capacity || capacity > SIZE_MAX / sizeof(*grown))
     return false;
-  grown = ixs_arena_alloc(query->bounds->scratch, capacity * sizeof(*grown),
+  grown = ixs_arena_alloc(query->root->scratch, capacity * sizeof(*grown),
                           sizeof(void *));
   if (!grown)
     return false;
   memset(grown, 0, capacity * sizeof(*grown));
   for (i = 0; i < query->memo.capacity; i++) {
-    bounds_exact_proof_memo_entry entry = query->memo.entries[i];
+    bounds_proof_memo_entry entry = query->memo.entries[i];
     size_t slot;
     if (!entry.expr)
       continue;
-    slot = bounds_exact_proof_hash(entry.expr, entry.kind, entry.modulus) &
-           (capacity - 1u);
+    slot =
+        bounds_exact_proof_hash(entry.bounds, entry.expr,
+                                (bounds_proof_kind)entry.kind, entry.modulus) &
+        (capacity - 1u);
     while (grown[slot].expr)
       slot = (slot + 1u) & (capacity - 1u);
     grown[slot] = entry;
@@ -6772,80 +6709,263 @@ static bool bounds_exact_proof_memo_grow(bounds_exact_proof_query *query) {
   return true;
 }
 
-static bounds_exact_proof_memo_entry *
-bounds_exact_proof_memo_get(bounds_exact_proof_query *query, ixs_node *expr,
-                            bounds_exact_proof_kind kind, int64_t modulus,
-                            bool create) {
+static bounds_proof_memo_entry *
+bounds_proof_memo_get(bounds_proof_query *query, ixs_bounds *bounds,
+                      ixs_node *expr, bounds_proof_kind kind, uint64_t modulus,
+                      bool create) {
   size_t slot;
   if (create && (!query->memo.capacity ||
                  query->memo.count + 1u > query->memo.capacity / 2u)) {
-    if (!bounds_exact_proof_memo_grow(query))
+    if (!bounds_proof_memo_grow(query))
       return NULL;
   }
   if (!query->memo.capacity)
     return NULL;
-  slot = bounds_exact_proof_hash(expr, kind, modulus) &
+  slot = bounds_exact_proof_hash(bounds, expr, kind, modulus) &
          (query->memo.capacity - 1u);
   while (query->memo.entries[slot].expr &&
-         (query->memo.entries[slot].expr != expr ||
-          query->memo.entries[slot].kind != kind ||
+         (query->memo.entries[slot].bounds != bounds ||
+          query->memo.entries[slot].expr != expr ||
+          (bounds_proof_kind)query->memo.entries[slot].kind != kind ||
           query->memo.entries[slot].modulus != modulus))
     slot = (slot + 1u) & (query->memo.capacity - 1u);
   if (!query->memo.entries[slot].expr) {
     if (!create)
       return NULL;
+    query->memo.entries[slot].bounds = bounds;
     query->memo.entries[slot].expr = expr;
-    query->memo.entries[slot].kind = kind;
+    query->memo.entries[slot].kind = (uint8_t)kind;
     query->memo.entries[slot].modulus = modulus;
     query->memo.count++;
   }
   return &query->memo.entries[slot];
 }
 
-static ixs_query_walk_step
-bounds_exact_proof_push(bounds_exact_proof_query *query, ixs_node *expr,
-                        bounds_exact_proof_kind kind, int64_t modulus) {
-  bounds_exact_proof_memo_entry *entry;
+static bool bounds_proof_grow_exact(bounds_proof_query *query) {
+  size_t capacity = query->exact_capacity * 2u;
+  bounds_exact_proof_frame *grown;
+  if (capacity <= query->exact_capacity || capacity > SIZE_MAX / sizeof(*grown))
+    return false;
+  grown = ixs_arena_grow(query->root->scratch, query->exact_frames,
+                         query->exact_capacity * sizeof(*grown),
+                         capacity * sizeof(*grown), sizeof(void *));
+  if (!grown)
+    return false;
+  query->exact_frames = grown;
+  query->exact_capacity = capacity;
+  return true;
+}
+
+static bool bounds_proof_grow_residue(bounds_proof_query *query) {
+  size_t capacity =
+      query->residue_capacity ? query->residue_capacity * 2u : 16u;
+  bounds_residue_frame *grown;
+  if (capacity <= query->residue_capacity ||
+      capacity > SIZE_MAX / sizeof(*grown))
+    return false;
+  grown = ixs_arena_grow(query->root->scratch, query->residue_frames,
+                         query->residue_capacity * sizeof(*grown),
+                         capacity * sizeof(*grown), sizeof(void *));
+  if (!grown)
+    return false;
+  query->residue_frames = grown;
+  query->residue_capacity = capacity;
+  return true;
+}
+
+static void bounds_proof_restore_parent(bounds_proof_query *query,
+                                        bounds_proof_frame_kind parent) {
+  query->top_kind = parent;
+  if (parent == BOUNDS_PROOF_FRAME_RESIDUE) {
+    assert(query->residue_count != 0u);
+    query->active_bounds =
+        query->residue_frames[query->residue_count - 1u].bounds;
+  } else if (parent == BOUNDS_PROOF_FRAME_NONE) {
+    query->active_bounds = query->root;
+  }
+}
+
+IXS_STATIC void bounds_proof_query_init(bounds_proof_query *query,
+                                        ixs_bounds *root,
+                                        bool proof_independent) {
+  memset(query, 0, sizeof(*query));
+  query->root = root;
+  query->active_bounds = root;
+  query->proof_independent = proof_independent;
+  query->exact_frames = query->inline_exact;
+  query->exact_capacity =
+      sizeof(query->inline_exact) / sizeof(query->inline_exact[0]);
+  query->memo.entries = query->inline_memo;
+  query->memo.capacity =
+      sizeof(query->inline_memo) / sizeof(query->inline_memo[0]);
+}
+
+IXS_STATIC ixs_query_walk_step bounds_proof_push_exact(
+    bounds_proof_query *query, ixs_bounds *bounds, ixs_node *expr,
+    bounds_proof_kind kind, uint64_t modulus) {
+  bounds_proof_memo_entry *entry;
   bounds_exact_proof_frame *frame;
-  ixs_query_walk_step step;
-  if (!expr || (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0)) {
+  if (!bounds || !expr || (kind == BOUNDS_PROOF_DIVISIBLE && modulus == 0u) ||
+      (kind != BOUNDS_PROOF_INTEGER && kind != BOUNDS_PROOF_DIVISIBLE)) {
     return IXS_QUERY_WALK_STOP;
   }
-  entry = bounds_exact_proof_memo_get(query, expr, kind, modulus, true);
-  if (!entry)
+  entry = bounds_proof_memo_get(query, bounds, expr, kind, modulus, true);
+  if (!entry) {
+    query->root->oom = true;
     return IXS_QUERY_WALK_OOM;
-  if (entry->active) {
-    return IXS_QUERY_WALK_STOP;
   }
+  if (entry->active)
+    return IXS_QUERY_WALK_STOP;
   if (entry->complete) {
-    query->child_result = entry->result;
+    query->child_success = entry->success;
+    query->child_residue = entry->residue;
     return IXS_QUERY_WALK_ADVANCED;
   }
-  step = ixs_query_walk_push(&query->walk, expr);
-  if (step != IXS_QUERY_WALK_ADVANCED)
-    return step;
-  frame = IXS_QUERY_WALK_TOP(&query->walk);
+  if (query->exact_count == query->exact_capacity &&
+      !bounds_proof_grow_exact(query)) {
+    query->root->oom = true;
+    return IXS_QUERY_WALK_OOM;
+  }
+  frame = &query->exact_frames[query->exact_count++];
+  memset(frame, 0, sizeof(*frame));
+  frame->expr = expr;
   frame->kind = kind;
   frame->modulus = modulus;
   frame->stage = BOUNDS_EXACT_PROOF_INITIAL;
-  entry->active = true;
+  frame->parent_kind = (uint8_t)query->top_kind;
+  query->top_kind = BOUNDS_PROOF_FRAME_EXACT;
+  query->active_bounds = bounds;
+  query->depth++;
+  if (entry)
+    entry->active = true;
   return IXS_QUERY_WALK_ADVANCED;
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_complete(bounds_exact_proof_query *query, bool result) {
-  bounds_exact_proof_frame *frame = IXS_QUERY_WALK_TOP(&query->walk);
-  bounds_exact_proof_memo_entry *entry = bounds_exact_proof_memo_get(
-      query, frame->expr, frame->kind, frame->modulus, false);
-  if (!entry || !entry->active) {
-    return IXS_QUERY_WALK_STOP;
+bounds_proof_push_residue_mode(bounds_proof_query *query, ixs_bounds *bounds,
+                               ixs_node *expr, uint64_t modulus,
+                               bool memoized) {
+  bounds_proof_memo_entry *entry = NULL;
+  bounds_residue_frame *frame;
+  if (!bounds || !expr || modulus == 0u || bounds->oom)
+    return bounds && bounds->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_STOP;
+  if (memoized) {
+    entry = bounds_proof_memo_get(query, bounds, expr, BOUNDS_PROOF_RESIDUE,
+                                  modulus, true);
+    if (!entry) {
+      query->root->oom = true;
+      return IXS_QUERY_WALK_OOM;
+    }
+    if (entry->active)
+      return IXS_QUERY_WALK_STOP;
+    if (entry->complete) {
+      query->child_success = entry->success;
+      query->child_residue = entry->residue;
+      return IXS_QUERY_WALK_ADVANCED;
+    }
   }
-  entry->result = result;
-  entry->active = false;
-  entry->complete = true;
-  IXS_QUERY_WALK_POP(&query->walk);
-  query->child_result = result;
+  if (query->residue_count == query->residue_capacity &&
+      !bounds_proof_grow_residue(query)) {
+    query->root->oom = true;
+    return IXS_QUERY_WALK_OOM;
+  }
+  frame = &query->residue_frames[query->residue_count++];
+  memset(frame, 0, sizeof(*frame));
+  frame->expr = expr;
+  frame->bounds = bounds;
+  frame->modulus = modulus;
+  frame->stage = BOUNDS_RESIDUE_INITIAL;
+  frame->memoized = memoized;
+  frame->parent_kind = (uint8_t)query->top_kind;
+  query->top_kind = BOUNDS_PROOF_FRAME_RESIDUE;
+  query->active_bounds = bounds;
+  query->depth++;
+  if (entry)
+    entry->active = true;
   return IXS_QUERY_WALK_ADVANCED;
+}
+
+IXS_STATIC ixs_query_walk_step
+bounds_proof_push_residue(bounds_proof_query *query, ixs_bounds *bounds,
+                          ixs_node *expr, uint64_t modulus) {
+  return bounds_proof_push_residue_mode(query, bounds, expr, modulus,
+                                        query->proof_independent);
+}
+
+IXS_STATIC ixs_query_walk_step
+bounds_proof_push_residue_task(bounds_proof_query *query, ixs_bounds *bounds,
+                               ixs_node *expr, uint64_t modulus) {
+  return bounds_proof_push_residue_mode(query, bounds, expr, modulus, false);
+}
+
+IXS_STATIC bool bounds_proof_integer_cached(bounds_proof_query *query,
+                                            ixs_bounds *bounds,
+                                            ixs_node *expr) {
+  bounds_proof_memo_entry *entry = bounds_proof_memo_get(
+      query, bounds, expr, BOUNDS_PROOF_INTEGER, 0, false);
+  return entry && entry->complete && entry->success;
+}
+
+IXS_STATIC ixs_query_walk_step
+bounds_proof_complete_exact(bounds_proof_query *query, bool success) {
+  bounds_exact_proof_frame *frame;
+  bounds_proof_memo_entry *entry = NULL;
+  bounds_proof_frame_kind parent;
+  assert(query->top_kind == BOUNDS_PROOF_FRAME_EXACT);
+  assert(query->exact_count != 0u && query->depth != 0u);
+  frame = &query->exact_frames[query->exact_count - 1u];
+  {
+    entry = bounds_proof_memo_get(query, query->active_bounds, frame->expr,
+                                  frame->kind, frame->modulus, false);
+    if (!entry || !entry->active)
+      return IXS_QUERY_WALK_STOP;
+    entry->success = success;
+    entry->residue = 0;
+    entry->active = false;
+    entry->complete = true;
+  }
+  parent = (bounds_proof_frame_kind)frame->parent_kind;
+  query->exact_count--;
+  query->depth--;
+  bounds_proof_restore_parent(query, parent);
+  query->child_success = success;
+  query->child_residue = 0;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+IXS_STATIC ixs_query_walk_step bounds_proof_complete_residue(
+    bounds_proof_query *query, bool success, uint64_t residue) {
+  bounds_residue_frame *frame;
+  bounds_proof_memo_entry *entry = NULL;
+  bounds_proof_frame_kind parent;
+  assert(query->top_kind == BOUNDS_PROOF_FRAME_RESIDUE);
+  assert(query->residue_count != 0u && query->depth != 0u);
+  frame = &query->residue_frames[query->residue_count - 1u];
+  if (frame->memoized) {
+    entry = bounds_proof_memo_get(query, frame->bounds, frame->expr,
+                                  BOUNDS_PROOF_RESIDUE, frame->modulus, false);
+    if (!entry || !entry->active)
+      return IXS_QUERY_WALK_STOP;
+    entry->success = success;
+    entry->residue = residue;
+    entry->active = false;
+    entry->complete = true;
+  }
+  parent = (bounds_proof_frame_kind)frame->parent_kind;
+  query->residue_count--;
+  query->depth--;
+  bounds_proof_restore_parent(query, parent);
+  query->child_success = success;
+  query->child_residue = residue;
+  return IXS_QUERY_WALK_ADVANCED;
+}
+
+static ixs_query_walk_step bounds_exact_proof_push(bounds_proof_query *query,
+                                                   ixs_node *expr,
+                                                   bounds_proof_kind kind,
+                                                   uint64_t modulus) {
+  return bounds_proof_push_exact(query, query->active_bounds, expr, kind,
+                                 modulus);
 }
 
 static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
@@ -6854,22 +6974,6 @@ static bool bounds_exact_proof_rational(ixs_node *node, int64_t *p,
     return false;
   ixs_node_get_rat(node, p, q);
   return *q > 0;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_divisible_after_add(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  ixs_bitfacts bits;
-  uint64_t mask;
-  if (ixs_int64_is_positive_pow2(frame->modulus)) {
-    mask = (uint64_t)frame->modulus - 1u;
-    if (ixs_bounds_get_bitfacts(query->bounds, frame->expr, &bits) &&
-        (bits.known_zero & mask) == mask)
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-  }
-  return bounds_exact_proof_complete(query, false);
 }
 
 static ixs_query_walk_step
@@ -6884,7 +6988,7 @@ bounds_exact_proof_start_integer_mul(bounds_exact_proof_frame *frame) {
   }
   frame->index = 0;
   if (q == 1) {
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_MUL_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   }
   divisor = ixs_gcd(p, q);
@@ -6893,12 +6997,12 @@ bounds_exact_proof_start_integer_mul(bounds_exact_proof_frame *frame) {
   }
   frame->denominator = q / divisor;
   frame->denominator_cancelled = frame->denominator == 1;
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+  frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_SCAN;
   return IXS_QUERY_WALK_ADVANCED;
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
+bounds_exact_proof_start_integer_add(bounds_proof_query *query,
                                      bounds_exact_proof_frame *frame) {
   int64_t p;
   int64_t q;
@@ -6908,20 +7012,21 @@ bounds_exact_proof_start_integer_add(bounds_exact_proof_query *query,
     return IXS_QUERY_WALK_STOP;
   }
   (void)p;
-  if (q != 1)
-    return bounds_exact_proof_complete(
-        query, bounds_add_known_divisible(query->bounds, node, 1));
+  if (q != 1) {
+    frame->stage = BOUNDS_PROOF_INTEGER_ADD_RESIDUE;
+    return bounds_proof_push_residue(query, query->active_bounds, node, 1u);
+  }
   frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
+  frame->stage = BOUNDS_PROOF_INTEGER_ADD_SCAN;
   return IXS_QUERY_WALK_ADVANCED;
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
+bounds_exact_proof_start_integer(bounds_proof_query *query,
                                  bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
   if (ixs_node_is_integer_valued(node))
-    return bounds_exact_proof_complete(query, true);
+    return bounds_proof_complete_exact(query, true);
   switch (node->tag) {
   case IXS_MUL:
     return bounds_exact_proof_start_integer_mul(frame);
@@ -6936,209 +7041,114 @@ bounds_exact_proof_start_integer(bounds_exact_proof_query *query,
       return IXS_QUERY_WALK_STOP;
     }
     frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_ASSOC_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   case IXS_PIECEWISE:
     if (node->u.pw.ncases == 0 || !node->u.pw.cases) {
       return IXS_QUERY_WALK_STOP;
     }
     frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_PW_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   case IXS_MOD:
     if (!node->u.binary.lhs || !node->u.binary.rhs) {
       return IXS_QUERY_WALK_STOP;
     }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS;
+    frame->stage = BOUNDS_PROOF_INTEGER_MOD_LHS;
     return bounds_exact_proof_push(query, node->u.binary.lhs,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+                                   BOUNDS_PROOF_INTEGER, 0);
   default:
-    return bounds_exact_proof_complete(query, false);
+    return bounds_proof_complete_exact(query, false);
   }
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_start_divisible_add(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  int64_t p;
-  int64_t q;
-  ixs_node *node = frame->expr;
-  if (!bounds_exact_proof_rational(node->u.add.coeff, &p, &q) ||
-      (node->u.add.nterms != 0 && !node->u.add.terms)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  if (q != 1) {
-    if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-    return bounds_exact_proof_divisible_after_add(query, frame);
-  }
-  if (p % frame->modulus != 0)
-    return bounds_exact_proof_divisible_after_add(query, frame);
-  frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_divisible_mul(bounds_exact_proof_query *query,
-                                       bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (!node->u.mul.coeff || node->u.mul.coeff->tag != IXS_INT ||
-      (node->u.mul.nfactors != 0 && !node->u.mul.factors)) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  if (node->u.mul.coeff->u.ival == 0)
-    return bounds_exact_proof_complete(query, true);
-  frame->index = 0;
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN;
-  return IXS_QUERY_WALK_ADVANCED;
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_start_divisible(bounds_exact_proof_query *query,
+bounds_exact_proof_start_divisible(bounds_proof_query *query,
                                    bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  ixs_bitfacts bits;
-  int64_t symbol_modulus, symbol_remainder;
-  uint64_t mask;
-  if (frame->modulus == 1) {
-    if (ixs_node_is_integer_valued(node))
-      return bounds_exact_proof_complete(query, true);
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
-    frame->index = UINT32_MAX;
-    return bounds_exact_proof_push(query, node, BOUNDS_EXACT_PROOF_INTEGER, 0);
-  }
-  if (node->tag == IXS_ADD)
-    return bounds_exact_proof_start_divisible_add(query, frame);
-  if (ixs_int64_is_positive_pow2(frame->modulus)) {
-    mask = (uint64_t)frame->modulus - 1u;
-    if (ixs_bounds_get_bitfacts(query->bounds, node, &bits) &&
-        (bits.known_zero & mask) == mask)
-      return bounds_exact_proof_complete(query, true);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-  }
-  switch (node->tag) {
-  case IXS_INT:
-    return bounds_exact_proof_complete(query,
-                                       node->u.ival % frame->modulus == 0);
-  case IXS_SYM:
-    if (!node->u.name) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    return bounds_exact_proof_complete(
-        query, bounds_store_get_modrem(query->bounds, node->u.name,
-                                       &symbol_modulus, &symbol_remainder) &&
-                   symbol_modulus % frame->modulus == 0 &&
-                   symbol_remainder % frame->modulus == 0);
-  case IXS_MUL:
-    if (node->u.mul.coeff && node->u.mul.coeff->tag == IXS_INT)
-      return bounds_exact_proof_start_divisible_mul(query, frame);
-    return bounds_exact_proof_complete(query, false);
-  case IXS_MAX:
-  case IXS_MIN:
-    if (node->u.assoc.nargs == 0 || !node->u.assoc.args) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN;
-    return IXS_QUERY_WALK_ADVANCED;
-  default:
-    return bounds_exact_proof_complete(query, false);
-  }
+  frame->stage = BOUNDS_PROOF_DIVISIBLE_INTEGER;
+  return bounds_exact_proof_push(query, frame->expr, BOUNDS_PROOF_INTEGER, 0);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_integer_mul(bounds_exact_proof_query *query,
+bounds_exact_proof_resume_integer_mul(bounds_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN) {
-    if (frame->index != 0 && !query->child_result)
-      return bounds_exact_proof_complete(query, false);
+  if (frame->stage == BOUNDS_PROOF_INTEGER_MUL_SCAN) {
+    if (frame->index != 0 && !query->child_success)
+      return bounds_proof_complete_exact(query, false);
     if (frame->index == node->u.mul.nfactors)
-      return bounds_exact_proof_complete(query, true);
+      return bounds_proof_complete_exact(query, true);
     if (!node->u.mul.factors[frame->index].base ||
         node->u.mul.factors[frame->index].exp <= 0) {
       if (!node->u.mul.factors[frame->index].base)
         return IXS_QUERY_WALK_STOP;
-      return bounds_exact_proof_complete(query, false);
+      return bounds_proof_complete_exact(query, false);
     }
     frame->index++;
     return bounds_exact_proof_push(query,
                                    node->u.mul.factors[frame->index - 1u].base,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+                                   BOUNDS_PROOF_INTEGER, 0);
   }
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE) {
+  if (frame->stage == BOUNDS_PROOF_INTEGER_MUL_RATIONAL_RESIDUE) {
     ixs_node *base = node->u.mul.factors[frame->index].base;
-    uint64_t residue = 0;
-    bool known;
-    if (query->child_result) {
-      frame->denominator_cancelled = true;
-      frame->index++;
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
-      return IXS_QUERY_WALK_ADVANCED;
-    }
-    known = bounds_known_residue_independent(
-        query->bounds, base, (uint64_t)frame->denominator, &residue);
-    if (query->bounds->oom)
-      return IXS_QUERY_WALK_OOM;
-    if (known) {
-      if (residue == 0)
+    if (query->child_success) {
+      if (query->child_residue == 0u)
         frame->denominator_cancelled = true;
       frame->index++;
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+      frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_SCAN;
       return IXS_QUERY_WALK_ADVANCED;
     }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
-    return bounds_exact_proof_push(query, base, BOUNDS_EXACT_PROOF_INTEGER, 0);
+    frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
+    return bounds_exact_proof_push(query, base, BOUNDS_PROOF_INTEGER, 0);
   }
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
+  if (frame->stage == BOUNDS_PROOF_INTEGER_MUL_RATIONAL_INTEGER) {
+    if (!query->child_success)
+      return bounds_proof_complete_exact(query, false);
     frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   }
   if (frame->index == node->u.mul.nfactors)
-    return bounds_exact_proof_complete(query, frame->denominator_cancelled);
+    return bounds_proof_complete_exact(query, frame->denominator_cancelled);
   if (!node->u.mul.factors[frame->index].base ||
       node->u.mul.factors[frame->index].exp <= 0) {
     if (!node->u.mul.factors[frame->index].base)
       return IXS_QUERY_WALK_STOP;
-    return bounds_exact_proof_complete(query, false);
+    return bounds_proof_complete_exact(query, false);
   }
   if (frame->denominator_cancelled) {
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
-    return bounds_exact_proof_push(query,
-                                   node->u.mul.factors[frame->index].base,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+    frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_INTEGER;
+    return bounds_exact_proof_push(
+        query, node->u.mul.factors[frame->index].base, BOUNDS_PROOF_INTEGER, 0);
   }
-  frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE;
-  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                 frame->denominator);
+  frame->stage = BOUNDS_PROOF_INTEGER_MUL_RATIONAL_RESIDUE;
+  return bounds_proof_push_residue(query, query->active_bounds,
+                                   node->u.mul.factors[frame->index].base,
+                                   frame->denominator);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
+bounds_exact_proof_resume_integer_add(bounds_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
+  if (frame->stage == BOUNDS_PROOF_INTEGER_ADD_RESIDUE)
+    return bounds_proof_complete_exact(query, query->child_success &&
+                                                  query->child_residue == 0u);
+  if (frame->stage == BOUNDS_PROOF_INTEGER_ADD_INTEGER) {
+    if (!query->child_success)
+      return bounds_proof_complete_exact(query, false);
     frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
-  } else if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(
-          query, bounds_add_known_divisible(query->bounds, node, 1));
+    frame->stage = BOUNDS_PROOF_INTEGER_ADD_SCAN;
+  } else if (frame->stage == BOUNDS_PROOF_INTEGER_ADD_DIVISIBLE) {
+    if (!query->child_success) {
+      frame->stage = BOUNDS_PROOF_INTEGER_ADD_RESIDUE;
+      return bounds_proof_push_residue(query, query->active_bounds, node, 1u);
+    }
     frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_ADD_SCAN;
   }
   if (frame->index == node->u.add.nterms)
-    return bounds_exact_proof_complete(query, true);
+    return bounds_proof_complete_exact(query, true);
   {
     const ixs_addterm *term = &node->u.add.terms[frame->index];
     int64_t p;
@@ -7148,47 +7158,47 @@ bounds_exact_proof_resume_integer_add(bounds_exact_proof_query *query,
       return IXS_QUERY_WALK_STOP;
     }
     if (q == 1) {
-      frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER;
-      return bounds_exact_proof_push(query, term->term,
-                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
+      frame->stage = BOUNDS_PROOF_INTEGER_ADD_INTEGER;
+      return bounds_exact_proof_push(query, term->term, BOUNDS_PROOF_INTEGER,
+                                     0);
     }
     divisor = ixs_gcd(p, q);
     if (divisor <= 0 || q % divisor != 0) {
       return IXS_QUERY_WALK_STOP;
     }
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE;
-    return bounds_exact_proof_push(query, term->term,
-                                   BOUNDS_EXACT_PROOF_DIVISIBLE, q / divisor);
+    frame->stage = BOUNDS_PROOF_INTEGER_ADD_DIVISIBLE;
+    return bounds_exact_proof_push(query, term->term, BOUNDS_PROOF_DIVISIBLE,
+                                   q / divisor);
   }
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_integer_assoc(bounds_exact_proof_query *query,
+bounds_exact_proof_resume_integer_assoc(bounds_proof_query *query,
                                         bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
-  if (frame->index != 0 && !query->child_result)
-    return bounds_exact_proof_complete(query, false);
+  if (frame->index != 0 && !query->child_success)
+    return bounds_proof_complete_exact(query, false);
   if (frame->index == node->u.assoc.nargs)
-    return bounds_exact_proof_complete(query, true);
+    return bounds_proof_complete_exact(query, true);
   if (!node->u.assoc.args[frame->index]) {
     return IXS_QUERY_WALK_STOP;
   }
   frame->index++;
   return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
-                                 BOUNDS_EXACT_PROOF_INTEGER, 0);
+                                 BOUNDS_PROOF_INTEGER, 0);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
+bounds_exact_proof_resume_integer_piecewise(bounds_proof_query *query,
                                             bounds_exact_proof_frame *frame) {
   ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
+  if (frame->stage == BOUNDS_PROOF_INTEGER_PW_CHILD) {
+    if (!query->child_success)
+      return bounds_proof_complete_exact(query, false);
     if (frame->terminal_branch)
-      return bounds_exact_proof_complete(query, true);
+      return bounds_proof_complete_exact(query, true);
     frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN;
+    frame->stage = BOUNDS_PROOF_INTEGER_PW_SCAN;
   }
   while (frame->index < node->u.pw.ncases) {
     ixs_node *cond = node->u.pw.cases[frame->index].cond;
@@ -7202,8 +7212,8 @@ bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
     else if (ixs_node_is_known_true(cond))
       truth = IXS_CHECK_TRUE;
     else if (cond->tag == IXS_CMP)
-      truth = ixs_bounds_check(query->bounds, cond);
-    if (query->bounds->oom)
+      truth = ixs_bounds_check(query->active_bounds, cond);
+    if (query->active_bounds->oom)
       return IXS_QUERY_WALK_OOM;
     if (truth == IXS_CHECK_FALSE) {
       frame->index++;
@@ -7211,156 +7221,64 @@ bounds_exact_proof_resume_integer_piecewise(bounds_exact_proof_query *query,
     }
     frame->reachable = true;
     frame->terminal_branch = truth == IXS_CHECK_TRUE;
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD;
-    return bounds_exact_proof_push(query, value, BOUNDS_EXACT_PROOF_INTEGER, 0);
+    frame->stage = BOUNDS_PROOF_INTEGER_PW_CHILD;
+    return bounds_exact_proof_push(query, value, BOUNDS_PROOF_INTEGER, 0);
   }
-  return bounds_exact_proof_complete(query, frame->reachable);
+  return bounds_proof_complete_exact(query, frame->reachable);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_integer_mod(bounds_exact_proof_query *query,
+bounds_exact_proof_resume_integer_mod(bounds_proof_query *query,
                                       bounds_exact_proof_frame *frame) {
-  if (frame->stage == BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS) {
-    if (!query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    frame->stage = BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS;
+  if (frame->stage == BOUNDS_PROOF_INTEGER_MOD_LHS) {
+    if (!query->child_success)
+      return bounds_proof_complete_exact(query, false);
+    frame->stage = BOUNDS_PROOF_INTEGER_MOD_RHS;
     return bounds_exact_proof_push(query, frame->expr->u.binary.rhs,
-                                   BOUNDS_EXACT_PROOF_INTEGER, 0);
+                                   BOUNDS_PROOF_INTEGER, 0);
   }
-  return bounds_exact_proof_complete(query, query->child_result);
+  return bounds_proof_complete_exact(query, query->child_success);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_add(bounds_exact_proof_query *query,
-                                        bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD) {
-    if (!query->child_result)
-      return bounds_exact_proof_divisible_after_add(query, frame);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN;
+bounds_exact_proof_resume_divisible(bounds_proof_query *query,
+                                    bounds_exact_proof_frame *frame) {
+  if (frame->stage == BOUNDS_PROOF_DIVISIBLE_INTEGER) {
+    if (!query->child_success)
+      return bounds_proof_complete_exact(query, false);
+    frame->stage = BOUNDS_PROOF_DIVISIBLE_RESIDUE;
+    return bounds_proof_push_residue(query, query->active_bounds, frame->expr,
+                                     frame->modulus);
   }
-  if (frame->index == node->u.add.nterms)
-    return bounds_exact_proof_complete(query, true);
-  {
-    const ixs_addterm *term = &node->u.add.terms[frame->index];
-    int64_t p;
-    int64_t q;
-    int64_t divisor;
-    if (!term->term || !bounds_exact_proof_rational(term->coeff, &p, &q)) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    if (q != 1) {
-      if (bounds_add_known_divisible(query->bounds, node, frame->modulus))
-        return bounds_exact_proof_complete(query, true);
-      if (query->bounds->oom)
-        return IXS_QUERY_WALK_OOM;
-      return bounds_exact_proof_divisible_after_add(query, frame);
-    }
-    divisor = ixs_gcd(p, frame->modulus);
-    if (divisor <= 0 || frame->modulus % divisor != 0) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD;
-    return bounds_exact_proof_push(query, term->term,
-                                   BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                   frame->modulus / divisor);
-  }
+  return bounds_proof_complete_exact(query, query->child_success &&
+                                                query->child_residue == 0u);
 }
 
 static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_mul(bounds_exact_proof_query *query,
-                                        bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN) {
-    int64_t divisor;
-    if (frame->index != 0 && !query->child_result)
-      return bounds_exact_proof_complete(query, false);
-    if (frame->index < node->u.mul.nfactors) {
-      const ixs_mulfactor *factor = &node->u.mul.factors[frame->index];
-      if (!factor->base || factor->exp < 0) {
-        if (!factor->base)
-          return IXS_QUERY_WALK_STOP;
-        return bounds_exact_proof_complete(query, false);
-      }
-      frame->index++;
-      return bounds_exact_proof_push(query, factor->base,
-                                     BOUNDS_EXACT_PROOF_INTEGER, 0);
-    }
-    divisor = ixs_gcd(node->u.mul.coeff->u.ival, frame->modulus);
-    if (divisor <= 0 || frame->modulus % divisor != 0) {
-      return IXS_QUERY_WALK_STOP;
-    }
-    frame->denominator = frame->modulus / divisor;
-    if (frame->denominator == 1)
-      return bounds_exact_proof_complete(query, true);
-    frame->index = 0;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
-  } else if (frame->stage == BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD) {
-    if (query->child_result)
-      return bounds_exact_proof_complete(query, true);
-    frame->index++;
-    frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN;
-  }
-  while (frame->index < node->u.mul.nfactors &&
-         node->u.mul.factors[frame->index].exp < 1)
-    frame->index++;
-  if (frame->index == node->u.mul.nfactors)
-    return bounds_exact_proof_complete(query, false);
-  frame->stage = BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD;
-  return bounds_exact_proof_push(query, node->u.mul.factors[frame->index].base,
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE,
-                                 frame->denominator);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume_divisible_assoc(bounds_exact_proof_query *query,
-                                          bounds_exact_proof_frame *frame) {
-  ixs_node *node = frame->expr;
-  if (frame->index == UINT32_MAX)
-    return bounds_exact_proof_complete(query, query->child_result);
-  if (frame->index != 0 && !query->child_result)
-    return bounds_exact_proof_complete(query, false);
-  if (frame->index == node->u.assoc.nargs)
-    return bounds_exact_proof_complete(query, true);
-  if (!node->u.assoc.args[frame->index]) {
-    return IXS_QUERY_WALK_STOP;
-  }
-  frame->index++;
-  return bounds_exact_proof_push(query, node->u.assoc.args[frame->index - 1u],
-                                 BOUNDS_EXACT_PROOF_DIVISIBLE, frame->modulus);
-}
-
-static ixs_query_walk_step
-bounds_exact_proof_resume(bounds_exact_proof_query *query,
+bounds_exact_proof_resume(bounds_proof_query *query,
                           bounds_exact_proof_frame *frame) {
   switch (frame->stage) {
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_DIVISIBLE:
-  case BOUNDS_EXACT_PROOF_INTEGER_MUL_RATIONAL_INTEGER:
+  case BOUNDS_PROOF_INTEGER_MUL_SCAN:
+  case BOUNDS_PROOF_INTEGER_MUL_RATIONAL_SCAN:
+  case BOUNDS_PROOF_INTEGER_MUL_RATIONAL_RESIDUE:
+  case BOUNDS_PROOF_INTEGER_MUL_RATIONAL_INTEGER:
     return bounds_exact_proof_resume_integer_mul(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_INTEGER:
-  case BOUNDS_EXACT_PROOF_INTEGER_ADD_DIVISIBLE:
+  case BOUNDS_PROOF_INTEGER_ADD_SCAN:
+  case BOUNDS_PROOF_INTEGER_ADD_INTEGER:
+  case BOUNDS_PROOF_INTEGER_ADD_DIVISIBLE:
+  case BOUNDS_PROOF_INTEGER_ADD_RESIDUE:
     return bounds_exact_proof_resume_integer_add(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_ASSOC_SCAN:
+  case BOUNDS_PROOF_INTEGER_ASSOC_SCAN:
     return bounds_exact_proof_resume_integer_assoc(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_PW_SCAN:
-  case BOUNDS_EXACT_PROOF_INTEGER_PW_CHILD:
+  case BOUNDS_PROOF_INTEGER_PW_SCAN:
+  case BOUNDS_PROOF_INTEGER_PW_CHILD:
     return bounds_exact_proof_resume_integer_piecewise(query, frame);
-  case BOUNDS_EXACT_PROOF_INTEGER_MOD_LHS:
-  case BOUNDS_EXACT_PROOF_INTEGER_MOD_RHS:
+  case BOUNDS_PROOF_INTEGER_MOD_LHS:
+  case BOUNDS_PROOF_INTEGER_MOD_RHS:
     return bounds_exact_proof_resume_integer_mod(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ADD_CHILD:
-    return bounds_exact_proof_resume_divisible_add(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_INTEGER_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_SCAN:
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_MUL_FACTOR_CHILD:
-    return bounds_exact_proof_resume_divisible_mul(query, frame);
-  case BOUNDS_EXACT_PROOF_DIVISIBLE_ASSOC_SCAN:
-    return bounds_exact_proof_resume_divisible_assoc(query, frame);
+  case BOUNDS_PROOF_DIVISIBLE_INTEGER:
+  case BOUNDS_PROOF_DIVISIBLE_RESIDUE:
+    return bounds_exact_proof_resume_divisible(query, frame);
   case BOUNDS_EXACT_PROOF_INITIAL:
     break;
   }
@@ -7368,33 +7286,57 @@ bounds_exact_proof_resume(bounds_exact_proof_query *query,
 }
 
 /* hot */
-static ixs_query_walk_step bounds_exact_proof_advance(void *state, void *top) {
-  bounds_exact_proof_query *query = state;
-  bounds_exact_proof_frame *frame = top;
+IXS_STATIC ixs_query_walk_step bounds_exact_proof_advance(
+    bounds_proof_query *query, bounds_exact_proof_frame *frame) {
   if (frame->stage == BOUNDS_EXACT_PROOF_INITIAL)
-    return frame->kind == BOUNDS_EXACT_PROOF_INTEGER
+    return frame->kind == BOUNDS_PROOF_INTEGER
                ? bounds_exact_proof_start_integer(query, frame)
                : bounds_exact_proof_start_divisible(query, frame);
   return bounds_exact_proof_resume(query, frame);
 }
 
-/* Both proof relations are one iterative dependency graph.  The common small
- * query stays in fixed local buffers; deeper stacks and larger open-addressed
- * memos grow on scratch.  Expected work is O(V + E) over distinct
- * (node, relation, modulus) obligations, and malformed cycles are rejected
- * without consuming C stack. */
+IXS_STATIC ixs_query_walk_step bounds_proof_drive(bounds_proof_query *query,
+                                                  ixs_query_walk_step step) {
+  while (step == IXS_QUERY_WALK_ADVANCED && query->depth != 0u) {
+    if (query->top_kind == BOUNDS_PROOF_FRAME_EXACT) {
+      step = bounds_exact_proof_advance(
+          query, &query->exact_frames[query->exact_count - 1u]);
+    } else if (query->top_kind == BOUNDS_PROOF_FRAME_RESIDUE) {
+      step = bounds_residue_advance(
+          query, &query->residue_frames[query->residue_count - 1u]);
+    } else {
+      step = IXS_QUERY_WALK_STOP;
+    }
+  }
+  if (step == IXS_QUERY_WALK_ADVANCED)
+    return step;
+  while (query->depth != 0u) {
+    if (query->top_kind == BOUNDS_PROOF_FRAME_RESIDUE) {
+      bounds_residue_abort(query,
+                           &query->residue_frames[query->residue_count - 1u]);
+    } else if (query->top_kind == BOUNDS_PROOF_FRAME_EXACT) {
+      (void)bounds_proof_complete_exact(query, false);
+    } else {
+      break;
+    }
+  }
+  return step;
+}
+
+/* Integer, divisibility, and residue obligations share one iterative graph.
+ * Exact frames stay inline through depth 16; residue frames retain their
+ * separate typed pool and allocation cutoff.  Expected work is O(V + E) over
+ * distinct (bounds, node, relation, modulus) obligations. */
 static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
-                                    bounds_exact_proof_kind kind,
-                                    int64_t modulus) {
+                                    bounds_proof_kind kind, int64_t modulus) {
   ixs_arena_mark mark;
-  bounds_exact_proof_query query;
+  bounds_proof_query query;
   ixs_query_walk_step step;
   bool result = false;
-  if (!b || !expr || b->oom ||
-      (kind == BOUNDS_EXACT_PROOF_DIVISIBLE && modulus <= 0))
+  if (!b || !expr || b->oom || (kind == BOUNDS_PROOF_DIVISIBLE && modulus <= 0))
     return false;
   if (ixs_node_is_integer_valued(expr) &&
-      (kind == BOUNDS_EXACT_PROOF_INTEGER || modulus == 1))
+      (kind == BOUNDS_PROOF_INTEGER || modulus == 1))
     return true;
   /* Predicate and interval domains can ask an exact question while resolving
    * one Piecewise condition.  One nested evaluator preserves that precision;
@@ -7405,28 +7347,16 @@ static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
     return false;
   b->exact_proof_call_depth++;
   mark = ixs_arena_save(b->scratch);
-  query.bounds = b;
-  query.stack_oom = false;
-  IXS_QUERY_WALK_INIT_INLINE(&query.walk, b->scratch, &query.stack_oom,
-                             bounds_exact_proof_frame, expr,
-                             query.inline_frames);
-  query.memo.entries = query.inline_memo;
-  query.memo.count = 0;
-  query.memo.capacity =
-      sizeof(query.inline_memo) / sizeof(query.inline_memo[0]);
-  query.child_result = false;
-  memset(query.inline_memo, 0, sizeof(query.inline_memo));
-  step = bounds_exact_proof_push(&query, expr, kind, modulus);
-  if (step == IXS_QUERY_WALK_ADVANCED)
-    step = ixs_query_walk_drive(&query.walk, &query, bounds_exact_proof_advance,
-                                NULL);
+  bounds_proof_query_init(&query, b, true);
+  step = bounds_proof_push_exact(&query, b, expr, kind, (uint64_t)modulus);
+  step = bounds_proof_drive(&query, step);
   if (step == IXS_QUERY_WALK_OOM || b->oom) {
     b->oom = true;
     bounds_query_note_oom(b);
   } else if (step == IXS_QUERY_WALK_STOP) {
     bounds_query_note_invalid(b);
   } else {
-    result = query.child_result;
+    result = query.child_success;
   }
   ixs_arena_restore(b->scratch, mark);
   b->exact_proof_call_depth--;
@@ -7435,12 +7365,12 @@ static bool bounds_exact_proof_eval(ixs_bounds *b, ixs_node *expr,
 
 IXS_STATIC bool ixs_bounds_is_known_divisible(ixs_bounds *b, ixs_node *expr,
                                               int64_t m) {
-  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_DIVISIBLE, m);
+  return bounds_exact_proof_eval(b, expr, BOUNDS_PROOF_DIVISIBLE, m);
 }
 
 IXS_STATIC bool ixs_bounds_is_integer_with_divinfo(ixs_bounds *b,
                                                    ixs_node *expr) {
-  return bounds_exact_proof_eval(b, expr, BOUNDS_EXACT_PROOF_INTEGER, 0);
+  return bounds_exact_proof_eval(b, expr, BOUNDS_PROOF_INTEGER, 0);
 }
 
 IXS_STATIC ixs_check_result
@@ -12928,12 +12858,13 @@ IXS_STATIC size_t bounds_relation_projection_generation_count(
 #include "bounds.h"
 #include "bounds_bitfacts.h"
 #include "bounds_difference.h"
+#include "bounds_proof.h"
 #include "bounds_query.h"
 #include "bounds_store.h"
 #include "hash.h"
-#include "query_walk.h"
 #include "rational.h"
 
+#include <assert.h>
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
@@ -12951,210 +12882,26 @@ static uint64_t bounds_pow_mod(uint64_t base, int32_t exponent,
   return result;
 }
 
-typedef struct {
+typedef struct bounds_residue_group {
   ixs_node *representative;
   uint64_t coefficient;
 } bounds_residue_group;
-
-static bool bounds_residue_group_table(ixs_bounds *b, size_t count,
-                                       bounds_residue_group **groups,
-                                       size_t *capacity) {
-  size_t needed;
-  size_t result = 16u;
-  if (count > SIZE_MAX - count) {
-    b->oom = true;
-    return false;
-  }
-  needed = count + count;
-  while (result < needed) {
-    if (result > SIZE_MAX / 2u || result * 2u > SIZE_MAX / sizeof(**groups)) {
-      b->oom = true;
-      return false;
-    }
-    result *= 2u;
-  }
-  *groups =
-      ixs_arena_alloc(b->scratch, result * sizeof(**groups), sizeof(void *));
-  if (!*groups) {
-    b->oom = true;
-    return false;
-  }
-  memset(*groups, 0, result * sizeof(**groups));
-  *capacity = result;
-  return true;
-}
 
 /* Mod(x, k) and x have the same residue modulo every positive divisor of k.
  * Strip only literal, positive moduli and only across integer-valued operands;
  * pointer identity then gives a cheap canonical congruence representative.
  */
-static ixs_node *bounds_residue_representative(ixs_bounds *b, ixs_node *expr,
-                                               uint64_t modulus,
-                                               bool proof_independent) {
-  while (
-      expr->tag == IXS_MOD && expr->u.binary.rhs->tag == IXS_INT &&
-      expr->u.binary.rhs->u.ival > 0 &&
-      (uint64_t)expr->u.binary.rhs->u.ival % modulus == 0 &&
-      (proof_independent
-           ? ixs_node_is_integer_valued(expr->u.binary.lhs) &&
-                 ixs_node_is_integer_valued(expr->u.binary.rhs)
-           : ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.lhs) &&
-                 ixs_bounds_is_integer_with_divinfo(b, expr->u.binary.rhs))) {
+static ixs_node *bounds_residue_representative(bounds_proof_query *query,
+                                               ixs_bounds *b, ixs_node *expr,
+                                               uint64_t modulus) {
+  while (expr->tag == IXS_MOD && expr->u.binary.rhs->tag == IXS_INT &&
+         expr->u.binary.rhs->u.ival > 0 &&
+         (uint64_t)expr->u.binary.rhs->u.ival % modulus == 0 &&
+         (ixs_node_is_integer_valued(expr->u.binary.lhs) ||
+          bounds_proof_integer_cached(query, b, expr->u.binary.lhs))) {
     expr = expr->u.binary.lhs;
   }
   return expr;
-}
-
-static bool bounds_residue_collect_add_groups(ixs_bounds *b, ixs_node *expr,
-                                              uint64_t scale, uint64_t modulus,
-                                              bool proof_independent,
-                                              bounds_residue_group *groups,
-                                              size_t group_capacity,
-                                              size_t *ngroups) {
-  size_t i;
-  int64_t p;
-  int64_t q;
-
-  for (i = 0; i < expr->u.add.nterms; i++) {
-    ixs_node *term = expr->u.add.terms[i].term;
-    ixs_node *representative;
-    uint64_t coefficient;
-    size_t group;
-
-    ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q <= 0 || scale % (uint64_t)q != 0 ||
-        (!proof_independent && !ixs_bounds_is_integer_with_divinfo(b, term)))
-      return false;
-    coefficient = ixs_u64_mul_mod(ixs_int64_normalize_residue(p, modulus),
-                                  (scale / (uint64_t)q) % modulus, modulus);
-    if (coefficient == 0)
-      continue;
-    representative =
-        bounds_residue_representative(b, term, modulus, proof_independent);
-    group = ixs_hash_ptr(representative) & (group_capacity - 1u);
-    while (groups[group].representative &&
-           groups[group].representative != representative)
-      group = (group + 1u) & (group_capacity - 1u);
-    if (!groups[group].representative) {
-      groups[group].representative = representative;
-      (*ngroups)++;
-    }
-    groups[group].coefficient =
-        ixs_u64_add_mod(groups[group].coefficient, coefficient, modulus);
-  }
-  return true;
-}
-
-static bool bounds_residue_accumulate_add_groups(
-    ixs_bounds *b, bounds_residue_group *groups, size_t group_capacity,
-    size_t ngroups, uint64_t modulus, bool proof_independent,
-    uint64_t *result) {
-  size_t i;
-
-  for (i = 0; i < group_capacity && ngroups != 0; i++) {
-    uint64_t coefficient = groups[i].coefficient;
-    uint64_t reduced;
-    uint64_t residue;
-    if (!groups[i].representative)
-      continue;
-    ngroups--;
-    if (coefficient == 0)
-      continue;
-    reduced = modulus / ixs_u64_gcd(coefficient, modulus);
-    if (reduced == 1u)
-      continue;
-    if (!(proof_independent
-              ? bounds_known_residue_independent(b, groups[i].representative,
-                                                 reduced, &residue)
-              : bounds_known_residue(b, groups[i].representative, reduced,
-                                     &residue)))
-      return false;
-    *result = ixs_u64_add_mod(
-        *result, ixs_u64_mul_mod(coefficient, residue, modulus), modulus);
-  }
-  return true;
-}
-
-/* Group equal congruence representatives before recursive residue queries.
- * Scratch hashing keeps wide additions linear without a semantic term cap. */
-static bool bounds_known_scaled_add_residue(ixs_bounds *b, ixs_node *expr,
-                                            uint64_t scale, uint64_t modulus,
-                                            uint64_t *out,
-                                            bool proof_independent) {
-  ixs_arena_mark mark;
-  bounds_residue_group *groups;
-  size_t group_capacity;
-  size_t ngroups = 0;
-  uint64_t result;
-  int64_t p;
-  int64_t q;
-  bool success = false;
-
-  if (!b || !expr || expr->tag != IXS_ADD || !out || scale == 0 || modulus == 0)
-    return false;
-  mark = ixs_arena_save(b->scratch);
-  if (!bounds_residue_group_table(b, (size_t)expr->u.add.nterms, &groups,
-                                  &group_capacity))
-    goto cleanup;
-
-  ixs_node_get_rat(expr->u.add.coeff, &p, &q);
-  if (q <= 0 || scale % (uint64_t)q != 0)
-    goto cleanup;
-  result = ixs_u64_mul_mod(ixs_int64_normalize_residue(p, modulus),
-                           (scale / (uint64_t)q) % modulus, modulus);
-  if (!bounds_residue_collect_add_groups(b, expr, scale, modulus,
-                                         proof_independent, groups,
-                                         group_capacity, &ngroups) ||
-      !bounds_residue_accumulate_add_groups(b, groups, group_capacity, ngroups,
-                                            modulus, proof_independent,
-                                            &result))
-    goto cleanup;
-  *out = result;
-  success = true;
-
-cleanup:
-  ixs_arena_restore(b->scratch, mark);
-  return success;
-}
-
-IXS_STATIC bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                           int64_t modulus) {
-  uint64_t denominator;
-  uint64_t divisor;
-  uint64_t factor;
-  uint64_t scaled_modulus;
-  uint64_t residue;
-  uint32_t i;
-  int64_t p;
-  int64_t q;
-  bool has_rational_coefficient;
-
-  if (!b || !expr || expr->tag != IXS_ADD || modulus <= 0)
-    return false;
-  denominator = 1u;
-  has_rational_coefficient = false;
-  for (i = 0;; i++) {
-    ixs_node_get_rat(
-        i == 0 ? expr->u.add.coeff : expr->u.add.terms[i - 1u].coeff, &p, &q);
-    if (q <= 0)
-      return false;
-    has_rational_coefficient = has_rational_coefficient || q != 1;
-    divisor = (uint64_t)q;
-    factor = divisor / ixs_u64_gcd(denominator, divisor);
-    if (factor != 0 && denominator > (uint64_t)INT64_MAX / factor)
-      return false;
-    denominator *= factor;
-    if (i == expr->u.add.nterms)
-      break;
-  }
-  if (!has_rational_coefficient)
-    return false;
-  if ((uint64_t)modulus > (uint64_t)INT64_MAX / denominator)
-    return false;
-  scaled_modulus = (uint64_t)modulus * denominator;
-  return bounds_known_scaled_add_residue(b, expr, denominator, scaled_modulus,
-                                         &residue, true) &&
-         residue == 0;
 }
 
 static bool bounds_known_symbol_residue(ixs_bounds *b, ixs_node *expr,
@@ -13170,70 +12917,23 @@ static bool bounds_known_symbol_residue(ixs_bounds *b, ixs_node *expr,
   return true;
 }
 
-typedef enum {
-  BOUNDS_RESIDUE_INITIAL,
-  BOUNDS_RESIDUE_ADD_SCAN,
-  BOUNDS_RESIDUE_ADD_CHILD,
-  BOUNDS_RESIDUE_MUL_SCAN,
-  BOUNDS_RESIDUE_MUL_CHILD,
-  BOUNDS_RESIDUE_MOD_CHILD,
-  BOUNDS_RESIDUE_ASSOC_SCAN,
-  BOUNDS_RESIDUE_ASSOC_CHILD,
-  BOUNDS_RESIDUE_PW_TOTAL_SCAN,
-  BOUNDS_RESIDUE_PW_TOTAL_CHILD,
-  BOUNDS_RESIDUE_PW_REACH_SCAN,
-  BOUNDS_RESIDUE_PW_REACH_CHILD
-} bounds_residue_stage;
-
-typedef struct {
-  ixs_node *expr;
-  ixs_bounds *bounds;
-  uint64_t modulus;
-  bounds_query_scope scope;
-  bounds_residue_group *groups;
-  size_t group_capacity;
-  size_t group_index;
-  uint64_t result;
-  uint64_t coefficient;
-  uint64_t reduced_modulus;
-  uint32_t index;
-  bounds_residue_stage stage;
-  ixs_bounds *remaining;
-  ixs_bounds *active;
-  ixs_check_result branch_truth;
-  bool tracked;
-  bool have_result;
-  bool covered;
-  bool remaining_ready;
-  bool active_ready;
-} bounds_residue_frame;
-
-typedef struct {
-  ixs_bounds *root;
-  ixs_query_walk walk;
-  uint64_t child_residue;
-  bool child_success;
-  bool proof_independent;
-} bounds_residue_query;
-
-static ixs_query_walk_step bounds_residue_push(bounds_residue_query *query,
-                                               ixs_bounds *b, ixs_node *expr,
-                                               uint64_t modulus) {
+IXS_STATIC ixs_query_walk_step
+bounds_proof_push_scaled_add(bounds_proof_query *query, ixs_bounds *bounds,
+                             ixs_node *expr, uint64_t scale, uint64_t modulus) {
+  ixs_query_walk_step step =
+      bounds_proof_push_residue_task(query, bounds, expr, modulus);
   bounds_residue_frame *frame;
-  ixs_query_walk_step step;
-  if (!b || !expr || modulus == 0 || b->oom)
-    return b && b->oom ? IXS_QUERY_WALK_OOM : IXS_QUERY_WALK_STOP;
-  step = ixs_query_walk_push(&query->walk, expr);
-  if (step != IXS_QUERY_WALK_ADVANCED)
+  if (step != IXS_QUERY_WALK_ADVANCED ||
+      query->top_kind != BOUNDS_PROOF_FRAME_RESIDUE)
     return step;
-  frame = IXS_QUERY_WALK_TOP(&query->walk);
-  frame->bounds = b;
-  frame->modulus = modulus;
-  frame->stage = BOUNDS_RESIDUE_INITIAL;
+  frame = &query->residue_frames[query->residue_count - 1u];
+  frame->coefficient = scale;
+  frame->synthetic_scaled = true;
+  frame->stage = BOUNDS_RESIDUE_SCALED_ADD_START;
   return IXS_QUERY_WALK_ADVANCED;
 }
 
-static void bounds_residue_destroy_fork(bounds_residue_query *query,
+static void bounds_residue_destroy_fork(bounds_proof_query *query,
                                         bounds_residue_frame *frame,
                                         bool active) {
   ixs_bounds **fork = active ? &frame->active : &frame->remaining;
@@ -13247,7 +12947,7 @@ static void bounds_residue_destroy_fork(bounds_residue_query *query,
   *fork = NULL;
 }
 
-static void bounds_residue_close(bounds_residue_query *query,
+static bool bounds_residue_close(bounds_proof_query *query,
                                  bounds_residue_frame *frame, bool success,
                                  uint64_t residue) {
   bounds_residue_destroy_fork(query, frame, true);
@@ -13260,25 +12960,27 @@ static void bounds_residue_close(bounds_residue_query *query,
     else
       success = false;
   }
-  query->child_success = success;
-  query->child_residue = residue;
+  return success;
 }
 
-static ixs_query_walk_step bounds_residue_complete(bounds_residue_query *query,
+static ixs_query_walk_step bounds_residue_complete(bounds_proof_query *query,
                                                    bool success,
                                                    uint64_t residue) {
-  bounds_residue_close(query, IXS_QUERY_WALK_TOP(&query->walk), success,
-                       residue);
-  IXS_QUERY_WALK_POP(&query->walk);
-  return IXS_QUERY_WALK_ADVANCED;
+  bounds_residue_frame *frame;
+  assert(query->top_kind == BOUNDS_PROOF_FRAME_RESIDUE);
+  frame = &query->residue_frames[query->residue_count - 1u];
+  success = bounds_residue_close(query, frame, success, residue);
+  return bounds_proof_complete_residue(query, success, residue);
 }
 
 /* hot */
-static void bounds_residue_abort(void *state, void *top) {
-  bounds_residue_close(state, top, false, 0);
+IXS_STATIC void bounds_residue_abort(bounds_proof_query *query,
+                                     bounds_residue_frame *frame) {
+  (void)bounds_residue_close(query, frame, false, 0);
+  (void)bounds_proof_complete_residue(query, false, 0);
 }
 
-static bool bounds_residue_prepare_add(bounds_residue_query *query,
+static bool bounds_residue_prepare_add(bounds_proof_query *query,
                                        bounds_residue_frame *frame,
                                        uint64_t scale) {
   ixs_node *expr = frame->expr;
@@ -13324,9 +13026,7 @@ static bool bounds_residue_prepare_add(bounds_residue_query *query,
     uint64_t coefficient;
     size_t group;
     ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
-    if (q <= 0 || scale % (uint64_t)q != 0 ||
-        (!query->proof_independent &&
-         !ixs_bounds_is_integer_with_divinfo(b, term)))
+    if (q <= 0 || scale % (uint64_t)q != 0)
       return false;
     if (b->oom) {
       query->root->oom = true;
@@ -13335,10 +13035,10 @@ static bool bounds_residue_prepare_add(bounds_residue_query *query,
     coefficient =
         ixs_u64_mul_mod(ixs_int64_normalize_residue(p, frame->modulus),
                         (scale / (uint64_t)q) % frame->modulus, frame->modulus);
-    if (coefficient == 0)
+    if (coefficient == 0 && !frame->synthetic_scaled)
       continue;
-    representative = bounds_residue_representative(b, term, frame->modulus,
-                                                   query->proof_independent);
+    representative =
+        bounds_residue_representative(query, b, term, frame->modulus);
     group = ixs_hash_ptr(representative) & (capacity - 1u);
     while (frame->groups[group].representative &&
            frame->groups[group].representative != representative)
@@ -13352,7 +13052,37 @@ static bool bounds_residue_prepare_add(bounds_residue_query *query,
   return true;
 }
 
-static bool bounds_residue_alloc_fork(bounds_residue_query *query,
+static bool bounds_residue_add_scale(ixs_node *expr, uint64_t modulus,
+                                     uint64_t *scale,
+                                     uint64_t *scaled_modulus) {
+  uint64_t denominator = 1u;
+  uint32_t i;
+  for (i = 0;; i++) {
+    uint64_t divisor;
+    uint64_t factor;
+    int64_t p;
+    int64_t q;
+    ixs_node_get_rat(
+        i == 0 ? expr->u.add.coeff : expr->u.add.terms[i - 1u].coeff, &p, &q);
+    (void)p;
+    if (q <= 0)
+      return false;
+    divisor = (uint64_t)q;
+    factor = divisor / ixs_u64_gcd(denominator, divisor);
+    if (factor != 0u && denominator > (uint64_t)INT64_MAX / factor)
+      return false;
+    denominator *= factor;
+    if (i == expr->u.add.nterms)
+      break;
+  }
+  if (modulus > (UINT64_C(1) << 63u) / denominator)
+    return false;
+  *scale = denominator;
+  *scaled_modulus = modulus * denominator;
+  return true;
+}
+
+static bool bounds_residue_alloc_fork(bounds_proof_query *query,
                                       bounds_residue_frame *frame,
                                       const ixs_bounds *source, bool active) {
   ixs_bounds **fork = active ? &frame->active : &frame->remaining;
@@ -13371,7 +13101,7 @@ static bool bounds_residue_alloc_fork(bounds_residue_query *query,
   return true;
 }
 
-static bool bounds_residue_start_reachable(bounds_residue_query *query,
+static bool bounds_residue_start_reachable(bounds_proof_query *query,
                                            bounds_residue_frame *frame) {
   if (!frame->bounds->ctx || frame->expr->u.pw.ncases == 0 ||
       !frame->expr->u.pw.cases)
@@ -13397,7 +13127,7 @@ static bool bounds_residue_merge(uint64_t branch, uint64_t *result,
 }
 
 static ixs_query_walk_step
-bounds_residue_track_frame(bounds_residue_query *query,
+bounds_residue_track_frame(bounds_proof_query *query,
                            bounds_residue_frame *frame) {
   bounds_query_cache_entry *cached = NULL;
   bounds_query_enter_result enter;
@@ -13417,7 +13147,7 @@ bounds_residue_track_frame(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_direct_independent(bounds_residue_query *query,
+bounds_residue_direct_independent(bounds_proof_query *query,
                                   bounds_residue_frame *frame) {
   ixs_bounds *current = frame->bounds;
   ixs_node *node = frame->expr;
@@ -13427,9 +13157,8 @@ bounds_residue_direct_independent(bounds_residue_query *query,
   int64_t exact;
 
   /* Public integrality would re-enter the live exact-proof stack. */
-  if (!ixs_node_is_known_total(node)) {
-    return bounds_residue_complete(query, false, 0);
-  }
+  if (!ixs_node_is_known_total(node))
+    return IXS_QUERY_WALK_NEXT;
   if (node->tag == IXS_ADD &&
       bounds_difference_exact_unit_value(current, node, &exact)) {
     return bounds_residue_complete(
@@ -13462,33 +13191,14 @@ bounds_residue_direct_independent(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_direct_tracked(bounds_residue_query *query,
-                              bounds_residue_frame *frame) {
+bounds_residue_direct_integral_tracked(bounds_proof_query *query,
+                                       bounds_residue_frame *frame) {
   ixs_bounds *current = frame->bounds;
   ixs_node *node = frame->expr;
   ixs_interval iv;
   ixs_bitfacts bits;
   int64_t exact;
 
-  /* Structural ADD skips recursive interval propagation, but an exact unit
-   * difference is an O(1) producer invariant and retains its affine offset. */
-  if (node->tag == IXS_ADD &&
-      bounds_difference_exact_unit_value(current, node, &exact)) {
-    return bounds_residue_complete(
-        query, true, ixs_int64_normalize_residue(exact, frame->modulus));
-  }
-  if ((node->tag == IXS_ADD || node->tag == IXS_MOD ||
-       node->tag == IXS_PIECEWISE) &&
-      ixs_node_is_integer_valued(node) && ixs_node_is_known_total(node))
-    return IXS_QUERY_WALK_NEXT;
-  if (ixs_bounds_check_integer_valued(current, node) != IXS_CHECK_TRUE ||
-      !ixs_node_is_known_total(node)) {
-    if (current->oom)
-      query->root->oom = true;
-    if (query->root->oom)
-      return IXS_QUERY_WALK_OOM;
-    return bounds_residue_complete(query, false, 0);
-  }
   if (frame->modulus == 1u) {
     return bounds_residue_complete(query, true, 0);
   }
@@ -13516,7 +13226,33 @@ bounds_residue_direct_tracked(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_start_mul(bounds_residue_query *query,
+bounds_residue_direct_tracked(bounds_proof_query *query,
+                              bounds_residue_frame *frame) {
+  ixs_node *node = frame->expr;
+  int64_t exact;
+
+  /* Structural ADD skips recursive interval propagation, but an exact unit
+   * difference is an O(1) producer invariant and retains its affine offset. */
+  if (node->tag == IXS_ADD &&
+      bounds_difference_exact_unit_value(frame->bounds, node, &exact)) {
+    return bounds_residue_complete(
+        query, true, ixs_int64_normalize_residue(exact, frame->modulus));
+  }
+  if (node->tag == IXS_ADD && ixs_node_is_known_total(node))
+    return IXS_QUERY_WALK_NEXT;
+  if ((node->tag == IXS_MUL || node->tag == IXS_MOD ||
+       node->tag == IXS_PIECEWISE) &&
+      ixs_node_is_integer_valued(node) && ixs_node_is_known_total(node))
+    return IXS_QUERY_WALK_NEXT;
+  if (!ixs_node_is_known_total(node))
+    return bounds_residue_complete(query, false, 0);
+  frame->stage = BOUNDS_RESIDUE_INTEGER_CHILD;
+  return bounds_proof_push_exact(query, frame->bounds, node,
+                                 BOUNDS_PROOF_INTEGER, 0);
+}
+
+static ixs_query_walk_step
+bounds_residue_start_mul(bounds_proof_query *query,
                          bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   int64_t p;
@@ -13528,17 +13264,14 @@ bounds_residue_start_mul(bounds_residue_query *query,
   frame->coefficient = ixs_int64_normalize_residue(p, frame->modulus);
   frame->reduced_modulus =
       frame->modulus / ixs_u64_gcd(frame->coefficient, frame->modulus);
-  if (frame->reduced_modulus == 1u) {
-    return bounds_residue_complete(query, true, 0);
-  }
   frame->result = 1u % frame->reduced_modulus;
   frame->index = 0;
-  frame->stage = BOUNDS_RESIDUE_MUL_SCAN;
+  frame->stage = BOUNDS_RESIDUE_MUL_INTEGER_SCAN;
   return IXS_QUERY_WALK_ADVANCED;
 }
 
 static ixs_query_walk_step
-bounds_residue_start_assoc(bounds_residue_query *query,
+bounds_residue_start_assoc(bounds_proof_query *query,
                            bounds_residue_frame *frame, bool bitwise) {
   ixs_node *node = frame->expr;
   if ((bitwise && !ixs_u64_is_pow2(frame->modulus)) ||
@@ -13552,7 +13285,7 @@ bounds_residue_start_assoc(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_start_frame(bounds_residue_query *query,
+bounds_residue_start_frame(bounds_proof_query *query,
                            bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   switch (node->tag) {
@@ -13572,11 +13305,16 @@ bounds_residue_start_frame(bounds_residue_query *query,
     return bounds_residue_complete(query, success, residue);
   }
   case IXS_ADD:
-    if (!bounds_residue_prepare_add(query, frame, 1u)) {
-      if (query->root->oom)
-        return IXS_QUERY_WALK_OOM;
+    if (!bounds_residue_add_scale(node, frame->modulus, &frame->reduced_modulus,
+                                  &frame->result))
       return bounds_residue_complete(query, false, 0);
+    if (frame->reduced_modulus != 1u) {
+      frame->stage = BOUNDS_RESIDUE_ADD_SCALED_CHILD;
+      return bounds_proof_push_scaled_add(
+          query, frame->bounds, node, frame->reduced_modulus, frame->result);
     }
+    frame->index = 0;
+    frame->stage = BOUNDS_RESIDUE_ADD_INTEGER_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   case IXS_MUL:
     return bounds_residue_start_mul(query, frame);
@@ -13586,8 +13324,8 @@ bounds_residue_start_frame(bounds_residue_query *query,
       return bounds_residue_complete(query, false, 0);
     }
     frame->stage = BOUNDS_RESIDUE_MOD_CHILD;
-    return bounds_residue_push(query, frame->bounds, node->u.binary.lhs,
-                               frame->modulus);
+    return bounds_proof_push_residue(query, frame->bounds, node->u.binary.lhs,
+                                     frame->modulus);
   case IXS_XOR:
   case IXS_AND:
   case IXS_OR:
@@ -13609,8 +13347,41 @@ bounds_residue_start_frame(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_add(bounds_residue_query *query,
+bounds_residue_resume_add(bounds_proof_query *query,
                           bounds_residue_frame *frame) {
+  if (frame->stage == BOUNDS_RESIDUE_ADD_SCALED_CHILD) {
+    uint64_t scale = frame->reduced_modulus;
+    if (!query->child_success || query->child_residue % scale != 0u)
+      return bounds_residue_complete(query, false, 0);
+    return bounds_residue_complete(
+        query, true, (query->child_residue / scale) % frame->modulus);
+  }
+  if (frame->stage == BOUNDS_RESIDUE_ADD_INTEGER_CHILD) {
+    if (!query->child_success)
+      return bounds_residue_complete(query, false, 0);
+    frame->index++;
+    frame->stage = BOUNDS_RESIDUE_ADD_INTEGER_SCAN;
+  }
+  if (frame->stage == BOUNDS_RESIDUE_ADD_INTEGER_SCAN) {
+    if (frame->index < frame->expr->u.add.nterms) {
+      ixs_node *term = frame->expr->u.add.terms[frame->index].term;
+      if (!term)
+        return IXS_QUERY_WALK_STOP;
+      if (ixs_node_is_integer_valued(term) ||
+          bounds_proof_integer_cached(query, frame->bounds, term)) {
+        frame->index++;
+        return IXS_QUERY_WALK_ADVANCED;
+      }
+      frame->stage = BOUNDS_RESIDUE_ADD_INTEGER_CHILD;
+      return bounds_proof_push_exact(query, frame->bounds, term,
+                                     BOUNDS_PROOF_INTEGER, 0);
+    }
+    if (!bounds_residue_prepare_add(query, frame, 1u)) {
+      if (query->root->oom)
+        return IXS_QUERY_WALK_OOM;
+      return bounds_residue_complete(query, false, 0);
+    }
+  }
   if (frame->stage == BOUNDS_RESIDUE_ADD_CHILD) {
     if (!query->child_success) {
       return bounds_residue_complete(query, false, 0);
@@ -13625,24 +13396,46 @@ bounds_residue_resume_add(bounds_residue_query *query,
   }
   while (frame->group_index < frame->group_capacity) {
     bounds_residue_group *group = &frame->groups[frame->group_index++];
-    if (!group->representative || group->coefficient == 0)
+    if (!group->representative ||
+        (group->coefficient == 0 && !frame->synthetic_scaled))
       continue;
     frame->coefficient = group->coefficient;
     frame->reduced_modulus =
         frame->modulus / ixs_u64_gcd(frame->coefficient, frame->modulus);
-    if (frame->reduced_modulus == 1u)
+    if (frame->reduced_modulus == 1u && !frame->synthetic_scaled)
       continue;
     frame->stage = BOUNDS_RESIDUE_ADD_CHILD;
-    return bounds_residue_push(query, frame->bounds, group->representative,
-                               frame->reduced_modulus);
+    return bounds_proof_push_residue(
+        query, frame->bounds, group->representative, frame->reduced_modulus);
   }
   return bounds_residue_complete(query, true, frame->result);
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_mul(bounds_residue_query *query,
+bounds_residue_resume_mul(bounds_proof_query *query,
                           bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
+  if (frame->stage == BOUNDS_RESIDUE_MUL_INTEGER_SCAN) {
+    if (frame->index != 0u && !query->child_success)
+      return bounds_residue_complete(query, false, 0);
+    if (frame->index < node->u.mul.nfactors) {
+      const ixs_mulfactor *factor = &node->u.mul.factors[frame->index++];
+      if (!factor->base || factor->exp < 0)
+        return factor->base ? bounds_residue_complete(query, false, 0)
+                            : IXS_QUERY_WALK_STOP;
+      if (ixs_node_is_integer_valued(factor->base) ||
+          bounds_proof_integer_cached(query, frame->bounds, factor->base)) {
+        query->child_success = true;
+        return IXS_QUERY_WALK_ADVANCED;
+      }
+      return bounds_proof_push_exact(query, frame->bounds, factor->base,
+                                     BOUNDS_PROOF_INTEGER, 0);
+    }
+    if (frame->reduced_modulus == 1u)
+      return bounds_residue_complete(query, true, 0);
+    frame->index = 0;
+    frame->stage = BOUNDS_RESIDUE_MUL_SCAN;
+  }
   if (frame->stage == BOUNDS_RESIDUE_MUL_CHILD) {
     if (!query->child_success) {
       return bounds_residue_complete(query, false, 0);
@@ -13657,12 +13450,7 @@ bounds_residue_resume_mul(bounds_residue_query *query,
     frame->stage = BOUNDS_RESIDUE_MUL_SCAN;
     return IXS_QUERY_WALK_ADVANCED;
   }
-  /* Ordinary residue queries have already proved every factor integral and
-   * may stop after a zero product.  Independent exact-proof queries have no
-   * such callback: visit the remaining factors so a divisible integer factor
-   * cannot hide a rational one. */
-  if ((!query->proof_independent && frame->result == 0) ||
-      frame->index == node->u.mul.nfactors) {
+  if (frame->result == 0 || frame->index == node->u.mul.nfactors) {
     return bounds_residue_complete(
         query, true,
         ixs_u64_mul_mod(frame->coefficient, frame->result, frame->modulus));
@@ -13671,13 +13459,13 @@ bounds_residue_resume_mul(bounds_residue_query *query,
     return bounds_residue_complete(query, false, 0);
   }
   frame->stage = BOUNDS_RESIDUE_MUL_CHILD;
-  return bounds_residue_push(query, frame->bounds,
-                             node->u.mul.factors[frame->index].base,
-                             frame->reduced_modulus);
+  return bounds_proof_push_residue(query, frame->bounds,
+                                   node->u.mul.factors[frame->index].base,
+                                   frame->reduced_modulus);
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_assoc(bounds_residue_query *query,
+bounds_residue_resume_assoc(bounds_proof_query *query,
                             bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   if (frame->stage == BOUNDS_RESIDUE_ASSOC_SCAN) {
@@ -13688,7 +13476,7 @@ bounds_residue_resume_assoc(bounds_residue_query *query,
       return bounds_residue_complete(query, frame->have_result, result);
     }
     frame->stage = BOUNDS_RESIDUE_ASSOC_CHILD;
-    return bounds_residue_push(
+    return bounds_proof_push_residue(
         query, frame->bounds, node->u.assoc.args[frame->index], frame->modulus);
   }
   if (!query->child_success) {
@@ -13711,7 +13499,7 @@ bounds_residue_resume_assoc(bounds_residue_query *query,
   return IXS_QUERY_WALK_ADVANCED;
 }
 
-static bool bounds_residue_add_condition(bounds_residue_query *query,
+static bool bounds_residue_add_condition(bounds_proof_query *query,
                                          ixs_bounds *target, ixs_node *cond,
                                          bool truth) {
   struct ixs_node_impl assumption;
@@ -13724,7 +13512,7 @@ static bool bounds_residue_add_condition(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_pw_total(bounds_residue_query *query,
+bounds_residue_resume_pw_total(bounds_proof_query *query,
                                bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   if (frame->stage == BOUNDS_RESIDUE_PW_TOTAL_SCAN) {
@@ -13732,9 +13520,9 @@ bounds_residue_resume_pw_total(bounds_residue_query *query,
       return bounds_residue_complete(query, frame->have_result, frame->result);
     }
     frame->stage = BOUNDS_RESIDUE_PW_TOTAL_CHILD;
-    return bounds_residue_push(query, frame->bounds,
-                               node->u.pw.cases[frame->index].value,
-                               frame->modulus);
+    return bounds_proof_push_residue(query, frame->bounds,
+                                     node->u.pw.cases[frame->index].value,
+                                     frame->modulus);
   }
   if (!query->child_success ||
       !bounds_residue_merge(query->child_residue, &frame->result,
@@ -13757,7 +13545,7 @@ bounds_residue_resume_pw_total(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_pw_reach_scan(bounds_residue_query *query,
+bounds_residue_resume_pw_reach_scan(bounds_proof_query *query,
                                     bounds_residue_frame *frame) {
   ixs_node *node = frame->expr;
   ixs_node *cond;
@@ -13820,11 +13608,11 @@ bounds_residue_resume_pw_reach_scan(bounds_residue_query *query,
   }
   frame->branch_truth = truth;
   frame->stage = BOUNDS_RESIDUE_PW_REACH_CHILD;
-  return bounds_residue_push(query, frame->active, value, frame->modulus);
+  return bounds_proof_push_residue(query, frame->active, value, frame->modulus);
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_pw_reach_child(bounds_residue_query *query,
+bounds_residue_resume_pw_reach_child(bounds_proof_query *query,
                                      bounds_residue_frame *frame) {
   ixs_node *cond = frame->expr->u.pw.cases[frame->index].cond;
   if (!query->child_success ||
@@ -13848,12 +13636,34 @@ bounds_residue_resume_pw_reach_child(bounds_residue_query *query,
 }
 
 static ixs_query_walk_step
-bounds_residue_resume_frame(bounds_residue_query *query,
+bounds_residue_resume_frame(bounds_proof_query *query,
                             bounds_residue_frame *frame) {
   switch (frame->stage) {
+  case BOUNDS_RESIDUE_SCALED_ADD_START: {
+    uint64_t scale = frame->coefficient;
+    if (!bounds_residue_prepare_add(query, frame, scale)) {
+      if (query->root->oom)
+        return IXS_QUERY_WALK_OOM;
+      return bounds_residue_complete(query, false, 0);
+    }
+    return IXS_QUERY_WALK_ADVANCED;
+  }
+  case BOUNDS_RESIDUE_INTEGER_CHILD: {
+    ixs_query_walk_step step;
+    if (!query->child_success)
+      return bounds_residue_complete(query, false, 0);
+    step = bounds_residue_direct_integral_tracked(query, frame);
+    return step == IXS_QUERY_WALK_NEXT
+               ? bounds_residue_start_frame(query, frame)
+               : step;
+  }
+  case BOUNDS_RESIDUE_ADD_INTEGER_SCAN:
+  case BOUNDS_RESIDUE_ADD_INTEGER_CHILD:
+  case BOUNDS_RESIDUE_ADD_SCALED_CHILD:
   case BOUNDS_RESIDUE_ADD_SCAN:
   case BOUNDS_RESIDUE_ADD_CHILD:
     return bounds_residue_resume_add(query, frame);
+  case BOUNDS_RESIDUE_MUL_INTEGER_SCAN:
   case BOUNDS_RESIDUE_MUL_SCAN:
   case BOUNDS_RESIDUE_MUL_CHILD:
     return bounds_residue_resume_mul(query, frame);
@@ -13878,10 +13688,10 @@ bounds_residue_resume_frame(bounds_residue_query *query,
 }
 
 /* hot */
-static ixs_query_walk_step bounds_residue_advance(void *state, void *top) {
-  bounds_residue_query *query = state;
-  bounds_residue_frame *frame = top;
+IXS_STATIC ixs_query_walk_step
+bounds_residue_advance(bounds_proof_query *query, bounds_residue_frame *frame) {
   ixs_query_walk_step step;
+  query->active_bounds = frame->bounds;
   if (frame->stage != BOUNDS_RESIDUE_INITIAL)
     return bounds_residue_resume_frame(query, frame);
   step = bounds_residue_track_frame(query, frame);
@@ -13895,40 +13705,22 @@ static ixs_query_walk_step bounds_residue_advance(void *state, void *top) {
   return step;
 }
 
-static bool bounds_known_residue_mode(ixs_bounds *b, ixs_node *expr,
-                                      uint64_t modulus, uint64_t *out,
-                                      bool proof_independent) {
+IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
+                                     uint64_t modulus, uint64_t *out) {
   ixs_arena_mark mark;
-  bounds_residue_query query;
+  bounds_proof_query query;
   ixs_query_walk_step step;
   if (!b || !expr || !out || modulus == 0 || b->oom)
     return false;
 
   mark = ixs_arena_save(b->scratch);
-  memset(&query, 0, sizeof(query));
-  query.root = b;
-  query.proof_independent = proof_independent;
-  IXS_QUERY_WALK_INIT(&query.walk, b->scratch, &b->oom, bounds_residue_frame,
-                      expr);
-  step = bounds_residue_push(&query, b, expr, modulus);
-  if (step == IXS_QUERY_WALK_ADVANCED)
-    step = ixs_query_walk_drive(&query.walk, &query, bounds_residue_advance,
-                                bounds_residue_abort);
+  bounds_proof_query_init(&query, b, false);
+  step = bounds_proof_push_residue(&query, b, expr, modulus);
+  step = bounds_proof_drive(&query, step);
   if (query.child_success)
     *out = query.child_residue;
   ixs_arena_restore(b->scratch, mark);
   return step == IXS_QUERY_WALK_ADVANCED && query.child_success;
-}
-
-IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
-                                     uint64_t modulus, uint64_t *out) {
-  return bounds_known_residue_mode(b, expr, modulus, out, false);
-}
-
-IXS_STATIC bool bounds_known_residue_independent(ixs_bounds *b, ixs_node *expr,
-                                                 uint64_t modulus,
-                                                 uint64_t *out) {
-  return bounds_known_residue_mode(b, expr, modulus, out, true);
 }
 
 /* ==================================================================== */

@@ -158,8 +158,6 @@ IXS_STATIC void bounds_admit_exact_relation(ixs_bounds *b, ixs_node *lhs,
 /* Lower proof services borrow these query-policy operations. */
 IXS_STATIC ixs_interval bounds_get_intrinsic(ixs_bounds *b, ixs_node *expr);
 IXS_STATIC ixs_interval bounds_get_tracked(ixs_bounds *b, ixs_node *expr);
-IXS_STATIC bool bounds_add_known_divisible(ixs_bounds *b, ixs_node *expr,
-                                           int64_t modulus);
 IXS_STATIC ixs_node *bounds_condition_assumption(ixs_bounds *bounds,
                                                  ixs_node *condition,
                                                  bool value,

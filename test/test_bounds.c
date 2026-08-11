@@ -7835,6 +7835,27 @@ static void test_public_fact_divisibility_rejects_reciprocal_factor(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_fact_divisibility_requires_integral_product(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "nonintegral_product_x");
+  ixs_node *y = ixs_sym(ctx, "nonintegral_product_y");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *quarter_x = ixs_div(ctx, x, ixs_int(ctx, 4));
+  ixs_node *sum = ixs_add(ctx, y, quarter_x);
+  ixs_node *product = ixs_mul(ctx, two, sum);
+  ixs_node *query = ixs_cmp(ctx, ixs_mod(ctx, product, two), IXS_CMP_EQ, zero);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && y && two && zero && quarter_x && sum && product && query &&
+        facts);
+  CHECK(test_ixs_check_integer_valued_facts(facts, sum) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_divisible_facts(facts, product, 2) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(facts, query) == IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_known_bits_propagation(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *item = ixs_sym(ctx, "item");
@@ -12218,6 +12239,7 @@ int main(void) {
   test_generic_piecewise_scalar_selector();
   test_public_fact_divisibility();
   test_public_fact_divisibility_rejects_reciprocal_factor();
+  test_public_fact_divisibility_requires_integral_product();
   test_public_known_bits_propagation();
   test_public_known_bits_failures();
   test_public_symbol_congruence();
