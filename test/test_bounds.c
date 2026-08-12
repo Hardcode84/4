@@ -5937,6 +5937,7 @@ static void test_public_range_associative_many(void) {
   ixs_node *extreme[2];
   ixs_node *expr;
   ixs_node *sum;
+  ixs_node *overlap_sum;
   ixs_facts *facts = ixs_facts_create(ctx);
   ixs_range_result r;
 
@@ -5973,9 +5974,10 @@ static void test_public_range_associative_many(void) {
   overlap[1] = ixs_mul(ctx, ixs_int(ctx, 8), y);
   overlap[2] = scaled[2];
   sum = ixs_add(ctx, scaled[0], ixs_add(ctx, scaled[1], scaled[2]));
+  overlap_sum = ixs_add(ctx, ixs_xor(ctx, overlap[0], overlap[1]), overlap[2]);
   CHECK(ixs_simplify(ctx, ixs_xor_many(ctx, 3, scaled), bounds, 6) == sum);
-  CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_xor_many(ctx, 3, overlap), bounds,
-                                  6)) == IXS_XOR);
+  CHECK(ixs_simplify(ctx, ixs_xor_many(ctx, 3, overlap), bounds, 6) ==
+        overlap_sum);
 
   congruent[0] =
       ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 4), x), ixs_int(ctx, 1));

@@ -719,7 +719,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   operand known bits then tighten the result's required and possible bits. If
   any nonnegative operand is unbounded above, the result is `[0,+inf)`.
   A negative or sign-unknown operand reports unknown. Low-64-bit facts never
-  impose a signed or unsigned machine width on the expression.
+  impose a signed or unsigned machine width on the expression. Multiplication
+  by a positive power of two shifts known bits. More generally, multiplying a
+  proven zero-or-one integer by any positive integer preserves the sparse bit
+  support of that coefficient; this is ordinary bitfact propagation, not an
+  XOR- or layout-specific recognizer.
 - **Piecewise**: propagation follows first-match semantics. Each reachable
   branch is evaluated in a fork containing its condition and the negations of
   all earlier conditions; dead and shadowed branches are ignored. All

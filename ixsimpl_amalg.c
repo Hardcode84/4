@@ -3004,6 +3004,7 @@ static void bitfacts_apply_add_known(ixs_bounds *b, ixs_node *expr,
 static void bitfacts_apply_mul_known(ixs_node *expr,
                                      const bounds_bitfacts_child *child,
                                      ixs_bitfacts *out) {
+  uint64_t child_possible;
   uint64_t coeff;
   unsigned shift, i;
 
@@ -3013,7 +3014,24 @@ static void bitfacts_apply_mul_known(ixs_node *expr,
     return;
 
   coeff = (uint64_t)expr->u.mul.coeff->u.ival;
-  if (!ixs_u64_is_pow2(coeff) || !child->success)
+  if (!child->success)
+    return;
+
+  /* A binary integer selects either zero or the coefficient.  Preserve the
+   * coefficient's sparse support even when it is not a power of two. */
+  child_possible = ~child->bits.known_zero;
+  if ((child_possible & ~UINT64_C(1)) == 0u) {
+    if (child_possible == 0u) {
+      out->known_zero = UINT64_MAX;
+      out->known_one = 0u;
+      return;
+    }
+    out->known_zero |= ~coeff;
+    if ((child->bits.known_one & UINT64_C(1)) != 0u)
+      out->known_one |= coeff;
+    return;
+  }
+  if (!ixs_u64_is_pow2(coeff))
     return;
 
   shift = bit_ctz64(coeff);
@@ -3284,8 +3302,7 @@ bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
   case IXS_MUL:
     if (node->u.mul.coeff->tag != IXS_INT || node->u.mul.coeff->u.ival <= 0 ||
         node->u.mul.nfactors != 1 || node->u.mul.factors[0].exp != 1 ||
-        !ixs_node_is_integer_valued(node) ||
-        !ixs_u64_is_pow2((uint64_t)node->u.mul.coeff->u.ival)) {
+        !ixs_node_is_integer_valued(node)) {
       return bounds_bitfacts_complete(query, true, frame->bits);
     }
     frame->stage = BOUNDS_BITFACTS_MUL;
@@ -35789,30 +35806,113 @@ static ixs_node *xor_binary_linear_canonicalize(ixs_ctx *ctx, ixs_bounds *bnds,
   return canonical;
 }
 
-static ixs_node *xor_disjoint_bits_sum(ixs_ctx *ctx, ixs_bounds *bnds,
-                                       ixs_node *result) {
+static uint32_t xor_label_bit_components(const uint64_t *possible,
+                                         uint32_t *component, uint32_t *queue,
+                                         uint32_t count) {
+  uint32_t component_count = 0;
+  uint32_t i;
+
+  for (i = 0; i < count; i++)
+    component[i] = count;
+  for (i = 0; i < count; i++) {
+    uint32_t head = 0;
+    uint32_t tail = 0;
+    if (component[i] != count)
+      continue;
+    component[i] = i;
+    queue[tail++] = i;
+    component_count++;
+    while (head < tail) {
+      uint32_t current = queue[head++];
+      uint32_t j;
+      for (j = 0; j < count; j++) {
+        if (component[j] == count && (possible[current] & possible[j]) != 0u) {
+          component[j] = i;
+          queue[tail++] = j;
+        }
+      }
+    }
+  }
+  return component_count;
+}
+
+static ixs_node *xor_build_component_sum(ixs_ctx *ctx, ixs_node *xor_node,
+                                         const uint32_t *component,
+                                         ixs_node **members) {
+  ixs_node *sum = ctx->node_zero;
+  uint32_t i;
+
+  for (i = 0; sum && i < xor_node->u.assoc.nargs; i++) {
+    ixs_node *part;
+    uint32_t count = 0;
+    uint32_t j;
+    if (component[i] != i)
+      continue;
+    for (j = 0; j < xor_node->u.assoc.nargs; j++)
+      if (component[j] == i)
+        members[count++] = xor_node->u.assoc.args[j];
+    part = xor_build_result(ctx, members, count, 0);
+    sum = part ? simp_add(ctx, sum, part) : NULL;
+  }
+  return sum;
+}
+
+/* Split the local possible-bit overlap graph into connected components.  Each
+ * operand is queued once and scans the A operands once, so graph traversal and
+ * component rebuilding are O(A^2) in XOR arity and inspect no global state. */
+static ixs_node *xor_disjoint_bit_components(ixs_ctx *ctx, ixs_bounds *bnds,
+                                             ixs_node *result) {
   ixs_node *xor_node = result;
-  uint64_t possible_bits = 0;
+  ixs_arena_mark mark;
+  uint64_t *possible;
+  uint32_t *component;
+  uint32_t *queue;
+  ixs_node **members;
+  ixs_node *sum;
+  uint32_t component_count;
   uint32_t i;
 
   if (!bnds || result->tag != IXS_XOR)
     return result;
+  mark = ixs_arena_save(&ctx->scratch);
+  possible = ixs_arena_alloc(&ctx->scratch,
+                             xor_node->u.assoc.nargs * sizeof(*possible),
+                             sizeof(*possible));
+  component = ixs_arena_alloc(&ctx->scratch,
+                              xor_node->u.assoc.nargs * sizeof(*component),
+                              sizeof(*component));
+  queue = ixs_arena_alloc(
+      &ctx->scratch, xor_node->u.assoc.nargs * sizeof(*queue), sizeof(*queue));
+  members =
+      ixs_arena_alloc(&ctx->scratch, xor_node->u.assoc.nargs * sizeof(*members),
+                      sizeof(*members));
+  if (!possible || !component || !queue || !members) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return NULL;
+  }
   for (i = 0; i < xor_node->u.assoc.nargs; i++) {
     ixs_bitfacts facts;
     ixs_node *arg = xor_node->u.assoc.args[i];
-    uint64_t possible;
     if (!bounds_int_nonnegative_finite(bnds, arg) ||
-        !ixs_bounds_get_bitfacts(bnds, arg, &facts))
-      return result;
-    possible = ~facts.known_zero;
-    if ((possible_bits & possible) != 0)
-      return result;
-    possible_bits |= possible;
+        !ixs_bounds_get_bitfacts(bnds, arg, &facts)) {
+      ixs_node *fallback = bnds->oom ? NULL : result;
+      ixs_arena_restore(&ctx->scratch, mark);
+      return fallback;
+    }
+    possible[i] = ~facts.known_zero;
   }
-  result = ctx->node_zero;
-  for (i = 0; result && i < xor_node->u.assoc.nargs; i++)
-    result = simp_add(ctx, result, xor_node->u.assoc.args[i]);
-  return result;
+
+  component_count = xor_label_bit_components(possible, component, queue,
+                                             xor_node->u.assoc.nargs);
+  if (component_count == 1u) {
+    ixs_arena_restore(&ctx->scratch, mark);
+    return result;
+  }
+  sum = xor_build_component_sum(ctx, xor_node, component, members);
+  if (sum)
+    IXS_STAT_HIT(ctx);
+  ixs_arena_restore(&ctx->scratch, mark);
+  return sum;
 }
 
 static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
@@ -35848,7 +35948,7 @@ static ixs_node *simp_xor_many_bnds(ixs_ctx *ctx, ixs_bounds *bnds, uint32_t n,
   if (result)
     result = xor_binary_linear_canonicalize(ctx, bnds, result);
   if (result)
-    result = xor_disjoint_bits_sum(ctx, bnds, result);
+    result = xor_disjoint_bit_components(ctx, bnds, result);
   ixs_arena_restore(&ctx->scratch, mark);
   return result;
 }

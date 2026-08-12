@@ -894,6 +894,29 @@ static void test_xor_binary_linear_failure_retry(void) {
   CHECK(ixs_ctx_nerrors(ctx) == 0);
   ixs_ctx_destroy(ctx);
 }
+
+static void test_xor_bit_component_failure_retry(void) {
+  ixs_ctx *ctx = ctx_create_or_die();
+  ixs_arena *scratch = ixs_test_scratch(ctx);
+  ixs_node *x = ixs_sym(ctx, "xor_component_retry_x");
+  ixs_node *y = ixs_sym(ctx, "xor_component_retry_y");
+  ixs_node *z = ixs_sym(ctx, "xor_component_retry_z");
+  ixs_node *low = ixs_and(ctx, x, ixs_int(ctx, 3));
+  ixs_node *high0 = ixs_and(ctx, y, ixs_int(ctx, 12));
+  ixs_node *high1 = ixs_and(ctx, z, ixs_int(ctx, 12));
+  ixs_node *args[3] = {low, high0, high1};
+  ixs_node *source = ixs_xor_many(ctx, 3, args);
+  ixs_node *expected = ixs_add(ctx, low, ixs_xor(ctx, high0, high1));
+
+  CHECK(ctx && x && y && z && low && high0 && high1 && source && expected);
+  ixs_arena_set_fail_after(scratch, 0);
+  CHECK(ixs_simplify(ctx, source, NULL, 0) == NULL);
+  ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_simplify(ctx, source, NULL, 0) == expected);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
+  ixs_ctx_destroy(ctx);
+}
 #endif
 
 static void test_rational_carrier_factoring(void) {
@@ -1572,6 +1595,129 @@ static void test_xor_known_bit_simplification(void) {
         ixs_node_tag(ixs_simplify(
             ctx, ixs_xor(ctx, ixs_sub(ctx, ixs_int(ctx, 32), four_b), eight_c),
             assumes, 6)) == IXS_XOR);
+  }
+}
+
+static void test_xor_disjoint_component_factorization(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *item = ixs_sym(ctx, "xor_component_item");
+  ixs_node *group = ixs_sym(ctx, "xor_component_group");
+  ixs_node *within = ixs_sym(ctx, "xor_component_within");
+  ixs_node *dynamic = ixs_sym(ctx, "xor_component_dynamic");
+  ixs_node *item64 = ixs_mod(ctx, item, ixs_int(ctx, 64));
+  ixs_node *bits[6];
+  ixs_node *assumes[] = {
+      ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, item, IXS_CMP_LT, ixs_int(ctx, 256)),
+      ixs_cmp(ctx, item, IXS_CMP_EQ, ixs_floor(ctx, item)),
+      ixs_cmp(ctx, group, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, group, IXS_CMP_LT, ixs_int(ctx, 2)),
+      ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_floor(ctx, group)),
+      ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0)),
+      ixs_cmp(ctx, within, IXS_CMP_LT, ixs_int(ctx, 4)),
+      ixs_cmp(ctx, within, IXS_CMP_EQ, ixs_floor(ctx, within)),
+  };
+  ixs_node *ordinary_args[9];
+  ixs_node *transpose_args[9];
+  ixs_node *overlap_args[3];
+  ixs_node *ordinary;
+  ixs_node *ordinary_expected;
+  ixs_node *transpose;
+  ixs_node *transpose_expected;
+  ixs_facts *facts = ixs_facts_create(ctx);
+  uint32_t bit;
+
+  CHECK(facts && ixs_facts_assume_preds(facts, assumes, 9));
+  bits[0] = ixs_mod(ctx, item64, ixs_int(ctx, 2));
+  for (bit = 1; bit < 6; bit++) {
+    bits[bit] = ixs_mod(
+        ctx,
+        ixs_floor(ctx, ixs_div(ctx, item64, ixs_int(ctx, (int64_t)1 << bit))),
+        ixs_int(ctx, 2));
+  }
+
+  ordinary_args[0] = ixs_mul(ctx, ixs_int(ctx, 4), bits[5]);
+  ordinary_args[1] = ixs_mul(ctx, ixs_int(ctx, 8), group);
+  ordinary_args[2] = ixs_mul(ctx, ixs_int(ctx, 32), bits[0]);
+  ordinary_args[3] = ixs_mul(ctx, ixs_int(ctx, 64), bits[1]);
+  ordinary_args[4] = ixs_mul(ctx, ixs_int(ctx, 136), bits[2]);
+  ordinary_args[5] = ixs_mul(ctx, ixs_int(ctx, 272), bits[3]);
+  ordinary_args[6] = ixs_mul(ctx, ixs_int(ctx, 512), bits[4]);
+  ordinary_args[7] =
+      ixs_mul(ctx, ixs_int(ctx, 2),
+              ixs_floor(ctx, ixs_div(ctx, within, ixs_int(ctx, 2))));
+  ordinary_args[8] = ixs_mod(ctx, within, ixs_int(ctx, 2));
+  ordinary = ixs_xor_many(ctx, 9, ordinary_args);
+  ordinary_expected = ixs_add(ctx, ixs_xor_many(ctx, 7, ordinary_args), within);
+  CHECK(ixs_simplify(ctx, ordinary, assumes, 9) ==
+        ixs_simplify(ctx, ordinary_expected, assumes, 9));
+  CHECK(test_ixs_simplify_facts(
+            facts, ixs_cmp(ctx, ordinary, IXS_CMP_EQ, ordinary_expected)) ==
+        ixs_true(ctx));
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, ordinary, IXS_CMP_EQ, ordinary_expected)) ==
+        IXS_CHECK_TRUE);
+
+  transpose_args[0] = ixs_mul(ctx, ixs_int(ctx, 4), bits[2]);
+  transpose_args[1] = ixs_mul(ctx, ixs_int(ctx, 8), bits[3]);
+  transpose_args[2] = ixs_mul(ctx, ixs_int(ctx, 16), bits[4]);
+  transpose_args[3] =
+      ixs_mul(ctx, ixs_int(ctx, 32), ixs_mod(ctx, within, ixs_int(ctx, 2)));
+  transpose_args[4] =
+      ixs_mul(ctx, ixs_int(ctx, 64),
+              ixs_floor(ctx, ixs_div(ctx, within, ixs_int(ctx, 2))));
+  transpose_args[5] = ixs_mul(ctx, ixs_int(ctx, 136), bits[5]);
+  transpose_args[6] = ixs_mul(ctx, ixs_int(ctx, 272), group);
+  transpose_args[7] = ixs_mul(ctx, ixs_int(ctx, 2), bits[1]);
+  transpose_args[8] = bits[0];
+  transpose = ixs_xor_many(ctx, 9, transpose_args);
+  transpose_expected = ixs_add(ctx, ixs_xor_many(ctx, 7, transpose_args),
+                               ixs_mod(ctx, item, ixs_int(ctx, 4)));
+  CHECK(ixs_node_tag(ixs_simplify(ctx, transpose, assumes, 9)) == IXS_ADD);
+  CHECK(test_ixs_simplify_facts(
+            facts, ixs_cmp(ctx, transpose, IXS_CMP_EQ, transpose_expected)) ==
+        ixs_true(ctx));
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, transpose, IXS_CMP_EQ, transpose_expected)) ==
+        IXS_CHECK_TRUE);
+
+  {
+    ixs_node *low = ixs_and(ctx, item, ixs_int(ctx, 3));
+    ixs_node *high0 = ixs_and(ctx, group, ixs_int(ctx, 12));
+    ixs_node *high1 = ixs_and(ctx, within, ixs_int(ctx, 12));
+    ixs_node *generic_args[3] = {low, high0, high1};
+    ixs_node *generic = ixs_xor_many(ctx, 3, generic_args);
+    ixs_node *generic_expected = ixs_add(ctx, low, ixs_xor(ctx, high0, high1));
+    CHECK(ixs_simplify(ctx, generic, NULL, 0) == generic_expected);
+  }
+
+  /* Bit 3 joins the first two operands and bit 7 joins the last two, so the
+   * three operands form one connected component. */
+  overlap_args[0] = ixs_mul(ctx, ixs_int(ctx, 8), group);
+  overlap_args[1] = ixs_mul(ctx, ixs_int(ctx, 136), bits[2]);
+  overlap_args[2] =
+      ixs_mul(ctx, ixs_int(ctx, 128), ixs_mod(ctx, within, ixs_int(ctx, 2)));
+  CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_xor_many(ctx, 3, overlap_args),
+                                  assumes, 9)) == IXS_XOR);
+
+  {
+    ixs_node *negative = ixs_sym(ctx, "xor_component_negative");
+    ixs_node *unbounded = ixs_sym(ctx, "xor_component_unbounded");
+    ixs_node *negative_assumes[] = {
+        ixs_cmp(ctx, negative, IXS_CMP_GE, ixs_int(ctx, -4)),
+        ixs_cmp(ctx, negative, IXS_CMP_LE, ixs_int(ctx, -1)),
+        ixs_cmp(ctx, negative, IXS_CMP_EQ, ixs_floor(ctx, negative)),
+    };
+    ixs_node *partial = ixs_mod(ctx, item, dynamic);
+
+    CHECK(
+        ixs_node_tag(ixs_simplify(ctx, ixs_xor(ctx, negative, ixs_int(ctx, 8)),
+                                  negative_assumes, 3)) == IXS_XOR);
+    CHECK(
+        ixs_node_tag(ixs_simplify(ctx, ixs_xor(ctx, unbounded, ixs_int(ctx, 8)),
+                                  NULL, 0)) == IXS_XOR);
+    CHECK(ixs_node_tag(ixs_simplify(ctx, ixs_xor(ctx, partial, ixs_int(ctx, 8)),
+                                    assumes, 9)) == IXS_XOR);
   }
 }
 
@@ -6063,6 +6209,7 @@ int main(void) {
   test_mod_bitwise_projection_failure_retry();
   test_mod_product_factor_reduction_failure_retry();
   test_xor_binary_linear_failure_retry();
+  test_xor_bit_component_failure_retry();
 #endif
   test_rational_carrier_factoring();
   test_mod_extract_constant_residue();
@@ -6072,6 +6219,7 @@ int main(void) {
   test_flat_associative_nodes();
   test_xor_nested_cancellation();
   test_xor_known_bit_simplification();
+  test_xor_disjoint_component_factorization();
   test_xor_binary_linear_form();
   test_simplify_with_bounds();
   test_eq_substitution();

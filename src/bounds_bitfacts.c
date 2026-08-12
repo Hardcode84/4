@@ -247,6 +247,7 @@ static void bitfacts_apply_add_known(ixs_bounds *b, ixs_node *expr,
 static void bitfacts_apply_mul_known(ixs_node *expr,
                                      const bounds_bitfacts_child *child,
                                      ixs_bitfacts *out) {
+  uint64_t child_possible;
   uint64_t coeff;
   unsigned shift, i;
 
@@ -256,7 +257,24 @@ static void bitfacts_apply_mul_known(ixs_node *expr,
     return;
 
   coeff = (uint64_t)expr->u.mul.coeff->u.ival;
-  if (!ixs_u64_is_pow2(coeff) || !child->success)
+  if (!child->success)
+    return;
+
+  /* A binary integer selects either zero or the coefficient.  Preserve the
+   * coefficient's sparse support even when it is not a power of two. */
+  child_possible = ~child->bits.known_zero;
+  if ((child_possible & ~UINT64_C(1)) == 0u) {
+    if (child_possible == 0u) {
+      out->known_zero = UINT64_MAX;
+      out->known_one = 0u;
+      return;
+    }
+    out->known_zero |= ~coeff;
+    if ((child->bits.known_one & UINT64_C(1)) != 0u)
+      out->known_one |= coeff;
+    return;
+  }
+  if (!ixs_u64_is_pow2(coeff))
     return;
 
   shift = bit_ctz64(coeff);
@@ -527,8 +545,7 @@ bounds_bitfacts_start_composite(bounds_bitfacts_query *query,
   case IXS_MUL:
     if (node->u.mul.coeff->tag != IXS_INT || node->u.mul.coeff->u.ival <= 0 ||
         node->u.mul.nfactors != 1 || node->u.mul.factors[0].exp != 1 ||
-        !ixs_node_is_integer_valued(node) ||
-        !ixs_u64_is_pow2((uint64_t)node->u.mul.coeff->u.ival)) {
+        !ixs_node_is_integer_valued(node)) {
       return bounds_bitfacts_complete(query, true, frame->bits);
     }
     frame->stage = BOUNDS_BITFACTS_MUL;

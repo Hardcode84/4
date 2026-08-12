@@ -537,7 +537,9 @@ xor(..., c*xor(b...), ...)  → xor(..., c*b, ...)
                   defined integer proven in [0,1]
 xor(..., c1*b, c2*b, ...)   → xor(..., (c1 xor c2)*b, ...)
                   under the same mask and binary-factor conditions
-xor(a, b)       → a + b    when a,b >= 0 and known bits do not overlap
+xor(args...)    → sum(xor(component) for each possible-bit component)
+                  when every operand is a bounded nonnegative integer;
+                  operands are connected when their possible-one bits overlap
 
 k*xor(a, b + 2^n) - k*xor(a, b)
                 → k*(2^n - 2*(a & 2^n))
@@ -561,6 +563,17 @@ clean retry. Equivalence consumes the same fact-backed simplifier, so an
 invertible binary basis is proved through its canonical reconstruction rather
 than a second XOR prover.
 
+The subsequent possible-bit pass builds the local overlap graph from the same
+fact-backed bit query. XOR remains inside each connected component; components
+with disjoint possible bits combine by integer addition. The former
+all-operands-disjoint rule is the special case where every component is a
+singleton. Breadth-first component labeling and reconstruction are `O(A^2)` in
+the immediate XOR arity `A`, allocate only query scratch, and scan no context
+state. A connected graph, a negative or unbounded operand, an unavailable
+integer/bit proof, or a partial expression with no finite domain proof leaves
+the XOR intact. Allocation or proof-transport failure aborts the rewrite and a
+later query may retry cleanly.
+
 Fact-backed ADD rewriting gives the XOR-delta rule its active bounds object.
 The rule therefore reuses the current bitfacts cache and can consume stored
 congruence and mask facts. Fact-free construction retains the same structural
@@ -569,9 +582,11 @@ active.
 
 The known-bit query merges exact interval facts and propagates low 64-bit
 facts through `ADD`, positive power-of-two `MUL`, `floor(x/2^n)` for
-non-negative `x`, and `Mod(x, 2^n)`. `MUL` and `Mod` only produce bitfacts
-for integer-valued expressions. The XOR-to-ADD rule is deliberately
-bounds-aware: both operands must be proven non-negative with finite int64
+non-negative `x`, and `Mod(x, 2^n)`. For `c*b` with positive integer `c` and a
+proven binary integer `b`, it preserves the sparse possible-bit mask of `c`
+even when `c` is not a power of two. `MUL` and `Mod` only produce bitfacts for
+integer-valued expressions. Component factorization is deliberately
+bounds-aware: every operand must be proven non-negative with finite int64
 bounds, because the known-bit lattice tracks only the low 64 bits. The
 XOR-delta rule leaves the largest int64 power-of-two delta untouched to avoid
 overflowing temporary arithmetic.
