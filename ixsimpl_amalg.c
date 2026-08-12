@@ -13111,28 +13111,29 @@ static size_t bounds_relation_projection_hash(size_t endpoint_index) {
   return (size_t)mixed;
 }
 
-static bounds_equality_projection_cache_entry *
-bounds_relation_projection_slot(ixs_bounds *b, size_t endpoint_index,
-                                bool *found) {
-  bounds_equality_projection_cache_entry *cache =
-      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
+static size_t bounds_relation_projection_probe(const ixs_bounds *b,
+                                               size_t endpoint_index,
+                                               bool *found) {
+  const bounds_equality_projection_cache_entry *cache =
+      (const bounds_equality_projection_cache_entry *)
+          b->equality_projection_cache;
   size_t slot;
   if (!b->equality_projection_cache_capacity) {
     *found = false;
-    return NULL;
+    return SIZE_MAX;
   }
   slot = bounds_relation_projection_hash(endpoint_index) &
          (b->equality_projection_cache_capacity - 1u);
   while (cache[slot].generation == b->equality_projection_cache_generation) {
-    bounds_equality_projection_cache_entry *entry = &cache[slot];
+    const bounds_equality_projection_cache_entry *entry = &cache[slot];
     if (entry->endpoint_index == endpoint_index) {
       *found = true;
-      return entry;
+      return slot;
     }
     slot = (slot + 1u) & (b->equality_projection_cache_capacity - 1u);
   }
   *found = false;
-  return &cache[slot];
+  return slot;
 }
 
 static bool bounds_relation_projection_grow(ixs_bounds *b) {
@@ -13174,9 +13175,13 @@ static bool bounds_relation_projection_grow(ixs_bounds *b) {
 
 static bounds_equality_projection_cache_entry *
 bounds_relation_projection_row(ixs_bounds *b, size_t endpoint_index) {
+  bounds_equality_projection_cache_entry *cache =
+      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
   bounds_equality_projection_cache_entry *entry;
+  size_t slot;
   bool found;
-  entry = bounds_relation_projection_slot(b, endpoint_index, &found);
+  slot = bounds_relation_projection_probe(b, endpoint_index, &found);
+  entry = slot == SIZE_MAX ? NULL : &cache[slot];
   if (found)
     return entry;
   assert(entry != NULL && b->equality_projection_cache_capacity != 0 &&
@@ -13194,9 +13199,13 @@ bounds_relation_projection_row(ixs_bounds *b, size_t endpoint_index) {
 
 static bounds_equality_projection_cache_entry *
 bounds_relation_projection_existing(ixs_bounds *b, size_t endpoint_index) {
+  bounds_equality_projection_cache_entry *cache =
+      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
   bounds_equality_projection_cache_entry *entry;
+  size_t slot;
   bool found;
-  entry = bounds_relation_projection_slot(b, endpoint_index, &found);
+  slot = bounds_relation_projection_probe(b, endpoint_index, &found);
+  entry = slot == SIZE_MAX ? NULL : &cache[slot];
   assert(found && entry != NULL);
   if (!found || !entry)
     abort();
@@ -13205,10 +13214,13 @@ bounds_relation_projection_existing(ixs_bounds *b, size_t endpoint_index) {
 
 static const bounds_equality_projection_cache_entry *
 bounds_relation_projection_find(const ixs_bounds *b, size_t endpoint_index) {
+  const bounds_equality_projection_cache_entry *cache =
+      (const bounds_equality_projection_cache_entry *)
+          b->equality_projection_cache;
+  size_t slot;
   bool found;
-  bounds_equality_projection_cache_entry *entry =
-      bounds_relation_projection_slot((ixs_bounds *)b, endpoint_index, &found);
-  return found ? entry : NULL;
+  slot = bounds_relation_projection_probe(b, endpoint_index, &found);
+  return found ? &cache[slot] : NULL;
 }
 
 static bool bounds_relation_projection_reserve(ixs_bounds *b,
@@ -13302,10 +13314,14 @@ IXS_STATIC ixs_interval bounds_relation_projection_complete_range(
 IXS_STATIC bool bounds_relation_projection_complete_defined(
     ixs_bounds *b, size_t endpoint_index, bool without_equality,
     ixs_check_result result) {
+  bounds_equality_projection_cache_entry *cache =
+      (bounds_equality_projection_cache_entry *)b->equality_projection_cache;
   bounds_equality_projection_cache_entry *entry;
+  size_t slot;
   uint8_t completion;
   bool found;
-  entry = bounds_relation_projection_slot(b, endpoint_index, &found);
+  slot = bounds_relation_projection_probe(b, endpoint_index, &found);
+  entry = slot == SIZE_MAX ? NULL : &cache[slot];
   if (!found) {
     if (!bounds_relation_projection_reserve(b, 1u))
       return false;
