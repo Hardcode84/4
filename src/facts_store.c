@@ -802,6 +802,53 @@ static ixs_bounds_build_status facts_ingest_original_predicates(
   return IXS_BOUNDS_BUILD_OK;
 }
 
+static ixs_node *facts_supported_true_root(ixs_node *predicate) {
+  ixs_node *root;
+  int64_t value;
+  if (!predicate || predicate->tag != IXS_CMP ||
+      predicate->u.binary.cmp_op != IXS_CMP_EQ ||
+      !extract_cmp_expr_const(predicate, &root, &value) || value != 1 ||
+      !ixs_node_is_bool_valued(root) ||
+      (root->tag != IXS_CMP && root->tag != IXS_AND))
+    return NULL;
+  return root;
+}
+
+/* A selected Boolean carrier can expose a supported predicate behind an exact
+ * truth wrapper. Reprocess that predicate until monotone ingestion stops
+ * refining facts; the stored wrapper must not hide later consequences. */
+static ixs_bounds_build_status
+facts_saturate_supported_true_root(ixs_ctx *ctx, ixs_bounds *candidate,
+                                   ixs_node *predicate,
+                                   facts_closure_capture *capture) {
+  ixs_node *root = facts_supported_true_root(predicate);
+  if (!root)
+    return IXS_BOUNDS_BUILD_OK;
+  for (;;) {
+    ixs_bounds_build_status status;
+    ixs_node *simplified;
+    bool changed = false;
+    bool limited = false;
+    bool *outer_observer =
+        bounds_store_swap_change_observer(candidate, &changed);
+    simplified = simp_simplify_bounds_status(ctx, root, candidate, &limited);
+    if (limited)
+      status = IXS_BOUNDS_BUILD_LIMIT;
+    else if (!simplified || candidate->oom)
+      status = IXS_BOUNDS_BUILD_OOM;
+    else
+      status = bounds_assume_ingest_predicate(candidate, simplified);
+    (void)bounds_store_swap_change_observer(candidate, outer_observer);
+    if (changed && outer_observer)
+      *outer_observer = true;
+    if (status == IXS_BOUNDS_BUILD_OK && changed)
+      facts_closure_capture_append(capture, simplified);
+    if (status != IXS_BOUNDS_BUILD_OK || candidate->contradiction ||
+        ixs_bounds_has_empty(candidate) || !changed)
+      return status;
+  }
+}
+
 static ixs_bounds_build_status facts_process_predicate_worklist(
     ixs_ctx *ctx, ixs_bounds *candidate, ixs_node *const *predicates,
     facts_worklist *work, facts_closure_capture *capture) {
@@ -826,6 +873,9 @@ static ixs_bounds_build_status facts_process_predicate_worklist(
       return IXS_BOUNDS_BUILD_OOM;
     }
     status = bounds_assume_ingest_predicate(candidate, predicate);
+    if (status == IXS_BOUNDS_BUILD_OK)
+      status = facts_saturate_supported_true_root(ctx, candidate, predicate,
+                                                  capture);
     (void)bounds_store_swap_change_observer(candidate, old_observer);
     if (status != IXS_BOUNDS_BUILD_OK)
       return status;

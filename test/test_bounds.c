@@ -11946,6 +11946,138 @@ static void check_bounds_payload_unchanged(const ixs_bounds *actual,
         actual->oom == before->oom);
 }
 
+static ixs_node *selected_closure_fact(ixs_ctx *ctx, ixs_node *group,
+                                       ixs_node *selected) {
+  ixs_node *group_zero = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 0));
+  ixs_node *group_one = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_node *group_two = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 2));
+  ixs_node *group_three = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *selected_group =
+      ixs_or(ctx, group_one, ixs_or(ctx, group_two, group_three));
+  ixs_node *values[3] = {ixs_true(ctx), selected, ixs_true(ctx)};
+  ixs_node *conditions[3] = {group_zero, selected_group, ixs_true(ctx)};
+  return ixs_cmp(ctx, ixs_pw(ctx, 3, values, conditions), IXS_CMP_EQ,
+                 ixs_true(ctx));
+}
+
+static void test_public_facts_selected_predicate_saturation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *group = ixs_sym(ctx, "selected_closure_group");
+  ixs_node *lane = ixs_sym(ctx, "selected_closure_lane");
+  ixs_node *base = ixs_sym(ctx, "selected_closure_base");
+  ixs_node *divisor = ixs_sym(ctx, "selected_closure_divisor");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *group_one = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_node *divisor_eight = ixs_cmp(ctx, divisor, IXS_CMP_EQ, ixs_int(ctx, 8));
+  ixs_node *quotient = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, lane, ixs_int(ctx, 8)), divisor));
+  ixs_node *selected = ixs_and(
+      ctx, ixs_cmp(ctx, lane, IXS_CMP_GE, zero),
+      ixs_and(ctx, ixs_cmp(ctx, ixs_add(ctx, base, quotient), IXS_CMP_GE, zero),
+              ixs_and(ctx, ixs_cmp(ctx, lane, IXS_CMP_LE, ixs_int(ctx, 7)),
+                      divisor_eight)));
+  ixs_node *open_selected = ixs_and(
+      ctx, ixs_cmp(ctx, lane, IXS_CMP_GE, zero),
+      ixs_and(ctx, ixs_cmp(ctx, ixs_add(ctx, base, quotient), IXS_CMP_GE, zero),
+              ixs_cmp(ctx, lane, IXS_CMP_LE, ixs_int(ctx, 7))));
+  ixs_node *selected_fact = selected_closure_fact(ctx, group, selected);
+  ixs_node *open_fact = selected_closure_fact(ctx, group, open_selected);
+  ixs_node *forward[2] = {group_one, selected_fact};
+  ixs_node *reverse[2] = {selected_fact, group_one};
+  ixs_node *unresolved_batch[2] = {group_one, open_fact};
+  ixs_facts *facts[3] = {ixs_facts_create(ctx), ixs_facts_create(ctx),
+                         ixs_facts_create(ctx)};
+  ixs_facts *scalar = ixs_facts_create(ctx);
+  ixs_facts *unresolved = ixs_facts_create(ctx);
+  ixs_node *cycle_a = ixs_sym(ctx, "selected_cycle_a");
+  ixs_node *cycle_b = ixs_sym(ctx, "selected_cycle_b");
+  ixs_node *cycle_a_one = ixs_cmp(ctx, cycle_a, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_node *cycle_b_one = ixs_cmp(ctx, cycle_b, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_node *cycle[2] = {selected_closure_fact(ctx, cycle_a, cycle_b_one),
+                        selected_closure_fact(ctx, cycle_b, cycle_a_one)};
+  ixs_node *contradictory_batch[3] = {
+      group_one, selected_fact,
+      ixs_cmp(ctx, divisor, IXS_CMP_EQ, ixs_int(ctx, 7))};
+  ixs_facts *cyclic = ixs_facts_create(ctx);
+  ixs_facts *contradictory = ixs_facts_create(ctx);
+  ixs_bounds unresolved_before = unresolved->bounds;
+  size_t i;
+
+  CHECK(ixs_facts_assume_preds(facts[0], forward, 2));
+  CHECK(ixs_facts_assume_preds(facts[1], forward, 2));
+  CHECK(ixs_facts_assume_preds(facts[2], reverse, 2));
+  for (i = 0; i < 3; i++) {
+    CHECK(test_ixs_check_facts(facts[i], divisor_eight) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_check_facts(facts[i], ixs_cmp(ctx, base, IXS_CMP_GE,
+                                                 zero)) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_simplify_facts(facts[i], quotient) == zero);
+  }
+
+  CHECK(ixs_facts_assume_pred(scalar, group_one));
+  CHECK(ixs_facts_assume_pred(scalar, selected_fact));
+  CHECK(test_ixs_check_facts(scalar, divisor_eight) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(scalar, quotient) == zero);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(!ixs_facts_assume_preds(unresolved, unresolved_batch, 2));
+  CHECK(!unresolved->usable);
+  check_bounds_payload_unchanged(&unresolved->bounds, &unresolved_before);
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
+  CHECK(strstr(ixs_ctx_error(ctx, 0), "closed domain") != NULL);
+
+  CHECK(ixs_facts_assume_preds(cyclic, cycle, 2));
+  CHECK(test_ixs_check_facts(cyclic, cycle_a_one) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_check_facts(cyclic, cycle_b_one) == IXS_CHECK_UNKNOWN);
+
+  CHECK(ixs_facts_assume_preds(contradictory, contradictory_batch, 3));
+  CHECK(contradictory->usable);
+  CHECK(test_ixs_check_facts(contradictory, ixs_true(ctx)) ==
+        IXS_CHECK_UNKNOWN);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_public_facts_selected_predicate_saturation_oom(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *group = ixs_sym(ctx, "selected_oom_group");
+  ixs_node *lane = ixs_sym(ctx, "selected_oom_lane");
+  ixs_node *base = ixs_sym(ctx, "selected_oom_base");
+  ixs_node *divisor = ixs_sym(ctx, "selected_oom_divisor");
+  ixs_node *unrelated = ixs_sym(ctx, "selected_oom_unrelated");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *group_one = ixs_cmp(ctx, group, IXS_CMP_EQ, ixs_int(ctx, 1));
+  ixs_node *divisor_eight = ixs_cmp(ctx, divisor, IXS_CMP_EQ, ixs_int(ctx, 8));
+  ixs_node *quotient = ixs_floor(
+      ctx, ixs_div(ctx, ixs_mod(ctx, lane, ixs_int(ctx, 8)), divisor));
+  ixs_node *selected = ixs_and(
+      ctx, ixs_cmp(ctx, lane, IXS_CMP_GE, zero),
+      ixs_and(ctx, ixs_cmp(ctx, ixs_add(ctx, base, quotient), IXS_CMP_GE, zero),
+              ixs_and(ctx, ixs_cmp(ctx, lane, IXS_CMP_LE, ixs_int(ctx, 7)),
+                      divisor_eight)));
+  ixs_node *predicates[2] = {group_one,
+                             selected_closure_fact(ctx, group, selected)};
+  ixs_node *seed = ixs_cmp(ctx, unrelated, IXS_CMP_GE, zero);
+  ixs_facts *failed = ixs_facts_create(ctx);
+  ixs_facts *recovered = ixs_facts_create(ctx);
+  ixs_bounds before;
+
+  CHECK(ixs_facts_assume_pred(failed, seed));
+  before = failed->bounds;
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(!ixs_facts_assume_preds(failed, predicates, 2));
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!failed->usable);
+  check_bounds_payload_unchanged(&failed->bounds, &before);
+
+  ixs_ctx_clear_errors(ctx);
+  CHECK(ixs_facts_assume_pred(recovered, seed));
+  CHECK(ixs_facts_assume_preds(recovered, predicates, 2));
+  CHECK(test_ixs_check_facts(recovered, divisor_eight) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(recovered, quotient) == zero);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_facts_closed_batch_contract(void) {
   const size_t budget = 4096;
   ixs_ctx *ctx = ixs_ctx_create();
@@ -12869,6 +13001,8 @@ int main(void) {
   test_public_facts_closure_cache_hit_rejects_open_domain();
   test_public_facts_assume_batch_has_no_round_limit();
   test_public_facts_assume_batch_mid_simplify_oom();
+  test_public_facts_selected_predicate_saturation();
+  test_public_facts_selected_predicate_saturation_oom();
   test_public_difference_constraint_oom_is_atomic();
   test_public_exact_equality_oom_is_atomic();
   test_public_difference_potential_overflow_is_atomic();

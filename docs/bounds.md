@@ -351,6 +351,13 @@ conservatively requeues the whole batch. Closure ends when the queue is empty;
 there is no batch-size or round-count limit. Bounds domains are monotone, and a
 queue entry can create more work only when it strictly refines a fact.
 
+A rewrite may expose a supported comparison or conjunction as the child of an
+exact `predicate == 1` carrier. Fact closure follows that child and reprocesses
+it until ingestion makes no semantic refinement. This is a Boolean identity,
+not Piecewise extraction: selection is only one way to produce the carrier.
+Each refining child is recorded in the closure-cache replay sequence. An
+unresolved or partial carrier still fails the ordinary closed-domain check.
+
 The dependency index uses iterative DAG traversal, a per-predicate node set,
 and an open-addressed interned-symbol table. Pointer-identical predicates are
 filtered in expected O(n), preserving each first input position. Hash tables

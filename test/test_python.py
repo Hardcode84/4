@@ -5175,6 +5175,54 @@ def test_facts_assume_many_uses_prefix_closure() -> None:
     assert ctx.check(y >= 0, facts=facts) is True
 
 
+def test_facts_assume_many_closes_selected_predicates() -> None:
+    ctx = ixsimpl.Context()
+    group, lane, base, divisor = (
+        ctx.sym("selected_closure_group"),
+        ctx.sym("selected_closure_lane"),
+        ctx.sym("selected_closure_base"),
+        ctx.sym("selected_closure_divisor"),
+    )
+    quotient = ixsimpl.floor((lane % 8) / divisor)
+    group_one = ctx.eq(group, 1)
+    selected_group = ixsimpl.or_(group_one, ctx.eq(group, 2), ctx.eq(group, 3))
+
+    def guarded(selected: ixsimpl.Expr) -> ixsimpl.Expr:
+        return ctx.eq(
+            ixsimpl.pw(
+                (ctx.true_(), ctx.eq(group, 0)),
+                (selected, selected_group),
+                (ctx.true_(), ctx.true_()),
+            ),
+            ctx.true_(),
+        )
+
+    selected = ixsimpl.and_(
+        lane >= 0,
+        base + quotient >= 0,
+        lane <= 7,
+        ctx.eq(divisor, 8),
+    )
+    selected_fact = guarded(selected)
+    for predicates in ([group_one, selected_fact], [selected_fact, group_one]):
+        facts = ctx.facts()
+        facts.assume_many(predicates)
+        assert ctx.check(ctx.eq(divisor, 8), facts=facts) is True
+        assert ctx.check(base >= 0, facts=facts) is True
+        assert ctx.range(base, facts=facts) == (0, None)
+        assert quotient.simplify(facts=facts) == ctx.int_(0)
+
+    unresolved = ctx.facts()
+    with pytest.raises(ValueError, match="closed domain"):
+        unresolved.assume_many(
+            [
+                group_one,
+                guarded(ixsimpl.and_(lane >= 0, base + quotient >= 0, lane <= 7)),
+            ]
+        )
+    assert ctx.check(group_one, facts=unresolved) is None
+
+
 def test_compound_assumption_ingestion_parity() -> None:
     ctx = ixsimpl.Context()
     x, d = ctx.sym("x"), ctx.sym("d")
