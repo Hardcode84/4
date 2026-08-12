@@ -831,15 +831,27 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   ordinary equivalence proof. Other predicate equalities retain their existing
   entry path.
 
-  Equivalence composes those exact proofs through a narrow set of canonical
-  numeric contexts. Entry is restricted to canonical two-term `floor`/`Mod`
-  groups and production-backed binary XORs. A query-local iterative worklist
-  pairs `ADD`, `MUL`, `floor`, and `ceil` DAG nodes with expected O(N)
-  insertion and lookup work and O(N) query state; invoked child proof rules
-  retain their own documented bounds. Canonical ADDs with different arity use
-  exact relation partitioning only when removing common terms strictly reduces
-  the relation. Affine `floor` and `ceil` contexts may move residuals into their
-  arguments only when each residual is proven integer-valued.
+  Equivalence composes child proofs through any compatible eager canonical
+  context described by the shared defined-child layout. Tags and child counts
+  must match; comparison operators and multiplication exponent layouts must
+  also match. Lazy Piecewise is excluded because root definedness does not make
+  every arm and later condition available to an eager child proof. A
+  query-local iterative worklist pairs the two DAGs with expected O(N)
+  insertion and lookup work and O(N) query state. `MAX`, `MIN`, `XOR`, `AND`,
+  and `OR` first commit pointer-identical operands, then deterministically match
+  the remaining operands one-to-one with O(A^2) bounded subproofs. Canonical
+  ADDs with different arity use exact relation partitioning only when removing
+  common terms strictly reduces the relation. Affine `floor` and `ceil`
+  contexts may move residuals into their arguments only when each residual is
+  proven integer-valued.
+
+  A zero-sum ADD is partitioned into canonical positive and negative sides.
+  Across two ADDs, equally scaled terms first match by pointer and then by the
+  same bounded equivalence proof; matched terms are removed and the smaller
+  residual relation re-enters equivalence. Matching is deterministic O(L*R),
+  has no radix or layout tag, and strictly reduces the number of direct terms
+  before recursion. Allocation failure, query limits, invalid state, and
+  unrepresentable optional arithmetic keep their distinct existing outcomes.
 
   Immediate canonical additive-row mechanics are owned by the private
   `src/additive_row.c` component. Allocation-free recognizers recover a single

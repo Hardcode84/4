@@ -14,6 +14,7 @@
 #include "facts_store.h"
 #include "query_transaction.h"
 #include "query_walk.h"
+#include "rational.h"
 #include "simplify.h"
 #include <assert.h>
 #include <limits.h>
@@ -39,6 +40,10 @@ typedef struct {
   ixs_fact_query_status status;
   const ixs_node *value;
 } ixs_simplify_result;
+
+/* Root-only semantic cancellation is quadratic in direct ADD terms. Explicit
+ * equivalence queries remain available for larger sums. */
+#define FACTS_ADDITIVE_IDENTITY_MAX_TERMS 64u
 
 typedef struct {
   query_node_set set;
@@ -186,6 +191,7 @@ static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
 static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *source,
                                                ixs_node *rewritten,
+                                               ixs_fact_query_status *status,
                                                bool *limited);
 
 static ixs_algebra_status
@@ -578,7 +584,7 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
       !ixs_node_is_sentinel(value)) {
     value = simp_normalize_rational_carrier(ctx, &facts->bounds, value);
     value = facts_project_simplified_root(ctx, &facts->bounds, expr, value,
-                                          &limited);
+                                          &result.status, &limited);
   }
   if (limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
@@ -662,7 +668,7 @@ static bool facts_simplify_batch_finalize(ixs_ctx *ctx, ixs_bounds *bounds,
     if (!exprs[i])
       return false;
     exprs[i] = facts_project_simplified_root(ctx, bounds, sources[i], exprs[i],
-                                             &limited);
+                                             status, &limited);
     if (limited) {
       *status = IXS_FACT_QUERY_LIMITED;
       return false;
@@ -832,11 +838,65 @@ static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
   return result;
 }
 
+/* Zero is the unique canonical representative of a proved additive identity.
+ * This root projection shares the ordinary equivalence engine; it does not
+ * re-enter the per-node fact rewrite. */
+static bool facts_additive_identity_candidate(ixs_node *node) {
+  uint32_t i;
+  uint32_t j;
+
+  if (!node || node->tag != IXS_ADD || node->u.add.nterms < 3u ||
+      node->u.add.nterms > FACTS_ADDITIVE_IDENTITY_MAX_TERMS ||
+      !ixs_node_is_zero(node->u.add.coeff))
+    return false;
+  for (i = 0; i < node->u.add.nterms; i++) {
+    int64_t left_p;
+    int64_t left_q;
+    ixs_node_get_rat(node->u.add.terms[i].coeff, &left_p, &left_q);
+    for (j = i + 1u; j < node->u.add.nterms; j++) {
+      int64_t right_p;
+      int64_t right_q;
+      ixs_node_get_rat(node->u.add.terms[j].coeff, &right_p, &right_q);
+      if ((left_p < 0) == (right_p < 0) || left_q != right_q)
+        continue;
+      if (ixs_int64_magnitude(left_p) == ixs_int64_magnitude(right_p) &&
+          node->u.add.terms[i].term->tag == node->u.add.terms[j].term->tag)
+        return true;
+    }
+  }
+  return false;
+}
+
+static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
+                                                 ixs_bounds *bounds,
+                                                 ixs_node *rewritten,
+                                                 ixs_fact_query_status *status,
+                                                 bool *limited) {
+  ixs_check_result equivalent;
+  ixs_algebra_status detail;
+
+  if (!facts_additive_identity_candidate(rewritten))
+    return rewritten;
+  detail = bounds_equivalence_query_detail(bounds, ctx, rewritten,
+                                           ctx->node_zero, &equivalent);
+  if (detail == IXS_ALGEBRA_LIMITED) {
+    *limited = true;
+    return rewritten;
+  }
+  *status = facts_status_from_algebra(detail);
+  if (*status != IXS_FACT_QUERY_COMPLETE)
+    return NULL;
+  return equivalent == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
+}
+
 static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *source,
                                                ixs_node *rewritten,
+                                               ixs_fact_query_status *status,
                                                bool *limited) {
   ixs_check_result projected;
+  rewritten =
+      facts_project_additive_identity(ctx, bounds, rewritten, status, limited);
   if (!rewritten || ixs_node_is_sentinel(rewritten) ||
       !ixs_node_is_pred_kind(source) || ixs_node_is_known_true(rewritten) ||
       ixs_node_is_known_false(rewritten))

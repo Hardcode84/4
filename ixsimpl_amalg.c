@@ -4977,7 +4977,6 @@ typedef struct {
   size_t memo_capacity;
   size_t visited;
   unsigned bounded_subproof_depth;
-  unsigned xor_context_subproof_depth;
   bool limited;
   bool invalid;
   bool oom;
@@ -5106,35 +5105,21 @@ static bool equivalence_context_shape(ixs_node *lhs, ixs_node *rhs,
       !defined_child_count(rhs, &rhs_children) || lhs_children == 0u ||
       lhs_children != rhs_children)
     return false;
-  switch (lhs->tag) {
-  case IXS_ADD:
-  case IXS_FLOOR:
-  case IXS_CEIL:
-    break;
-  case IXS_MUL:
+  /* Piecewise is lazy: root definedness does not make every corresponding
+   * arm and later condition available to an eager child proof. */
+  if (lhs->tag == IXS_PIECEWISE)
+    return false;
+  if (lhs->tag == IXS_MUL) {
     if (lhs->u.mul.nfactors != rhs->u.mul.nfactors)
       return false;
     for (i = 0; i < lhs->u.mul.nfactors; i++)
       if (lhs->u.mul.factors[i].exp != rhs->u.mul.factors[i].exp)
         return false;
-    break;
-  default:
-    return false;
   }
+  if (lhs->tag == IXS_CMP && lhs->u.binary.cmp_op != rhs->u.binary.cmp_op)
+    return false;
   *child_count = lhs_children;
   return true;
-}
-
-static bool equivalence_grouped_add_context(ixs_node *node) {
-  ixs_tag first;
-  ixs_tag second;
-
-  if (node->tag != IXS_ADD || node->u.add.nterms != 2u)
-    return false;
-  first = (ixs_tag)node->u.add.terms[0].term->tag;
-  second = (ixs_tag)node->u.add.terms[1].term->tag;
-  return (first == IXS_MOD && (second == IXS_FLOOR || second == IXS_CEIL)) ||
-         (second == IXS_MOD && (first == IXS_FLOOR || first == IXS_CEIL));
 }
 
 typedef struct {
@@ -5302,65 +5287,66 @@ static bool equivalence_cancel_common_add(equivalence_state *state,
   return true;
 }
 
-static bool equivalence_xor_child_proven(equivalence_state *state,
-                                         ixs_node *lhs, ixs_node *rhs,
-                                         unsigned depth) {
-  ixs_check_result result;
-  state->xor_context_subproof_depth++;
-  result = equivalence_bounded_core(state, lhs, rhs, depth);
-  state->xor_context_subproof_depth--;
-  return result == IXS_CHECK_TRUE;
+static bool equivalence_is_commutative_associative(ixs_tag tag) {
+  return tag == IXS_MAX || tag == IXS_MIN || tag == IXS_XOR || tag == IXS_AND ||
+         tag == IXS_OR;
 }
 
-/* Canonical XOR nodes are flat. The production-backed binary case pairs exact
- * arguments before semantic candidates. Its admitted arity A=2 keeps matching
- * O(A^2). */
-static ixs_check_result equivalence_match_xor_context(equivalence_state *state,
-                                                      ixs_node *lhs,
-                                                      ixs_node *rhs,
-                                                      unsigned depth) {
-  ixs_node *left_zero;
-  ixs_node *left_one;
-  ixs_node *right_zero;
-  ixs_node *right_one;
+/* Exact children are committed first. Remaining children use deterministic
+ * left-to-right one-to-one matching. The work is O(A^2), and every semantic
+ * candidate uses the fixed bounded-subproof allowance. */
+static ixs_check_result
+equivalence_match_associative_context(equivalence_state *state, ixs_node *lhs,
+                                      ixs_node *rhs, unsigned depth) {
+  ixs_arena_mark mark = ixs_arena_save(&state->ctx->scratch);
+  size_t nargs = lhs->u.assoc.nargs;
+  unsigned char *left_matched;
+  unsigned char *right_matched;
+  size_t i;
+  size_t j;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
 
-  if (lhs->u.assoc.nargs != 2u || rhs->u.assoc.nargs != 2u)
-    return IXS_CHECK_UNKNOWN;
-  left_zero = lhs->u.assoc.args[0];
-  left_one = lhs->u.assoc.args[1];
-  right_zero = rhs->u.assoc.args[0];
-  right_one = rhs->u.assoc.args[1];
+  left_matched = ixs_arena_alloc(&state->ctx->scratch, nargs, 1);
+  right_matched = ixs_arena_alloc(&state->ctx->scratch, nargs, 1);
+  if ((!left_matched || !right_matched) && nargs != 0u) {
+    state->oom = true;
+    goto cleanup;
+  }
+  memset(left_matched, 0, nargs);
+  memset(right_matched, 0, nargs);
+  for (i = 0; i < nargs; i++) {
+    for (j = 0; j < nargs; j++) {
+      if (!right_matched[j] && lhs->u.assoc.args[i] == rhs->u.assoc.args[j]) {
+        left_matched[i] = 1;
+        right_matched[j] = 1;
+        break;
+      }
+    }
+  }
+  for (i = 0; i < nargs; i++) {
+    if (left_matched[i])
+      continue;
+    for (j = 0; j < nargs; j++) {
+      if (!right_matched[j] &&
+          equivalence_bounded_core(state, lhs->u.assoc.args[i],
+                                   rhs->u.assoc.args[j],
+                                   depth) == IXS_CHECK_TRUE) {
+        left_matched[i] = 1;
+        right_matched[j] = 1;
+        break;
+      }
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        goto cleanup;
+    }
+    if (!left_matched[i])
+      goto cleanup;
+  }
+  result = IXS_CHECK_TRUE;
 
-  /* Commit exact pairs first. The remaining child then has one possible
-   * partner, preserving deterministic matching without backtracking. */
-  if (left_zero == right_zero)
-    return equivalence_xor_child_proven(state, left_one, right_one, depth)
-               ? IXS_CHECK_TRUE
-               : IXS_CHECK_UNKNOWN;
-  if (left_zero == right_one)
-    return equivalence_xor_child_proven(state, left_one, right_zero, depth)
-               ? IXS_CHECK_TRUE
-               : IXS_CHECK_UNKNOWN;
-  if (left_one == right_zero)
-    return equivalence_xor_child_proven(state, left_zero, right_one, depth)
-               ? IXS_CHECK_TRUE
-               : IXS_CHECK_UNKNOWN;
-  if (left_one == right_one)
-    return equivalence_xor_child_proven(state, left_zero, right_zero, depth)
-               ? IXS_CHECK_TRUE
-               : IXS_CHECK_UNKNOWN;
-
-  if (equivalence_xor_child_proven(state, left_zero, right_zero, depth) &&
-      equivalence_xor_child_proven(state, left_one, right_one, depth))
-    return IXS_CHECK_TRUE;
-  if (state->limited || state->invalid || state->oom ||
-      state->arithmetic_unrepresentable)
-    return IXS_CHECK_UNKNOWN;
-  return equivalence_xor_child_proven(state, left_zero, right_one, depth) &&
-                 equivalence_xor_child_proven(state, left_one, right_zero,
-                                              depth)
-             ? IXS_CHECK_TRUE
-             : IXS_CHECK_UNKNOWN;
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
 }
 
 static bool
@@ -5427,11 +5413,11 @@ static bool equivalence_context_process_pair(
   if (state->limited || state->invalid || state->oom ||
       state->arithmetic_unrepresentable)
     return false;
-  if (simplified_lhs->tag == IXS_XOR && simplified_rhs->tag == IXS_XOR &&
-      simplified_lhs->u.assoc.nargs == 2u &&
-      simplified_rhs->u.assoc.nargs == 2u)
-    return equivalence_match_xor_context(state, simplified_lhs, simplified_rhs,
-                                         depth) == IXS_CHECK_TRUE;
+  if (simplified_lhs->tag == simplified_rhs->tag &&
+      equivalence_is_commutative_associative(simplified_lhs->tag) &&
+      simplified_lhs->u.assoc.nargs == simplified_rhs->u.assoc.nargs)
+    return equivalence_match_associative_context(
+               state, simplified_lhs, simplified_rhs, depth) == IXS_CHECK_TRUE;
 
   if (equivalence_cancel_common_add(state, simplified_lhs, simplified_rhs,
                                     &lhs_residual, &rhs_residual))
@@ -5444,24 +5430,16 @@ static bool equivalence_context_process_pair(
 }
 
 /* Worklist insertion and lookup are expected O(N) in the paired canonical DAG.
- * Existing child proofs keep their own bounds; XOR may add O(A^2) bounded
- * child proofs after exact argument pairing. */
+ * Associative contexts may add O(A^2) bounded child proofs after exact
+ * argument pairing. */
 static ixs_check_result equivalence_same_context(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
   equivalence_context_worklist worklist;
   uint32_t child_count;
-  bool xor_shape = lhs->tag == IXS_XOR && rhs->tag == IXS_XOR &&
-                   lhs->u.assoc.nargs == 2u && rhs->u.assoc.nargs == 2u;
-  bool round_shape = state->xor_context_subproof_depth != 0u &&
-                     lhs->tag == rhs->tag &&
-                     (lhs->tag == IXS_FLOOR || lhs->tag == IXS_CEIL);
-  bool grouped_shape = equivalence_grouped_add_context(lhs) &&
-                       equivalence_grouped_add_context(rhs);
 
   memset(&worklist, 0, sizeof(worklist));
-  if ((!xor_shape && !round_shape && !grouped_shape) ||
-      (!xor_shape && !equivalence_context_shape(lhs, rhs, &child_count)) ||
+  if (!equivalence_context_shape(lhs, rhs, &child_count) ||
       !equivalence_context_enqueue(state, &worklist, lhs, rhs))
     return IXS_CHECK_UNKNOWN;
 
@@ -5551,6 +5529,158 @@ static equivalence_build_status equivalence_build_sub(equivalence_state *state,
   if (status != EQUIVALENCE_BUILD_OK)
     return status;
   return equivalence_build_add(state, lhs, negative, result);
+}
+
+static bool equivalence_partition_zero_sum(equivalence_state *state,
+                                           ixs_node *lhs, ixs_node *rhs,
+                                           ixs_node **positive,
+                                           ixs_node **negative) {
+  struct ixs_node_impl equality;
+  int64_t offset;
+
+  if ((!ixs_node_is_zero(lhs) && !ixs_node_is_zero(rhs)) ||
+      (lhs->tag != IXS_ADD && rhs->tag != IXS_ADD))
+    return false;
+  memset(&equality, 0, sizeof(equality));
+  equality.tag = IXS_CMP;
+  equality.u.binary.lhs = lhs;
+  equality.u.binary.rhs = rhs;
+  equality.u.binary.cmp_op = IXS_CMP_EQ;
+  if (!bounds_extract_cmp_exact_relation(state->bounds, &equality, positive,
+                                         negative, &offset)) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  if (offset != 0) {
+    ixs_node *constant = ixs_node_int(state->ctx, offset);
+    if (!constant || equivalence_build_add(state, *negative, constant,
+                                           negative) != EQUIVALENCE_BUILD_OK) {
+      if (!constant)
+        state->oom = true;
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool equivalence_add_coeff_equal(ixs_node *lhs, ixs_node *rhs) {
+  int64_t lhs_p;
+  int64_t lhs_q;
+  int64_t rhs_p;
+  int64_t rhs_q;
+
+  ixs_node_get_rat(lhs, &lhs_p, &lhs_q);
+  ixs_node_get_rat(rhs, &rhs_p, &rhs_q);
+  return lhs_p == rhs_p && lhs_q == rhs_q;
+}
+
+static bool equivalence_build_add_residual(equivalence_state *state,
+                                           ixs_node *add,
+                                           const unsigned char *matched,
+                                           ixs_node **residual) {
+  uint32_t i;
+
+  *residual = add->u.add.coeff;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    ixs_node *scaled;
+    int64_t p;
+    int64_t q;
+    if (matched[i])
+      continue;
+    ixs_node_get_rat(add->u.add.terms[i].coeff, &p, &q);
+    if (equivalence_build_scale_rat(state, add->u.add.terms[i].term, p, q,
+                                    &scaled) != EQUIVALENCE_BUILD_OK ||
+        equivalence_build_add(state, *residual, scaled, residual) !=
+            EQUIVALENCE_BUILD_OK)
+      return false;
+  }
+  return true;
+}
+
+/* Equal-scale terms may cancel after their values are proved equivalent. The
+ * two canonical sums are query-local, so deterministic matching is O(L*R).
+ * Each semantic candidate uses the fixed bounded-subproof allowance. */
+static ixs_check_result
+equivalence_cancel_proven_add_terms(equivalence_state *state, ixs_node *lhs,
+                                    ixs_node *rhs, unsigned depth) {
+  ixs_arena_mark mark;
+  unsigned char *lhs_matched;
+  unsigned char *rhs_matched;
+  ixs_node *lhs_residual;
+  ixs_node *rhs_residual;
+  uint32_t matched_count = 0u;
+  uint32_t i;
+  uint32_t j;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (lhs->tag != IXS_ADD || rhs->tag != IXS_ADD)
+    return IXS_CHECK_UNKNOWN;
+  mark = ixs_arena_save(&state->ctx->scratch);
+  lhs_matched = ixs_arena_alloc(&state->ctx->scratch, lhs->u.add.nterms, 1);
+  rhs_matched = ixs_arena_alloc(&state->ctx->scratch, rhs->u.add.nterms, 1);
+  if ((!lhs_matched && lhs->u.add.nterms != 0u) ||
+      (!rhs_matched && rhs->u.add.nterms != 0u)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  memset(lhs_matched, 0, lhs->u.add.nterms);
+  memset(rhs_matched, 0, rhs->u.add.nterms);
+  for (i = 0; i < lhs->u.add.nterms; i++) {
+    for (j = 0; j < rhs->u.add.nterms; j++) {
+      if (!rhs_matched[j] &&
+          equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
+                                      rhs->u.add.terms[j].coeff) &&
+          lhs->u.add.terms[i].term == rhs->u.add.terms[j].term) {
+        lhs_matched[i] = 1;
+        rhs_matched[j] = 1;
+        matched_count++;
+        break;
+      }
+    }
+  }
+  for (i = 0; i < lhs->u.add.nterms; i++) {
+    if (lhs_matched[i])
+      continue;
+    for (j = 0; j < rhs->u.add.nterms; j++) {
+      if (rhs_matched[j] ||
+          !equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
+                                       rhs->u.add.terms[j].coeff))
+        continue;
+      if (equivalence_bounded_core(state, lhs->u.add.terms[i].term,
+                                   rhs->u.add.terms[j].term,
+                                   depth + 1u) == IXS_CHECK_TRUE) {
+        lhs_matched[i] = 1;
+        rhs_matched[j] = 1;
+        matched_count++;
+        break;
+      }
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        goto cleanup;
+    }
+  }
+  if (matched_count == 0u ||
+      !equivalence_build_add_residual(state, lhs, lhs_matched, &lhs_residual) ||
+      !equivalence_build_add_residual(state, rhs, rhs_matched, &rhs_residual))
+    goto cleanup;
+  result =
+      equivalence_bounded_core(state, lhs_residual, rhs_residual, depth + 1u);
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_check_result equivalence_zero_sum(equivalence_state *state,
+                                             ixs_node *lhs, ixs_node *rhs,
+                                             unsigned depth) {
+  ixs_node *positive;
+  ixs_node *negative;
+
+  if (!equivalence_partition_zero_sum(state, lhs, rhs, &positive, &negative))
+    return IXS_CHECK_UNKNOWN;
+  return equivalence_bounded_core(state, positive, negative, depth + 1u);
 }
 
 static ixs_check_result equivalence_difference(equivalence_state *state,
@@ -6703,6 +6833,15 @@ equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
                               ixs_node *rhs, ixs_node *simplified_lhs,
                               ixs_node *simplified_rhs, unsigned depth) {
   ixs_check_result result;
+
+  result = equivalence_zero_sum(state, simplified_lhs, simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+
+  result = equivalence_cancel_proven_add_terms(state, simplified_lhs,
+                                               simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
 
   result = equivalence_difference(state, simplified_lhs, simplified_rhs);
   if (result != IXS_CHECK_UNKNOWN)
@@ -17371,6 +17510,7 @@ IXS_STATIC ixs_node *expand_impl(ixs_ctx *ctx, ixs_node *expr) {
 #include "facts_store.h"
 #include "query_transaction.h"
 #include "query_walk.h"
+#include "rational.h"
 #include "simplify.h"
 #include <assert.h>
 #include <limits.h>
@@ -17396,6 +17536,10 @@ typedef struct {
   ixs_fact_query_status status;
   const ixs_node *value;
 } ixs_simplify_result;
+
+/* Root-only semantic cancellation is quadratic in direct ADD terms. Explicit
+ * equivalence queries remain available for larger sums. */
+#define FACTS_ADDITIVE_IDENTITY_MAX_TERMS 64u
 
 typedef struct {
   query_node_set set;
@@ -17543,6 +17687,7 @@ static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
 static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *source,
                                                ixs_node *rewritten,
+                                               ixs_fact_query_status *status,
                                                bool *limited);
 
 static ixs_algebra_status
@@ -17935,7 +18080,7 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
       !ixs_node_is_sentinel(value)) {
     value = simp_normalize_rational_carrier(ctx, &facts->bounds, value);
     value = facts_project_simplified_root(ctx, &facts->bounds, expr, value,
-                                          &limited);
+                                          &result.status, &limited);
   }
   if (limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
@@ -18019,7 +18164,7 @@ static bool facts_simplify_batch_finalize(ixs_ctx *ctx, ixs_bounds *bounds,
     if (!exprs[i])
       return false;
     exprs[i] = facts_project_simplified_root(ctx, bounds, sources[i], exprs[i],
-                                             &limited);
+                                             status, &limited);
     if (limited) {
       *status = IXS_FACT_QUERY_LIMITED;
       return false;
@@ -18189,11 +18334,65 @@ static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
   return result;
 }
 
+/* Zero is the unique canonical representative of a proved additive identity.
+ * This root projection shares the ordinary equivalence engine; it does not
+ * re-enter the per-node fact rewrite. */
+static bool facts_additive_identity_candidate(ixs_node *node) {
+  uint32_t i;
+  uint32_t j;
+
+  if (!node || node->tag != IXS_ADD || node->u.add.nterms < 3u ||
+      node->u.add.nterms > FACTS_ADDITIVE_IDENTITY_MAX_TERMS ||
+      !ixs_node_is_zero(node->u.add.coeff))
+    return false;
+  for (i = 0; i < node->u.add.nterms; i++) {
+    int64_t left_p;
+    int64_t left_q;
+    ixs_node_get_rat(node->u.add.terms[i].coeff, &left_p, &left_q);
+    for (j = i + 1u; j < node->u.add.nterms; j++) {
+      int64_t right_p;
+      int64_t right_q;
+      ixs_node_get_rat(node->u.add.terms[j].coeff, &right_p, &right_q);
+      if ((left_p < 0) == (right_p < 0) || left_q != right_q)
+        continue;
+      if (ixs_int64_magnitude(left_p) == ixs_int64_magnitude(right_p) &&
+          node->u.add.terms[i].term->tag == node->u.add.terms[j].term->tag)
+        return true;
+    }
+  }
+  return false;
+}
+
+static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
+                                                 ixs_bounds *bounds,
+                                                 ixs_node *rewritten,
+                                                 ixs_fact_query_status *status,
+                                                 bool *limited) {
+  ixs_check_result equivalent;
+  ixs_algebra_status detail;
+
+  if (!facts_additive_identity_candidate(rewritten))
+    return rewritten;
+  detail = bounds_equivalence_query_detail(bounds, ctx, rewritten,
+                                           ctx->node_zero, &equivalent);
+  if (detail == IXS_ALGEBRA_LIMITED) {
+    *limited = true;
+    return rewritten;
+  }
+  *status = facts_status_from_algebra(detail);
+  if (*status != IXS_FACT_QUERY_COMPLETE)
+    return NULL;
+  return equivalent == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
+}
+
 static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *source,
                                                ixs_node *rewritten,
+                                               ixs_fact_query_status *status,
                                                bool *limited) {
   ixs_check_result projected;
+  rewritten =
+      facts_project_additive_identity(ctx, bounds, rewritten, status, limited);
   if (!rewritten || ixs_node_is_sentinel(rewritten) ||
       !ixs_node_is_pred_kind(source) || ixs_node_is_known_true(rewritten) ||
       ixs_node_is_known_false(rewritten))

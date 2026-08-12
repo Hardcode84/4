@@ -130,7 +130,7 @@ static void test_equivalent_expression_contexts(void) {
         IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(facts, left_xor, bad_xor) != IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(facts, wide_left_xor, wide_right_xor) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(without_residual_integrality, left_floor,
                                   right_floor) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(without_residual_integrality, left_ceil,
@@ -174,11 +174,123 @@ static void test_equivalent_expression_contexts(void) {
         IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == 0u);
 
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+  CHECK(test_ixs_equivalent_facts(facts, wide_left_xor, wide_right_xor) ==
+        IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+  CHECK(!facts->bounds.oom);
+  CHECK(ixs_ctx_nerrors(ctx) == 1u);
+  if (ixs_ctx_nerrors(ctx) != 0u)
+    CHECK(strstr(ixs_ctx_error(ctx, 0u), "out of memory") != NULL);
+  ixs_ctx_clear_errors(ctx);
+  CHECK(test_ixs_equivalent_facts(facts, wide_left_xor, wide_right_xor) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_ctx_nerrors(ctx) == 0u);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_generic_context_cancellation(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "context_cancel_item");
+  ixs_node *within = ixs_sym(ctx, "context_cancel_within");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_node *sixty_four = ixs_int(ctx, 64);
+  ixs_node *digit1_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), two)),
+      two);
+  ixs_node *digit2_16 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixteen), four)),
+      two);
+  ixs_node *digit2_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), four)),
+      two);
+  ixs_node *digit3_16 =
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixteen), eight));
+  ixs_node *digit3_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), eight)),
+      two);
+  ixs_node *within_bit = ixs_mod(ctx, within, two);
+  ixs_node *xor_16 = ixs_xor(ctx, ixs_mul(ctx, eight, digit3_16),
+                             ixs_mul(ctx, ixs_int(ctx, 136), within_bit));
+  ixs_node *xor_64 = ixs_xor(ctx, ixs_mul(ctx, ixs_int(ctx, 136), within_bit),
+                             ixs_mul(ctx, eight, digit3_64));
+  ixs_node *zero_sum =
+      ixs_add(ctx,
+              ixs_sub(ctx, ixs_mul(ctx, sixteen, ixs_mod(ctx, item, two)),
+                      ixs_mul(ctx, sixteen, ixs_mod(ctx, item, four))),
+              ixs_add(ctx,
+                      ixs_sub(ctx, ixs_mul(ctx, sixty_four, digit2_64),
+                              ixs_mul(ctx, sixty_four, digit2_16)),
+                      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 32), digit1_64),
+                              ixs_sub(ctx, ixs_mul(ctx, sixteen, xor_64),
+                                      ixs_mul(ctx, sixteen, xor_16)))));
+  ixs_node *near_miss =
+      ixs_add(ctx, zero_sum, ixs_mul(ctx, ixs_int(ctx, -1), digit1_64));
+  ixs_node *wrong_width = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), eight)),
+      four);
+  ixs_node *different_arity = ixs_xor(ctx, xor_16, ixs_int(ctx, 1));
+  ixs_node *different_cmp_lhs = ixs_cmp(ctx, item, IXS_CMP_LT, within);
+  ixs_node *different_cmp_rhs = ixs_cmp(ctx, item, IXS_CMP_LE, within);
+  ixs_node *left_square = ixs_mul(ctx, digit2_16, digit2_16);
+  ixs_node *right_square = ixs_mul(ctx, digit2_64, digit2_64);
+  ixs_node *right_cube = ixs_mul(ctx, right_square, digit2_64);
+  ixs_node *left_max = ixs_max(ctx, digit2_16, digit3_16);
+  ixs_node *right_max = ixs_max(ctx, digit3_64, digit2_64);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  const ixs_node *batch[2] = {zero_sum, near_miss};
+
+  CHECK(ctx && item && within && digit1_64 && digit2_16 && digit2_64 &&
+        digit3_16 && digit3_64 && within_bit && xor_16 && xor_64 && zero_sum &&
+        near_miss && wrong_width && different_arity && different_cmp_lhs &&
+        different_cmp_rhs && left_square && right_square && right_cube &&
+        left_max && right_max && facts);
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, item, IXS_CMP_EQ, ixs_floor(ctx, item))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_EQ, ixs_floor(ctx, within))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_LE, ixs_int(ctx, 3))));
+
+  CHECK(test_ixs_equivalent_facts(facts, digit2_16, digit2_64) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, digit3_16, digit3_64) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, xor_16, xor_64) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_square, right_square) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_max, right_max) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, zero_sum, ixs_int(ctx, 0)) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_simplify_facts(facts, zero_sum) == ixs_int(ctx, 0));
+  ixs_simplify_batch_facts(facts, batch, 2u);
+  CHECK(batch[0] == ixs_int(ctx, 0));
+  CHECK(batch[1] != ixs_int(ctx, 0));
+
+  CHECK(test_ixs_equivalent_facts(facts, near_miss, ixs_int(ctx, 0)) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, digit3_16, wrong_width) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, different_arity, xor_64) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, different_cmp_lhs,
+                                  different_cmp_rhs) != IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, left_square, right_cube) !=
+        IXS_CHECK_TRUE);
+
   ixs_ctx_destroy(ctx);
 }
 
 int main(void) {
   test_equivalent_expression_contexts();
+  test_generic_context_cancellation();
   printf("test_equivalence_context: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
 }

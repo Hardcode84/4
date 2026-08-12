@@ -637,3 +637,13 @@ finite fallback inspects at most 4096 nodes and 8 finite-range symbols and
 enumerates at most 64 Cartesian points. Varying predicates, eager partial
 operands, larger domains, proof limits, and allocation failure retain the
 ordinary query status instead of manufacturing a constant.
+
+A non-predicate ADD root may likewise use the shared equivalence proof to
+replace a proved additive identity with canonical `0`. The cheap admission
+requires a zero constant and at least one pair of opposite, equal-magnitude
+coefficients on the same node kind. The projection is root-only and never
+re-enters fact rewriting. Because its semantic term matching is quadratic, the
+automatic simplification projection is limited to 64 direct terms; callers can
+still request explicit equivalence for larger sums. A miss leaves the ordinary
+rewritten ADD unchanged, while allocation failure and proof limits retain their
+normal fact-query status. Scalar and batch simplification use the same path.

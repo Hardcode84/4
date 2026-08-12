@@ -2296,6 +2296,49 @@ def test_exact_equality_definitions_share_simplify_and_check() -> None:
     assert ctx.check_predicate(ctx.eq(expr, expected), facts) is True
 
 
+def test_same_context_equivalence_canonicalizes_zero_sum() -> None:
+    ctx = ixsimpl.Context()
+    item = ctx.sym("context_cancel_item")
+    within = ctx.sym("context_cancel_within")
+    digit1_64 = ixsimpl.floor((item % 64) / 2) % 2
+    digit2_16 = ixsimpl.floor((item % 16) / 4) % 2
+    digit2_64 = ixsimpl.floor((item % 64) / 4) % 2
+    digit3_16 = ixsimpl.floor((item % 16) / 8)
+    digit3_64 = ixsimpl.floor((item % 64) / 8) % 2
+    within_bit = within % 2
+    xor_16 = ixsimpl.xor_(8 * digit3_16, 136 * within_bit)
+    xor_64 = ixsimpl.xor_(136 * within_bit, 8 * digit3_64)
+    zero_sum = (
+        16 * (item % 2)
+        - 16 * (item % 4)
+        + 64 * digit2_64
+        - 64 * digit2_16
+        + 32 * digit1_64
+        + 16 * xor_64
+        - 16 * xor_16
+    )
+    near_miss = zero_sum - digit1_64
+    zero = ctx.int_(0)
+    facts = ctx.facts()
+    facts.assume_many(
+        [
+            ctx.eq(item, ixsimpl.floor(item)),
+            ctx.eq(within, ixsimpl.floor(within)),
+            within >= 0,
+            within <= 3,
+        ]
+    )
+
+    assert ctx.equivalent(digit2_16, digit2_64, facts) is True
+    assert ctx.equivalent(digit3_16, digit3_64, facts) is True
+    assert ctx.equivalent(zero_sum, zero, facts) is True
+    assert zero_sum.simplify(facts=facts) == zero
+    batch = [zero_sum, near_miss]
+    ctx.simplify_batch(batch, facts=facts)
+    assert batch[0] == zero
+    assert batch[1] != zero
+
+
 @given(
     m=st.integers(min_value=2, max_value=32),
     denominator=st.integers(min_value=1, max_value=4),
