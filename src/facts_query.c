@@ -889,6 +889,28 @@ static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
   return equivalent == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
 }
 
+/* A structurally total root with one finite interval value has that rational
+ * as its canonical result.  This is the same typed interval proof used by
+ * checks; it does not add an expression-shape rule to the simplifier. */
+static ixs_node *facts_project_exact_root(ixs_ctx *ctx, ixs_bounds *bounds,
+                                          ixs_node *source, ixs_node *rewritten,
+                                          ixs_fact_query_status *status) {
+  ixs_interval interval;
+  ixs_node *exact;
+
+  if (ixs_node_is_pred_kind(source) || !ixs_node_is_known_total(source))
+    return rewritten;
+  interval = ixs_bounds_get(bounds, source);
+  if (!interval.valid || interval.lo_inf || interval.hi_inf ||
+      ixs_rat_cmp(interval.lo_p, interval.lo_q, interval.hi_p, interval.hi_q) !=
+          0)
+    return rewritten;
+  exact = ixs_node_rat(ctx, interval.lo_p, interval.lo_q);
+  if (!exact)
+    *status = IXS_FACT_QUERY_OOM;
+  return exact;
+}
+
 static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *source,
                                                ixs_node *rewritten,
@@ -897,6 +919,10 @@ static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
   ixs_check_result projected;
   rewritten =
       facts_project_additive_identity(ctx, bounds, rewritten, status, limited);
+  if (!*limited && *status == IXS_FACT_QUERY_COMPLETE && rewritten &&
+      !ixs_node_is_sentinel(rewritten))
+    rewritten =
+        facts_project_exact_root(ctx, bounds, source, rewritten, status);
   if (!rewritten || ixs_node_is_sentinel(rewritten) ||
       !ixs_node_is_pred_kind(source) || ixs_node_is_known_true(rewritten) ||
       ixs_node_is_known_false(rewritten))

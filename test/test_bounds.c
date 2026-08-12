@@ -2190,6 +2190,120 @@ static void test_piecewise_residue_domain_guards(void) {
 /*  Bounds: expression-level overrides (expr >= 0 pattern)            */
 /* ------------------------------------------------------------------ */
 
+static void test_public_affine_endpoint_refinement(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *major = ixs_sym(ctx, "affine_endpoint_major");
+  ixs_node *minor = ixs_sym(ctx, "affine_endpoint_minor");
+  ixs_node *major_mod_64 = ixs_mod(ctx, major, ixs_int(ctx, 64));
+  ixs_node *major_digits = ixs_int(ctx, 0);
+  ixs_node *minor_mod_8 = ixs_mod(ctx, minor, ixs_int(ctx, 8));
+  ixs_node *active;
+  ixs_node *predicates[3];
+  ixs_node *minor_digits[3];
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result range;
+  ixs_known_bits bits;
+  const ixs_node *simplified[1];
+  int64_t modulus;
+  int64_t residue;
+  size_t i;
+
+  for (i = 0; i < 3; i++) {
+    int64_t place = INT64_C(1) << i;
+    ixs_node *major_digit = ixs_mod(
+        ctx,
+        i == 0
+            ? major_mod_64
+            : ixs_floor(ctx, ixs_div(ctx, major_mod_64, ixs_int(ctx, place))),
+        ixs_int(ctx, 2));
+    major_digits = ixs_add(ctx, major_digits,
+                           ixs_mul(ctx, ixs_int(ctx, place), major_digit));
+    minor_digits[i] = ixs_mod(
+        ctx,
+        i == 0 ? minor
+               : ixs_floor(ctx, ixs_div(ctx, minor, ixs_int(ctx, place))),
+        ixs_int(ctx, 2));
+  }
+  active =
+      ixs_add(ctx, major_digits, ixs_mul(ctx, ixs_int(ctx, 16), minor_mod_8));
+  predicates[0] = ixs_cmp(ctx, major, IXS_CMP_GE, ixs_int(ctx, 0));
+  predicates[1] = ixs_cmp(ctx, major, IXS_CMP_LE, ixs_int(ctx, 511));
+  predicates[2] = ixs_cmp(ctx, active, IXS_CMP_EQ, ixs_int(ctx, 0));
+
+  CHECK(ixs_facts_assume_preds(facts, predicates, 3));
+  CHECK(test_ixs_range_facts(facts, minor_mod_8, &range));
+  CHECK(range.has_lower && range.has_upper && range.lower_p == 0 &&
+        range.lower_q == 1 && range.upper_p == 0 && range.upper_q == 1);
+  CHECK(test_ixs_get_symbol_congruence_facts(facts, minor, &modulus, &residue));
+  CHECK(modulus == 8 && residue == 0);
+  CHECK(test_ixs_get_known_bits_facts(facts, minor, &bits));
+  CHECK((bits.known_zero & UINT64_C(7)) == UINT64_C(7));
+  CHECK(test_ixs_simplify_facts(facts, minor_mod_8) == ixs_int(ctx, 0));
+  for (i = 0; i < 3; i++) {
+    CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, minor_digits[i], IXS_CMP_EQ,
+                                              ixs_int(ctx, 0))) ==
+          IXS_CHECK_TRUE);
+  }
+  simplified[0] = minor_mod_8;
+  test_ixs_simplify_batch_facts(facts, simplified, 1);
+  CHECK(simplified[0] == ixs_int(ctx, 0));
+
+  /* A multi-residue interval is not an exact congruence. */
+  {
+    ixs_facts *loose = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_pred(
+        loose, ixs_cmp(ctx, minor_mod_8, IXS_CMP_LE, ixs_int(ctx, 1))));
+    CHECK(!test_ixs_get_symbol_congruence_facts(loose, minor, &modulus,
+                                                &residue));
+    CHECK(test_ixs_check_facts(loose, ixs_cmp(ctx, minor_digits[0], IXS_CMP_EQ,
+                                              ixs_int(ctx, 0))) ==
+          IXS_CHECK_UNKNOWN);
+  }
+
+  /* Rational coefficient signs map a lower sum endpoint to opposite term
+   * endpoints.  An interior sum value does not select either endpoint. */
+  {
+    ixs_node *a = ixs_sym(ctx, "affine_endpoint_a");
+    ixs_node *b = ixs_sym(ctx, "affine_endpoint_b");
+    ixs_node *sum = ixs_add(ctx, ixs_mul(ctx, ixs_rat(ctx, 1, 2), a),
+                            ixs_mul(ctx, ixs_rat(ctx, -3, 2), b));
+    ixs_node *domain[5] = {ixs_cmp(ctx, a, IXS_CMP_GE, ixs_int(ctx, 0)),
+                           ixs_cmp(ctx, a, IXS_CMP_LE, ixs_int(ctx, 2)),
+                           ixs_cmp(ctx, b, IXS_CMP_GE, ixs_int(ctx, 2)),
+                           ixs_cmp(ctx, b, IXS_CMP_LE, ixs_int(ctx, 4)), NULL};
+    ixs_facts *endpoint = ixs_facts_create(ctx);
+    ixs_facts *upper_endpoint = ixs_facts_create(ctx);
+    ixs_facts *interior = ixs_facts_create(ctx);
+
+    domain[4] = ixs_cmp(ctx, sum, IXS_CMP_EQ, ixs_int(ctx, -6));
+    CHECK(ixs_facts_assume_preds(endpoint, domain, 5));
+    CHECK(test_ixs_check_facts(endpoint,
+                               ixs_cmp(ctx, a, IXS_CMP_EQ, ixs_int(ctx, 0))) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_check_facts(endpoint,
+                               ixs_cmp(ctx, b, IXS_CMP_EQ, ixs_int(ctx, 4))) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_simplify_facts(endpoint, a) == ixs_int(ctx, 0));
+    CHECK(test_ixs_simplify_facts(endpoint, b) == ixs_int(ctx, 4));
+
+    domain[4] = ixs_cmp(ctx, sum, IXS_CMP_EQ, ixs_int(ctx, -2));
+    CHECK(ixs_facts_assume_preds(upper_endpoint, domain, 5));
+    CHECK(test_ixs_simplify_facts(upper_endpoint, a) == ixs_int(ctx, 2));
+    CHECK(test_ixs_simplify_facts(upper_endpoint, b) == ixs_int(ctx, 2));
+
+    domain[4] = ixs_cmp(ctx, sum, IXS_CMP_EQ, ixs_int(ctx, -4));
+    CHECK(ixs_facts_assume_preds(interior, domain, 5));
+    CHECK(test_ixs_check_facts(interior,
+                               ixs_cmp(ctx, a, IXS_CMP_EQ, ixs_int(ctx, 0))) ==
+          IXS_CHECK_UNKNOWN);
+    CHECK(test_ixs_check_facts(interior,
+                               ixs_cmp(ctx, b, IXS_CMP_EQ, ixs_int(ctx, 4))) ==
+          IXS_CHECK_UNKNOWN);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_expr_override(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -12545,6 +12659,7 @@ int main(void) {
   test_piecewise_residue_domain_guards();
 
   /* Bounds: expression overrides */
+  test_public_affine_endpoint_refinement();
   test_bounds_expr_override();
   test_bounds_expr_override_invalidates_cache();
   test_bounds_var_index_oom();

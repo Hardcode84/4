@@ -647,3 +647,10 @@ automatic simplification projection is limited to 64 direct terms; callers can
 still request explicit equivalence for larger sums. A miss leaves the ordinary
 rewritten ADD unchanged, while allocation failure and proof limits retain their
 normal fact-query status. Scalar and batch simplification use the same path.
+
+A structurally total non-predicate root whose ordinary interval query proves
+one finite rational value is replaced by that canonical rational. This final
+projection is expression-shape independent and is shared by scalar and batch
+fact simplification. It lets exact ranges published by affine endpoint
+propagation produce the same conclusion as `ixs_check`; partial roots and
+non-singleton ranges retain the rewritten expression.

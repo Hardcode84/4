@@ -116,6 +116,15 @@ layout, load factor, and allocation remain consumer-owned.
   `128+64*u+w` and `128+2*(64*u+w)` without requiring independent ranges for
   `u` and `w`. Rational overflow or an unrepresentable inverse conservatively
   skips the proportional alias.
+- **Affine endpoint propagation**: when a total finite affine `ADD` has an
+  exact stored value equal to the computed lower or upper endpoint of its term
+  ranges, every nonzero-coefficient contribution is forced to its matching
+  endpoint. Negative coefficients select the opposite term endpoint. The
+  assumption owner validates every term before publishing any refinement, then
+  repeats ordinary expression-range publication until no typed domain changes.
+  An interior sum value, an unbounded term, or interval overflow proves
+  nothing. The work is linear in the direct terms per monotone publication
+  pass and does not recognize radix digits or `Mod` syntax.
 - **Nonzero facts**: normalized `expr != 0` assumptions are retained in dense
   insertion order. Up to four entries use a bounded inline scan. The fifth
   creates an 8-slot open-addressed pointer index, which doubles before
@@ -131,7 +140,10 @@ layout, load factor, and allocation remain consumer-owned.
 - **Modular congruence**: `Mod(K, 32) == R` — the simplifier tracks
   `K ≡ R (mod 32)`.  Multiple assumptions on the same symbol merge via CRT
   (Chinese Remainder Theorem).  Pure divisibility (`R == 0`) is the common
-  special case; `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`.
+  special case; `Mod(K, 256) == 0` implies `Mod(K, 32) == 0`. An exact stored
+  range for `Mod(symbol, positive-literal)` publishes the same congruence, so
+  reverse affine refinement reaches interval, residue, known-bit, checker, and
+  fact-simplification consumers through their existing queries.
 - **Congruent range intersection**: finite symbol interval endpoints round
   inward to the nearest value satisfying the stored congruence before range
   propagation. Unrepresentable aligned endpoints retain the original bound.

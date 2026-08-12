@@ -369,12 +369,14 @@ static void add_shifted_add_range(ixs_bounds *b, ixs_node *expr,
     ixs_bounds_add_expr(b, base, shifted);
 }
 
-static void add_expr_integer_zero_cmp(ixs_bounds *b, ixs_node *expr,
-                                      ixs_cmp_op op) {
+static void add_expr_zero_cmp(ixs_bounds *b, ixs_node *expr, ixs_cmp_op op) {
   ixs_interval iv;
-  if (!ixs_node_is_integer_valued(expr))
+  if (ixs_node_is_integer_valued(expr))
+    iv = interval_from_integer_zero_cmp(op);
+  else if (op == IXS_CMP_EQ && ixs_node_is_known_total(expr))
+    iv = ixs_interval_exact(0, 1);
+  else
     return;
-  iv = interval_from_integer_zero_cmp(op);
   if (!iv.valid)
     return;
   ixs_bounds_add_expr(b, expr, iv);
@@ -936,6 +938,27 @@ static void bounds_refine_mod_inverse_for_expr(ixs_bounds *b, ixs_node *expr) {
     bounds_refine_mod_inverse_symbol(b, expr);
 }
 
+/* An exact canonical remainder on a raw symbol is the same fact as a
+ * congruence.  Publish it through the symbol domain so interval, residue, and
+ * bit queries observe the refinement through their ordinary paths. */
+static void bounds_publish_exact_mod_range(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval range;
+  int64_t residue;
+  int64_t modulus;
+
+  if (!b || !expr || expr->tag != IXS_MOD ||
+      expr->u.binary.lhs->tag != IXS_SYM ||
+      expr->u.binary.rhs->tag != IXS_INT || expr->u.binary.rhs->u.ival <= 0 ||
+      b->oom || b->contradiction)
+    return;
+  range = bounds_store_expr_interval(b, expr);
+  modulus = expr->u.binary.rhs->u.ival;
+  if (!ixs_interval_is_point_int(range, &residue) || residue < 0 ||
+      residue >= modulus)
+    return;
+  apply_modrem(b, expr->u.binary.lhs->u.name, modulus, residue);
+}
+
 static bool bounds_lift_floor_symbol_range(ixs_node *round,
                                            ixs_interval quotient,
                                            ixs_node **symbol,
@@ -1053,6 +1076,156 @@ static bool bounds_propagate_added_expr_ranges(ixs_bounds *b, ixs_node *expr,
   return !b->oom && !b->contradiction;
 }
 
+static bool bounds_finite_interval_endpoint(const ixs_interval *interval,
+                                            bool lower, int64_t *numerator,
+                                            int64_t *denominator) {
+  int64_t endpoint_p;
+  int64_t endpoint_q;
+
+  if (!interval || !interval->valid ||
+      (lower ? interval->lo_inf : interval->hi_inf))
+    return false;
+  endpoint_p = lower ? interval->lo_p : interval->hi_p;
+  endpoint_q = lower ? interval->lo_q : interval->hi_q;
+  if (ixs_interval_is_neg_inf(endpoint_p, endpoint_q) ||
+      ixs_interval_is_pos_inf(endpoint_p, endpoint_q))
+    return false;
+  *numerator = endpoint_p;
+  *denominator = endpoint_q;
+  return true;
+}
+
+static bool bounds_collect_add_term_ranges(ixs_bounds *b, ixs_node *expr,
+                                           ixs_interval *sum) {
+  int64_t constant_p;
+  int64_t constant_q;
+  uint32_t i;
+
+  ixs_node_get_rat(expr->u.add.coeff, &constant_p, &constant_q);
+  *sum = ixs_interval_exact(constant_p, constant_q);
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    ixs_interval contribution;
+    ixs_interval term_range;
+
+    term_range = ixs_bounds_get(b, expr->u.add.terms[i].term);
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &coefficient_p,
+                     &coefficient_q);
+    if (!term_range.valid || coefficient_p == 0)
+      return false;
+    contribution = iv_mul_const(term_range, coefficient_p, coefficient_q);
+    *sum = iv_add(*sum, contribution);
+    if (!sum->valid || b->oom)
+      return false;
+  }
+  return true;
+}
+
+/* If an affine sum equals the sum of all contribution lower bounds, every
+ * contribution equals its lower bound; the upper-endpoint case is dual.
+ * Coefficient signs map contribution endpoints back to term endpoints. */
+static bool bounds_select_add_term_endpoints(ixs_bounds *b, ixs_node *expr,
+                                             ixs_interval sum, int64_t fixed_p,
+                                             int64_t fixed_q,
+                                             bool *select_lower) {
+  int64_t endpoint_p;
+  int64_t endpoint_q;
+  bool at_lower;
+  bool at_upper;
+  uint32_t i;
+
+  at_lower =
+      bounds_finite_interval_endpoint(&sum, true, &endpoint_p, &endpoint_q) &&
+      ixs_rat_cmp(fixed_p, fixed_q, endpoint_p, endpoint_q) == 0;
+  at_upper =
+      bounds_finite_interval_endpoint(&sum, false, &endpoint_p, &endpoint_q) &&
+      ixs_rat_cmp(fixed_p, fixed_q, endpoint_p, endpoint_q) == 0;
+  if (!at_lower && !at_upper)
+    return false;
+  *select_lower = at_lower;
+
+  for (i = 0; i < expr->u.add.nterms; i++) {
+    int64_t coefficient_p;
+    int64_t coefficient_q;
+    bool positive;
+    bool use_lower;
+    ixs_interval term_range;
+
+    term_range = ixs_bounds_get(b, expr->u.add.terms[i].term);
+    ixs_node_get_rat(expr->u.add.terms[i].coeff, &coefficient_p,
+                     &coefficient_q);
+    positive = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1) > 0;
+    use_lower = at_lower == positive;
+    if (!bounds_finite_interval_endpoint(&term_range, use_lower, &endpoint_p,
+                                         &endpoint_q))
+      return false;
+  }
+  return true;
+}
+
+static void bounds_publish_add_term_endpoints(ixs_bounds *b, ixs_node *expr,
+                                              bool select_lower) {
+  uint32_t i;
+
+  for (;;) {
+    bool changed = false;
+    bool *outer = bounds_store_swap_change_observer(b, &changed);
+
+    for (i = 0; i < expr->u.add.nterms && !b->oom && !b->contradiction; i++) {
+      int64_t coefficient_p;
+      int64_t coefficient_q;
+      int64_t endpoint_p;
+      int64_t endpoint_q;
+      bool positive;
+      bool use_lower;
+      ixs_interval term_range;
+
+      term_range = ixs_bounds_get(b, expr->u.add.terms[i].term);
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &coefficient_p,
+                       &coefficient_q);
+      positive = ixs_rat_cmp(coefficient_p, coefficient_q, 0, 1) > 0;
+      use_lower = select_lower == positive;
+      if (!bounds_finite_interval_endpoint(&term_range, use_lower, &endpoint_p,
+                                           &endpoint_q))
+        break;
+      ixs_bounds_add_expr(b, expr->u.add.terms[i].term,
+                          ixs_interval_exact(endpoint_p, endpoint_q));
+    }
+    (void)bounds_store_swap_change_observer(b, outer);
+    if (changed && outer)
+      *outer = true;
+    if (!changed || b->oom || b->contradiction)
+      return;
+  }
+}
+
+/* This scans only the direct terms of one trusted ADD.  Publication repeats
+ * while a typed domain changes, so reverse refinements reach the same monotone
+ * fixed point as ordinary fact ingestion without a digit or Mod recognizer. */
+static void bounds_refine_add_from_endpoint(ixs_bounds *b, ixs_node *expr) {
+  ixs_interval fixed;
+  ixs_interval sum;
+  bool select_lower;
+  int64_t fixed_p;
+  int64_t fixed_q;
+
+  if (!b || !expr || expr->tag != IXS_ADD || expr->u.add.nterms == 0 ||
+      !ixs_node_is_known_total(expr) || b->oom || b->contradiction)
+    return;
+  fixed = bounds_store_expr_interval(b, expr);
+  if (!fixed.valid || fixed.lo_inf || fixed.hi_inf ||
+      ixs_rat_cmp(fixed.lo_p, fixed.lo_q, fixed.hi_p, fixed.hi_q) != 0 ||
+      !bounds_finite_interval_endpoint(&fixed, true, &fixed_p, &fixed_q))
+    return;
+
+  if (!bounds_collect_add_term_ranges(b, expr, &sum) ||
+      !bounds_select_add_term_endpoints(b, expr, sum, fixed_p, fixed_q,
+                                        &select_lower))
+    return;
+  bounds_publish_add_term_endpoints(b, expr, select_lower);
+}
+
 IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
                                     ixs_interval iv) {
   ixs_node *canon = NULL;
@@ -1077,12 +1250,17 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
   if (!bounds_propagate_added_expr_ranges(b, expr, canon, iv, first_expr,
                                           added_expr_end))
     return;
-  for (i = first_expr; i < added_expr_end; i++)
+  for (i = first_expr; i < added_expr_end; i++) {
+    bounds_publish_exact_mod_range(b, b->exprs[i].expr);
     if (b->exprs[i].expr != expr && b->exprs[i].expr != canon)
       bounds_refine_mod_inverse_for_expr(b, b->exprs[i].expr);
+  }
+  bounds_publish_exact_mod_range(b, expr);
   bounds_refine_mod_inverse_for_expr(b, expr);
-  if (canon && canon != expr)
+  if (canon && canon != expr) {
+    bounds_publish_exact_mod_range(b, canon);
     bounds_refine_mod_inverse_for_expr(b, canon);
+  }
   if (b->oom || b->contradiction)
     return;
   if (expr->tag == IXS_FLOOR)
@@ -1091,6 +1269,11 @@ IXS_STATIC void ixs_bounds_add_expr(ixs_bounds *b, ixs_node *expr,
   if (canon && canon != expr && canon->tag == IXS_FLOOR)
     bounds_refine_symbol_from_floor_range(b, canon,
                                           bounds_store_expr_interval(b, canon));
+  if (b->oom || b->contradiction)
+    return;
+  bounds_refine_add_from_endpoint(b, expr);
+  if (canon && canon != expr)
+    bounds_refine_add_from_endpoint(b, canon);
 }
 
 /* apply_sym_cmp_const has already intersected the raw symbol table and
@@ -1264,7 +1447,7 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
 
   /* Fallback: expr op 0 for non-symbol lhs. Store as expression bound. */
   if (ixs_node_is_zero(rhs)) {
-    add_expr_integer_zero_cmp(b, lhs, op);
+    add_expr_zero_cmp(b, lhs, op);
   } else if (ixs_bounds_check_defined(b, lhs) == IXS_CHECK_TRUE &&
              ixs_bounds_check_defined(b, rhs) == IXS_CHECK_TRUE) {
     ixs_node *difference = simp_sub(b->ctx, lhs, rhs);
@@ -1273,7 +1456,7 @@ static void bounds_add_assumption_impl(ixs_bounds *b, ixs_node *a) {
       return;
     }
     if (!ixs_node_is_sentinel(difference))
-      add_expr_integer_zero_cmp(b, difference, op);
+      add_expr_zero_cmp(b, difference, op);
   }
 }
 
