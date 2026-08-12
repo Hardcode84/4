@@ -393,8 +393,8 @@ ordered-predicate key; each successful mutation claims a fact-pointer and
 semantic-version key. Collision replacement advances the slot generation, so
 an older fact handle observes a cache miss rather than another domain's result.
 No fact handle embeds a result table. Together the lazily allocated tables
-retain at most 256 KiB per context. A separate four-way 512-entry table retains
-at most 32 KiB for bounded equivalence subproofs. Its key is the exact
+retain at most 256 KiB per context. A separate four-way 4096-entry table
+retains at most 192 KiB for bounded equivalence subproofs. Its key is the exact
 fact-domain identity, unordered operand pair, proof depth, bounded-subproof
 depth, and full or restricted projection scope; mutation assigns a new domain
 identity. Clean `UNKNOWN` results are reusable only at that same proof budget

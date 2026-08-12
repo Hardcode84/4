@@ -382,11 +382,11 @@ typedef struct {
 } facts_closure_cache;
 
 /* Expected O(1). Set collisions evict only an optional proof result. */
-#define FACTS_EQUIVALENCE_CACHE_CAP 512u
+#define FACTS_EQUIVALENCE_CACHE_CAP 4096u
 #define FACTS_EQUIVALENCE_CACHE_WAYS 4u
 #define FACTS_EQUIVALENCE_CACHE_SETS                                           \
   (FACTS_EQUIVALENCE_CACHE_CAP / FACTS_EQUIVALENCE_CACHE_WAYS)
-#define FACTS_EQUIVALENCE_CACHE_RETAINED_LIMIT (32u * 1024u)
+#define FACTS_EQUIVALENCE_CACHE_RETAINED_LIMIT (192u * 1024u)
 
 typedef struct {
   ixs_node *lhs;
