@@ -4987,6 +4987,13 @@ static void test_nested_mod_remainder_composition(void) {
   ixs_node *bits =
       ixs_add(ctx, ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 2), bit1)),
               ixs_mul(ctx, ixs_int(ctx, 4), bit2));
+  ixs_node *half = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 2)));
+  ixs_node *half_bit0 = ixs_mod(ctx, half, ixs_int(ctx, 2));
+  ixs_node *half_bit1 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 4))), ixs_int(ctx, 2));
+  ixs_node *half_bits =
+      ixs_add(ctx, half_bit0, ixs_mul(ctx, ixs_int(ctx, 2), half_bit1));
+  ixs_node *half_direct = ixs_mod(ctx, half, ixs_int(ctx, 4));
   ixs_node *enclosed_bit1 =
       ixs_mod(ctx,
               ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, x, ixs_int(ctx, 64)),
@@ -5036,6 +5043,7 @@ static void test_nested_mod_remainder_composition(void) {
                     ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, partial, three)),
                             five)))) == IXS_ADD);
   CHECK(bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
+  CHECK(half_bits == half_direct);
   CHECK(enclosed_bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
   CHECK(compact_bits == ixs_mod(ctx, x, ixs_int(ctx, 8)));
 
@@ -5071,6 +5079,12 @@ static void test_nested_mod_remainder_composition(void) {
                             five)))) == IXS_ADD);
   CHECK(ixs_node_tag(ixs_add(ctx, bit0, ixs_mul(ctx, ixs_int(ctx, 4), bit2))) ==
         IXS_ADD);
+  CHECK(
+      ixs_node_tag(ixs_add(
+          ctx, half_bit0,
+          ixs_mul(ctx, ixs_int(ctx, 2),
+                  ixs_mod(ctx, ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 5))),
+                          ixs_int(ctx, 2))))) == IXS_ADD);
   CHECK(ixs_node_tag(wrong_enclosing) == IXS_ADD);
   CHECK(ixs_node_tag(overflow) == IXS_ADD);
   CHECK(ixs_ctx_nerrors(ctx) == errors);

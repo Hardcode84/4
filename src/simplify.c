@@ -1326,6 +1326,35 @@ static bool radix_chain_floor_parts(ixs_node *node, ixs_node **base,
   return true;
 }
 
+/* A quotient-normalized carrier keeps the same radix digits. Canonical floor
+ * construction flattens floor(floor(x/a)/b) to floor(x/(a*b)), so recover the
+ * shared carrier from either spelling. */
+static bool radix_chain_direct_quotient(ixs_node *carrier, ixs_node *rounded,
+                                        int64_t place) {
+  ixs_node *carrier_base;
+  ixs_node *rounded_base;
+  int64_t carrier_divisor;
+  int64_t expected_divisor;
+  int64_t rounded_divisor;
+
+  if (!radix_chain_floor_parts(rounded, &rounded_base, &rounded_divisor))
+    return false;
+  if (rounded_base == carrier && rounded_divisor == place)
+    return true;
+  return radix_chain_floor_parts(carrier, &carrier_base, &carrier_divisor) &&
+         carrier_base == rounded_base &&
+         ixs_safe_mul(carrier_divisor, place, &expected_divisor) &&
+         rounded_divisor == expected_divisor;
+}
+
+static bool radix_chain_direct_step(bool terminal, ixs_node *carrier,
+                                    ixs_node *rounded, int64_t place,
+                                    int64_t digit_count, int64_t *next) {
+  return !terminal && digit_count > 1 &&
+         radix_chain_direct_quotient(carrier, rounded, place) &&
+         ixs_safe_mul(place, digit_count, next);
+}
+
 static bool radix_chain_term_at_place(const ixs_addterm *terms, uint32_t nterms,
                                       int64_t place, ixs_node **digit) {
   bool found = false;
@@ -1370,6 +1399,9 @@ static bool radix_chain_complete_step(const ixs_addterm *terms, uint32_t nterms,
       rounded = digit->u.binary.lhs;
     else
       terminal = true;
+    if (radix_chain_direct_step(terminal, *carrier, rounded, place, digit_count,
+                                next))
+      return true;
     if (!radix_chain_floor_parts(rounded, &numerator, &divisor) ||
         divisor != place || !numerator || numerator->tag != IXS_MOD ||
         numerator->u.binary.lhs != *carrier ||

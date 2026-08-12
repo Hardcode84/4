@@ -336,6 +336,10 @@ partial common scale. A defined source already implies `A > 0` and `B > 0`, so
 the exact identity may refine the remaining domain to poison elsewhere. The
 product `A*B` uses checked optional arithmetic: an unrepresentable product is a
 no-match without a diagnostic, while allocation failure is propagated.
+Literal digit chains also recover a carrier whose nested floors were flattened:
+digits of `floor(x/a)` may therefore be spelled with denominators `a`, `2*a`,
+and so on. Quotient algebra relates the enclosing Mod spelling to that same
+canonical result without imposing a second simplifier normal form.
 Mod-bearing ADD terms are indexed by carrier and modulus at no more than 50%
 load, giving expected O(N) work. Reverse floor/ceiling recognition likewise
 indexes the borrowed row by carrier at no more than 50% load instead of pairing

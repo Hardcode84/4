@@ -4202,6 +4202,16 @@ def test_congruent_radix_reconstruction_composes_equivalence() -> None:
     bad_witness = 2 * t_half + (t + 1) % 2
     assert ctx.equivalent(bad_witness, t, witness_facts) is not True
 
+    legacy_facts = ctx.facts()
+    legacy_facts.assume_many([slot >= 0, slot < 128])
+    direct = ixsimpl.floor((slot % 8) / 2)
+    partition = ixsimpl.floor(slot / 2) % 2 + 2 * (ixsimpl.floor(slot / 4) % 2)
+    canonical = ixsimpl.floor(slot / 2) % 4
+    assert partition == canonical
+    assert ctx.equivalent(direct, partition, legacy_facts) is True
+    assert ctx.check(ctx.eq(direct, partition), facts=legacy_facts) is True
+    assert ctx.check(ctx.ne(direct, partition), facts=legacy_facts) is False
+
 
 @given(
     radix=st.integers(min_value=2, max_value=8),
