@@ -8739,15 +8739,27 @@ static void test_fact_simplify_projects_finite_root_predicates(void) {
   ixs_facts *two_points = ixs_facts_create(ctx);
   ixs_facts *limit_facts = ixs_facts_create(ctx);
   ixs_facts *over_limit_facts = ixs_facts_create(ctx);
+  ixs_facts *bit_aligned = ixs_facts_create(ctx);
   ixs_range_result range = {0};
   ixs_node *batch[4] = {is_endpoint, is_neither, equals_zero, partial};
+  ixs_node *three = ixs_int(ctx, 3);
+  ixs_node *fifteen = ixs_int(ctx, 15);
+  ixs_node *toggled = ixs_xor(ctx, ixs_int(ctx, 2), x);
+  ixs_node *toggled_equals_fifteen = ixs_cmp(ctx, toggled, IXS_CMP_EQ, fifteen);
+  ixs_node *toggled_ne_fifteen = ixs_cmp(ctx, toggled, IXS_CMP_NE, fifteen);
+  ixs_node *rewritten_equals_thirteen =
+      ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 13));
+  ixs_node *bit_batch[2] = {toggled_equals_fifteen, toggled_ne_fifteen};
   const ixs_node *result;
   size_t errors;
   size_t i;
   bool held = false;
 
   CHECK(ctx && x && zero && one && equals_zero && equals_one && is_endpoint &&
-        is_neither && partial && two_points && limit_facts && over_limit_facts);
+        is_neither && partial && two_points && limit_facts &&
+        over_limit_facts && bit_aligned && three && fifteen && toggled &&
+        toggled_equals_fifteen && toggled_ne_fifteen &&
+        rewritten_equals_thirteen);
   range.has_lower = true;
   range.has_upper = true;
   range.lower_q = 1;
@@ -8774,6 +8786,28 @@ static void test_fact_simplify_projects_finite_root_predicates(void) {
   CHECK(batch[1] == ixs_false(ctx));
   CHECK(batch[2] == equals_zero);
   CHECK(batch[3] == partial);
+
+  range.upper_p = 15;
+  CHECK(ixs_facts_assume_range(bit_aligned, x, &range));
+  CHECK(ixs_facts_assume_pred(
+      bit_aligned, ixs_cmp(ctx, ixs_and(ctx, x, three), IXS_CMP_EQ, zero)));
+  CHECK(test_ixs_check_predicate_facts(bit_aligned, toggled_equals_fifteen) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_facts(bit_aligned, toggled_equals_fifteen) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_simplify_facts(bit_aligned, toggled_equals_fifteen) ==
+        ixs_false(ctx));
+  CHECK(test_ixs_check_predicate_facts(bit_aligned, toggled_ne_fifteen) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(bit_aligned, toggled_ne_fifteen) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(bit_aligned, toggled_ne_fifteen) ==
+        ixs_true(ctx));
+  CHECK(test_ixs_check_predicate_facts(
+            bit_aligned, rewritten_equals_thirteen) == IXS_CHECK_UNKNOWN);
+  ixs_simplify_batch_facts(bit_aligned, bit_batch, 2);
+  CHECK(bit_batch[0] == ixs_false(ctx));
+  CHECK(bit_batch[1] == ixs_true(ctx));
 
   for (i = 0; i < OVER_LIMIT; i++)
     limit_terms[i] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, (int64_t)i));

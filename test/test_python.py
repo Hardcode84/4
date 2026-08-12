@@ -5295,6 +5295,53 @@ def test_check_exact_fallback_assumption_fact_parity() -> None:
     assert ctx.check(different, facts=facts) is True
 
 
+def test_fact_predicate_truth_pipeline_parity_matrix() -> None:
+    ctx = ixsimpl.Context()
+    x = ctx.sym("predicate_truth_x")
+
+    two_points = ctx.facts()
+    two_points.assume_range(x, 0, 1)
+    endpoint = ixsimpl.or_(ctx.eq(x, 0), ctx.eq(x, 1))
+    neither = ixsimpl.and_(ctx.ne(x, 0), ctx.ne(x, 1))
+
+    bit_aligned = ctx.facts()
+    bit_aligned.assume_many([ctx.eq(x & 3, 0), x >= 0, x <= 15])
+    toggled = ixsimpl.xor_(ctx.int_(2), x)
+    impossible = ctx.eq(toggled, 15)
+    necessary = ctx.ne(toggled, 15)
+
+    matrix = [
+        (two_points, endpoint, True, False),
+        (two_points, neither, False, False),
+        (bit_aligned, impossible, False, True),
+        (bit_aligned, necessary, True, True),
+    ]
+    for facts, predicate, expected, normalized_cmp in matrix:
+        assert ctx.check_predicate(predicate, facts) is expected
+        assert predicate.simplify(facts=facts) == (ctx.true_() if expected else ctx.false_())
+        assert ctx.check_predicate(ixsimpl.not_(predicate), facts) is (not expected)
+        if normalized_cmp:
+            assert ctx.check(predicate, facts=facts) is expected
+            assert ctx.check(ixsimpl.not_(predicate), facts=facts) is (not expected)
+
+    finite_batch = [endpoint, neither]
+    bit_batch = [impossible, necessary]
+    ctx.simplify_batch(finite_batch, facts=two_points)
+    ctx.simplify_batch(bit_batch, facts=bit_aligned)
+    assert finite_batch + bit_batch == [
+        ctx.true_(),
+        ctx.false_(),
+        ctx.false_(),
+        ctx.true_(),
+    ]
+
+    # A bounded value has no unique canonical replacement merely because its
+    # range is useful to proof queries.
+    assert x.simplify(facts=two_points) == x
+    assert ctx.range(x, facts=two_points) == (0, 1)
+    assert ctx.equivalent(x, ctx.int_(0), two_points) is None
+
+
 def test_fact_backed_simplification() -> None:
     ctx = ixsimpl.Context()
     x, y = ctx.sym("fact_simplify_x"), ctx.sym("fact_simplify_y")

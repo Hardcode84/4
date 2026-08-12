@@ -648,14 +648,23 @@ exceeds the node representation, the original structurally valid comparison
 is retained and the failed fold's diagnostic is discarded. Operand errors and
 allocation failure still propagate.
 
-After fact-backed rewriting finishes, a predicate root receives one bounded
-truth projection at the caller boundary. Structural predicate evaluation and
-the existing finite-domain proof may replace the root with canonical `0` or
-`1`; they are not simplifier rules and cannot recurse into rewriting. The
-finite fallback inspects at most 4096 nodes and 8 finite-range symbols and
-enumerates at most 64 Cartesian points. Varying predicates, eager partial
-operands, larger domains, proof limits, and allocation failure retain the
-ordinary query status instead of manufacturing a constant.
+Fact-backed checking and simplification use one root truth pipeline. It applies
+structural predicate evaluation, exact comparison proof, and local implication
+in that order. Simplification checks the original root before the rewritten
+root: a valid fact-backed rewrite can remove the representation that made the
+original proof cheap, but it cannot invalidate that proof. The bounded finite
+domain proof remains the final fallback and evaluates the original root. These
+are caller-boundary projections, not simplifier rules, and cannot recurse into
+rewriting. The finite fallback inspects at most 4096 nodes and 8 finite-range
+symbols and enumerates at most 64 Cartesian points. Varying predicates, eager
+partial operands, larger domains, proof limits, and allocation failure retain
+the ordinary query status instead of manufacturing a constant.
+
+The parity matrix checks each proved predicate and its negation through scalar
+simplification, batch simplification, and predicate checking. A non-predicate
+range does not itself select a canonical value: for example, `0 <= x <= 1`
+supports predicate proofs while simplification retains `x`. Canonical
+replacement requires a singleton value or another exact identity proof.
 
 A non-predicate ADD root may likewise use the shared equivalence proof to
 replace a proved additive identity with canonical `0`. The cheap admission

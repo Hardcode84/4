@@ -818,11 +818,16 @@ facts_status_from_algebra(ixs_algebra_status status) {
   return IXS_FACT_QUERY_COMPLETE;
 }
 
+/* One root truth pipeline is shared by check and simplification. Structural
+ * predicate folding, exact comparison proof, and local implication retain
+ * their distinct bounded engines but no public entry may omit one of them. */
 static ixs_check_result
-facts_predicate_eval(ixs_bounds *bounds, ixs_node *predicate, bool *limited) {
+facts_predicate_truth(ixs_bounds *bounds, ixs_node *predicate, bool *limited) {
   ixs_check_result result = bounds_predicate_eval(bounds, predicate, limited);
   if (!*limited && result == IXS_CHECK_UNKNOWN && predicate->tag == IXS_CMP)
     result = ixs_bounds_check_query(bounds, predicate);
+  if (!*limited && result == IXS_CHECK_UNKNOWN)
+    result = bounds_predicate_implication(bounds, predicate, limited);
   return result;
 }
 
@@ -832,7 +837,7 @@ static ixs_check_result facts_project_rewritten_predicate(ixs_bounds *bounds,
                                                           ixs_node *source,
                                                           ixs_node *rewritten,
                                                           bool *limited) {
-  ixs_check_result result = facts_predicate_eval(bounds, rewritten, limited);
+  ixs_check_result result = facts_predicate_truth(bounds, rewritten, limited);
   if (!*limited && result == IXS_CHECK_UNKNOWN)
     result = bounds_predicate_bounded_finite_domain(bounds, source);
   return result;
@@ -927,8 +932,10 @@ static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
       !ixs_node_is_pred_kind(source) || ixs_node_is_known_true(rewritten) ||
       ixs_node_is_known_false(rewritten))
     return rewritten;
-  projected =
-      facts_project_rewritten_predicate(bounds, source, rewritten, limited);
+  projected = facts_predicate_truth(bounds, source, limited);
+  if (!*limited && projected == IXS_CHECK_UNKNOWN)
+    projected =
+        facts_project_rewritten_predicate(bounds, source, rewritten, limited);
   if (projected == IXS_CHECK_TRUE)
     return ctx->node_true;
   if (projected == IXS_CHECK_FALSE)
@@ -976,10 +983,7 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
   /* The predicate engine owns structural truth. Exact EQ/NE fallback belongs
    * to equivalence and is applied here at the public query boundary. */
   result.check =
-      facts_predicate_eval(&facts->bounds, predicate, &predicate_limited);
-  if (!predicate_limited && result.check == IXS_CHECK_UNKNOWN)
-    result.check = bounds_predicate_implication(&facts->bounds, predicate,
-                                                &predicate_limited);
+      facts_predicate_truth(&facts->bounds, predicate, &predicate_limited);
   if (predicate_limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
     goto cleanup;
@@ -1466,6 +1470,7 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
   ixs_arena_mark mark;
   ixs_algebra_status definition_status;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
+  bool predicate_limited = false;
   bool scratch_saved = false;
   if (!facts_store_bind(facts, &binding, &ctx))
     return result;
@@ -1488,7 +1493,14 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  result.check = ixs_bounds_check_query(&facts->bounds, expr);
+  result.check =
+      expr->tag == IXS_CMP
+          ? facts_predicate_truth(&facts->bounds, expr, &predicate_limited)
+          : ixs_bounds_check_query(&facts->bounds, expr);
+  if (predicate_limited) {
+    result.status = IXS_FACT_QUERY_LIMITED;
+    goto cleanup;
+  }
   result.status = IXS_FACT_QUERY_COMPLETE;
   if (result.check != IXS_CHECK_UNKNOWN || facts->bounds.oom ||
       bounds_query_state_transport(&facts->bounds) !=
@@ -1501,8 +1513,16 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
   result.status = facts_status_from_algebra(definition_status);
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     goto cleanup;
-  if (normalized != expr)
-    result.check = ixs_bounds_check_query(&facts->bounds, normalized);
+  if (normalized != expr) {
+    result.check = normalized->tag == IXS_CMP
+                       ? facts_predicate_truth(&facts->bounds, normalized,
+                                               &predicate_limited)
+                       : ixs_bounds_check_query(&facts->bounds, normalized);
+    if (predicate_limited) {
+      result.status = IXS_FACT_QUERY_LIMITED;
+      goto cleanup;
+    }
+  }
   result.status = IXS_FACT_QUERY_COMPLETE;
 
 cleanup:
