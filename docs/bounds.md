@@ -393,7 +393,12 @@ ordered-predicate key; each successful mutation claims a fact-pointer and
 semantic-version key. Collision replacement advances the slot generation, so
 an older fact handle observes a cache miss rather than another domain's result.
 No fact handle embeds a result table. Together the lazily allocated tables
-retain at most 256 KiB per context. Cache allocation failure is an
+retain at most 256 KiB per context. A separate direct-mapped 512-entry table
+retains at most 32 KiB for conclusive bounded equivalence subproofs. Its key is
+the exact fact-domain identity plus the unordered operand pair; mutation
+assigns a new domain identity. `UNKNOWN` and failed, limited, cyclic, invalid,
+or unrepresentable attempts are never stored, so a cache entry cannot suppress
+a stronger later proof. Cache allocation failure is an
 optimization miss, while any allocation or validation failure during closure
 construction or replay retains the normal transaction-poisoning contract.
 Cached nodes are context-owned and immutable, so entries survive session reset
@@ -894,12 +899,14 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   proven integer-valued.
 
   A zero-sum ADD is partitioned into canonical positive and negative sides.
-  Across two ADDs, equally scaled terms first match by pointer and then by the
-  same bounded equivalence proof; matched terms are removed and the smaller
-  residual relation re-enters equivalence. Matching is deterministic O(L*R),
-  has no radix or layout tag, and strictly reduces the number of direct terms
-  before recursion. Allocation failure, query limits, invalid state, and
-  unrepresentable optional arithmetic keep their distinct existing outcomes.
+  Across two ADDs, equally scaled terms first match by pointer. That direct
+  residual is tried before semantic matching. If cheaper complete proof paths
+  miss, remaining equal-scale terms use the same bounded equivalence proof and
+  rebuild the residual once more. Matching is deterministic O(L*R), has no
+  radix or layout tag, and strictly reduces the number of direct terms before
+  recursion. Conclusive bounded subproofs use the exact-domain cache described
+  above. Allocation failure, query limits, invalid state, and unrepresentable
+  optional arithmetic keep their distinct existing outcomes.
 
   Immediate canonical additive-row mechanics are owned by the private
   `src/additive_row.c` component. Allocation-free recognizers recover a single

@@ -45,6 +45,7 @@ typedef struct {
   size_t simplify_cache_count;
   size_t simplify_cache_capacity;
   size_t visited;
+  size_t memo_cycles;
   unsigned bounded_subproof_depth;
   bool limited;
   bool invalid;
@@ -220,12 +221,25 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
 static ixs_check_result equivalence_bounded_core(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
+  ixs_bounds_transport_snapshot transport;
+  size_t memo_cycles;
   ixs_check_result result;
   if (state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
     return IXS_CHECK_UNKNOWN;
+  if (facts_equivalence_cache_lookup(state->ctx, state->bounds, lhs, rhs,
+                                     &result))
+    return result;
+  transport = ixs_bounds_query_transport_snapshot(state->bounds);
+  memo_cycles = state->memo_cycles;
   state->bounded_subproof_depth++;
   result = equivalence_core(state, lhs, rhs, depth);
   state->bounded_subproof_depth--;
+  if (result != IXS_CHECK_UNKNOWN && !state->limited && !state->invalid &&
+      !state->oom && !state->arithmetic_unrepresentable &&
+      state->memo_cycles == memo_cycles &&
+      !bounds_query_limited_since(state->bounds, transport) &&
+      !bounds_query_invalid_since(state->bounds, transport))
+    facts_equivalence_cache_store(state->ctx, state->bounds, lhs, rhs, result);
   return result;
 }
 
@@ -730,12 +744,46 @@ static bool equivalence_build_add_residual(equivalence_state *state,
   return true;
 }
 
+static bool equivalence_match_semantic_add_terms(equivalence_state *state,
+                                                 ixs_node *lhs, ixs_node *rhs,
+                                                 unsigned char *lhs_matched,
+                                                 unsigned char *rhs_matched,
+                                                 uint32_t *matched_count,
+                                                 unsigned depth) {
+  uint32_t i;
+  uint32_t j;
+
+  for (i = 0; i < lhs->u.add.nterms; i++) {
+    if (lhs_matched[i])
+      continue;
+    for (j = 0; j < rhs->u.add.nterms; j++) {
+      if (rhs_matched[j] ||
+          !equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
+                                       rhs->u.add.terms[j].coeff))
+        continue;
+      if (equivalence_bounded_core(state, lhs->u.add.terms[i].term,
+                                   rhs->u.add.terms[j].term,
+                                   depth + 1u) == IXS_CHECK_TRUE) {
+        lhs_matched[i] = 1;
+        rhs_matched[j] = 1;
+        (*matched_count)++;
+        break;
+      }
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        return false;
+    }
+  }
+  return true;
+}
+
 /* Equal-scale terms may cancel after their values are proved equivalent. The
  * two canonical sums are query-local, so deterministic matching is O(L*R).
  * Each semantic candidate uses the fixed bounded-subproof allowance. */
 static ixs_check_result
 equivalence_cancel_proven_add_terms(equivalence_state *state, ixs_node *lhs,
-                                    ixs_node *rhs, unsigned depth) {
+                                    ixs_node *rhs, unsigned depth,
+                                    bool match_semantic) {
   ixs_arena_mark mark;
   unsigned char *lhs_matched;
   unsigned char *rhs_matched;
@@ -771,33 +819,18 @@ equivalence_cancel_proven_add_terms(equivalence_state *state, ixs_node *lhs,
       }
     }
   }
-  for (i = 0; i < lhs->u.add.nterms; i++) {
-    if (lhs_matched[i])
-      continue;
-    for (j = 0; j < rhs->u.add.nterms; j++) {
-      if (rhs_matched[j] ||
-          !equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
-                                       rhs->u.add.terms[j].coeff))
-        continue;
-      if (equivalence_bounded_core(state, lhs->u.add.terms[i].term,
-                                   rhs->u.add.terms[j].term,
-                                   depth + 1u) == IXS_CHECK_TRUE) {
-        lhs_matched[i] = 1;
-        rhs_matched[j] = 1;
-        matched_count++;
-        break;
-      }
-      if (state->limited || state->invalid || state->oom ||
-          state->arithmetic_unrepresentable)
-        goto cleanup;
-    }
-  }
+  if (match_semantic &&
+      !equivalence_match_semantic_add_terms(state, lhs, rhs, lhs_matched,
+                                            rhs_matched, &matched_count, depth))
+    goto cleanup;
   if (matched_count == 0u ||
       !equivalence_build_add_residual(state, lhs, lhs_matched, &lhs_residual) ||
       !equivalence_build_add_residual(state, rhs, rhs_matched, &rhs_residual))
     goto cleanup;
   result =
       equivalence_bounded_core(state, lhs_residual, rhs_residual, depth + 1u);
+  if (!match_semantic && result != IXS_CHECK_TRUE)
+    result = IXS_CHECK_UNKNOWN;
 
 cleanup:
   ixs_arena_restore(&state->ctx->scratch, mark);
@@ -1536,8 +1569,10 @@ static ixs_check_result equivalence_core(equivalence_state *state,
   }
   if (entry->complete)
     return entry->result;
-  if (entry->active)
+  if (entry->active) {
+    state->memo_cycles++;
     return IXS_CHECK_UNKNOWN;
+  }
   entry->active = true;
   result = equivalence_core_impl(state, lhs, rhs, depth, true);
   entry = equivalence_memo_get(state, lhs, rhs, false);
@@ -1971,7 +2006,7 @@ equivalence_direct_arithmetic(equivalence_state *state, ixs_node *lhs,
     return result;
 
   result = equivalence_cancel_proven_add_terms(state, simplified_lhs,
-                                               simplified_rhs, depth);
+                                               simplified_rhs, depth, false);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
 
@@ -2005,6 +2040,26 @@ equivalence_context_composition(equivalence_state *state, ixs_node *lhs,
   if (result == IXS_CHECK_UNKNOWN && state->arithmetic_unrepresentable)
     return equivalence_low_bits(state, lhs, rhs, depth);
   return result;
+}
+
+static ixs_check_result
+equivalence_final_fallbacks(equivalence_state *state, ixs_node *lhs,
+                            ixs_node *rhs, ixs_node *simplified_lhs,
+                            ixs_node *simplified_rhs, unsigned depth,
+                            bool allow_context) {
+  ixs_check_result result =
+      equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_cancel_proven_add_terms(state, simplified_lhs,
+                                               simplified_rhs, depth, true);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_low_bits(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN || !allow_context)
+    return result;
+  return equivalence_piecewise_root(state, simplified_lhs, simplified_rhs,
+                                    depth);
 }
 
 static ixs_check_result equivalence_core_impl(equivalence_state *state,
@@ -2067,14 +2122,8 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   result = equivalence_projected(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
-  result = equivalence_expanded(state, simplified_lhs, simplified_rhs, depth);
-  if (result != IXS_CHECK_UNKNOWN)
-    return result;
-  result = equivalence_low_bits(state, lhs, rhs, depth);
-  if (result != IXS_CHECK_UNKNOWN || !allow_context)
-    return result;
-  return equivalence_piecewise_root(state, simplified_lhs, simplified_rhs,
-                                    depth);
+  return equivalence_final_fallbacks(state, lhs, rhs, simplified_lhs,
+                                     simplified_rhs, depth, allow_context);
 }
 
 static ixs_algebra_status bounds_equivalence_query_detail_impl(

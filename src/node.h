@@ -171,6 +171,9 @@ struct ixs_ctx {
 
   /* Exact empty-domain fact closures, shared by short-lived sessions. */
   void *facts_closure_cache;
+  /* Conclusive bounded equivalence proofs, keyed by exact fact domain. */
+  void *facts_equivalence_cache;
+  uint64_t next_facts_domain_id;
 
   /* Lazily allocated, context-lifetime workspace for bounds proof queries. */
   void *bounds_query_state;

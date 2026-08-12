@@ -244,6 +244,8 @@ static void test_generic_context_cancellation(void) {
   ixs_facts *facts = ixs_facts_create(ctx);
   const ixs_node *batch[2] = {zero_sum, near_miss};
   facts_query_cache *fact_cache;
+  ixs_facts_equivalence_cache_stats_result proof_cache;
+  size_t proof_hits;
   size_t projection_visits;
   size_t projection_skips;
 
@@ -272,6 +274,14 @@ static void test_generic_context_cancellation(void) {
         IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(facts, zero_sum, ixs_int(ctx, 0)) ==
         IXS_CHECK_TRUE);
+  ixs_facts_equivalence_cache_stats(ctx, &proof_cache);
+  CHECK(proof_cache.stores != 0u);
+  CHECK(proof_cache.retained_bytes <= proof_cache.retained_limit);
+  proof_hits = proof_cache.hits;
+  CHECK(test_ixs_equivalent_facts(facts, zero_sum, ixs_int(ctx, 0)) ==
+        IXS_CHECK_TRUE);
+  ixs_facts_equivalence_cache_stats(ctx, &proof_cache);
+  CHECK(proof_cache.hits > proof_hits);
   fact_cache = facts->bounds.facts_query_cache;
   CHECK(fact_cache != NULL);
   projection_visits = facts->bounds.exact_projection_visits;

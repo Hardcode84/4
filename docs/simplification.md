@@ -688,6 +688,9 @@ equivalence therefore suppresses duplicate exact projection only for that
 typed entry point. Ordinary equivalence retains full exact projection.
 Projection-recursive equivalence is not cached as a full proof, so a restricted
 UNKNOWN cannot hide a later top-level proof.
+Conclusive bounded child proofs may be reused across queries in the same exact
+fact domain. Unknown or poisoned attempts are never cached, and ordinary
+equivalence still runs full exact projection.
 
 A structurally total non-predicate root whose ordinary interval query proves
 one finite rational value is replaced by that canonical rational. This final
