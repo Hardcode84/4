@@ -8,6 +8,8 @@
 #include <string.h>
 
 #ifdef IXS_TEST_INTERNAL
+#include "bounds_query.h"
+#include "facts_store.h"
 #include "node.h"
 #include "simplify.h"
 #endif
@@ -3685,6 +3687,126 @@ static void test_fact_backed_simplification(void) {
   ixs_ctx_destroy(other);
 }
 
+static void test_fact_equality_definition_normalization(void) {
+  ixs_ctx *ctx = get_ctx();
+  ixs_node *source_x = ixs_sym(ctx, "definition_source_x");
+  ixs_node *source_y = ixs_sym(ctx, "definition_source_y");
+  ixs_node *fresh_x = ixs_sym(ctx, "definition_fresh_x");
+  ixs_node *fresh_y = ixs_sym(ctx, "definition_fresh_y");
+  ixs_node *definitions[2] = {
+      ixs_cmp(ctx, source_x, IXS_CMP_EQ, fresh_x),
+      ixs_cmp(ctx, source_y, IXS_CMP_EQ,
+              ixs_add(ctx, fresh_y, ixs_int(ctx, 3))),
+  };
+  ixs_node *expr =
+      ixs_add(ctx, source_x, ixs_mul(ctx, ixs_int(ctx, 2), source_y));
+  ixs_node *expected = ixs_add(
+      ctx, fresh_x,
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 2), fresh_y), ixs_int(ctx, 6)));
+  const ixs_node *batch[2] = {expr, source_y};
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(facts && ixs_facts_assume_preds(facts, definitions, 2));
+  CHECK(test_ixs_simplify_facts(facts, expr) == expected);
+  test_ixs_simplify_batch_facts(facts, batch, 2);
+  CHECK(batch[0] == expected);
+  CHECK(batch[1] == ixs_add(ctx, fresh_y, ixs_int(ctx, 3)));
+  CHECK(test_ixs_equivalent_facts(facts, expr, expected) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, expected, expr) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, expr, IXS_CMP_EQ, expected)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_facts(facts, ixs_cmp(ctx, expr, IXS_CMP_NE, expected)) ==
+        IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, expr, IXS_CMP_EQ, expected)) == IXS_CHECK_TRUE);
+
+  {
+    ixs_node *carrier = ixs_sym(ctx, "definition_composite_carrier");
+    ixs_node *target = ixs_floor(ctx, ixs_div(ctx, carrier, ixs_int(ctx, 8)));
+    ixs_node *replacement = ixs_sym(ctx, "definition_composite_replacement");
+    ixs_node *nested = ixs_add(ctx, ixs_int(ctx, 1), target);
+    ixs_facts *composite = ixs_facts_create(ctx);
+    CHECK(composite &&
+          ixs_facts_assume_pred(composite,
+                                ixs_cmp(ctx, target, IXS_CMP_EQ, replacement)));
+    CHECK(test_ixs_simplify_facts(composite, nested) ==
+          ixs_add(ctx, replacement, ixs_int(ctx, 1)));
+  }
+
+  {
+    ixs_node *cycle_x = ixs_sym(ctx, "definition_cycle_x");
+    ixs_node *cycle_y = ixs_sym(ctx, "definition_cycle_y");
+    ixs_node *cycle_expr = ixs_add(ctx, cycle_x, cycle_y);
+    ixs_node *cycle_result;
+    ixs_facts *cycle = ixs_facts_create(ctx);
+    CHECK(cycle && ixs_facts_assume_pred(
+                       cycle, ixs_cmp(ctx, cycle_x, IXS_CMP_EQ, cycle_y)));
+    CHECK(test_ixs_simplify_facts(cycle, cycle_x) == cycle_y);
+    cycle_result = test_ixs_simplify_facts(cycle, cycle_expr);
+    CHECK(cycle_result == ixs_mul(ctx, ixs_int(ctx, 2), cycle_x) ||
+          cycle_result == ixs_mul(ctx, ixs_int(ctx, 2), cycle_y));
+  }
+
+  {
+    ixs_node *self = ixs_sym(ctx, "definition_self");
+    ixs_facts *recursive = ixs_facts_create(ctx);
+    CHECK(recursive &&
+          ixs_facts_assume_pred(recursive,
+                                ixs_cmp(ctx, self, IXS_CMP_EQ,
+                                        ixs_mod(ctx, self, ixs_int(ctx, 8)))));
+    CHECK(test_ixs_simplify_facts(recursive, self) == self);
+  }
+
+  {
+    ixs_node *partial = ixs_sym(ctx, "definition_partial");
+    ixs_node *divisor = ixs_sym(ctx, "definition_divisor");
+    ixs_facts *open = ixs_facts_create(ctx);
+    CHECK(open && ixs_facts_assume_pred(
+                      open, ixs_cmp(ctx, partial, IXS_CMP_EQ,
+                                    ixs_div(ctx, ixs_int(ctx, 1), divisor))));
+    CHECK(test_ixs_simplify_facts(open, partial) == partial);
+  }
+
+  {
+    ixs_node *wide_x = ixs_sym(ctx, "definition_wide_x");
+    ixs_node *wide_y = ixs_sym(ctx, "definition_wide_y");
+    ixs_node *wide_z = ixs_sym(ctx, "definition_wide_z");
+    ixs_node *wide_expr = ixs_add(ctx, wide_x, wide_y);
+    ixs_facts *wide = ixs_facts_create(ctx);
+    CHECK(wide &&
+          ixs_facts_assume_pred(
+              wide, ixs_cmp(ctx, wide_x, IXS_CMP_EQ,
+                            ixs_add(ctx, wide_y, ixs_int(ctx, INT64_MAX)))));
+    CHECK(ixs_facts_assume_pred(
+        wide, ixs_cmp(ctx, wide_y, IXS_CMP_EQ,
+                      ixs_add(ctx, wide_z, ixs_int(ctx, 1)))));
+    CHECK(test_ixs_simplify_facts(wide, wide_expr) ==
+          ixs_add(ctx, wide_x, ixs_add(ctx, wide_z, ixs_int(ctx, 1))));
+  }
+
+#ifdef IXS_TEST_INTERNAL
+  {
+    ixs_arena *scratch = ixs_test_scratch(ctx);
+    size_t errors = ixs_ctx_nerrors(ctx);
+    ixs_arena_set_fail_after(scratch, 0);
+    CHECK(test_ixs_simplify_facts(facts, expr) == NULL);
+    ixs_arena_set_fail_after(scratch, IXS_ARENA_FAILURE_DISABLED);
+    CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+    CHECK(test_ixs_simplify_facts(facts, expr) == expected);
+  }
+  {
+    bool held = false;
+    size_t errors = ixs_ctx_nerrors(ctx);
+    CHECK(bounds_query_force_hold_begin(&facts->bounds, &held) && held);
+    bounds_query_note_limit(&facts->bounds);
+    CHECK(ixs_simplify_facts(facts, expr) == NULL);
+    CHECK(ixs_ctx_nerrors(ctx) == errors + 1u);
+    ixs_bounds_query_hold_end(&facts->bounds);
+    CHECK(test_ixs_simplify_facts(facts, expr) == expected);
+  }
+#endif
+}
+
 static void test_fact_backed_bit_projection(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "facts_bit_projection_x");
@@ -4520,8 +4642,10 @@ static void test_mod_difference_congruence(void) {
 
     CHECK(ixs_facts_assume_pred(equal_unproved_sign,
                                 ixs_cmp(ctx, x, IXS_CMP_EQ, z)));
+    /* Exact equality makes both remainder operands identical on every defined
+     * evaluation; a zero modulus may therefore refine to zero as poison. */
     CHECK(test_ixs_simplify_facts(equal_unproved_sign, symbolic_difference) ==
-          symbolic_difference);
+          ixs_int(ctx, 0));
 
     CHECK(ixs_facts_assume_pred(positive_unequal,
                                 ixs_cmp(ctx, d, IXS_CMP_GT, ixs_int(ctx, 0))));
@@ -4532,7 +4656,7 @@ static void test_mod_difference_congruence(void) {
         ixs_facts_assume_pred(equal_negative, ixs_cmp(ctx, x, IXS_CMP_EQ, z)));
     CHECK(ixs_facts_assume_pred(equal_negative,
                                 ixs_cmp(ctx, d, IXS_CMP_LT, ixs_int(ctx, 0))));
-    CHECK(test_ixs_simplify_facts(equal_negative, symbolic_difference) !=
+    CHECK(test_ixs_simplify_facts(equal_negative, symbolic_difference) ==
           ixs_int(ctx, 0));
   }
 
@@ -5986,6 +6110,7 @@ int main(void) {
   test_floor_symbolic_denom_residue();
   test_simplify_batch();
   test_fact_backed_simplification();
+  test_fact_equality_definition_normalization();
   test_fact_backed_bit_projection();
   test_fact_backed_affine_truncating_remainder();
   test_exact_divide_fact_piecewise();

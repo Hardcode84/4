@@ -53,6 +53,25 @@ IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
   return true;
 }
 
+IXS_STATIC bool query_node_set_reserve(ixs_arena *arena, query_node_set *set,
+                                       size_t count) {
+  while (set->capacity / 2u < count)
+    if (!query_node_set_grow(arena, set))
+      return false;
+  return true;
+}
+
+IXS_STATIC bool query_node_set_contains(const query_node_set *set,
+                                        const ixs_node *node) {
+  size_t index;
+  if (!set->capacity)
+    return false;
+  index = node->hash & (set->capacity - 1u);
+  while (set->slots[index] && set->slots[index] != node)
+    index = (index + 1u) & (set->capacity - 1u);
+  return set->slots[index] != NULL;
+}
+
 IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
                                       size_t *count, size_t *capacity,
                                       ixs_node *node) {

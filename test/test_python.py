@@ -2274,6 +2274,28 @@ def test_exact_floor_mod_refines_poison_before_child_rewrite() -> None:
     assert (x / k).simplify(assumptions=[zero]).is_domain_error
 
 
+def test_exact_equality_definitions_share_simplify_and_check() -> None:
+    ctx = ixsimpl.Context()
+    source_x = ctx.sym("definition_source_x")
+    source_y = ctx.sym("definition_source_y")
+    fresh_x = ctx.sym("definition_fresh_x")
+    fresh_y = ctx.sym("definition_fresh_y")
+    facts = ctx.facts()
+    facts.assume_many([ctx.eq(source_x, fresh_x), ctx.eq(source_y, fresh_y + 3)])
+    expr = source_x + 2 * source_y
+    expected = fresh_x + 2 * fresh_y + 6
+
+    assert expr.simplify(facts=facts) == expected
+    batch = [expr, source_y]
+    ctx.simplify_batch(batch, facts=facts)
+    assert batch == [expected, fresh_y + 3]
+    assert ctx.equivalent(expr, expected, facts) is True
+    assert ctx.equivalent(expected, expr, facts) is True
+    assert ctx.check(ctx.eq(expr, expected), facts=facts) is True
+    assert ctx.check(ctx.ne(expr, expected), facts=facts) is False
+    assert ctx.check_predicate(ctx.eq(expr, expected), facts) is True
+
+
 @given(
     m=st.integers(min_value=2, max_value=32),
     denominator=st.integers(min_value=1, max_value=4),

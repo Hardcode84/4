@@ -16,6 +16,10 @@ typedef struct {
 
 IXS_STATIC bool query_node_set_insert(ixs_arena *arena, query_node_set *set,
                                       ixs_node *node, bool *inserted);
+IXS_STATIC bool query_node_set_reserve(ixs_arena *arena, query_node_set *set,
+                                       size_t count);
+IXS_STATIC bool query_node_set_contains(const query_node_set *set,
+                                        const ixs_node *node);
 IXS_STATIC bool query_node_stack_push(ixs_arena *arena, ixs_node ***stack,
                                       size_t *count, size_t *capacity,
                                       ixs_node *node);

@@ -155,7 +155,9 @@ def test_relational_exact_equality_api_contract() -> None:
     overflow = ctx.facts()
     overflow.assume(ctx.eq(x, y + (2**63 - 1)))
     overflow.assume(ctx.eq(y, z + 1))
-    assert ctx.equivalent(x, z, overflow) is None
+    # One representable definition edge exposes y = z + 1; the retained wide
+    # relation then proves x and z unequal without narrowing their full delta.
+    assert ctx.equivalent(x, z, overflow) is False
     assert _difference(x, z, overflow) is None
 
 

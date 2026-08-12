@@ -1207,6 +1207,25 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   caches but do not weaken or consume the fact set. Detected contradictory
   facts leave simplification results unchanged; they never enable rewriting
   from an empty domain.
+
+  Fact-backed simplify, normalized comparison, predicate, and equivalence
+  queries share one exact-definition normalization step. It finds equality
+  endpoints anywhere in the original query DAG, collects each incident
+  independently defined component once, and chooses one nonrecursive
+  representative for that component. An endpoint outside the query is
+  preferred; if both aliases occur, one safe queried endpoint is retained so
+  they converge rather than swap. Checked relation offsets build the
+  replacements, which are applied simultaneously in one nonrecursive pass.
+  Replacement subgraphs are not traversed. A candidate whose descendants
+  contain a selected target is rejected, partial endpoints remain barriers,
+  and offsets that do not fit an expression constant are skipped. A
+  representational failure while rebuilding the rewritten DAG discards the
+  speculative rewrite and its diagnostic. Simplification then continues on
+  the original expression. Existing proof queries run first and definition
+  normalization is their fallback, so a canonical alias cannot hide a proof
+  already attached to the original endpoint. The work is linear in the query
+  DAG, the distinct incident components, and the candidate DAGs inspected
+  while selecting their representatives.
 - **Fact substitution transfer** (`ixs_facts_substitute_multi`, Python
   `Facts.subs(mapping)`, C++ `Facts::substitute_multi`): applies all target
   replacements simultaneously. Replacements are not traversed, overlapping

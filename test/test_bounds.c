@@ -5216,7 +5216,9 @@ static void test_public_exact_equality_cycles_and_overflow(void) {
       overflow, ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_add(ctx, z, ixs_int(ctx, 1)))));
   CHECK(!overflow->bounds.contradiction);
   CHECK(!test_simplified_difference(overflow, x, z, &delta));
-  CHECK(test_ixs_equivalent_facts(overflow, x, z) == IXS_CHECK_UNKNOWN);
+  /* Definition normalization can expose one representable edge at a time;
+   * the wide relation proof then establishes that the endpoints differ. */
+  CHECK(test_ixs_equivalent_facts(overflow, x, z) == IXS_CHECK_FALSE);
 
   ixs_ctx_destroy(ctx);
 }

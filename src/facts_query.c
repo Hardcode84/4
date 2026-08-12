@@ -41,6 +41,13 @@ typedef struct {
 } ixs_simplify_result;
 
 typedef struct {
+  query_node_set set;
+  ixs_node **ordered;
+  size_t count;
+  size_t capacity;
+} facts_definition_targets;
+
+typedef struct {
   ixs_fact_query_status status;
   ixs_pow2_fact fact;
 } ixs_pow2_query_result;
@@ -181,6 +188,300 @@ static ixs_node *facts_project_simplified_root(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *rewritten,
                                                bool *limited);
 
+static ixs_algebra_status
+facts_definition_collect_targets(ixs_ctx *ctx, ixs_bounds *bounds,
+                                 ixs_node *root,
+                                 facts_definition_targets *targets) {
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+
+  memset(&visited, 0, sizeof(visited));
+  memset(targets, 0, sizeof(*targets));
+  if (!query_node_stack_push(&ctx->scratch, &stack, &stack_count,
+                             &stack_capacity, root))
+    return IXS_ALGEBRA_OOM;
+  while (stack_count > 0u) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+    uint32_t i;
+    bool inserted;
+    size_t endpoint_index;
+
+    if (!query_node_set_insert(&ctx->scratch, &visited, node, &inserted))
+      return IXS_ALGEBRA_OOM;
+    if (!inserted)
+      continue;
+    if (ixs_relation_algebra_find_endpoint(&bounds->relations, node,
+                                           &endpoint_index)) {
+      (void)endpoint_index;
+      if (!query_node_set_insert(&ctx->scratch, &targets->set, node, &inserted))
+        return IXS_ALGEBRA_OOM;
+      if (inserted &&
+          !query_node_stack_push(&ctx->scratch, &targets->ordered,
+                                 &targets->count, &targets->capacity, node))
+        return IXS_ALGEBRA_OOM;
+    }
+    child_count = ixs_node_nchildren(node);
+    for (i = 0; i < child_count; i++) {
+      ixs_node *child = ixs_node_child(node, i);
+      if (!child)
+        return IXS_ALGEBRA_INVALID;
+      if (!query_node_stack_push(&ctx->scratch, &stack, &stack_count,
+                                 &stack_capacity, child))
+        return IXS_ALGEBRA_OOM;
+    }
+  }
+  return IXS_ALGEBRA_MATCH;
+}
+
+static ixs_algebra_status
+facts_definition_descendants_intersect_targets(ixs_ctx *ctx, ixs_node *root,
+                                               const query_node_set *targets,
+                                               bool *intersects) {
+  ixs_arena_mark mark = ixs_arena_save(&ctx->scratch);
+  query_node_set visited;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+  ixs_algebra_status status = IXS_ALGEBRA_MATCH;
+  uint32_t child_count;
+  uint32_t i;
+
+  *intersects = false;
+  memset(&visited, 0, sizeof(visited));
+  child_count = ixs_node_nchildren(root);
+  for (i = 0; i < child_count; i++) {
+    ixs_node *child = ixs_node_child(root, i);
+    if (!child) {
+      status = IXS_ALGEBRA_INVALID;
+      goto cleanup;
+    }
+    if (!query_node_stack_push(&ctx->scratch, &stack, &stack_count,
+                               &stack_capacity, child)) {
+      status = IXS_ALGEBRA_OOM;
+      goto cleanup;
+    }
+  }
+  while (stack_count > 0u) {
+    ixs_node *node = stack[--stack_count];
+    bool inserted;
+    if (query_node_set_contains(targets, node)) {
+      *intersects = true;
+      goto cleanup;
+    }
+    if (!query_node_set_insert(&ctx->scratch, &visited, node, &inserted)) {
+      status = IXS_ALGEBRA_OOM;
+      goto cleanup;
+    }
+    if (!inserted)
+      continue;
+    child_count = ixs_node_nchildren(node);
+    for (i = 0; i < child_count; i++) {
+      ixs_node *child = ixs_node_child(node, i);
+      if (!child) {
+        status = IXS_ALGEBRA_INVALID;
+        goto cleanup;
+      }
+      if (!query_node_stack_push(&ctx->scratch, &stack, &stack_count,
+                                 &stack_capacity, child)) {
+        status = IXS_ALGEBRA_OOM;
+        goto cleanup;
+      }
+    }
+  }
+
+cleanup:
+  ixs_arena_restore(&ctx->scratch, mark);
+  return status;
+}
+
+static ixs_algebra_status facts_definition_choose_canonical(
+    ixs_ctx *ctx, const facts_definition_targets *definitions,
+    const bounds_relation_component *component, size_t *canonical_index) {
+  unsigned pass;
+  size_t i;
+
+  *canonical_index = SIZE_MAX;
+  for (pass = 0; pass < 2u && *canonical_index == SIZE_MAX; pass++) {
+    for (i = 0; i < component->count; i++) {
+      ixs_node *candidate = component->entries[i].node;
+      bool selected = query_node_set_contains(&definitions->set, candidate);
+      bool intersects;
+      ixs_algebra_status status;
+
+      if (selected != (pass != 0u))
+        continue;
+      status = facts_definition_descendants_intersect_targets(
+          ctx, candidate, &definitions->set, &intersects);
+      if (status != IXS_ALGEBRA_MATCH)
+        return status;
+      if (!intersects) {
+        *canonical_index = i;
+        break;
+      }
+    }
+  }
+  return IXS_ALGEBRA_MATCH;
+}
+
+static ixs_algebra_status facts_definition_component_replacements(
+    ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *root,
+    const facts_definition_targets *definitions, query_node_set *processed,
+    ixs_node **targets, ixs_node **replacements, size_t *replacement_count) {
+  bounds_relation_component component;
+  ixs_algebra_status component_status;
+  size_t canonical_index = SIZE_MAX;
+  size_t i;
+
+  component_status =
+      bounds_collect_relation_component(bounds, root, &component);
+  if (component_status == IXS_ALGEBRA_NO_MATCH) {
+    bool inserted;
+    return query_node_set_insert(&ctx->scratch, processed, root, &inserted)
+               ? IXS_ALGEBRA_NO_MATCH
+               : IXS_ALGEBRA_OOM;
+  }
+  if (component_status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
+    return component_status;
+  }
+
+  /* Prefer a definition outside the query. If both sides occur, choose one
+   * nonrecursive queried endpoint so every alias converges instead of swaps. */
+  component_status = facts_definition_choose_canonical(
+      ctx, definitions, &component, &canonical_index);
+  if (component_status != IXS_ALGEBRA_MATCH) {
+    bounds_relation_component_destroy(&component);
+    return component_status;
+  }
+  if (canonical_index == SIZE_MAX) {
+    for (i = 0; i < component.count; i++) {
+      ixs_node *target = component.entries[i].node;
+      bool inserted;
+      if (!query_node_set_contains(&definitions->set, target))
+        continue;
+      if (!query_node_set_insert(&ctx->scratch, processed, target, &inserted)) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
+      }
+    }
+    bounds_relation_component_destroy(&component);
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+
+  for (i = 0; i < component.count; i++) {
+    ixs_node *target = component.entries[i].node;
+    ixs_node *replacement = component.entries[canonical_index].node;
+    ixs_relation_offset delta;
+    int64_t delta_value;
+    bool inserted;
+
+    if (!query_node_set_contains(&definitions->set, target))
+      continue;
+    if (!query_node_set_insert(&ctx->scratch, processed, target, &inserted)) {
+      bounds_relation_component_destroy(&component);
+      return IXS_ALGEBRA_OOM;
+    }
+    if (!inserted)
+      continue;
+    if (!ixs_relation_offset_add(component.entries[i].offset,
+                                 ixs_relation_offset_negate(
+                                     component.entries[canonical_index].offset),
+                                 &delta) ||
+        !ixs_relation_offset_to_int64(delta, &delta_value))
+      continue;
+    if (delta_value != 0) {
+      ixs_node *constant = ixs_node_int(ctx, delta_value);
+      bool unrepresentable = false;
+      if (!constant) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
+      }
+      replacement = simp_try_add(ctx, replacement, constant, &unrepresentable);
+      if (!replacement) {
+        if (unrepresentable)
+          continue;
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_OOM;
+      }
+      if (ixs_node_is_sentinel(replacement)) {
+        bounds_relation_component_destroy(&component);
+        return IXS_ALGEBRA_INVALID;
+      }
+    }
+    if (replacement == target)
+      continue;
+    assert(*replacement_count < definitions->count);
+    targets[*replacement_count] = target;
+    replacements[(*replacement_count)++] = replacement;
+  }
+  bounds_relation_component_destroy(&component);
+  return IXS_ALGEBRA_MATCH;
+}
+
+/* Definitions are selected from the original query and applied once.
+ * Replacements are never traversed. A replacement may name its component's
+ * selected canonical root, but none of its descendants can be a selected
+ * target, so exact equality cycles cannot become recursive rewrites. Work is
+ * linear in the query DAG, the distinct incident relation components, and the
+ * candidate DAGs inspected while choosing one representative per component. */
+static ixs_algebra_status facts_definition_normalize(ixs_ctx *ctx,
+                                                     ixs_bounds *bounds,
+                                                     ixs_node *expr,
+                                                     ixs_node **result) {
+  facts_definition_targets definitions;
+  query_node_set processed;
+  ixs_node **targets;
+  ixs_node **replacements;
+  size_t replacement_count = 0;
+  size_t i;
+  ixs_query_transaction diagnostic_transaction;
+  ixs_algebra_status status;
+
+  *result = expr;
+  if (ixs_relation_algebra_edge_count(&bounds->relations) == 0u)
+    return IXS_ALGEBRA_NO_MATCH;
+  status = facts_definition_collect_targets(ctx, bounds, expr, &definitions);
+  if (status != IXS_ALGEBRA_MATCH || definitions.count == 0u)
+    return status == IXS_ALGEBRA_MATCH ? IXS_ALGEBRA_NO_MATCH : status;
+  if (definitions.count > UINT32_MAX ||
+      definitions.count > SIZE_MAX / sizeof(*replacements))
+    return IXS_ALGEBRA_OOM;
+  memset(&processed, 0, sizeof(processed));
+  if (!query_node_set_reserve(&ctx->scratch, &processed, definitions.count))
+    return IXS_ALGEBRA_OOM;
+  targets = ixs_arena_alloc(&ctx->scratch, definitions.count * sizeof(*targets),
+                            sizeof(void *));
+  replacements = ixs_arena_alloc(
+      &ctx->scratch, definitions.count * sizeof(*replacements), sizeof(void *));
+  if (!targets || !replacements)
+    return IXS_ALGEBRA_OOM;
+  for (i = 0; i < definitions.count; i++) {
+    if (query_node_set_contains(&processed, definitions.ordered[i]))
+      continue;
+    status = facts_definition_component_replacements(
+        ctx, bounds, definitions.ordered[i], &definitions, &processed, targets,
+        replacements, &replacement_count);
+    if (status != IXS_ALGEBRA_MATCH && status != IXS_ALGEBRA_NO_MATCH)
+      return status;
+  }
+  if (replacement_count == 0u)
+    return IXS_ALGEBRA_NO_MATCH;
+  ixs_query_transaction_begin(&diagnostic_transaction, ctx, NULL, NULL);
+  *result = simp_subs_multi(ctx, expr, (uint32_t)replacement_count, targets,
+                            replacements);
+  if (!*result)
+    return IXS_ALGEBRA_OOM;
+  if (ixs_node_is_sentinel(*result)) {
+    (void)ixs_query_transaction_finish(&diagnostic_transaction, false);
+    *result = expr;
+    return IXS_ALGEBRA_NO_MATCH;
+  }
+  return *result == expr ? IXS_ALGEBRA_NO_MATCH : IXS_ALGEBRA_MATCH;
+}
+
 static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
                                      ixs_node *expr,
                                      ixs_simplify_result *result) {
@@ -206,6 +507,22 @@ static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
     return true;
   }
   return false;
+}
+
+static ixs_fact_query_status
+facts_status_from_algebra(ixs_algebra_status status);
+
+static ixs_node *facts_definition_simplify(ixs_ctx *ctx, ixs_bounds *bounds,
+                                           ixs_node *expr,
+                                           ixs_fact_query_status *status,
+                                           bool *limited) {
+  ixs_node *normalized;
+  ixs_algebra_status definition_status =
+      facts_definition_normalize(ctx, bounds, expr, &normalized);
+  *status = facts_status_from_algebra(definition_status);
+  if (*status != IXS_FACT_QUERY_COMPLETE)
+    return NULL;
+  return simp_simplify_bounds_status(ctx, normalized, bounds, limited);
 }
 
 /* Successful poison refinement discards diagnostics from dead children.
@@ -251,8 +568,8 @@ static ixs_simplify_result facts_query_simplify(ixs_facts *facts,
 
   mark = ixs_arena_save(&ctx->scratch);
   old_oom = facts->bounds.oom;
-  value = simp_simplify_bounds_status(ctx, expr, &facts->bounds, &limited);
-  result.status = IXS_FACT_QUERY_COMPLETE;
+  value = facts_definition_simplify(ctx, &facts->bounds, expr, &result.status,
+                                    &limited);
   if (!limited && value && !ixs_node_is_sentinel(value) &&
       ixs_node_contains_rounding(value) && ixs_node_contains_piecewise(value))
     value = facts_simplify_truncating_remainders(ctx, &facts->bounds, expr,
@@ -354,6 +671,20 @@ static bool facts_simplify_batch_finalize(ixs_ctx *ctx, ixs_bounds *bounds,
   return true;
 }
 
+static ixs_algebra_status facts_simplify_batch_definitions(ixs_ctx *ctx,
+                                                           ixs_bounds *bounds,
+                                                           ixs_node **exprs,
+                                                           size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    ixs_algebra_status status =
+        facts_definition_normalize(ctx, bounds, exprs[i], &exprs[i]);
+    if (status != IXS_ALGEBRA_MATCH && status != IXS_ALGEBRA_NO_MATCH)
+      return status;
+  }
+  return IXS_ALGEBRA_MATCH;
+}
+
 static ixs_fact_query_status
 facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   ixs_session_binding binding;
@@ -366,6 +697,7 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
   bool old_oom;
   bool clean_result = true;
   size_t i;
+  ixs_algebra_status definition_status = IXS_ALGEBRA_MATCH;
   ixs_fact_query_status status = IXS_FACT_QUERY_INVALID;
 
   if (!facts_store_bind(facts, &binding, &ctx))
@@ -405,7 +737,11 @@ facts_query_simplify_batch(ixs_facts *facts, ixs_node **exprs, size_t n) {
     memcpy(originals, exprs, n * sizeof(*originals));
   }
   old_oom = facts->bounds.oom;
-  ok = simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds);
+  definition_status =
+      facts_simplify_batch_definitions(ctx, &facts->bounds, exprs, n);
+  status = facts_status_from_algebra(definition_status);
+  ok = status == IXS_FACT_QUERY_COMPLETE &&
+       simp_simplify_batch_bounds(ctx, exprs, n, &facts->bounds);
   if (ok)
     ok = facts_simplify_batch_remainders(ctx, &facts->bounds, originals, exprs,
                                          n, &status);
@@ -521,6 +857,8 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
   ixs_ctx *ctx;
   ixs_arena_mark mark;
   ixs_node *simplified;
+  ixs_node *normalized;
+  ixs_algebra_status definition_status;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
   bool predicate_limited = false;
   bool simplify_limited = false;
@@ -566,9 +904,16 @@ static ixs_fact_check_result facts_query_check_predicate(ixs_facts *facts,
   }
 
   mark = ixs_arena_save(&ctx->scratch);
-  simplified = simp_simplify_bounds_status(ctx, predicate, &facts->bounds,
-                                           &simplify_limited);
-  if (simplify_limited) {
+  definition_status =
+      facts_definition_normalize(ctx, &facts->bounds, predicate, &normalized);
+  result.status = facts_status_from_algebra(definition_status);
+  simplified = NULL;
+  if (result.status == IXS_FACT_QUERY_COMPLETE)
+    simplified = simp_simplify_bounds_status(ctx, normalized, &facts->bounds,
+                                             &simplify_limited);
+  if (result.status != IXS_FACT_QUERY_COMPLETE) {
+    result.check = IXS_CHECK_UNKNOWN;
+  } else if (simplify_limited) {
     result.status = IXS_FACT_QUERY_LIMITED;
   } else if (!simplified) {
     result.status = IXS_FACT_QUERY_OOM;
@@ -598,8 +943,12 @@ facts_query_equivalent(ixs_facts *facts, ixs_node *lhs, ixs_node *rhs) {
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
   ixs_node *nodes[2] = {lhs, rhs};
+  ixs_node *normalized_lhs;
+  ixs_arena_mark mark;
+  ixs_algebra_status definition_status;
   ixs_algebra_status detail;
   bool query_held = false;
+  bool scratch_saved = false;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
   if (!facts_store_bind(facts, &binding, &ctx))
     return result;
@@ -623,11 +972,26 @@ facts_query_equivalent(ixs_facts *facts, ixs_node *lhs, ixs_node *rhs) {
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
+  mark = ixs_arena_save(&ctx->scratch);
+  scratch_saved = true;
   detail = bounds_equivalence_query_detail(&facts->bounds, ctx, lhs, rhs,
                                            &result.check);
   result.status = facts_status_from_algebra(detail);
+  if (result.status != IXS_FACT_QUERY_COMPLETE ||
+      result.check != IXS_CHECK_UNKNOWN)
+    goto cleanup;
+  definition_status =
+      facts_definition_normalize(ctx, &facts->bounds, lhs, &normalized_lhs);
+  result.status = facts_status_from_algebra(definition_status);
+  if (result.status != IXS_FACT_QUERY_COMPLETE || normalized_lhs == lhs)
+    goto cleanup;
+  detail = bounds_equivalence_query_detail(&facts->bounds, ctx, normalized_lhs,
+                                           rhs, &result.check);
+  result.status = facts_status_from_algebra(detail);
 
 cleanup:
+  if (scratch_saved)
+    ixs_arena_restore(&ctx->scratch, mark);
   if (query_held)
     ixs_bounds_query_hold_end(&facts->bounds);
   result.status = facts_read_query_finish(&read_scope, result.status);
@@ -1012,7 +1376,11 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
+  ixs_node *normalized;
+  ixs_arena_mark mark;
+  ixs_algebra_status definition_status;
   ixs_fact_check_result result = {IXS_FACT_QUERY_INVALID, IXS_CHECK_UNKNOWN};
+  bool scratch_saved = false;
   if (!facts_store_bind(facts, &binding, &ctx))
     return result;
   facts_read_query_begin(&read_scope, &facts->bounds, ctx, "check");
@@ -1036,8 +1404,24 @@ static ixs_fact_check_result facts_query_check(ixs_facts *facts,
   }
   result.check = ixs_bounds_check_query(&facts->bounds, expr);
   result.status = IXS_FACT_QUERY_COMPLETE;
+  if (result.check != IXS_CHECK_UNKNOWN || facts->bounds.oom ||
+      bounds_query_state_transport(&facts->bounds) !=
+          IXS_BOUNDS_TRANSPORT_CLEAN)
+    goto cleanup;
+  mark = ixs_arena_save(&ctx->scratch);
+  scratch_saved = true;
+  definition_status =
+      facts_definition_normalize(ctx, &facts->bounds, expr, &normalized);
+  result.status = facts_status_from_algebra(definition_status);
+  if (result.status != IXS_FACT_QUERY_COMPLETE)
+    goto cleanup;
+  if (normalized != expr)
+    result.check = ixs_bounds_check_query(&facts->bounds, normalized);
+  result.status = IXS_FACT_QUERY_COMPLETE;
 
 cleanup:
+  if (scratch_saved)
+    ixs_arena_restore(&ctx->scratch, mark);
   result.status = facts_read_query_finish(&read_scope, result.status);
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.check = IXS_CHECK_UNKNOWN;
