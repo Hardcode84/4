@@ -70,12 +70,16 @@ static inline void facts_store_unbind(ixs_facts *facts,
 IXS_STATIC ixs_bounds_build_status facts_store_ingest_predicate_branch(
     ixs_ctx *ctx, ixs_bounds *bounds, ixs_node *predicate);
 IXS_STATIC void facts_store_destroy_session(ixs_session_impl *impl);
-/* The exact-domain cache stores only conclusive semantic proofs. */
+/* Exact-domain cache stores subproofs only at their original proof budget. */
 IXS_STATIC bool facts_equivalence_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *lhs, ixs_node *rhs,
+                                               unsigned depth,
+                                               unsigned bounded_depth,
                                                ixs_check_result *result);
 IXS_STATIC void facts_equivalence_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
                                               ixs_node *lhs, ixs_node *rhs,
+                                              unsigned depth,
+                                              unsigned bounded_depth,
                                               ixs_check_result result);
 
 /* Internal hooks emitted only by the test-instrumented library. */

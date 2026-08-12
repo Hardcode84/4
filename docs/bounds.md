@@ -393,12 +393,14 @@ ordered-predicate key; each successful mutation claims a fact-pointer and
 semantic-version key. Collision replacement advances the slot generation, so
 an older fact handle observes a cache miss rather than another domain's result.
 No fact handle embeds a result table. Together the lazily allocated tables
-retain at most 256 KiB per context. A separate direct-mapped 512-entry table
-retains at most 32 KiB for conclusive bounded equivalence subproofs. Its key is
-the exact fact-domain identity plus the unordered operand pair; mutation
-assigns a new domain identity. `UNKNOWN` and failed, limited, cyclic, invalid,
-or unrepresentable attempts are never stored, so a cache entry cannot suppress
-a stronger later proof. Cache allocation failure is an
+retain at most 256 KiB per context. A separate four-way 512-entry table retains
+at most 32 KiB for bounded equivalence subproofs. Its key is the exact
+fact-domain identity, unordered operand pair, proof depth, bounded-subproof
+depth, and full or restricted projection scope; mutation assigns a new domain
+identity. Clean `UNKNOWN` results are reusable only at that same proof budget
+and scope. Failed, limited, cyclic, invalid, OOM, or unrepresentable attempts
+are never stored, so a cache entry cannot suppress a stronger later proof.
+Cache allocation failure is an
 optimization miss, while any allocation or validation failure during closure
 construction or replay retains the normal transaction-poisoning contract.
 Cached nodes are context-owned and immutable, so entries survive session reset

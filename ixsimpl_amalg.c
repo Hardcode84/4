@@ -5407,24 +5407,28 @@ static ixs_check_result equivalence_bounded_core(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
   ixs_bounds_transport_snapshot transport;
+  bool cacheable;
   size_t memo_cycles;
   ixs_check_result result;
   if (state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
     return IXS_CHECK_UNKNOWN;
-  if (facts_equivalence_cache_lookup(state->ctx, state->bounds, lhs, rhs,
-                                     &result))
+  if (facts_equivalence_cache_lookup(state->ctx, state->bounds, lhs, rhs, depth,
+                                     state->bounded_subproof_depth, &result))
     return result;
   transport = ixs_bounds_query_transport_snapshot(state->bounds);
   memo_cycles = state->memo_cycles;
   state->bounded_subproof_depth++;
   result = equivalence_core(state, lhs, rhs, depth);
   state->bounded_subproof_depth--;
-  if (result != IXS_CHECK_UNKNOWN && !state->limited && !state->invalid &&
-      !state->oom && !state->arithmetic_unrepresentable &&
+  cacheable = result != IXS_CHECK_UNKNOWN ||
+              (memo_cycles == 0u && state->memo_cycles == 0u);
+  if (cacheable && !state->limited && !state->invalid && !state->oom &&
+      !state->arithmetic_unrepresentable && !state->bounds->oom &&
       state->memo_cycles == memo_cycles &&
       !bounds_query_limited_since(state->bounds, transport) &&
       !bounds_query_invalid_since(state->bounds, transport))
-    facts_equivalence_cache_store(state->ctx, state->bounds, lhs, rhs, result);
+    facts_equivalence_cache_store(state->ctx, state->bounds, lhs, rhs, depth,
+                                  state->bounded_subproof_depth, result);
   return result;
 }
 
@@ -21121,8 +21125,11 @@ typedef struct {
 #endif
 } facts_closure_cache;
 
-/* Expected O(1). Direct-map collisions evict only an optional proof result. */
+/* Expected O(1). Set collisions evict only an optional proof result. */
 #define FACTS_EQUIVALENCE_CACHE_CAP 512u
+#define FACTS_EQUIVALENCE_CACHE_WAYS 4u
+#define FACTS_EQUIVALENCE_CACHE_SETS                                           \
+  (FACTS_EQUIVALENCE_CACHE_CAP / FACTS_EQUIVALENCE_CACHE_WAYS)
 #define FACTS_EQUIVALENCE_CACHE_RETAINED_LIMIT (32u * 1024u)
 
 typedef struct {
@@ -21130,6 +21137,9 @@ typedef struct {
   ixs_node *rhs;
   uint64_t domain_id;
   ixs_check_result result;
+  unsigned depth;
+  unsigned bounded_depth;
+  bool restricted;
 } facts_equivalence_cache_entry;
 
 typedef struct {
@@ -21185,7 +21195,8 @@ static facts_closure_cache *facts_closure_cache_get(ixs_ctx *ctx) {
 }
 
 static bool facts_equivalence_cache_enabled(ixs_ctx *ctx, ixs_bounds *bounds) {
-  return ctx && bounds && ctx->arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+  return ctx && bounds && !bounds->oom &&
+         ctx->arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
          ctx->scratch.fail_after == IXS_ARENA_FAILURE_DISABLED &&
          bounds->query_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
          bounds->query_state_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
@@ -21214,18 +21225,26 @@ static void facts_equivalence_cache_clear(ixs_ctx *ctx) {
 }
 
 static size_t facts_equivalence_cache_slot(uint64_t domain_id, ixs_node *lhs,
-                                           ixs_node *rhs) {
+                                           ixs_node *rhs, unsigned depth,
+                                           unsigned bounded_depth) {
   size_t hash = ixs_hash_ptr(lhs);
   hash ^= ixs_hash_ptr(rhs) + (hash << 6u) + (hash >> 2u);
   hash ^= (size_t)domain_id + (hash << 6u) + (hash >> 2u);
-  return hash & (FACTS_EQUIVALENCE_CACHE_CAP - 1u);
+  hash ^= (size_t)depth + (hash << 6u) + (hash >> 2u);
+  hash ^= (size_t)bounded_depth + (hash << 6u) + (hash >> 2u);
+  return (hash & (FACTS_EQUIVALENCE_CACHE_SETS - 1u)) *
+         FACTS_EQUIVALENCE_CACHE_WAYS;
 }
 
 IXS_STATIC bool facts_equivalence_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
                                                ixs_node *lhs, ixs_node *rhs,
+                                               unsigned depth,
+                                               unsigned bounded_depth,
                                                ixs_check_result *result) {
   facts_equivalence_cache *cache;
   facts_query_cache *domain;
+  bool restricted;
+  size_t i;
   size_t slot;
   facts_equivalence_cache_entry *entry;
   if (!lhs || !rhs || !result || !facts_equivalence_cache_enabled(ctx, bounds))
@@ -21245,10 +21264,16 @@ IXS_STATIC bool facts_equivalence_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
     lhs = rhs;
     rhs = tmp;
   }
-  slot = facts_equivalence_cache_slot(domain->domain_id, lhs, rhs);
-  entry = &cache->entries[slot];
-  if (entry->domain_id == domain->domain_id && entry->lhs == lhs &&
-      entry->rhs == rhs) {
+  restricted = bounds->exact_projection_depth != 0;
+  slot = facts_equivalence_cache_slot(domain->domain_id, lhs, rhs, depth,
+                                      bounded_depth);
+  for (i = 0; i < FACTS_EQUIVALENCE_CACHE_WAYS; i++) {
+    entry = &cache->entries[slot + i];
+    if (entry->domain_id != domain->domain_id || entry->lhs != lhs ||
+        entry->rhs != rhs || entry->depth != depth ||
+        entry->bounded_depth != bounded_depth ||
+        entry->restricted != restricted)
+      continue;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     cache->hits++;
 #endif
@@ -21258,14 +21283,39 @@ IXS_STATIC bool facts_equivalence_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
   return false;
 }
 
+static facts_equivalence_cache_entry *facts_equivalence_cache_store_entry(
+    facts_equivalence_cache *cache, uint64_t domain_id, ixs_node *lhs,
+    ixs_node *rhs, unsigned depth, unsigned bounded_depth, bool restricted,
+    size_t slot) {
+  facts_equivalence_cache_entry *empty = NULL;
+  size_t i;
+
+  for (i = 0; i < FACTS_EQUIVALENCE_CACHE_WAYS; i++) {
+    facts_equivalence_cache_entry *candidate = &cache->entries[slot + i];
+    if (candidate->domain_id == domain_id && candidate->lhs == lhs &&
+        candidate->rhs == rhs && candidate->depth == depth &&
+        candidate->bounded_depth == bounded_depth &&
+        candidate->restricted == restricted)
+      return candidate;
+    if (!empty && candidate->domain_id == 0)
+      empty = candidate;
+  }
+  if (empty)
+    return empty;
+  return &cache->entries[slot + ((lhs->hash ^ rhs->hash ^ domain_id) &
+                                 (FACTS_EQUIVALENCE_CACHE_WAYS - 1u))];
+}
+
 IXS_STATIC void facts_equivalence_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
                                               ixs_node *lhs, ixs_node *rhs,
+                                              unsigned depth,
+                                              unsigned bounded_depth,
                                               ixs_check_result result) {
   facts_equivalence_cache *cache;
   facts_equivalence_cache_entry *entry;
   facts_query_cache *domain;
+  bool restricted;
   size_t slot;
-  assert(result != IXS_CHECK_UNKNOWN);
   if (!lhs || !rhs || !facts_equivalence_cache_enabled(ctx, bounds))
     return;
   domain = bounds->facts_query_cache;
@@ -21280,10 +21330,17 @@ IXS_STATIC void facts_equivalence_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
     lhs = rhs;
     rhs = tmp;
   }
-  slot = facts_equivalence_cache_slot(domain->domain_id, lhs, rhs);
-  entry = &cache->entries[slot];
-  if (entry->domain_id != 0 && (entry->domain_id != domain->domain_id ||
-                                entry->lhs != lhs || entry->rhs != rhs)) {
+  restricted = bounds->exact_projection_depth != 0;
+  slot = facts_equivalence_cache_slot(domain->domain_id, lhs, rhs, depth,
+                                      bounded_depth);
+  entry = facts_equivalence_cache_store_entry(cache, domain->domain_id, lhs,
+                                              rhs, depth, bounded_depth,
+                                              restricted, slot);
+  if (entry->domain_id != 0 &&
+      (entry->domain_id != domain->domain_id || entry->lhs != lhs ||
+       entry->rhs != rhs || entry->depth != depth ||
+       entry->bounded_depth != bounded_depth ||
+       entry->restricted != restricted)) {
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     cache->replacements++;
 #endif
@@ -21292,6 +21349,9 @@ IXS_STATIC void facts_equivalence_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
   entry->rhs = rhs;
   entry->domain_id = domain->domain_id;
   entry->result = result;
+  entry->depth = depth;
+  entry->bounded_depth = bounded_depth;
+  entry->restricted = restricted;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   cache->stores++;
 #endif

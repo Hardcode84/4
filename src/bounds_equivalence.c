@@ -222,24 +222,28 @@ static ixs_check_result equivalence_bounded_core(equivalence_state *state,
                                                  ixs_node *lhs, ixs_node *rhs,
                                                  unsigned depth) {
   ixs_bounds_transport_snapshot transport;
+  bool cacheable;
   size_t memo_cycles;
   ixs_check_result result;
   if (state->bounded_subproof_depth >= EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH)
     return IXS_CHECK_UNKNOWN;
-  if (facts_equivalence_cache_lookup(state->ctx, state->bounds, lhs, rhs,
-                                     &result))
+  if (facts_equivalence_cache_lookup(state->ctx, state->bounds, lhs, rhs, depth,
+                                     state->bounded_subproof_depth, &result))
     return result;
   transport = ixs_bounds_query_transport_snapshot(state->bounds);
   memo_cycles = state->memo_cycles;
   state->bounded_subproof_depth++;
   result = equivalence_core(state, lhs, rhs, depth);
   state->bounded_subproof_depth--;
-  if (result != IXS_CHECK_UNKNOWN && !state->limited && !state->invalid &&
-      !state->oom && !state->arithmetic_unrepresentable &&
+  cacheable = result != IXS_CHECK_UNKNOWN ||
+              (memo_cycles == 0u && state->memo_cycles == 0u);
+  if (cacheable && !state->limited && !state->invalid && !state->oom &&
+      !state->arithmetic_unrepresentable && !state->bounds->oom &&
       state->memo_cycles == memo_cycles &&
       !bounds_query_limited_since(state->bounds, transport) &&
       !bounds_query_invalid_since(state->bounds, transport))
-    facts_equivalence_cache_store(state->ctx, state->bounds, lhs, rhs, result);
+    facts_equivalence_cache_store(state->ctx, state->bounds, lhs, rhs, depth,
+                                  state->bounded_subproof_depth, result);
   return result;
 }
 

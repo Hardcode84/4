@@ -364,6 +364,81 @@ static void test_direct_fact_query_cache(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_equivalence_cache_clean_miss(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "proof_cache_a");
+  ixs_node *b = ixs_sym(ctx, "proof_cache_b");
+  ixs_node *c = ixs_sym(ctx, "proof_cache_c");
+  ixs_node *d = ixs_sym(ctx, "proof_cache_d");
+  ixs_node *e = ixs_sym(ctx, "proof_cache_e");
+  ixs_node *lhs = ixs_max(ctx, a, b);
+  ixs_node *rhs = ixs_max(ctx, c, d);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_session_binding binding;
+  ixs_facts_equivalence_cache_stats_result after;
+  ixs_facts_equivalence_cache_stats_result before;
+  ixs_check_result cached = IXS_CHECK_TRUE;
+  uint64_t domain_id;
+
+  CHECK(ctx && a && b && c && d && e && lhs && rhs && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, a, IXS_CMP_GE, ixs_int(ctx, 0))));
+
+  ixs_facts_equivalence_cache_stats(ctx, &before);
+  CHECK(test_ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  ixs_facts_equivalence_cache_stats(ctx, &after);
+  CHECK(after.stores > before.stores);
+  CHECK(after.retained_bytes <= after.retained_limit);
+  before = after;
+  CHECK(test_ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  ixs_facts_equivalence_cache_stats(ctx, &after);
+  CHECK(after.hits > before.hits);
+
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  facts_equivalence_cache_store(ctx, &facts->bounds, a, b, 3u, 1u,
+                                IXS_CHECK_UNKNOWN);
+  CHECK(facts_equivalence_cache_lookup(ctx, &facts->bounds, b, a, 3u, 1u,
+                                       &cached));
+  CHECK(cached == IXS_CHECK_UNKNOWN);
+  CHECK(!facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 4u, 1u,
+                                        &cached));
+  CHECK(!facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 3u, 2u,
+                                        &cached));
+  facts->bounds.exact_projection_depth++;
+  CHECK(!facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 3u, 1u,
+                                        &cached));
+  facts_equivalence_cache_store(ctx, &facts->bounds, a, b, 3u, 1u,
+                                IXS_CHECK_FALSE);
+  CHECK(facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 3u, 1u,
+                                       &cached));
+  CHECK(cached == IXS_CHECK_FALSE);
+  facts->bounds.exact_projection_depth--;
+  CHECK(facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 3u, 1u,
+                                       &cached));
+  CHECK(cached == IXS_CHECK_UNKNOWN);
+  ixs_session_unbind(&binding);
+
+  domain_id = facts->bounds.facts_query_cache->domain_id;
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, e, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(facts->bounds.facts_query_cache->domain_id != domain_id);
+  CHECK(!facts_equivalence_cache_lookup(ctx, &facts->bounds, a, b, 3u, 1u,
+                                        &cached));
+
+  ixs_facts_equivalence_cache_stats(ctx, &before);
+  ixs_arena_set_fail_after(&facts->bounds.query_arena, 0);
+  CHECK(test_ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  ixs_arena_set_fail_after(&facts->bounds.query_arena,
+                           IXS_ARENA_FAILURE_DISABLED);
+  ixs_facts_equivalence_cache_stats(ctx, &after);
+  CHECK(after.stores == before.stores);
+  CHECK(test_ixs_equivalent_facts(facts, lhs, rhs) == IXS_CHECK_UNKNOWN);
+  ixs_facts_equivalence_cache_stats(ctx, &after);
+  CHECK(after.stores > before.stores);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_equivalence_keeps_exact_projection(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *y = ixs_sym(ctx, "exact_projection_y");
@@ -390,6 +465,7 @@ int main(void) {
   test_equivalent_expression_contexts();
   test_generic_context_cancellation();
   test_direct_fact_query_cache();
+  test_equivalence_cache_clean_miss();
   test_equivalence_keeps_exact_projection();
   printf("test_equivalence_context: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
