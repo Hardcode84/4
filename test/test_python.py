@@ -1448,11 +1448,13 @@ def test_power_range_soundness(lo: int, width: int, exponent: int) -> None:
     expr = positive_power if exponent > 0 else ctx.int_(1) / positive_power
     result = ctx.range(expr, assumptions=[x >= lo, x <= hi])
 
-    if exponent < 0 and lo <= 0 <= hi:
-        assert result is None
+    if exponent < 0 and result is None:
+        assert lo <= 0 <= hi
         return
     assert result is not None
     for value in range(lo, hi + 1):
+        if exponent < 0 and value == 0:
+            continue
         actual = value**exponent if exponent > 0 else Fraction(1, value**magnitude)
         _assert_range_contains(result, actual)
 
@@ -2305,12 +2307,27 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
     reciprocal_lhs = (x + 1) / x
     reciprocal_rhs = 1 + reciprocal
     assert ctx.equivalent(polynomial, expanded, empty) is True
-    assert ctx.equivalent(reciprocal, reciprocal, empty) is None
-    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is None
+    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is True
+
+    origin = ctx.sym("origin")
+    extent = ctx.sym("extent")
+    trunc_facts = ctx.facts()
+    trunc_facts.assume(origin >= 0)
+    trunc_facts.assume(ctx.eq(ixsimpl.mod(origin, 256), 0))
+    trunc_facts.assume(ctx.eq(ixsimpl.mod(extent, 16), 0))
+    trunc_facts.assume(ctx.eq(origin, ixsimpl.floor(origin)))
+    trunc_facts.assume(ctx.eq(extent, ixsimpl.floor(extent)))
+    assert (
+        ctx.equivalent(
+            ixsimpl.trunc((origin + 3) / extent),
+            ixsimpl.trunc(origin / extent),
+            trunc_facts,
+        )
+        is True
+    )
 
     nonzero = ctx.facts()
     nonzero.assume(ctx.ne(x, 0))
-    assert ctx.equivalent(reciprocal, reciprocal, nonzero) is True
     assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, nonzero) is True
 
     modular = ctx.facts()
@@ -2574,7 +2591,7 @@ def test_fact_backed_algebra_helpers_use_domain_facts() -> None:
     assert ixsimpl.same_node(residual, base)
 
     reciprocal = 1 / i
-    assert ctx.constant_difference(reciprocal, reciprocal, empty) is None
+    assert ctx.constant_difference(reciprocal, reciprocal, empty) == 0
     nonzero = ctx.facts()
     nonzero.assume(ctx.ne(i, 0))
     assert ctx.constant_difference(reciprocal, reciprocal, nonzero) == 0
@@ -3773,12 +3790,17 @@ def test_mod_positive_literal_contract(dividend: int, divisor: int) -> None:
     assert result.eval({}) == dividend % divisor
 
 
-@given(divisor=st.integers(min_value=-(1 << 63), max_value=0))
-def test_mod_rejects_nonpositive_literal(divisor: int) -> None:
+@given(divisor=st.integers(min_value=-(1 << 63), max_value=-1))
+def test_mod_rejects_negative_literal(divisor: int) -> None:
     ctx = ixsimpl.Context()
     result = ixsimpl.mod(ctx.sym("x"), ctx.int_(divisor))
     assert result.is_domain_error
     assert any("divisor" in error for error in ctx.errors)
+
+
+def test_mod_zero_literal_refines_to_zero() -> None:
+    ctx = ixsimpl.Context()
+    assert ixsimpl.mod(ctx.sym("x"), ctx.int_(0)) == ctx.int_(0)
 
 
 def test_mod_symbolic_divisor_contract() -> None:
@@ -3790,7 +3812,7 @@ def test_mod_symbolic_divisor_contract() -> None:
     assert ixsimpl.same_node(expr.simplify(assumptions=[m > 0]), expr)
     assert expr.simplify(assumptions=[m < 0]).is_domain_error
     assert expr.simplify(assumptions=[m <= 0]).is_domain_error
-    assert expr.simplify(assumptions=[ctx.eq(m, 0)]).is_domain_error
+    assert expr.simplify(assumptions=[ctx.eq(m, 0)]) == ctx.int_(0)
     assert expr.eval({"x": -7, "m": 3}) == 2
     with pytest.raises(TypeError):
         expr.eval({"x": -7, "m": -3})

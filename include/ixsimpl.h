@@ -14,7 +14,7 @@
  *   NULL         -- out of memory.  Propagates: any op receiving NULL
  *                   returns NULL.
  *   PARSE_ERROR  -- malformed input.  Propagates through arithmetic.
- *   ERROR        -- domain error (e.g. division by zero).  Same.
+ *   ERROR        -- domain error (e.g. rational overflow).  Same.
  * Check with ixs_is_error / ixs_is_parse_error / ixs_is_domain_error.
  * Human-readable messages accumulate in the session error list.
  *
@@ -368,15 +368,14 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
  * rejected because they are not predicate trees. */
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            const ixs_node *predicate);
-/* Prove total equivalence over the full domain admitted by facts.  TRUE is
- * returned only after both operands are proved defined everywhere. FALSE is
- * returned only for a universal proof of different values;
- * insufficient facts, contradictory facts, invalid input, and resource
- * limits return UNKNOWN. */
+/* Prove equivalence over the full domain admitted by facts.  TRUE may refine
+ * poison operands.  FALSE is returned only for a universal proof of different
+ * defined values; insufficient facts, contradictory facts, invalid input, and
+ * resource limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
-/* Prove that lhs - rhs is an exactly representable integer constant.  The
- * operands must be defined over the complete fact domain. */
+/* Prove that lhs - rhs can refine to an exactly representable integer
+ * constant over the complete fact domain. */
 bool ixs_constant_difference_facts(ixs_facts *facts, const ixs_node *lhs,
                                    const ixs_node *rhs, int64_t *delta);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an

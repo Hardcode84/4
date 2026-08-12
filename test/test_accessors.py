@@ -278,14 +278,14 @@ def test_kind_aware_parse_surface() -> None:
     assert any("expected predicate, got expression" in err for err in ctx.errors)
 
     ctx.clear_errors()
-    domain = ctx.parse_expr("x > 1/0")
-    assert domain.is_domain_error
-    assert any("division by zero" in err for err in ctx.errors)
+    domain = ctx.parse_expr("x + 1/0")
+    assert not domain.is_error
+    assert not ctx.errors
 
     ctx.clear_errors()
-    legacy_domain = ctx.parse("x > 1/0")
-    assert legacy_domain.is_domain_error
-    assert any("division by zero" in err for err in ctx.errors)
+    legacy_domain = ctx.parse("x + 1/0")
+    assert not legacy_domain.is_error
+    assert not ctx.errors
 
 
 def test_is_pred_deep_binary_chain() -> None:

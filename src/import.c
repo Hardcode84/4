@@ -349,10 +349,8 @@ static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
     return NULL;
   if (src->tag == IXS_MOD) {
     divisor = ixs_node_classify_mod_divisor(rhs);
-    if (divisor == IXS_MOD_DIVISOR_ZERO) {
-      ixs_ctx_push_error(dst_ctx, "Mod: divisor is zero");
-      return dst_ctx->sentinel_error;
-    }
+    if (divisor == IXS_MOD_DIVISOR_ZERO)
+      return ixs_node_int(dst_ctx, 0);
     if (divisor == IXS_MOD_DIVISOR_NEGATIVE) {
       ixs_ctx_push_error(dst_ctx, "Mod: divisor is negative");
       return dst_ctx->sentinel_error;

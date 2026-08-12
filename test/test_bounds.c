@@ -3760,8 +3760,8 @@ static void test_public_dynamic_modular_projection_difference(void) {
 
   CHECK(ixs_facts_assume_range(zero_denominator, x, &pair_x_range));
   CHECK(ixs_facts_assume_range(zero_denominator, d, &zero_range));
-  CHECK(!test_ixs_constant_difference_facts(zero_denominator, direct1, direct0,
-                                            &delta));
+  CHECK(test_ixs_constant_difference_facts(zero_denominator, direct1, direct0,
+                                           &delta));
 
   CHECK(ixs_facts_assume_range(negative_denominator, x, &pair_x_range));
   CHECK(ixs_facts_assume_range(negative_denominator, d, &negative_range));
@@ -7103,6 +7103,8 @@ static void test_public_total_equivalence(void) {
   ixs_node *z = ixs_sym(ctx, "equiv_z");
   ixs_node *k = ixs_sym(ctx, "equiv_k");
   ixs_node *slot = ixs_sym(ctx, "equiv_slot");
+  ixs_node *origin = ixs_sym(ctx, "equiv_origin");
+  ixs_node *extent = ixs_sym(ctx, "equiv_extent");
   ixs_node *p = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
   ixs_node *q = ixs_cmp(ctx, y, IXS_CMP_LT, ixs_int(ctx, 4));
   ixs_node *r = ixs_cmp(ctx, z, IXS_CMP_NE, ixs_int(ctx, 0));
@@ -7115,6 +7117,9 @@ static void test_public_total_equivalence(void) {
       ixs_div(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)), x);
   ixs_node *reciprocal_algebraic_rhs =
       ixs_add(ctx, ixs_int(ctx, 1), reciprocal);
+  ixs_node *base_trunc = ixs_trunc(ctx, ixs_div(ctx, origin, extent));
+  ixs_node *shifted_trunc = ixs_trunc(
+      ctx, ixs_div(ctx, ixs_add(ctx, origin, ixs_int(ctx, 3)), extent));
   ixs_node *polynomial = ixs_mul(ctx, ixs_add(ctx, x, ixs_int(ctx, 1)),
                                  ixs_add(ctx, x, ixs_int(ctx, 1)));
   ixs_node *expanded = ixs_add(
@@ -7138,6 +7143,7 @@ static void test_public_total_equivalence(void) {
                              ixs_int(ctx, 0));
   ixs_facts *empty = ixs_facts_create(ctx);
   ixs_facts *nonzero = ixs_facts_create(ctx);
+  ixs_facts *trunc_facts = ixs_facts_create(ctx);
   ixs_facts *xor_facts = ixs_facts_create(ctx);
   ixs_facts *mod_facts = ixs_facts_create(ctx);
   ixs_facts *grid_facts = ixs_facts_create(ctx);
@@ -7151,16 +7157,29 @@ static void test_public_total_equivalence(void) {
   CHECK(test_ixs_equivalent_facts(empty, or_lhs, or_rhs) == IXS_CHECK_TRUE);
 
   CHECK(test_ixs_equivalent_facts(empty, reciprocal, reciprocal) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(empty, reciprocal_algebraic_lhs,
-                                  reciprocal_algebraic_rhs) ==
-        IXS_CHECK_UNKNOWN);
+                                  reciprocal_algebraic_rhs) == IXS_CHECK_TRUE);
   CHECK(ixs_facts_assume_pred(nonzero,
                               ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
   CHECK(test_ixs_equivalent_facts(nonzero, reciprocal, reciprocal) ==
         IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(nonzero, reciprocal_algebraic_lhs,
                                   reciprocal_algebraic_rhs) == IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(
+      trunc_facts, ixs_cmp(ctx, origin, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      trunc_facts, ixs_cmp(ctx, ixs_mod(ctx, origin, ixs_int(ctx, 256)),
+                           IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      trunc_facts, ixs_cmp(ctx, ixs_mod(ctx, extent, ixs_int(ctx, 16)),
+                           IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      trunc_facts, ixs_cmp(ctx, origin, IXS_CMP_EQ, ixs_floor(ctx, origin))));
+  CHECK(ixs_facts_assume_pred(
+      trunc_facts, ixs_cmp(ctx, extent, IXS_CMP_EQ, ixs_floor(ctx, extent))));
+  CHECK(test_ixs_equivalent_facts(trunc_facts, shifted_trunc, base_trunc) ==
+        IXS_CHECK_TRUE);
 
   CHECK(ixs_facts_assume_pred(xor_facts,
                               ixs_cmp(ctx, slot, IXS_CMP_GE, ixs_int(ctx, 0))));
@@ -7630,6 +7649,8 @@ static void test_generic_enclosed_radix_chain(void) {
 
   CHECK(test_ixs_equivalent_facts(integer, full_partition, compact_partition) ==
         IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(integer, digit_64, compact_digit) ==
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(integer, full_partition,
                                   ixs_mod(ctx, x, ixs_int(ctx, 16))) ==
         IXS_CHECK_TRUE);
@@ -7645,6 +7666,127 @@ static void test_generic_enclosed_radix_chain(void) {
         IXS_CHECK_FALSE);
   CHECK(test_ixs_equivalent_facts(integer, duplicate_partition,
                                   full_partition) == IXS_CHECK_UNKNOWN);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_generic_equivalent_radix_terms_in_zero_sum(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *item = ixs_sym(ctx, "radix_zero_sum_item");
+  ixs_node *within = ixs_sym(ctx, "radix_zero_sum_within");
+  ixs_node *other = ixs_sym(ctx, "radix_zero_sum_other");
+  ixs_node *residue = ixs_sym(ctx, "radix_zero_sum_residue");
+  ixs_node *two = ixs_int(ctx, 2);
+  ixs_node *four = ixs_int(ctx, 4);
+  ixs_node *eight = ixs_int(ctx, 8);
+  ixs_node *sixteen = ixs_int(ctx, 16);
+  ixs_node *sixty_four = ixs_int(ctx, 64);
+  ixs_node *digit1_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), two)),
+      two);
+  ixs_node *digit2_16 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixteen), four)),
+      two);
+  ixs_node *digit2_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), four)),
+      two);
+  ixs_node *digit3_16 =
+      ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixteen), eight));
+  ixs_node *digit3_64 = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), eight)),
+      two);
+  ixs_node *within_bit = ixs_mod(ctx, within, two);
+  ixs_node *xor_16 = ixs_xor(ctx, ixs_mul(ctx, eight, digit3_16),
+                             ixs_mul(ctx, ixs_int(ctx, 136), within_bit));
+  ixs_node *xor_64 = ixs_xor(ctx, ixs_mul(ctx, eight, digit3_64),
+                             ixs_mul(ctx, ixs_int(ctx, 136), within_bit));
+  ixs_node *zero_sum =
+      ixs_add(ctx,
+              ixs_sub(ctx, ixs_mul(ctx, sixteen, ixs_mod(ctx, item, two)),
+                      ixs_mul(ctx, sixteen, ixs_mod(ctx, item, four))),
+              ixs_add(ctx,
+                      ixs_sub(ctx, ixs_mul(ctx, sixty_four, digit2_64),
+                              ixs_mul(ctx, sixty_four, digit2_16)),
+                      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 32), digit1_64),
+                              ixs_sub(ctx, ixs_mul(ctx, sixteen, xor_64),
+                                      ixs_mul(ctx, sixteen, xor_16)))));
+  ixs_node *near_miss =
+      ixs_add(ctx, zero_sum,
+              ixs_sub(ctx, ixs_mul(ctx, ixs_int(ctx, 31), digit1_64),
+                      ixs_mul(ctx, ixs_int(ctx, 32), digit1_64)));
+  ixs_node *wrong_width = ixs_mod(
+      ctx, ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, sixty_four), eight)),
+      four);
+  ixs_node *item_partition = ixs_add(
+      ctx, ixs_mod(ctx, item, two),
+      ixs_mul(ctx, two,
+              ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, item, four), two))));
+  ixs_node *other_partition = ixs_add(
+      ctx, ixs_mod(ctx, other, two),
+      ixs_mul(ctx, two,
+              ixs_floor(ctx, ixs_div(ctx, ixs_mod(ctx, other, four), two))));
+  ixs_node *item_quotient = ixs_floor(
+      ctx, ixs_div(ctx,
+                   ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, item), within),
+                           sixteen),
+                   four));
+  ixs_node *other_quotient = ixs_floor(
+      ctx,
+      ixs_div(ctx,
+              ixs_mod(ctx, ixs_add(ctx, ixs_mul(ctx, four, other), residue),
+                      sixteen),
+              four));
+  ixs_node *two_groups =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 10), item_partition),
+              ixs_mul(ctx, ixs_int(ctx, 40), other_partition));
+  ixs_node *two_quotients =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 10), item_quotient),
+              ixs_mul(ctx, ixs_int(ctx, 40), other_quotient));
+  ixs_node *wrong_groups =
+      ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 10), item_partition),
+              ixs_mul(ctx, ixs_int(ctx, 39), other_partition));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *group_facts = ixs_facts_create(ctx);
+  ixs_node *bounded_values[4] = {item, within, other, residue};
+  size_t value_index;
+
+  CHECK(ctx && item && within && other && residue && digit1_64 && digit2_16 &&
+        digit2_64 && digit3_16 && digit3_64 && within_bit && xor_16 && xor_64 &&
+        zero_sum && near_miss && wrong_width && item_partition &&
+        other_partition && item_quotient && other_quotient && two_groups &&
+        two_quotients && wrong_groups && facts && group_facts);
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, item, IXS_CMP_EQ, ixs_floor(ctx, item))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_EQ, ixs_floor(ctx, within))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_LE, ixs_int(ctx, 3))));
+  for (value_index = 0; value_index < 4; ++value_index) {
+    ixs_node *value = bounded_values[value_index];
+    CHECK(ixs_facts_assume_pred(
+        group_facts, ixs_cmp(ctx, value, IXS_CMP_EQ, ixs_floor(ctx, value))));
+    CHECK(ixs_facts_assume_pred(
+        group_facts, ixs_cmp(ctx, value, IXS_CMP_GE, ixs_int(ctx, 0))));
+    CHECK(ixs_facts_assume_pred(
+        group_facts, ixs_cmp(ctx, value, IXS_CMP_LE, ixs_int(ctx, 3))));
+  }
+
+  CHECK(test_ixs_equivalent_facts(facts, digit2_16, digit2_64) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, digit3_16, digit3_64) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, digit3_16, wrong_width) ==
+        IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_equivalent_facts(facts, zero_sum, ixs_int(ctx, 0)) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(facts, near_miss, ixs_int(ctx, 0)) !=
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(group_facts, two_groups, two_quotients) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_equivalent_facts(group_facts, wrong_groups, two_quotients) !=
+        IXS_CHECK_TRUE);
+
   ixs_ctx_destroy(ctx);
 }
 
@@ -7901,8 +8043,8 @@ static void test_public_algebra_helpers_use_facts(void) {
   CHECK(ixs_same_node(coefficient, ixs_int(ctx, 8)));
   CHECK(ixs_same_node(residual, base));
 
-  CHECK(!test_ixs_constant_difference_facts(empty, reciprocal, reciprocal,
-                                            &delta));
+  CHECK(test_ixs_constant_difference_facts(empty, reciprocal, reciprocal,
+                                           &delta));
   CHECK(delta == 0);
   CHECK(ixs_facts_assume_pred(nonzero,
                               ixs_cmp(ctx, i, IXS_CMP_NE, ixs_int(ctx, 0))));
@@ -8567,7 +8709,7 @@ static void test_public_defined_mod_contract(void) {
         IXS_CHECK_TRUE);
   CHECK(ixs_check_defined(ctx, reciprocal_mod, &mod_zero, 1) ==
         IXS_CHECK_FALSE);
-  CHECK(ixs_check_defined(ctx, literal_zero, NULL, 0) == IXS_CHECK_UNKNOWN);
+  CHECK(ixs_check_defined(ctx, literal_zero, NULL, 0) == IXS_CHECK_TRUE);
   CHECK(ixs_check_defined(ctx, literal_negative, NULL, 0) == IXS_CHECK_UNKNOWN);
 
   ixs_ctx_destroy(ctx);
@@ -9767,6 +9909,7 @@ int main(void) {
   test_public_total_equivalence();
   test_generic_bounded_scaled_mod_equivalence();
   test_generic_enclosed_radix_chain();
+  test_generic_equivalent_radix_terms_in_zero_sum();
   test_generic_mod_reconstruction_from_quotient_fact();
   test_total_equivalence_new_proof_oom();
   test_public_equivalence_invalid_inputs();

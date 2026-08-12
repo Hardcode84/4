@@ -644,14 +644,15 @@ should be rare. Rational comparison nevertheless includes a portable emulated
 128-bit cross-multiply fallback when direct 64-bit multiplication would
 overflow.
 
-**Division by zero**: `ixs_rat(s, p, 0)` returns sentinel. `Mod(x, 0)` and
-any `x / 0` during construction or parsing returns sentinel. `ixs_rat` with
-`q < 0` normalizes to `(-p, -q)`.
+**Division by zero**: `ixs_rat(s, p, 0)` returns sentinel because it cannot
+represent a rational constant. Expression-level `Mod(x, 0)` and `x / 0` are
+poison and refine to zero. `ixs_rat` with `q < 0` normalizes to `(-p, -q)`.
 
-**Mod divisor domain**: `Mod(x, b)` requires `b > 0`. A known nonpositive
-constant returns `IXS_ERROR`. A symbolic divisor remains representable without
-a positivity proof, but substitution or assumption-aware simplification
-returns `IXS_ERROR` when it proves `b <= 0`. Unknown sign remains unresolved;
+**Mod divisor domain**: `Mod(x, b)` requires `b >= 0`; a known zero divisor is
+poison and refines to zero, while a known negative divisor returns `IXS_ERROR`.
+A symbolic divisor remains representable without a sign proof, but substitution
+or assumption-aware simplification returns `IXS_ERROR` when it proves `b < 0`.
+Unknown sign remains unresolved;
 range and modular-fact queries use no Mod-specific facts until positivity is
 proven. This matches the corpus, where every Mod divisor is a positive constant
 or is provably positive under assumptions.
@@ -965,6 +966,7 @@ but apply these rules:
 ```
 Mod(c, m)           where c,m constant   → c mod m
 Mod(x, 1)                                → 0
+Mod(x, x)                                → 0
 Mod(x + k*m, m)     where k is integer   → Mod(x, m)
 Mod(x, m)           where 0 <= x < m     → x
 Mod(Mod(x, m), m)                        → Mod(x, m)
@@ -1002,6 +1004,9 @@ Mod(x,a) + a*Mod(floor(x/a),b)           → Mod(x,a*b)
 c*Mod(A, m) - c*Mod(B, m)               → 0
                      when m > 0 is literal and A-B ≡ 0 (mod m)
 ```
+
+The self-remainder rule is a poison refinement: a zero or negative divisor is
+poison and may be refined to the same zero result as the positive domain.
 
 Bounds-aware elimination accepts symbolic integer moduli: proofs of `m > 0`,
 `x >= 0`, and `x-m < 0` reduce `Mod(x,m)` to `x`. Interval propagation also
@@ -1703,11 +1708,11 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   bounds state, ingests the antecedent, and proves the other disjunct locally.
   The fork shares the enclosing query guard and resource budget and is
   discarded after this single implication level.
-- **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
-  `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
-  defined over every valuation admitted by the incoming facts before pointer
-  identity can prove equality. It then tries fact-backed simplification of the
-  difference, expansion followed by simplification under the shared fact
+- **Fact-backed equivalence** (`ixs_equivalent_facts`, Python
+  `Context.equivalent`, C++ `Facts::equivalent`): a true proof may refine poison
+  operands. A false proof requires both operands to be defined over every
+  valuation admitted by the incoming facts. It tries fact-backed simplification
+  of the difference, expansion followed by simplification under the shared fact
   environment, flattened order-independent matching of predicate `AND`/`OR`
   terms, and a query-specific congruence proof for otherwise identical
   comparisons of `Mod` residuals. Aligned ordered comparisons normalize to
@@ -1753,6 +1758,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   compare equal only when their validated carrier node and total radix are
   identical. This covers arbitrary complete mixed-radix chains without a
   global rewrite, recursive transitivity search, or workload vocabulary.
+  Individual fields with the same carrier, place, and digit count are likewise
+  equivalent even when exposed through different enclosing residues. In an
+  exact zero-sum query, equally scaled terms may be cancelled after a bounded
+  equivalence proof; the unmatched terms are then handed back to these existing
+  radix rules. Matching is quadratic only in the two query-local ADD term
+  counts and does not enumerate carrier values.
 
   A normalized zero-sum equality may contain several `Mod` terms. The query
   isolates each term in turn and launches at most one bounded subproof for
@@ -1991,14 +2002,14 @@ it.
 
 ### Tier 3: Domain Error Sentinel (`IXS_ERROR`)
 
-Returned by constructors when an operation is mathematically undefined:
-division by zero, `Mod(x, 0)`, rational overflow, `ixs_rat(..., p, 0)`,
+Returned by constructors when an operation is outside the expression domain:
+negative `Mod` divisors, rational overflow, `ixs_rat(..., p, 0)`,
 integer literal overflow during parsing of a syntactically valid number.
 There is one domain-error sentinel per store (singleton). Diagnostics are
 appended to the active session error list.
 
 The parse entry points can return this sentinel when the input is
-syntactically valid but contains a domain error (e.g., `"1/0 + x"`).
+syntactically valid but contains a domain error (e.g., `"Mod(x, -3)"`).
 
 ### Propagation rules
 
@@ -2062,8 +2073,6 @@ session diagnostics arena. They remain valid until
 Each string includes the error kind and location, e.g.:
 - `"parse error at offset 7: unexpected token 'bar'"`
 - `"parse error: recursion depth limit (256) exceeded"`
-- `"division by zero"`
-- `"Mod: divisor is zero"`
 - `"Mod: divisor is negative"`
 - `"Mod: divisor is not positive under assumptions"`
 - `"rational overflow in multiply"`
@@ -2075,8 +2084,8 @@ Each string includes the error kind and location, e.g.:
 |---|---|---|---|
 | OOM | `NULL` | unchanged | arena exhausted |
 | Syntax error | `IXS_PARSE_ERROR` | appended | `"foo bar +"` |
-| Domain error | `IXS_ERROR` | appended | `1/0`, `Mod(x,0)`, overflow |
-| Valid parse with domain error | `IXS_ERROR` | appended | `"1/0 + x"` |
+| Domain error | `IXS_ERROR` | appended | `Mod(x,-3)`, overflow |
+| Valid parse with domain error | `IXS_ERROR` | appended | `"Mod(x, -3)"` |
 | NULL parser input | `IXS_PARSE_ERROR` | unchanged | `ixs_parse(s, NULL, len)` |
 | NULL node input to NULL-safe APIs | `NULL` | unchanged | propagation |
 | Sentinel input | same sentinel | unchanged | propagation |
@@ -3770,7 +3779,7 @@ met (< 50ms total).
 ### Phase 6: Hardening
 
 - Fuzz testing (generate random expressions, verify against SymPy)
-- Edge cases: overflow, division by zero, degenerate Piecewise
+- Edge cases: overflow, zero-divisor poison, degenerate Piecewise
 - C code output mode
 - Documentation
 
@@ -3817,7 +3826,7 @@ met (< 50ms total).
 4. **Negative/error-path tests**: Verify correct behavior for invalid inputs:
    - Parse errors: `"foo bar +"` → `IXS_PARSE_ERROR`
    - Depth limit: deeply nested input → `IXS_PARSE_ERROR`
-   - Domain error in parsed input: `"1/0 + x"` → `IXS_ERROR`
+   - Domain error in parsed input: `"Mod(x, -3)"` → `IXS_ERROR`
    - Division by zero via API: `ixs_mod(s, x, zero)` → `IXS_ERROR`
    - Integer literal overflow: `"99999999999999999999"` → `IXS_ERROR`
    - `ixs_rat(s, 1, 0)` → `IXS_ERROR`

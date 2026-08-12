@@ -450,7 +450,7 @@ static void test_walk_leaf(void) {
 
 static void test_walk_sentinel(void) {
   ixs_ctx *ctx = ixs_ctx_create();
-  ixs_node *err = ixs_div(ctx, ixs_int(ctx, 1), ixs_int(ctx, 0));
+  ixs_node *err = ixs_rat(ctx, 1, 0);
   CHECK(ixs_is_error(err));
 
   ixs_tag buf[4];
@@ -506,7 +506,7 @@ static ixs_walk_action reenter_same_session(const ixs_node *node, void *ud) {
     CHECK(!ixs_is_error(nested));
     CHECK(ixs_ctx_nerrors(state->ctx) == 0);
 
-    err = ixs_div(state->ctx, ixs_int(state->ctx, 1), ixs_int(state->ctx, 0));
+    err = ixs_rat(state->ctx, 1, 0);
     CHECK(err != NULL);
     CHECK(ixs_is_domain_error(err));
     CHECK(ixs_ctx_nerrors(state->ctx) == 1);

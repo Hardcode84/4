@@ -555,13 +555,13 @@ static void test_singletons_and_sentinels(void) {
 
   nodes[0] = ixs_true(&src_s);
   nodes[1] = ixs_false(&src_s);
-  nodes[2] = ixs_div(&src_s, ixs_int(&src_s, 1), ixs_int(&src_s, 0));
+  nodes[2] = ixs_rat(&src_s, 1, 0);
   nodes[3] = ixs_parse(&src_s, "???", 3);
   CHECK(nodes[2] && ixs_is_domain_error(nodes[2]));
   CHECK(nodes[3] && ixs_is_parse_error(nodes[3]));
   ixs_session_clear_errors(&src_s);
 
-  dst_err = ixs_div(&dst_s, ixs_int(&dst_s, 1), ixs_int(&dst_s, 0));
+  dst_err = ixs_rat(&dst_s, 1, 0);
   dst_parse = ixs_parse(&dst_s, "???", 3);
   CHECK(dst_err && ixs_is_domain_error(dst_err));
   CHECK(dst_parse && ixs_is_parse_error(dst_parse));
@@ -1470,7 +1470,7 @@ static void test_nonpositive_mod_rejected_on_serialize(void) {
 #endif
 
 static void test_nonpositive_mod_rejected_on_deserialize(void) {
-  static const int64_t invalid[] = {-3, 0, INT64_MIN};
+  static const int64_t invalid[] = {-3, INT64_MIN};
   ixs_ctx *ctx = NULL;
   ixs_session s;
   byte_buffer buf = {0};
@@ -1492,14 +1492,19 @@ static void test_nonpositive_mod_rejected_on_deserialize(void) {
     CHECK(ixs_is_parse_error(decoded));
     CHECK(ctx->htab_used == before_used);
     CHECK(ixs_session_nerrors(&s) == 1);
-    CHECK(strstr(ixs_session_error(&s, 0), "not positive") != NULL);
+    CHECK(strstr(ixs_session_error(&s, 0), "negative") != NULL);
   }
+
+  build_literal_mod_blob(&buf, 0);
+  ixs_session_clear_errors(&s);
+  CHECK(ixs_node_is_zero(deserialize_from_buffer(&s, &buf)));
+  CHECK(ixs_session_nerrors(&s) == 0);
 
   build_rational_mod_blob(&buf, -1, 2);
   ixs_session_clear_errors(&s);
   CHECK(ixs_is_parse_error(deserialize_from_buffer(&s, &buf)));
   CHECK(ixs_session_nerrors(&s) == 1);
-  CHECK(strstr(ixs_session_error(&s, 0), "not positive") != NULL);
+  CHECK(strstr(ixs_session_error(&s, 0), "negative") != NULL);
 
   build_literal_mod_blob(&buf, 3);
   ixs_session_clear_errors(&s);

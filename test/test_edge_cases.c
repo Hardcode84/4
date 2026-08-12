@@ -61,7 +61,7 @@ static void test_integer_overflow(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  2. Division by zero: ixs_mod(x, zero), parse "x/0"                 */
+/*  2. Division by zero poison refinements                              */
 /* ------------------------------------------------------------------ */
 
 static void test_division_by_zero(void) {
@@ -73,23 +73,21 @@ static void test_division_by_zero(void) {
   x = ixs_sym(ctx, "x");
   zero = ixs_int(ctx, 0);
 
-  /* ixs_mod(ctx, x, zero) returns domain error */
+  /* The constructors choose the zero refinement. */
   r = ixs_mod(ctx, x, zero);
-  CHECK(r && ixs_is_domain_error(r));
+  CHECK(r == zero);
   ixs_ctx_clear_errors(ctx);
 
-  /* ixs_div(ctx, x, zero) if available */
   r = ixs_div(ctx, x, zero);
-  CHECK(r && ixs_is_domain_error(r));
+  CHECK(r == zero);
   ixs_ctx_clear_errors(ctx);
 
-  /* Parse "x/0" or "1/0" */
   r = ixs_parse(ctx, "1/0", 3);
-  CHECK(r && ixs_is_domain_error(r));
+  CHECK(r == zero);
   ixs_ctx_clear_errors(ctx);
 
   r = ixs_parse(ctx, "Mod(x, 0)", 9);
-  CHECK(r && ixs_is_domain_error(r));
+  CHECK(r == zero);
   ixs_ctx_clear_errors(ctx);
 
   ixs_ctx_destroy(ctx);
@@ -269,7 +267,7 @@ static void test_sentinel_propagation(void) {
   char small_buf[4];
 
   x = ixs_sym(ctx, "x");
-  err = ixs_mod(ctx, x, ixs_int(ctx, 0));
+  err = ixs_rat(ctx, 1, 0);
   CHECK(err && ixs_is_domain_error(err));
   ixs_ctx_clear_errors(ctx);
 

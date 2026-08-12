@@ -655,8 +655,6 @@ static bool serial_write_mod(ixs_ctx *ctx, const ixs_writer *w,
                              serial_state *state, const ixs_node *node) {
   ixs_mod_divisor_class divisor =
       ixs_node_classify_mod_divisor(node->u.binary.rhs);
-  if (divisor == IXS_MOD_DIVISOR_ZERO)
-    return serial_error(ctx, "Mod divisor is zero");
   if (divisor == IXS_MOD_DIVISOR_NEGATIVE)
     return serial_error(ctx, "Mod divisor is negative");
   return serial_write_binary(ctx, w, state, WIRE_MOD, node->u.binary.lhs,
@@ -1095,9 +1093,9 @@ static decode_status decode_read_mod(ixs_ctx *ctx, decode_input *in,
   if (status != DECODE_OK)
     return status;
   divisor = &nodes[node->u.binary.rhs];
-  if ((divisor->tag == WIRE_INT && divisor->u.ival <= 0) ||
-      (divisor->tag == WIRE_RAT && divisor->u.rat.p <= 0))
-    return decode_error(ctx, in, "Mod divisor is not positive");
+  if ((divisor->tag == WIRE_INT && divisor->u.ival < 0) ||
+      (divisor->tag == WIRE_RAT && divisor->u.rat.p < 0))
+    return decode_error(ctx, in, "Mod divisor is negative");
   return DECODE_OK;
 }
 

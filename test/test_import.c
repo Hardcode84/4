@@ -206,8 +206,8 @@ static void test_sentinel_mapping(void) {
     return;
   }
 
-  src_err = ixs_div(&src_s, ixs_int(&src_s, 1), ixs_int(&src_s, 0));
-  dst_err = ixs_div(&dst_s, ixs_int(&dst_s, 1), ixs_int(&dst_s, 0));
+  src_err = ixs_rat(&src_s, 1, 0);
+  dst_err = ixs_rat(&dst_s, 1, 0);
   CHECK(src_err && ixs_is_domain_error(src_err));
   CHECK(dst_err && ixs_is_domain_error(dst_err));
   ixs_session_clear_errors(&src_s);

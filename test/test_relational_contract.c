@@ -397,7 +397,7 @@ static void test_relational_equivalence_probe_guards(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_relational_totality_predicate_contract(void) {
+static void test_relational_poison_refinement_predicate_contract(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "relation_totality_x");
   ixs_node *modulus = ixs_sym(ctx, "relation_totality_modulus");
@@ -415,7 +415,7 @@ static void test_relational_totality_predicate_contract(void) {
 
   ixs_ctx_clear_errors(ctx);
   errors = ixs_ctx_nerrors(ctx);
-  CHECK(test_ixs_check_predicate_facts(negative, total) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(negative, total) == IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
   CHECK(test_ixs_check_predicate_facts(positive, total) == IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
@@ -1000,7 +1000,7 @@ int main(void) {
   test_relational_cyclic_xor_recurrence();
   test_relational_mod_quotient_order();
   test_relational_equivalence_probe_guards();
-  test_relational_totality_predicate_contract();
+  test_relational_poison_refinement_predicate_contract();
   test_relational_optional_proof_extrema();
   test_relational_inverse_range_guards();
   test_relational_inverse_watchers_public_contract();

@@ -2404,9 +2404,9 @@ static ixs_node *simp_div_impl(ixs_ctx *ctx, ixs_node *a, ixs_node *b,
   if (prop)
     return prop;
 
-  /* Division by zero */
+  /* Division by zero is poison; choose the zero refinement. */
   if (ixs_node_is_zero(b))
-    return simp_undefined(ctx, "division by zero");
+    return ixs_node_int(ctx, 0);
 
   /* Constant / constant -> rational fold */
   if (ixs_node_is_const(a) && ixs_node_is_const(b)) {
@@ -4094,6 +4094,13 @@ static ixs_node *rule_mod_one(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
   return n;
 }
 
+static ixs_node *rule_mod_self(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *n) {
+  (void)bnds;
+  if (n->u.binary.lhs == n->u.binary.rhs)
+    return ixs_node_int(ctx, 0);
+  return n;
+}
+
 static ixs_node *rule_mod_mul_zero(ixs_ctx *ctx, ixs_bounds *bnds,
                                    ixs_node *n) {
   (void)bnds;
@@ -4452,6 +4459,7 @@ static ixs_node *rule_mod_bounds_elim(ixs_ctx *ctx, ixs_bounds *bnds,
 static const ixs_rule mod_rules[] = {
     {rule_mod_const_fold, "mod_const_fold", false},
     {rule_mod_one, "mod_one", false},
+    {rule_mod_self, "mod_self", false},
     {rule_mod_mul_zero, "mod_mul_zero", false},
     {rule_mod_idempotent, "mod_idempotent", false},
     {rule_mod_nested_divisor, "mod_nested_divisor", false},
@@ -4480,7 +4488,7 @@ static ixs_node *simp_mod_bnds(ixs_ctx *ctx, ixs_bounds *bnds, ixs_node *a,
   }
   domain = mod_divisor_domain(bnds, b);
   if (domain == MOD_DOMAIN_ZERO)
-    return simp_undefined(ctx, "Mod: divisor is zero");
+    return ixs_node_int(ctx, 0);
   if (domain == MOD_DOMAIN_NEGATIVE)
     return simp_undefined(ctx, "Mod: divisor is negative");
   if (domain == MOD_DOMAIN_NONPOSITIVE)
@@ -5349,11 +5357,9 @@ static ixs_node *rule_cmp_bool_zero(ixs_ctx *ctx, ixs_bounds *bnds,
 
 static ixs_node *rule_cmp_identity(ixs_ctx *ctx, ixs_bounds *bnds,
                                    ixs_node *n) {
+  (void)bnds;
   if (n->u.binary.lhs != n->u.binary.rhs)
     return n;
-  if (!node_is_proven_defined(bnds, n)) {
-    return n;
-  }
   switch (n->u.binary.cmp_op) {
   case IXS_CMP_GE:
   case IXS_CMP_LE:

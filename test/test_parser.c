@@ -419,18 +419,14 @@ static void test_kind_parsers_and_predicates(void) {
                "expected predicate, got expression") != NULL);
   ixs_ctx_clear_errors(ctx);
 
-  domain = ixs_parse_expr(ctx, "x > 1/0", 7);
-  CHECK(domain && ixs_is_domain_error(domain));
-  CHECK(ixs_ctx_nerrors(ctx) > 0);
-  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1),
-               "division by zero") != NULL);
+  domain = ixs_parse_pred(ctx, "x > 1/0", 7);
+  CHECK(domain && !ixs_is_error(domain));
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
   ixs_ctx_clear_errors(ctx);
 
   legacy = ixs_parse(ctx, "x > 1/0", 7);
-  CHECK(legacy && ixs_is_domain_error(legacy));
-  CHECK(ixs_ctx_nerrors(ctx) > 0);
-  CHECK(strstr(ixs_ctx_error(ctx, ixs_ctx_nerrors(ctx) - 1),
-               "division by zero") != NULL);
+  CHECK(legacy && ixs_is_parse_error(legacy));
+  CHECK(ixs_ctx_nerrors(ctx) == 1);
   ixs_ctx_clear_errors(ctx);
 
   CHECK(ixs_node_is_pred(ixs_true(ctx)));
@@ -442,11 +438,12 @@ static void test_kind_parsers_and_predicates(void) {
   err = ixs_parse_expr(ctx, "???", 3);
   domain = ixs_parse_expr(ctx, "1/0", 3);
   CHECK(err && ixs_is_parse_error(err));
-  CHECK(domain && ixs_is_domain_error(domain));
+  CHECK(domain && ixs_node_tag(domain) == IXS_INT &&
+        ixs_node_int_val(domain) == 0);
   CHECK(!ixs_node_is_expr(err));
   CHECK(!ixs_node_is_pred(err));
-  CHECK(!ixs_node_is_expr(domain));
-  CHECK(!ixs_node_is_pred(domain));
+  CHECK(ixs_node_is_expr(domain));
+  CHECK(ixs_node_is_pred(domain));
 
   ixs_ctx_destroy(ctx);
 }
@@ -455,15 +452,16 @@ static void test_errors(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *n;
 
-  /* Division by zero */
+  /* Division by zero is poison and refines to zero. */
   n = ixs_parse_expr(ctx, "1/0", 3);
-  CHECK(n && ixs_is_domain_error(n));
-  CHECK(ixs_ctx_nerrors(ctx) > 0);
+  CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 0);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
   ixs_ctx_clear_errors(ctx);
 
-  /* Mod by zero */
+  /* Mod by zero has the same refinement. */
   n = ixs_parse_expr(ctx, "Mod(x, 0)", 9);
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && ixs_node_tag(n) == IXS_INT && ixs_node_int_val(n) == 0);
+  CHECK(ixs_ctx_nerrors(ctx) == 0);
   ixs_ctx_clear_errors(ctx);
 
   /* Mod requires a positive divisor. */
@@ -481,34 +479,34 @@ static void test_errors(void) {
   CHECK(n && !ixs_is_error(n) && ixs_node_tag(n) == IXS_MOD);
 
   n = ixs_parse_expr(ctx, "floor(Mod(x, 0))", strlen("floor(Mod(x, 0))"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "Max(Mod(x, 0), y)", strlen("Max(Mod(x, 0), y)"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "Min(x, Mod(y, 0), z)",
                      strlen("Min(x, Mod(y, 0), z)"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "xor(x, Mod(y, 0), z)",
                      strlen("xor(x, Mod(y, 0), z)"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "x & Mod(y, 0) & z", strlen("x & Mod(y, 0) & z"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "x | Mod(y, 0) | z", strlen("x | Mod(y, 0) | z"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_pred(ctx, "x > 0 & Mod(y, 0) > 0 | z > 0",
                      strlen("x > 0 & Mod(y, 0) > 0 | z > 0"));
-  CHECK(n && ixs_is_domain_error(n));
+  CHECK(n && !ixs_is_error(n));
   ixs_ctx_clear_errors(ctx);
 
   n = ixs_parse_expr(ctx, "Max(Mod(x, 0),)", strlen("Max(Mod(x, 0),)"));

@@ -183,7 +183,7 @@ Three tiers, in priority order:
 1. **NULL** -- out of memory. Propagates: any operation receiving NULL
    returns NULL.
 2. **PARSE_ERROR** -- malformed input. Propagates through arithmetic.
-3. **ERROR** -- domain error (division by zero, etc.). Same propagation.
+3. **ERROR** -- domain error (rational overflow, etc.). Same propagation.
 
 Check with `ixs_is_error()` (either sentinel),
 `ixs_is_parse_error()`, or `ixs_is_domain_error()` for specific
@@ -209,7 +209,7 @@ pytest test/
 The test suite includes:
 - Unit tests for rationals, parser, simplifier
 - 615-expression corpus regression test
-- Edge-case tests (overflow, division by zero, deep nesting, sentinel
+- Edge-case tests (overflow, zero-divisor poison, deep nesting, sentinel
   propagation, etc.)
 - Hypothesis-based property tests (2,000 examples per test by default;
   use `--torture` for 50,000)

@@ -9565,6 +9565,17 @@ static inline ixs_interval bounds_get_mul(ixs_bounds *b, ixs_node *expr) {
       return ixs_interval_unknown();
     if (exp == 0)
       return ixs_interval_unknown();
+    if (exp < 0 && ixs_node_is_integer_valued(expr->u.mul.factors[i].base)) {
+      if (!fi.lo_inf && fi.lo_p == 0 && fi.lo_q == 1 &&
+          (fi.hi_inf || ixs_rat_cmp(fi.hi_p, fi.hi_q, 0, 1) > 0)) {
+        fi.lo_p = 1;
+        fi.lo_q = 1;
+      } else if (!fi.hi_inf && fi.hi_p == 0 && fi.hi_q == 1 &&
+                 (fi.lo_inf || ixs_rat_cmp(fi.lo_p, fi.lo_q, 0, 1) < 0)) {
+        fi.hi_p = -1;
+        fi.hi_q = 1;
+      }
+    }
     magnitude = (uint32_t)(exp64 < 0 ? -exp64 : exp64);
     powered = iv_pow(fi, magnitude);
     if (exp < 0)
@@ -16416,6 +16427,157 @@ equivalence_cancel_integer_content(equivalence_state *state, ixs_node *lhs,
   return equivalence_bounded_core(state, scaled_lhs, scaled_rhs, depth + 1u);
 }
 
+static bool equivalence_partition_zero_sum(equivalence_state *state,
+                                           ixs_node *lhs, ixs_node *rhs,
+                                           ixs_node **positive,
+                                           ixs_node **negative) {
+  struct ixs_node_impl equality;
+  int64_t offset;
+
+  if ((!ixs_node_is_zero(lhs) && !ixs_node_is_zero(rhs)) ||
+      (lhs->tag != IXS_ADD && rhs->tag != IXS_ADD))
+    return false;
+  memset(&equality, 0, sizeof(equality));
+  equality.tag = IXS_CMP;
+  equality.u.binary.lhs = lhs;
+  equality.u.binary.rhs = rhs;
+  equality.u.binary.cmp_op = IXS_CMP_EQ;
+  if (!bounds_extract_cmp_exact_relation(state->bounds, &equality, positive,
+                                         negative, &offset)) {
+    if (state->bounds->oom)
+      state->oom = true;
+    return false;
+  }
+  if (offset != 0) {
+    ixs_node *constant = ixs_node_int(state->ctx, offset);
+    if (!constant || equivalence_build_add(state, *negative, constant,
+                                           negative) != EQUIVALENCE_BUILD_OK) {
+      if (!constant)
+        state->oom = true;
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool equivalence_add_coeff_equal(ixs_node *lhs, ixs_node *rhs) {
+  int64_t lhs_p;
+  int64_t lhs_q;
+  int64_t rhs_p;
+  int64_t rhs_q;
+
+  ixs_node_get_rat(lhs, &lhs_p, &lhs_q);
+  ixs_node_get_rat(rhs, &rhs_p, &rhs_q);
+  return lhs_p == rhs_p && lhs_q == rhs_q;
+}
+
+static bool equivalence_build_add_residual(equivalence_state *state,
+                                           ixs_node *add,
+                                           const unsigned char *matched,
+                                           ixs_node **residual) {
+  uint32_t i;
+
+  *residual = add->u.add.coeff;
+  for (i = 0; i < add->u.add.nterms; i++) {
+    ixs_node *scaled;
+    if (matched[i])
+      continue;
+    if (equivalence_build_scale(state, add->u.add.terms[i].coeff,
+                                add->u.add.terms[i].term,
+                                &scaled) != EQUIVALENCE_BUILD_OK ||
+        equivalence_build_add(state, *residual, scaled, residual) !=
+            EQUIVALENCE_BUILD_OK)
+      return false;
+  }
+  return true;
+}
+
+/* Cancel equal-scale terms only after proving their values equivalent.  The
+ * work is O(L*R) over the two query-local sums and every recursive proof is
+ * bounded by EQUIVALENCE_BOUNDED_SUBPROOF_DEPTH. */
+static ixs_check_result
+equivalence_cancel_proven_add_terms(equivalence_state *state, ixs_node *lhs,
+                                    ixs_node *rhs, unsigned depth) {
+  ixs_arena_mark mark;
+  unsigned char *lhs_matched;
+  unsigned char *rhs_matched;
+  ixs_node *lhs_residual;
+  ixs_node *rhs_residual;
+  uint32_t matched_count = 0;
+  uint32_t i;
+  uint32_t j;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (lhs->tag != IXS_ADD || rhs->tag != IXS_ADD)
+    return IXS_CHECK_UNKNOWN;
+  mark = ixs_arena_save(&state->ctx->scratch);
+  lhs_matched = ixs_arena_alloc(&state->ctx->scratch, lhs->u.add.nterms, 1);
+  rhs_matched = ixs_arena_alloc(&state->ctx->scratch, rhs->u.add.nterms, 1);
+  if ((!lhs_matched && lhs->u.add.nterms != 0u) ||
+      (!rhs_matched && rhs->u.add.nterms != 0u)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  memset(lhs_matched, 0, lhs->u.add.nterms);
+  memset(rhs_matched, 0, rhs->u.add.nterms);
+
+  for (i = 0; i < lhs->u.add.nterms; i++) {
+    for (j = 0; j < rhs->u.add.nterms; j++) {
+      if (!rhs_matched[j] &&
+          equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
+                                      rhs->u.add.terms[j].coeff) &&
+          lhs->u.add.terms[i].term == rhs->u.add.terms[j].term) {
+        lhs_matched[i] = 1;
+        rhs_matched[j] = 1;
+        matched_count++;
+        break;
+      }
+    }
+  }
+  for (i = 0; i < lhs->u.add.nterms; i++) {
+    if (lhs_matched[i])
+      continue;
+    for (j = 0; j < rhs->u.add.nterms; j++) {
+      if (rhs_matched[j] ||
+          !equivalence_add_coeff_equal(lhs->u.add.terms[i].coeff,
+                                       rhs->u.add.terms[j].coeff))
+        continue;
+      if (equivalence_bounded_core(state, lhs->u.add.terms[i].term,
+                                   rhs->u.add.terms[j].term,
+                                   depth + 1u) == IXS_CHECK_TRUE) {
+        lhs_matched[i] = 1;
+        rhs_matched[j] = 1;
+        matched_count++;
+        break;
+      }
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        goto cleanup;
+    }
+  }
+  if (matched_count == 0u ||
+      !equivalence_build_add_residual(state, lhs, lhs_matched, &lhs_residual) ||
+      !equivalence_build_add_residual(state, rhs, rhs_matched, &rhs_residual))
+    goto cleanup;
+  result =
+      equivalence_bounded_core(state, lhs_residual, rhs_residual, depth + 1u);
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
+static ixs_check_result equivalence_zero_sum(equivalence_state *state,
+                                             ixs_node *lhs, ixs_node *rhs,
+                                             unsigned depth) {
+  ixs_node *positive;
+  ixs_node *negative;
+
+  if (!equivalence_partition_zero_sum(state, lhs, rhs, &positive, &negative))
+    return IXS_CHECK_UNKNOWN;
+  return equivalence_bounded_core(state, positive, negative, depth + 1u);
+}
+
 static ixs_check_result equivalence_difference(equivalence_state *state,
                                                ixs_node *lhs, ixs_node *rhs) {
   struct ixs_node_impl nonzero;
@@ -17505,21 +17667,6 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
   bounds_equality_walk_status relation_status;
   int64_t relation_delta;
   ixs_node *difference;
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
-  if (bounds_check_defined_detail(query->bounds, frame->lhs, &lhs_oom,
-                                  &lhs_limited) != IXS_CHECK_TRUE ||
-      bounds_check_defined_detail(query->bounds, frame->rhs, &rhs_oom,
-                                  &rhs_limited) != IXS_CHECK_TRUE) {
-    query->oom = lhs_oom || rhs_oom;
-    query->limited = lhs_limited || rhs_limited;
-    if (query->oom || query->limited)
-      return;
-    bounds_delta_complete(query, false, 0);
-    return;
-  }
   if (frame->lhs == frame->rhs) {
     bounds_delta_complete(query, true, 0);
     return;
@@ -19081,10 +19228,81 @@ static ixs_check_result equivalence_floor_mod_quotient_digit_direction(
                                         depth + 1u);
 }
 
+typedef struct {
+  ixs_node *base;
+  int64_t place;
+  int64_t digit_count;
+} equivalence_radix_digit;
+
+static bool equivalence_positive_int_node(ixs_node *node, int64_t *value);
+static bool equivalence_radix_base_is_valid(equivalence_state *state,
+                                            ixs_node *base);
+
+/* Decode one radix field independently of the enclosing residue used to
+ * expose it.  This gives equivalent linear-layout basis spellings the same
+ * query-local representative without selecting a global normal form. */
+static bool equivalence_decode_radix_digit(equivalence_state *state,
+                                           ixs_node *expr,
+                                           equivalence_radix_digit *digit) {
+  ixs_node *rounded = expr;
+  ixs_node *numerator;
+  ixs_node *denominator;
+  ixs_quotient_parts_status status;
+  int64_t enclosing;
+  int64_t width;
+
+  if (expr && expr->tag == IXS_MOD) {
+    if (!equivalence_positive_int_node(expr->u.binary.rhs, &width))
+      return false;
+    rounded = expr->u.binary.lhs;
+  } else {
+    width = 0;
+  }
+  if (!rounded || rounded->tag != IXS_FLOOR)
+    return false;
+  status = simp_decompose_exact_quotient(state->ctx, rounded->u.unary.arg,
+                                         &numerator, &denominator);
+  if (status == IXS_QUOTIENT_PARTS_OOM) {
+    state->oom = true;
+    return false;
+  }
+  if (status != IXS_QUOTIENT_PARTS_MATCH || numerator->tag != IXS_MOD ||
+      !equivalence_positive_int_node(numerator->u.binary.rhs, &enclosing) ||
+      !equivalence_positive_int_node(denominator, &digit->place) ||
+      enclosing % digit->place != 0)
+    return false;
+  if (width == 0)
+    width = enclosing / digit->place;
+  if (width <= 0 || digit->place > INT64_MAX / width ||
+      enclosing % (digit->place * width) != 0 ||
+      !equivalence_radix_base_is_valid(state, numerator->u.binary.lhs))
+    return false;
+  digit->base = numerator->u.binary.lhs;
+  digit->digit_count = width;
+  return true;
+}
+
+static ixs_check_result equivalence_same_radix_digit(equivalence_state *state,
+                                                     ixs_node *lhs,
+                                                     ixs_node *rhs) {
+  equivalence_radix_digit left;
+  equivalence_radix_digit right;
+  if (!equivalence_decode_radix_digit(state, lhs, &left) ||
+      !equivalence_decode_radix_digit(state, rhs, &right))
+    return IXS_CHECK_UNKNOWN;
+  return left.base == right.base && left.place == right.place &&
+                 left.digit_count == right.digit_count
+             ? IXS_CHECK_TRUE
+             : IXS_CHECK_UNKNOWN;
+}
+
 static ixs_check_result
 equivalence_floor_mod_quotient_digit(equivalence_state *state, ixs_node *lhs,
                                      ixs_node *rhs, unsigned depth) {
-  ixs_check_result result =
+  ixs_check_result result = equivalence_same_radix_digit(state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result =
       equivalence_floor_mod_quotient_digit_direction(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
@@ -19269,6 +19487,229 @@ equivalence_enclosed_radix_partition(equivalence_state *state, ixs_node *lhs,
                                                         : IXS_CHECK_UNKNOWN;
 }
 
+static bool equivalence_coeff_at_place(ixs_node *coefficient, ixs_node *scale,
+                                       int64_t place) {
+  int64_t coefficient_p;
+  int64_t coefficient_q;
+  int64_t scale_p;
+  int64_t scale_q;
+  int64_t expected_p;
+
+  ixs_node_get_rat(coefficient, &coefficient_p, &coefficient_q);
+  ixs_node_get_rat(scale, &scale_p, &scale_q);
+  return scale_p > 0 && place > 0 &&
+         ixs_safe_mul(scale_p, place, &expected_p) &&
+         coefficient_p == expected_p && coefficient_q == scale_q;
+}
+
+typedef struct {
+  const ixs_addterm *term;
+  uint32_t index;
+  int64_t count;
+  int64_t next_place;
+  bool terminal;
+} equivalence_radix_step;
+
+static bool equivalence_decode_radix_group_start(
+    equivalence_state *state, const ixs_addterm *term, ixs_node **base,
+    int64_t *start_place, int64_t *digit_count, int64_t *absolute_place) {
+  equivalence_radix_digit digit;
+
+  if (equivalence_decode_radix_digit(state, term->term, &digit)) {
+    *base = digit.base;
+    *start_place = digit.place;
+    *digit_count = digit.digit_count;
+  } else if (equivalence_decode_low_radix_digit(term->term, base,
+                                                digit_count)) {
+    *start_place = 1;
+  } else {
+    return false;
+  }
+  return equivalence_radix_base_is_valid(state, *base) &&
+         ixs_safe_mul(*start_place, *digit_count, absolute_place);
+}
+
+static bool equivalence_find_radix_group_step(
+    equivalence_state *state, ixs_node *group_side, const ixs_addterm *low_term,
+    ixs_node *base, int64_t absolute_place, int64_t relative_place,
+    const unsigned char *group_matched, const unsigned char *candidate,
+    equivalence_radix_step *step) {
+  uint32_t i;
+
+  for (i = 0; i < group_side->u.add.nterms; i++) {
+    const ixs_addterm *term = &group_side->u.add.terms[i];
+    int64_t enclosing;
+    if (group_matched[i] || candidate[i] ||
+        !equivalence_coeff_at_place(term->coeff, low_term->coeff,
+                                    relative_place) ||
+        !equivalence_decode_enclosed_radix_digit(state, term->term, base,
+                                                 absolute_place, &step->count,
+                                                 &enclosing, &step->terminal) ||
+        !equivalence_advance_radix_place(absolute_place, step->count, enclosing,
+                                         step->terminal, 0u, 1u,
+                                         &step->next_place))
+      continue;
+    step->term = term;
+    step->index = i;
+    return true;
+  }
+  return false;
+}
+
+static bool equivalence_commit_matching_radix_group(
+    equivalence_state *state, ixs_node *single_side,
+    const ixs_addterm *low_term, ixs_node *base, int64_t start_place,
+    int64_t digit_count, ixs_node *sum, unsigned char *group_matched,
+    unsigned char *single_matched, const unsigned char *candidate,
+    uint32_t group_count, unsigned depth) {
+  uint32_t i;
+
+  for (i = 0; i < single_side->u.add.nterms; i++) {
+    const ixs_addterm *single = &single_side->u.add.terms[i];
+    equivalence_radix_digit digit;
+    bool same_partition;
+    uint32_t j;
+    if (single_matched[i] ||
+        !equivalence_coeff_at_place(single->coeff, low_term->coeff, 1))
+      continue;
+    same_partition =
+        equivalence_decode_radix_digit(state, single->term, &digit) &&
+        digit.base == base && digit.place == start_place &&
+        digit.digit_count == digit_count;
+    if (!same_partition &&
+        equivalence_bounded_core(state, sum, single->term, depth + 1u) !=
+            IXS_CHECK_TRUE)
+      continue;
+    for (j = 0; j < group_count; j++)
+      group_matched[j] |= candidate[j];
+    single_matched[i] = 1;
+    return true;
+  }
+  return false;
+}
+
+static bool equivalence_match_radix_group_direction(
+    equivalence_state *state, ixs_node *group_side, ixs_node *single_side,
+    unsigned char *group_matched, unsigned char *single_matched,
+    unsigned depth) {
+  ixs_arena_mark mark = ixs_arena_save(&state->ctx->scratch);
+  unsigned char *candidate = NULL;
+  bool matched = false;
+  uint32_t low_index;
+
+  candidate =
+      ixs_arena_alloc(&state->ctx->scratch, group_side->u.add.nterms, 1);
+  if (!candidate && group_side->u.add.nterms != 0u) {
+    state->oom = true;
+    goto cleanup;
+  }
+  for (low_index = 0; low_index < group_side->u.add.nterms; low_index++) {
+    const ixs_addterm *low_term = &group_side->u.add.terms[low_index];
+    ixs_node *base;
+    ixs_node *sum;
+    int64_t digit_count;
+    int64_t start_place;
+    int64_t absolute_place;
+    int64_t relative_place;
+
+    if (group_matched[low_index])
+      continue;
+    if (!equivalence_decode_radix_group_start(state, low_term, &base,
+                                              &start_place, &digit_count,
+                                              &absolute_place))
+      continue;
+    memset(candidate, 0, group_side->u.add.nterms);
+    candidate[low_index] = 1;
+    sum = low_term->term;
+    relative_place = digit_count;
+    while (absolute_place > 1 && relative_place > 1) {
+      int64_t next_relative;
+      equivalence_radix_step step;
+
+      if (!equivalence_find_radix_group_step(state, group_side, low_term, base,
+                                             absolute_place, relative_place,
+                                             group_matched, candidate, &step))
+        break;
+      if (!ixs_safe_mul(relative_place, step.count, &next_relative))
+        break;
+      {
+        ixs_node *scaled;
+        if (equivalence_build_scale_rat(state, step.term->term, relative_place,
+                                        1, &scaled) != EQUIVALENCE_BUILD_OK ||
+            equivalence_build_add(state, sum, scaled, &sum) !=
+                EQUIVALENCE_BUILD_OK)
+          goto cleanup;
+      }
+      candidate[step.index] = 1;
+      if (equivalence_commit_matching_radix_group(
+              state, single_side, low_term, base, start_place, next_relative,
+              sum, group_matched, single_matched, candidate,
+              group_side->u.add.nterms, depth)) {
+        matched = true;
+        goto next_low;
+      }
+      if (state->limited || state->invalid || state->oom ||
+          state->arithmetic_unrepresentable)
+        goto cleanup;
+      if (step.terminal || step.next_place <= absolute_place)
+        break;
+      absolute_place = step.next_place;
+      relative_place = next_relative;
+    }
+  next_low:
+    continue;
+  }
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return matched;
+}
+
+/* A larger ADD may contain several independent scaled radix partitions.
+ * Recognize each complete chain structurally and cancel it against one proven
+ * equivalent term on the other side. This is query-local O((L+R)^3) matching
+ * over ADD terms; it neither rewrites canonical expressions nor enumerates
+ * carrier values. */
+static ixs_check_result
+equivalence_cancel_proven_radix_groups(equivalence_state *state, ixs_node *lhs,
+                                       ixs_node *rhs, unsigned depth) {
+  ixs_arena_mark mark;
+  unsigned char *lhs_matched;
+  unsigned char *rhs_matched;
+  ixs_node *lhs_residual;
+  ixs_node *rhs_residual;
+  bool matched;
+  ixs_check_result result = IXS_CHECK_UNKNOWN;
+
+  if (lhs->tag != IXS_ADD || rhs->tag != IXS_ADD)
+    return IXS_CHECK_UNKNOWN;
+  mark = ixs_arena_save(&state->ctx->scratch);
+  lhs_matched = ixs_arena_alloc(&state->ctx->scratch, lhs->u.add.nterms, 1);
+  rhs_matched = ixs_arena_alloc(&state->ctx->scratch, rhs->u.add.nterms, 1);
+  if ((!lhs_matched && lhs->u.add.nterms != 0u) ||
+      (!rhs_matched && rhs->u.add.nterms != 0u)) {
+    state->oom = true;
+    goto cleanup;
+  }
+  memset(lhs_matched, 0, lhs->u.add.nterms);
+  memset(rhs_matched, 0, rhs->u.add.nterms);
+  matched = equivalence_match_radix_group_direction(
+      state, lhs, rhs, lhs_matched, rhs_matched, depth);
+  matched |= equivalence_match_radix_group_direction(
+      state, rhs, lhs, rhs_matched, lhs_matched, depth);
+  if (!matched || state->limited || state->invalid || state->oom ||
+      state->arithmetic_unrepresentable ||
+      !equivalence_build_add_residual(state, lhs, lhs_matched, &lhs_residual) ||
+      !equivalence_build_add_residual(state, rhs, rhs_matched, &rhs_residual))
+    goto cleanup;
+  result =
+      equivalence_bounded_core(state, lhs_residual, rhs_residual, depth + 1u);
+
+cleanup:
+  ixs_arena_restore(&state->ctx->scratch, mark);
+  return result;
+}
+
 /* Removing a Euclidean residue modulo M rounds an integer down to an M
  * boundary.  When M divides the positive floor divisor D, that operation
  * cannot cross a D boundary, so floor(x/D) is unchanged. */
@@ -19359,6 +19800,61 @@ equivalence_floor_quotient_direction(equivalence_state *state,
       !equivalence_mod_sum_in_range(state, remainder, denominator))
     return IXS_CHECK_UNKNOWN;
   return IXS_CHECK_TRUE;
+}
+
+/* Truncating integer quotients are unchanged by a small nonnegative shift
+ * that stays in one shared divisor-alignment bucket.  The divisor may be
+ * zero: division by zero is poison, so a true equivalence may refine that
+ * case. */
+static ixs_check_result
+equivalence_trunc_shift_direction(equivalence_state *state, ixs_node *shifted,
+                                  ixs_node *base) {
+  ixs_node *shifted_numerator;
+  ixs_node *shifted_denominator;
+  ixs_node *base_numerator;
+  ixs_node *base_denominator;
+  ixs_node *delta;
+  ixs_quotient_parts_status shifted_status;
+  ixs_quotient_parts_status base_status;
+
+  if (!shifted || !base || shifted->tag != IXS_TRUNC || base->tag != IXS_TRUNC)
+    return IXS_CHECK_UNKNOWN;
+  shifted_status =
+      simp_decompose_exact_quotient(state->ctx, shifted->u.unary.arg,
+                                    &shifted_numerator, &shifted_denominator);
+  base_status = simp_decompose_exact_quotient(
+      state->ctx, base->u.unary.arg, &base_numerator, &base_denominator);
+  if (shifted_status == IXS_QUOTIENT_PARTS_OOM ||
+      base_status == IXS_QUOTIENT_PARTS_OOM) {
+    state->oom = true;
+    return IXS_CHECK_UNKNOWN;
+  }
+  if (shifted_status != IXS_QUOTIENT_PARTS_MATCH ||
+      base_status != IXS_QUOTIENT_PARTS_MATCH ||
+      shifted_denominator != base_denominator ||
+      ixs_bounds_check_integer_valued(state->bounds, shifted_numerator) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(state->bounds, base_numerator) !=
+          IXS_CHECK_TRUE ||
+      ixs_bounds_check_integer_valued(state->bounds, base_denominator) !=
+          IXS_CHECK_TRUE ||
+      !equivalence_proves_zero_cmp(state, shifted_numerator, IXS_CMP_GE) ||
+      !equivalence_proves_zero_cmp(state, base_numerator, IXS_CMP_GE) ||
+      equivalence_build_sub(state, shifted_numerator, base_numerator, &delta) !=
+          EQUIVALENCE_BUILD_OK ||
+      ixs_node_is_sentinel(delta) ||
+      !ixs_bounds_mod_shift_stays_in_residue(state->bounds, base_numerator,
+                                             base_denominator, delta))
+    return IXS_CHECK_UNKNOWN;
+  return IXS_CHECK_TRUE;
+}
+
+static ixs_check_result equivalence_trunc_shift(equivalence_state *state,
+                                                ixs_node *lhs, ixs_node *rhs) {
+  ixs_check_result result = equivalence_trunc_shift_direction(state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  return equivalence_trunc_shift_direction(state, rhs, lhs);
 }
 
 static ixs_check_result equivalence_floor_quotient(equivalence_state *state,
@@ -19569,6 +20065,15 @@ static ixs_check_result equivalence_core_algebra(equivalence_state *state,
   result = equivalence_cancel_integer_content(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
+  result = equivalence_zero_sum(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_cancel_proven_add_terms(state, lhs, rhs, depth);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_trunc_shift(state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
   result = equivalence_floor_quotient(state, lhs, rhs);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
@@ -19576,6 +20081,9 @@ static ixs_check_result equivalence_core_algebra(equivalence_state *state,
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   result = equivalence_enclosed_radix_partition(state, lhs, rhs);
+  if (result != IXS_CHECK_UNKNOWN)
+    return result;
+  result = equivalence_cancel_proven_radix_groups(state, lhs, rhs, depth);
   if (result != IXS_CHECK_UNKNOWN)
     return result;
   result = equivalence_floor_mod_partition(state, lhs, rhs);
@@ -19670,27 +20178,10 @@ static equivalence_query_status equivalence_query_bounds_detail_at_depth(
       bounds->query_state ? bounds->query_state->invalid_blocks : 0u;
   bool old_oom = bounds->oom;
   bool track_limits = bounds_query_is_tracking(bounds);
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
   equivalence_query_status status = EQUIVALENCE_QUERY_COMPLETE;
 
   equivalence_state_init(&state, ctx, bounds);
   state.bounded_subproof_depth = bounded_subproof_depth;
-  *result = IXS_CHECK_UNKNOWN;
-  if (bounds_check_defined_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
-          IXS_CHECK_TRUE ||
-      bounds_check_defined_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
-          IXS_CHECK_TRUE) {
-    if (lhs_oom || rhs_oom || (!old_oom && bounds->oom))
-      status = EQUIVALENCE_QUERY_OOM;
-    else if (lhs_limited || rhs_limited)
-      status = EQUIVALENCE_QUERY_LIMITED;
-    goto restore;
-  }
-  if (bounds->query_state)
-    limit_blocks = bounds->query_state->limit_blocks;
   *result = equivalence_core(&state, lhs, rhs, 0);
   if (state.invalid || bounds_query_invalid_since(bounds, invalid_blocks)) {
     *result = IXS_CHECK_UNKNOWN;
@@ -19705,7 +20196,6 @@ static equivalence_query_status equivalence_query_bounds_detail_at_depth(
     status = EQUIVALENCE_QUERY_LIMITED;
   }
 
-restore:
   equivalence_state_destroy(&state);
   if (!old_oom && bounds->oom)
     bounds_cache_clear(bounds);
@@ -19836,21 +20326,9 @@ constant_difference_query_bound_detail(ixs_ctx *ctx, ixs_bounds *bounds,
   size_t limit_blocks =
       bounds->query_state ? bounds->query_state->limit_blocks : 0u;
   bool old_oom = bounds->oom;
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
   ixs_fact_query_status status = IXS_FACT_QUERY_COMPLETE;
 
   memset(&attempt, 0, sizeof(attempt));
-  if (bounds_check_defined_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
-          IXS_CHECK_TRUE ||
-      bounds_check_defined_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
-          IXS_CHECK_TRUE) {
-    attempt.oom = lhs_oom || rhs_oom;
-    attempt.limited = lhs_limited || rhs_limited;
-    goto finish;
-  }
   if (bounds->query_state)
     limit_blocks = bounds->query_state->limit_blocks;
 
@@ -19860,7 +20338,6 @@ constant_difference_query_bound_detail(ixs_ctx *ctx, ixs_bounds *bounds,
   attempt.oom = attempt.delta_oom || (!old_oom && bounds->oom);
   attempt.limited =
       attempt.delta_limited || bounds_query_limited_since(bounds, limit_blocks);
-finish:
   attempt.oom = attempt.oom || (!old_oom && bounds->oom);
   status = constant_difference_query_status(
       attempt.oom, attempt.invalid, attempt.limited && !attempt.ok, attempt.ok,
