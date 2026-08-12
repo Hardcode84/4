@@ -1153,10 +1153,17 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   combines exact point ranges, complete low-64 bitfacts, additive rows over the
   weighted relation forest, and paired-Mod projection. Complete bitfacts are
   converted to signed two's-complement values without implementation-defined
-  unsigned-to-signed casts. The rewrite memo projects each input DAG node once,
-  while interval and bitfacts work reuse the active central query cache. Scalar
-  and batch simplification use the same path. A successful projection is a
-  poison refinement, so it need only agree where the source is defined.
+  unsigned-to-signed casts. A point-range probe runs first, but publication
+  still requires the original definedness proof. If the range is not exact, a
+  tag-specific capability check skips bitfacts only when its transfer would
+  reproduce the same interval seed. ADD relation work first verifies the
+  zero coefficient-sum invariant, and paired-Mod search starts only when the
+  normalized row contains a matching Mod pair. These necessary conditions
+  remove proof calls; they do not remove a proof backend. The rewrite memo
+  projects each input DAG node once, while interval and bitfacts work reuse the
+  active central query cache. Scalar and batch simplification use the same
+  path. A successful projection is a poison refinement, so it need only agree
+  where the source is defined.
   Contradictory fact domains still bypass rewriting rather than proving values
   vacuously. OOM, invalid internal state, query limits, and unrepresentable
   integer results remain distinct failures.

@@ -424,6 +424,51 @@ static bool bounds_bitfacts_alloc_children(bounds_bitfacts_query *query,
   return true;
 }
 
+IXS_STATIC bool bounds_bitfacts_may_refine(ixs_bounds *bounds, ixs_node *expr) {
+  ixs_node *dividend;
+  uint64_t shift;
+  if (!bounds || !expr)
+    return false;
+  switch (expr->tag) {
+  case IXS_SYM: {
+    ixs_var_bound *var = bounds_store_find_var(bounds, expr->u.name);
+    return var &&
+           ((var->bits.known_zero | var->bits.known_one) != 0 ||
+            (var->modulus > 1 && ixs_int64_is_positive_pow2(var->modulus)));
+  }
+  case IXS_ADD: {
+    int64_t p;
+    int64_t q;
+    uint32_t i;
+    ixs_node_get_rat(expr->u.add.coeff, &p, &q);
+    if (q != 1)
+      return false;
+    for (i = 0; i < expr->u.add.nterms; i++) {
+      ixs_node_get_rat(expr->u.add.terms[i].coeff, &p, &q);
+      if (q != 1)
+        return false;
+    }
+    return true;
+  }
+  case IXS_MUL:
+    return expr->u.mul.coeff->tag == IXS_INT && expr->u.mul.coeff->u.ival > 0 &&
+           expr->u.mul.nfactors == 1 && expr->u.mul.factors[0].exp == 1 &&
+           ixs_node_is_integer_valued(expr);
+  case IXS_FLOOR:
+    return extract_pow2_dividend(expr->u.unary.arg, &dividend, &shift);
+  case IXS_MOD:
+    return expr->u.binary.rhs->tag == IXS_INT &&
+           ixs_int64_is_positive_pow2(expr->u.binary.rhs->u.ival) &&
+           ixs_node_is_integer_valued(expr->u.binary.lhs);
+  case IXS_AND:
+  case IXS_OR:
+  case IXS_XOR:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static ixs_query_walk_step
 bounds_bitfacts_complete(bounds_bitfacts_query *query, bool success,
                          ixs_bitfacts bits) {

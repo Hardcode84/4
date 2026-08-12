@@ -606,7 +606,11 @@ materialize it when known-zero and known-one cover all 64 bits. For example,
 `Mod(x, 16) == 0` reduces `x & 15` to zero. Partial coverage does not produce a
 constant. Projection runs once per rewrite-memo entry and shares the active
 bitfacts query rather than walking the reachable DAG in a separate bounds
-context.
+context. Before starting that query, the bitfacts owner checks whether the
+node's supported transfer can add anything to its interval seed. Unsupported
+MUL, FLOOR, and Mod shapes, non-integer ADD coefficients, and tags whose
+bitfacts are interval-only skip the redundant walk; supported shapes and
+fact-backed symbol bits still use the complete proof.
 
 ## 4.9 Bitwise And/Or And Logical Not
 

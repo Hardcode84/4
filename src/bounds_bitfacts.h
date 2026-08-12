@@ -22,6 +22,11 @@ IXS_STATIC void bounds_bitfacts_apply_xor(ixs_bitfacts *out,
 IXS_STATIC uint64_t bounds_bitfacts_value_span_mask(uint64_t upper);
 IXS_STATIC bool ixs_bounds_get_bitfacts(struct ixs_bounds *bounds,
                                         ixs_node *expr, ixs_bitfacts *out);
+/* True exactly when the tag-specific transfer can add information beyond the
+ * interval seed used by ixs_bounds_get_bitfacts. Expected O(add terms) for an
+ * ADD coefficient check and O(1) otherwise. */
+IXS_STATIC bool bounds_bitfacts_may_refine(struct ixs_bounds *bounds,
+                                           ixs_node *expr);
 IXS_STATIC bool ixs_bounds_is_pow2_or_zero(struct ixs_bounds *bounds,
                                            ixs_node *expr);
 

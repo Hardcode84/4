@@ -8304,9 +8304,56 @@ static void test_exact_integer_projection_reuses_bitfacts(void) {
   CHECK(bounds_query_force_hold_begin(&bounds, &held) && held);
   status = bounds_project_exact_integer(ctx, &bounds, expr, &value);
   CHECK(status == IXS_ALGEBRA_MATCH && value == 0);
+  CHECK(bounds_project_exact_integer(ctx, &bounds, ctx->sentinel_error,
+                                     &value) == IXS_ALGEBRA_INVALID);
   ixs_bounds_query_hold_end(&bounds);
   ixs_bounds_destroy(&bounds);
 
+  ixs_session_unbind(&binding);
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_exact_integer_bitfacts_preflight(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_session_binding binding;
+  ixs_bounds bounds;
+  ixs_node *x = ixs_sym(ctx, "bitfacts_preflight_x");
+  ixs_node *y = ixs_sym(ctx, "bitfacts_preflight_y");
+  ixs_node *z = ixs_sym(ctx, "bitfacts_preflight_z");
+  ixs_node *half_x = ixs_mul(ctx, ixs_rat(ctx, 1, 2), x);
+  ixs_node *integer_add = ixs_add(ctx, x, y);
+  ixs_node *rational_add = ixs_add(ctx, x, half_x);
+  ixs_node *scaled = ixs_mul(ctx, ixs_int(ctx, 2), x);
+  ixs_node *shifted = ixs_floor(ctx, ixs_div(ctx, x, ixs_int(ctx, 8)));
+  ixs_node *mod_pow2 = ixs_mod(ctx, x, ixs_int(ctx, 8));
+  ixs_node *mod_other = ixs_mod(ctx, x, ixs_int(ctx, 3));
+  ixs_node *masked = ixs_and(ctx, x, ixs_int(ctx, 15));
+  ixs_node *known_bits = ixs_cmp(ctx, masked, IXS_CMP_EQ, ixs_int(ctx, 3));
+  ixs_node *known_residue = ixs_cmp(ctx, ixs_mod(ctx, z, ixs_int(ctx, 8)),
+                                    IXS_CMP_EQ, ixs_int(ctx, 3));
+
+  CHECK(ctx && x && y && z && half_x && integer_add && rational_add && scaled &&
+        shifted && mod_pow2 && mod_other && masked && known_bits &&
+        known_residue);
+  CHECK(ixs_session_bind(&binding, IXS_TEST_SESSION(ctx)) == ctx);
+  CHECK(ixs_bounds_init_ctx(&bounds, ctx, &ctx->scratch));
+
+  CHECK(!bounds_bitfacts_may_refine(&bounds, x));
+  CHECK(!bounds_bitfacts_may_refine(&bounds, z));
+  CHECK(bounds_bitfacts_may_refine(&bounds, integer_add));
+  CHECK(!bounds_bitfacts_may_refine(&bounds, rational_add));
+  CHECK(bounds_bitfacts_may_refine(&bounds, scaled));
+  CHECK(bounds_bitfacts_may_refine(&bounds, shifted));
+  CHECK(bounds_bitfacts_may_refine(&bounds, mod_pow2));
+  CHECK(!bounds_bitfacts_may_refine(&bounds, mod_other));
+  CHECK(bounds_bitfacts_may_refine(&bounds, masked));
+
+  CHECK(ixs_bounds_add_assumption(&bounds, known_bits));
+  CHECK(bounds_bitfacts_may_refine(&bounds, x));
+  CHECK(ixs_bounds_add_assumption(&bounds, known_residue));
+  CHECK(bounds_bitfacts_may_refine(&bounds, z));
+
+  ixs_bounds_destroy(&bounds);
   ixs_session_unbind(&binding);
   ixs_ctx_destroy(ctx);
 }
@@ -13069,6 +13116,7 @@ int main(void) {
   test_public_known_bits_propagation();
   test_public_known_bits_failures();
   test_exact_integer_projection_reuses_bitfacts();
+  test_exact_integer_bitfacts_preflight();
   test_modular_remainder_equality_reuses_queries();
   test_quotient_bucket_oracle_uses_existing_nodes();
   test_public_symbol_congruence();
