@@ -265,9 +265,14 @@ layout, load factor, and allocation remain consumer-owned.
   before a zero coefficient or reduced modulus of one can finish the residue.
   Reachable Piecewise branches run in bounds forks. Proof-independent mode
   consults only structural and stored facts.
-  `bounds_stride.c` joins ADD and Piecewise operands with gcd, scales linear
-  products without overflowing the retained stride, and maps literal `Mod`
-  through the gcd of dividend stride and modulus.
+  `bounds_stride.c` joins ADD and Piecewise residue classes with gcd and maps
+  literal `Mod` through the gcd of the dividend class and modulus. For a
+  positive target modulus, its product algebra composes coefficient, factor,
+  and cross-term strides with their residues; exponentiation reuses that same
+  class multiplication. Every intermediate gcd product is reduced against the
+  target before multiplication, so no representable target requires a wider
+  integer. The phase-free stride query remains the cheaper path for consumers
+  that do not need a residue representative.
 
   `bounds_query.c` owns that opaque central state and its lifecycle. Interval,
   bitfacts, residue, and stride entries use keys containing the kind, bounds
@@ -618,6 +623,13 @@ This enables rules like:
   representing its `2^63` magnitude in `int64_t`.
 - A symbol's finite interval and congruence narrow literal-`Mod` bounds to the
   extrema of reachable residues. Empty intersections are contradictions.
+- Any total integer expression with a fact-backed residue class gets the same
+  literal-`Mod` envelope. ADD, signed integer coefficients, nonlinear products,
+  positive powers, nested literal Mods, and Piecewise joins compose classes
+  algebraically. A full class is `[r, r + m - d]`, where `d` is the class
+  modulus intersected with `m`; a finite dividend interval instead uses the
+  exact first and last reachable residue without enumeration. Fractional or
+  partial carriers and dynamic or nonpositive moduli do not enter this path.
 - `Max(1, expr)` where `expr >= 1` → `expr`
 
 **Congruence-gated rewrites** (requires `Mod(sym, M) == R` assumption):

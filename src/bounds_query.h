@@ -58,7 +58,10 @@ typedef struct {
     ixs_interval interval;
     ixs_bitfacts bitfacts;
     uint64_t residue;
-    uint64_t stride;
+    struct {
+      uint64_t modulus;
+      uint64_t residue;
+    } stride;
   } result;
 } bounds_query_cache_entry;
 

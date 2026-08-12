@@ -384,14 +384,18 @@ integer-valued `Mod(x, m)` is in `[0, U - 1]`. An equality-constrained symbolic
 modulus receives the same dividend-step tightening as a literal modulus. No
 remainder bound is inferred unless the modulus is proven positive.
 
-For literal positive moduli, a symbol's finite interval and stored congruence
-are intersected before computing the `Mod` range. A full reachable residue
-cycle uses its gcd extrema; a partial cycle is enumerated up to 1024 steps.
-Larger partial cycles fall back to the structural over-approximation. An exact
+For literal positive moduli, the shared residue-class query feeds the generic
+`Mod` range. It composes symbol facts through ADD, signed coefficients,
+nonlinear products, positive powers, nested literal Mods, and Piecewise joins.
+A complete class maps directly to its first and last possible remainder. When
+the dividend also has a finite interval, floor-sum counting finds the exact
+reachable extrema in `O(log^2 modulus)` without enumerating values. An exact
 known residue produces an exact interval. Bounds environments record whether
-any congruence exists, so ordinary interval-only `Mod` queries skip the
-recursive residue proof. Empty interval/congruence intersections mark the fact
-domain contradictory.
+any congruence exists, so ordinary interval-only `Mod` queries keep the cheap
+structural coefficient path. Empty interval/congruence intersections mark the
+fact domain contradictory; partial, fractional, dynamic-modulus, overflow, and
+allocation-failure cases retain ordinary status behavior rather than inventing
+an envelope.
 
 Scaled exact division keeps modular wrap explicit. For example,
 `Mod(2*x,2^32)/2` reduces to `Mod(x,2^31)` when `x` is integer-valued, then to

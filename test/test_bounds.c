@@ -2304,6 +2304,122 @@ static void test_public_affine_endpoint_refinement(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_mod_product_residue_envelope(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *a = ixs_sym(ctx, "mod_product_a");
+  ixs_node *b = ixs_sym(ctx, "mod_product_b");
+  ixs_node *selector = ixs_sym(ctx, "mod_product_selector");
+  ixs_node *modulus = ixs_int(ctx, INT64_C(4294967296));
+  ixs_node *limit = ixs_int(ctx, INT64_C(4294967295));
+  ixs_node *selector_bit = ixs_mod(ctx, selector, ixs_int(ctx, 2));
+  ixs_node *dividend = ixs_mul(ctx, ixs_int(ctx, 2),
+                               ixs_add(ctx, b, ixs_mul(ctx, a, selector_bit)));
+  ixs_node *remainder = ixs_mod(ctx, dividend, modulus);
+  ixs_node *window =
+      ixs_cmp(ctx, ixs_add(ctx, remainder, ixs_int(ctx, 7)), IXS_CMP_LE, limit);
+  ixs_facts *aligned = ixs_facts_create(ctx);
+  ixs_facts *weak = ixs_facts_create(ctx);
+  ixs_range_result range;
+
+  CHECK(ixs_facts_assume_pred(aligned,
+                              ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 16)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(aligned,
+                              ixs_cmp(ctx, ixs_mod(ctx, b, ixs_int(ctx, 256)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(test_ixs_range_facts(aligned, remainder, &range));
+  CHECK(range.has_lower && range.lower_p == 0 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == INT64_C(4294967264) &&
+        range.upper_q == 1);
+  CHECK(test_ixs_check_facts(aligned, window) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(aligned, window) == ixs_true(ctx));
+
+  CHECK(
+      ixs_facts_assume_pred(weak, ixs_cmp(ctx, ixs_mod(ctx, a, ixs_int(ctx, 2)),
+                                          IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(
+      ixs_facts_assume_pred(weak, ixs_cmp(ctx, ixs_mod(ctx, b, ixs_int(ctx, 2)),
+                                          IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_facts(weak, window) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_simplify_facts(weak, window) != ixs_true(ctx));
+
+  /* Nonzero classes select the last reachable residue without enumerating
+   * the product domain. */
+  {
+    ixs_node *x = ixs_sym(ctx, "mod_product_x");
+    ixs_node *y = ixs_sym(ctx, "mod_product_y");
+    ixs_node *product_mod = ixs_mod(ctx, ixs_mul(ctx, x, y), modulus);
+    ixs_node *fits = ixs_cmp(ctx, ixs_add(ctx, product_mod, ixs_int(ctx, 4)),
+                             IXS_CMP_LE, limit);
+    ixs_node *misses = ixs_cmp(ctx, ixs_add(ctx, product_mod, ixs_int(ctx, 5)),
+                               IXS_CMP_LE, limit);
+    ixs_facts *classes = ixs_facts_create(ctx);
+
+    CHECK(ixs_facts_assume_pred(classes,
+                                ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 1))));
+    CHECK(ixs_facts_assume_pred(classes,
+                                ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 8)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 3))));
+    CHECK(test_ixs_range_facts(classes, product_mod, &range));
+    CHECK(range.has_lower && range.lower_p == 3 && range.lower_q == 1);
+    CHECK(range.has_upper && range.upper_p == INT64_C(4294967291) &&
+          range.upper_q == 1);
+    CHECK(test_ixs_check_facts(classes, fits) == IXS_CHECK_TRUE);
+    CHECK(test_ixs_check_facts(classes, misses) == IXS_CHECK_UNKNOWN);
+  }
+
+  /* The same class product works for non-power-of-two moduli and signed
+   * affine offsets. */
+  {
+    ixs_node *x = ixs_sym(ctx, "mod_product_composite_x");
+    ixs_node *y = ixs_sym(ctx, "mod_product_composite_y");
+    ixs_node *mod30 = ixs_int(ctx, 30);
+    ixs_node *product = ixs_mul(ctx, x, y);
+    ixs_node *shifted =
+        ixs_add(ctx, ixs_int(ctx, 5), ixs_mul(ctx, ixs_int(ctx, -1), product));
+    ixs_facts *classes = ixs_facts_create(ctx);
+
+    CHECK(ixs_facts_assume_pred(classes,
+                                ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 4)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 1))));
+    CHECK(ixs_facts_assume_pred(classes,
+                                ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 6)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 3))));
+    CHECK(test_ixs_range_facts(classes, ixs_mod(ctx, product, mod30), &range));
+    CHECK(range.has_lower && range.lower_p == 3 && range.lower_q == 1);
+    CHECK(range.has_upper && range.upper_p == 27 && range.upper_q == 1);
+    CHECK(test_ixs_range_facts(classes, ixs_mod(ctx, shifted, mod30), &range));
+    CHECK(range.has_lower && range.lower_p == 2 && range.lower_q == 1);
+    CHECK(range.has_upper && range.upper_p == 26 && range.upper_q == 1);
+  }
+
+  /* Query-local allocation failure does not poison retained facts. */
+  {
+    ixs_node *x = ixs_sym(ctx, "mod_product_oom_x");
+    ixs_node *y = ixs_sym(ctx, "mod_product_oom_y");
+    ixs_node *product_mod = ixs_mod(ctx, ixs_mul(ctx, x, y), modulus);
+    ixs_facts *oom = ixs_facts_create(ctx);
+
+    CHECK(ixs_facts_assume_pred(oom,
+                                ixs_cmp(ctx, ixs_mod(ctx, x, ixs_int(ctx, 8)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 1))));
+    CHECK(ixs_facts_assume_pred(oom,
+                                ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 8)),
+                                        IXS_CMP_EQ, ixs_int(ctx, 3))));
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), 0);
+    CHECK(!test_ixs_range_facts(oom, product_mod, &range));
+    CHECK(!range.has_lower && !range.has_upper && !oom->bounds.oom);
+    ixs_arena_set_fail_after(ixs_test_scratch(ctx), IXS_ARENA_FAILURE_DISABLED);
+    CHECK(test_ixs_range_facts(oom, product_mod, &range));
+    CHECK(range.has_lower && range.lower_p == 3 && range.lower_q == 1);
+    CHECK(range.has_upper && range.upper_p == INT64_C(4294967291) &&
+          range.upper_q == 1);
+  }
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_bounds_expr_override(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_bounds b;
@@ -12660,6 +12776,7 @@ int main(void) {
 
   /* Bounds: expression overrides */
   test_public_affine_endpoint_refinement();
+  test_public_mod_product_residue_envelope();
   test_bounds_expr_override();
   test_bounds_expr_override_invalidates_cache();
   test_bounds_var_index_oom();

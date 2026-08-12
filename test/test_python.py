@@ -1627,6 +1627,56 @@ def test_mod_range_intersects_interval_and_congruence(
         assert result == (min(reachable), max(reachable))
 
 
+@given(
+    modulus=st.integers(min_value=2, max_value=128),
+    x_modulus=st.integers(min_value=2, max_value=32),
+    y_modulus=st.integers(min_value=2, max_value=32),
+    x_residue=st.integers(min_value=-32, max_value=32),
+    y_residue=st.integers(min_value=-32, max_value=32),
+    coefficient=st.integers(min_value=-8, max_value=8).filter(bool),
+    offset=st.integers(min_value=-32, max_value=32),
+)
+def test_mod_product_residue_envelope_soundness(
+    modulus: int,
+    x_modulus: int,
+    y_modulus: int,
+    x_residue: int,
+    y_residue: int,
+    coefficient: int,
+    offset: int,
+) -> None:
+    """Product classes map to exact first/last reachable Mod residues."""
+    x_residue %= x_modulus
+    y_residue %= y_modulus
+    class_modulus = math.gcd(
+        modulus,
+        coefficient * x_modulus * y_residue,
+        coefficient * y_modulus * x_residue,
+        coefficient * x_modulus * y_modulus,
+    )
+    assume(class_modulus > 1)
+    class_residue = (coefficient * x_residue * y_residue + offset) % class_modulus
+
+    ctx = ixsimpl.Context()
+    x = ctx.sym("product_envelope_x")
+    y = ctx.sym("product_envelope_y")
+    expr = (coefficient * x * y + offset) % modulus
+    facts = ctx.facts()
+    facts.assume_many([ctx.eq(x % x_modulus, x_residue), ctx.eq(y % y_modulus, y_residue)])
+
+    assert ctx.range(expr, facts=facts) == (
+        class_residue,
+        class_residue + modulus - class_modulus,
+    )
+    for x_scale in range(-3, 4):
+        for y_scale in range(-3, 4):
+            actual = (
+                coefficient * (x_residue + x_scale * x_modulus) * (y_residue + y_scale * y_modulus)
+                + offset
+            ) % modulus
+            assert class_residue <= actual <= class_residue + modulus - class_modulus
+
+
 @given(delta=st.integers(min_value=-8, max_value=8).filter(bool))
 def test_symbolic_floor_difference_uses_remainder_proof(delta: int) -> None:
     """A proved remainder shift keeps symbolic quotients in one bucket."""

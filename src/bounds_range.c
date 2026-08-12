@@ -240,16 +240,16 @@ IXS_STATIC void bounds_range_invalidate_all(ixs_bounds *b) {
     memset(b->cache, 0, b->cache_cap * sizeof(*b->cache));
 }
 
-/* GCD of a positive modulus and a conservative dividend step. Computing the
- * GCD directly keeps the result representable when a coefficient is
- * INT64_MIN, whose magnitude is one past INT64_MAX. */
+/* GCD of a positive modulus and a conservative structural coefficient step.
+ * This allocation-free fallback avoids proof queries when no stored residue
+ * can strengthen the ordinary Mod range. */
 static int64_t mod_dividend_gcd(ixs_node *expr, int64_t modulus) {
   int64_t p, q, g;
   uint32_t i;
   switch (expr->tag) {
   case IXS_MUL:
     ixs_node_get_rat(expr->u.mul.coeff, &p, &q);
-    return (q == 1) ? ixs_gcd(p, modulus) : 1;
+    return q == 1 ? ixs_gcd(p, modulus) : 1;
   case IXS_ADD:
     ixs_node_get_rat(expr->u.add.coeff, &p, &q);
     if (q != 1)
@@ -925,18 +925,20 @@ static bool bounds_mod_progression_extrema(uint64_t count, uint64_t modulus,
 
 /* O(1) for a full residue cycle and O(log^2 modulus) for a partial cycle.
  * The latter uses floor-sum counting to avoid an arbitrary enumeration cap. */
-static bool bounds_symbol_mod_range(ixs_bounds *b, ixs_node *symbol,
-                                    const ixs_interval *iv, int64_t modulus,
-                                    ixs_interval *out) {
+static bool bounds_mod_class_finite_range(const ixs_interval *iv,
+                                          int64_t modulus,
+                                          uint64_t class_modulus,
+                                          uint64_t class_remainder,
+                                          ixs_interval *out) {
   int64_t known_modulus, known_remainder, lo, hi, current, delta, first;
   uint64_t steps, cycle, step, residue, min_residue, max_residue;
   uint64_t g;
 
-  if (symbol->tag != IXS_SYM || !iv->valid || iv->lo_inf || iv->hi_inf ||
-      modulus <= 0 ||
-      !bounds_store_get_modrem(b, symbol->u.name, &known_modulus,
-                               &known_remainder))
+  if (!iv->valid || iv->lo_inf || iv->hi_inf || modulus <= 0 ||
+      class_modulus == 0u || class_modulus > (uint64_t)INT64_MAX)
     return false;
+  known_modulus = (int64_t)class_modulus;
+  known_remainder = (int64_t)(class_remainder % class_modulus);
 
   lo = ixs_rat_ceil(iv->lo_p, iv->lo_q);
   hi = ixs_rat_floor(iv->hi_p, iv->hi_q);
@@ -969,21 +971,25 @@ static bool bounds_symbol_mod_range(ixs_bounds *b, ixs_node *symbol,
   return true;
 }
 
-/* An expression-wide stride class maps through Mod to one class modulo the
- * gcd of that stride and the positive literal divisor.  This gives the full
- * sound residue envelope without first expanding a Piecewise interval. */
-static bool bounds_structural_mod_range(ixs_bounds *b, ixs_node *dividend,
-                                        int64_t modulus, ixs_interval *out) {
-  uint64_t stride;
+static bool bounds_symbol_mod_range(ixs_bounds *b, ixs_node *symbol,
+                                    const ixs_interval *iv, int64_t modulus,
+                                    ixs_interval *out) {
+  int64_t known_modulus;
+  int64_t known_remainder;
   uint64_t common;
   uint64_t residue;
   uint64_t upper;
-  if (modulus <= 0 || !bounds_known_stride(b, dividend, &stride))
+  if (symbol->tag != IXS_SYM ||
+      !bounds_store_get_modrem(b, symbol->u.name, &known_modulus,
+                               &known_remainder))
     return false;
-  common = ixs_u64_gcd(stride, (uint64_t)modulus);
-  if (common <= 1u || !bounds_known_residue(b, dividend, common, &residue))
-    return false;
-  residue %= common;
+  if (bounds_mod_class_finite_range(
+          iv, modulus, (uint64_t)known_modulus,
+          ixs_int64_normalize_residue(known_remainder, (uint64_t)known_modulus),
+          out))
+    return true;
+  common = ixs_u64_gcd((uint64_t)known_modulus, (uint64_t)modulus);
+  residue = ixs_int64_normalize_residue(known_remainder, common);
   upper = residue + (uint64_t)modulus - common;
   if (upper > (uint64_t)INT64_MAX)
     return false;
@@ -991,35 +997,65 @@ static bool bounds_structural_mod_range(ixs_bounds *b, ixs_node *dividend,
   return true;
 }
 
+static bool bounds_mod_class_full_range(int64_t modulus, uint64_t class_modulus,
+                                        uint64_t class_remainder,
+                                        ixs_interval *out) {
+  uint64_t upper = class_remainder + (uint64_t)modulus - class_modulus;
+  if (upper > (uint64_t)INT64_MAX)
+    return false;
+  *out = ixs_interval_range((int64_t)class_remainder, 1, (int64_t)upper, 1);
+  return true;
+}
+
+static bool bounds_structural_mod_range(ixs_bounds *b, ixs_node *dividend,
+                                        const ixs_interval *dividend_range,
+                                        int64_t modulus, ixs_interval *out) {
+  uint64_t class_modulus;
+  uint64_t class_remainder;
+  if (!bounds_known_residue_class(b, dividend, (uint64_t)modulus,
+                                  &class_modulus, &class_remainder))
+    return false;
+  if (dividend_range &&
+      bounds_mod_class_finite_range(dividend_range, modulus, class_modulus,
+                                    class_remainder, out))
+    return true;
+  return bounds_mod_class_full_range(modulus, class_modulus, class_remainder,
+                                     out);
+}
+
 static ixs_interval bounds_get_positive_mod(ixs_bounds *b, ixs_node *lhs,
                                             int64_t modulus) {
   bool residue_tried = false;
   ixs_interval pi;
-  int64_t exact_lhs;
-  uint64_t residue;
   ixs_interval congruent;
+  int64_t exact_lhs;
+  uint64_t exact_residue;
 
   if (b->has_modrem && ixs_node_contains_piecewise(lhs) &&
       ixs_node_is_integer_valued(lhs) && ixs_node_is_known_total(lhs)) {
     residue_tried = true;
-    if (bounds_structural_mod_range(b, lhs, modulus, &congruent))
+    if (bounds_structural_mod_range(b, lhs, NULL, modulus, &congruent))
       return congruent;
-    if (bounds_known_residue(b, lhs, (uint64_t)modulus, &residue))
-      return ixs_interval_exact((int64_t)residue, 1);
+    if (bounds_known_residue(b, lhs, (uint64_t)modulus, &exact_residue))
+      return ixs_interval_exact((int64_t)exact_residue, 1);
   }
   pi = ixs_bounds_get(b, lhs);
   if (ixs_interval_is_point_int(pi, &exact_lhs))
     return ixs_interval_exact(
         (int64_t)ixs_int64_normalize_residue(exact_lhs, (uint64_t)modulus), 1);
   if (b->has_modrem && !residue_tried &&
-      bounds_known_residue(b, lhs, (uint64_t)modulus, &residue))
-    return ixs_interval_exact((int64_t)residue, 1);
+      bounds_known_residue(b, lhs, (uint64_t)modulus, &exact_residue))
+    return ixs_interval_exact((int64_t)exact_residue, 1);
   if (b->has_modrem &&
       bounds_symbol_mod_range(b, lhs, &pi, modulus, &congruent))
     return congruent;
   if (pi.valid && pi.lo_q == 1 && pi.hi_q == 1 && pi.lo_p >= 0 &&
       pi.hi_p < modulus)
     return pi;
+  if (b->has_modrem && !residue_tried && ixs_node_is_integer_valued(lhs) &&
+      ixs_node_is_known_total(lhs) &&
+      bounds_structural_mod_range(b, lhs, &pi, modulus, &congruent))
+    return congruent;
   if (ixs_node_is_integer_valued(lhs)) {
     int64_t divisor = mod_dividend_gcd(lhs, modulus);
     return ixs_interval_range(0, 1, modulus - divisor, 1);
