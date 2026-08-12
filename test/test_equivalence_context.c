@@ -243,6 +243,9 @@ static void test_generic_context_cancellation(void) {
   ixs_node *right_max = ixs_max(ctx, digit3_64, digit2_64);
   ixs_facts *facts = ixs_facts_create(ctx);
   const ixs_node *batch[2] = {zero_sum, near_miss};
+  facts_query_cache *fact_cache;
+  size_t projection_visits;
+  size_t projection_skips;
 
   CHECK(ctx && item && within && digit1_64 && digit2_16 && digit2_64 &&
         digit3_16 && digit3_64 && within_bit && xor_16 && xor_64 && zero_sum &&
@@ -269,7 +272,21 @@ static void test_generic_context_cancellation(void) {
         IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(facts, zero_sum, ixs_int(ctx, 0)) ==
         IXS_CHECK_TRUE);
+  fact_cache = facts->bounds.facts_query_cache;
+  CHECK(fact_cache != NULL);
+  projection_visits = facts->bounds.exact_projection_visits;
+  projection_skips = facts->bounds.exact_projection_skips;
   CHECK(ixs_simplify_facts(facts, zero_sum) == ixs_int(ctx, 0));
+  CHECK(facts->bounds.exact_projection_visits - projection_visits < 128u);
+  CHECK(facts->bounds.exact_projection_skips != projection_skips);
+  CHECK(fact_cache->identity_stores != 0u);
+  CHECK(fact_cache->simplify_stores != 0u);
+  CHECK(ixs_simplify_facts(facts, zero_sum) == ixs_int(ctx, 0));
+  CHECK(fact_cache->simplify_hits != 0u);
+  fact_cache->simplify[zero_sum->hash & (FACTS_SIMPLIFY_CACHE_CAP - 1u)]
+      .source = NULL;
+  CHECK(ixs_simplify_facts(facts, zero_sum) == ixs_int(ctx, 0));
+  CHECK(fact_cache->identity_hits != 0u);
   ixs_simplify_batch_facts(facts, batch, 2u);
   CHECK(batch[0] == ixs_int(ctx, 0));
   CHECK(batch[1] != ixs_int(ctx, 0));
@@ -288,9 +305,82 @@ static void test_generic_context_cancellation(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_direct_fact_query_cache(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "direct_cache_x");
+  ixs_node *y = ixs_sym(ctx, "direct_cache_y");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *predicate = ixs_cmp(ctx, x, IXS_CMP_EQ, zero);
+  const ixs_node *predicates[1] = {predicate};
+  ixs_facts *first =
+      ixs_facts_create_preds(IXS_TEST_SESSION(ctx), predicates, 1u);
+  ixs_facts *second =
+      ixs_facts_create_preds(IXS_TEST_SESSION(ctx), predicates, 1u);
+  ixs_facts *empty_first = ixs_facts_create(ctx);
+  ixs_facts *empty_second = ixs_facts_create(ctx);
+  ixs_facts_closure_cache_stats_result after;
+  ixs_facts_closure_cache_stats_result before;
+  facts_query_cache *shared;
+  size_t hits;
+  size_t i;
+
+  CHECK(ctx && x && y && zero && predicate && first && second && empty_first &&
+        empty_second);
+  CHECK(sizeof(*first) <= sizeof(first->bounds) + 64u);
+  CHECK(empty_first->bounds.facts_query_cache == NULL);
+  CHECK(empty_second->bounds.facts_query_cache == NULL);
+  ixs_facts_closure_cache_stats(ctx, &before);
+  for (i = 0; i < 256u; i++)
+    CHECK(ixs_facts_create(ctx) != NULL);
+  ixs_facts_closure_cache_stats(ctx, &after);
+  CHECK(after.retained_bytes == before.retained_bytes);
+  shared = first->bounds.facts_query_cache;
+  CHECK(shared && shared == second->bounds.facts_query_cache);
+  CHECK(test_ixs_simplify_facts(first, x) == zero);
+  hits = shared->simplify_hits;
+  CHECK(test_ixs_simplify_facts(second, x) == zero);
+  CHECK(shared->simplify_hits == hits + 1u);
+
+  CHECK(ixs_facts_assume_pred(second,
+                              ixs_cmp(ctx, y, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(second->bounds.facts_query_cache != NULL);
+  CHECK(second->bounds.facts_query_cache != first->bounds.facts_query_cache ||
+        second->bounds.facts_query_generation !=
+            first->bounds.facts_query_generation);
+  CHECK(first->bounds.facts_query_cache == shared);
+  CHECK(test_ixs_simplify_facts(first, x) == zero);
+  CHECK(test_ixs_simplify_facts(second, y) == zero);
+
+  ixs_ctx_destroy(ctx);
+}
+
+static void test_equivalence_keeps_exact_projection(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *y = ixs_sym(ctx, "exact_projection_y");
+  ixs_node *zero = ixs_int(ctx, 0);
+  ixs_node *masked = ixs_and(ctx, ixs_int(ctx, 2), y);
+  ixs_facts *facts = ixs_facts_create(ctx);
+
+  CHECK(ctx && y && zero && masked && facts);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, y, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, y, IXS_CMP_LE, ixs_int(ctx, 63))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, ixs_mod(ctx, y, ixs_int(ctx, 4)),
+                                      IXS_CMP_EQ, ixs_int(ctx, 1))));
+  CHECK(test_ixs_equivalent_facts(facts, masked, zero) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(facts, masked) == zero);
+  CHECK(test_ixs_equivalent_facts(facts, masked, zero) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 int main(void) {
   test_equivalent_expression_contexts();
   test_generic_context_cancellation();
+  test_direct_fact_query_cache();
+  test_equivalence_keeps_exact_projection();
   printf("test_equivalence_context: %d/%d passed\n", tests_passed, tests_run);
   return tests_passed == tests_run ? 0 : 1;
 }

@@ -488,9 +488,18 @@ static ixs_algebra_status facts_definition_normalize(ixs_ctx *ctx,
   return *result == expr ? IXS_ALGEBRA_NO_MATCH : IXS_ALGEBRA_MATCH;
 }
 
+static ixs_fact_query_status
+facts_status_from_algebra(ixs_algebra_status status);
+static bool facts_simplify_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *source, ixs_node **result);
+static void facts_simplify_cache_store_result(ixs_ctx *ctx, ixs_bounds *bounds,
+                                              ixs_node *source,
+                                              ixs_simplify_result result);
+
 static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
                                      ixs_node *expr,
                                      ixs_simplify_result *result) {
+  ixs_node *cached;
   if (!facts_store_ready(facts)) {
     ixs_ctx_push_error(ctx, "facts: fact set is unusable");
     result->status = IXS_FACT_QUERY_COMPLETE;
@@ -512,11 +521,13 @@ static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
     result->value = expr;
     return true;
   }
+  if (facts_simplify_cache_lookup(ctx, &facts->bounds, expr, &cached)) {
+    result->status = IXS_FACT_QUERY_COMPLETE;
+    result->value = cached;
+    return true;
+  }
   return false;
 }
-
-static ixs_fact_query_status
-facts_status_from_algebra(ixs_algebra_status status);
 
 static ixs_node *facts_definition_simplify(ixs_ctx *ctx, ixs_bounds *bounds,
                                            ixs_node *expr,
@@ -613,6 +624,7 @@ cleanup:
                                         !ixs_node_is_sentinel(result.value));
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.value = NULL;
+  facts_simplify_cache_store_result(ctx, &facts->bounds, expr, result);
   facts_store_unbind(facts, &binding);
   return result;
 }
@@ -818,6 +830,55 @@ facts_status_from_algebra(ixs_algebra_status status) {
   return IXS_FACT_QUERY_COMPLETE;
 }
 
+static bool facts_query_cache_enabled(ixs_ctx *ctx, ixs_bounds *bounds) {
+  return ctx->arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         ctx->scratch.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds->query_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds->query_state_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds_query_state_transport(bounds) == IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+static bool facts_simplify_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *source, ixs_node **result) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_simplify_entry *entry;
+  if (!cache || cache->generation != bounds->facts_query_generation ||
+      !facts_query_cache_enabled(ctx, bounds))
+    return false;
+  entry = &cache->simplify[source->hash & (FACTS_SIMPLIFY_CACHE_CAP - 1u)];
+  if (entry->generation != cache->generation || entry->source != source)
+    return false;
+  *result = entry->result;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->simplify_hits++;
+#endif
+  return true;
+}
+
+static void facts_simplify_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
+                                       ixs_node *source, ixs_node *result) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_simplify_entry *entry;
+  if (!cache || cache->generation != bounds->facts_query_generation ||
+      !facts_query_cache_enabled(ctx, bounds))
+    return;
+  entry = &cache->simplify[source->hash & (FACTS_SIMPLIFY_CACHE_CAP - 1u)];
+  entry->source = source;
+  entry->result = result;
+  entry->generation = cache->generation;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->simplify_stores++;
+#endif
+}
+
+static void facts_simplify_cache_store_result(ixs_ctx *ctx, ixs_bounds *bounds,
+                                              ixs_node *source,
+                                              ixs_simplify_result result) {
+  if (result.status == IXS_FACT_QUERY_COMPLETE && result.value &&
+      !ixs_node_is_sentinel(result.value))
+    facts_simplify_cache_store(ctx, bounds, source, result.value);
+}
+
 /* One root truth pipeline is shared by check and simplification. Structural
  * predicate folding, exact comparison proof, and local implication retain
  * their distinct bounded engines but no public entry may omit one of them. */
@@ -877,13 +938,26 @@ static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
                                                  ixs_node *rewritten,
                                                  ixs_fact_query_status *status,
                                                  bool *limited) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_identity_entry *entry = NULL;
   ixs_check_result equivalent;
   ixs_algebra_status detail;
 
   if (!facts_additive_identity_candidate(rewritten))
     return rewritten;
-  detail = bounds_equivalence_query_detail(bounds, ctx, rewritten,
-                                           ctx->node_zero, &equivalent);
+  if (cache && cache->generation == bounds->facts_query_generation &&
+      facts_query_cache_enabled(ctx, bounds)) {
+    entry = &cache->identity[rewritten->hash &
+                             (FACTS_QUERY_IDENTITY_CACHE_CAP - 1u)];
+    if (entry->generation == cache->generation && entry->source == rewritten) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+      cache->identity_hits++;
+#endif
+      return entry->result == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
+    }
+  }
+  detail = bounds_equivalence_simplified_query_detail(
+      bounds, ctx, rewritten, ctx->node_zero, &equivalent);
   if (detail == IXS_ALGEBRA_LIMITED) {
     *limited = true;
     return rewritten;
@@ -891,6 +965,14 @@ static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
   *status = facts_status_from_algebra(detail);
   if (*status != IXS_FACT_QUERY_COMPLETE)
     return NULL;
+  if (entry) {
+    entry->source = rewritten;
+    entry->result = equivalent;
+    entry->generation = cache->generation;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->identity_stores++;
+#endif
+  }
   return equivalent == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
 }
 

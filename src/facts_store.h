@@ -7,11 +7,39 @@
 #include "bounds.h"
 #include "bounds_store.h"
 
+#define FACTS_QUERY_IDENTITY_CACHE_CAP 32u
+#define FACTS_SIMPLIFY_CACHE_CAP 64u
+
+typedef struct {
+  ixs_node *source;
+  ixs_check_result result;
+  uint32_t generation;
+} facts_query_identity_entry;
+
+typedef struct {
+  ixs_node *source;
+  ixs_node *result;
+  uint32_t generation;
+} facts_query_simplify_entry;
+
+struct facts_query_cache {
+  facts_query_identity_entry identity[FACTS_QUERY_IDENTITY_CACHE_CAP];
+  facts_query_simplify_entry simplify[FACTS_SIMPLIFY_CACHE_CAP];
+  uint32_t generation;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  size_t identity_hits;
+  size_t identity_stores;
+  size_t simplify_hits;
+  size_t simplify_stores;
+#endif
+};
+
 struct ixs_facts {
   ixs_session_impl *impl;
   ixs_facts *session_next;
   ixs_ctx *ctx;
   uint64_t epoch;
+  uint64_t query_version;
   bool usable;
   ixs_bounds bounds;
 };

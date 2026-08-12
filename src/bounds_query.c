@@ -30,7 +30,10 @@ struct ixs_bounds_query_state {
 
 static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
   return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
-         lhs.expr == rhs.expr && lhs.argument == rhs.argument &&
+         lhs.expr == rhs.expr &&
+         (lhs.kind == BOUNDS_QUERY_EQUIVALENCE
+              ? lhs.selector.peer == rhs.selector.peer
+              : lhs.selector.argument == rhs.selector.argument) &&
          lhs.equality_disabled == rhs.equality_disabled;
 }
 
@@ -414,7 +417,12 @@ static bool bounds_query_grow_active(ixs_bounds *b,
 }
 
 static size_t bounds_query_key_hash(bounds_query_key key) {
-  uint64_t mixed = key.owner ^ key.argument ^ ((uint64_t)key.kind << 56);
+  uint64_t mixed = key.owner ^ ((uint64_t)key.kind << 56);
+  if (key.kind == BOUNDS_QUERY_EQUIVALENCE)
+    mixed ^= (uint64_t)((uintptr_t)key.selector.peer >> 3) *
+             UINT64_C(0x9e3779b97f4a7c15);
+  else
+    mixed ^= key.selector.argument;
   if (key.equality_disabled)
     mixed ^= UINT64_C(0x9e3779b97f4a7c15);
   mixed ^= (uint64_t)((uintptr_t)key.expr >> 3);
@@ -489,9 +497,11 @@ static bool bounds_query_prepare_cache_insert(ixs_bounds *b,
   return true;
 }
 
-IXS_STATIC bounds_query_enter_result bounds_query_begin(
-    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, uint64_t argument,
-    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+static bounds_query_enter_result
+bounds_query_begin_impl(ixs_bounds *b, bounds_query_kind kind, ixs_node *expr,
+                        ixs_node *peer, uint64_t argument,
+                        bounds_query_scope *scope,
+                        bounds_query_cache_entry **cached) {
   ixs_bounds_query_state *state;
   bounds_query_key key;
   bounds_query_cache_entry *entry;
@@ -526,7 +536,10 @@ IXS_STATIC bounds_query_enter_result bounds_query_begin(
   key.kind = kind;
   key.owner = b->query_owner;
   key.expr = expr;
-  key.argument = argument;
+  if (kind == BOUNDS_QUERY_EQUIVALENCE)
+    key.selector.peer = peer;
+  else
+    key.selector.argument = argument;
   key.equality_disabled = b->equality_disabled_depth != 0;
   entry = bounds_query_cache_find(state, key, &found);
   if (found) {
@@ -577,6 +590,18 @@ IXS_STATIC bounds_query_enter_result bounds_query_begin(
   scope->key = key;
   scope->active = true;
   return BOUNDS_QUERY_ENTER_STARTED;
+}
+
+IXS_STATIC bounds_query_enter_result bounds_query_begin(
+    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, uint64_t argument,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+  return bounds_query_begin_impl(b, kind, expr, NULL, argument, scope, cached);
+}
+
+IXS_STATIC bounds_query_enter_result bounds_query_begin_pair(
+    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, ixs_node *peer,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+  return bounds_query_begin_impl(b, kind, expr, peer, 0, scope, cached);
 }
 
 IXS_STATIC bounds_query_cache_entry *

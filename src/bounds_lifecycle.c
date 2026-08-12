@@ -17,6 +17,11 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->oom = false;
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
+  b->exact_projection_depth = 0;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  b->exact_projection_visits = 0;
+  b->exact_projection_skips = 0;
+#endif
   bounds_range_init(b, store_initialized);
   return store_initialized;
 }
@@ -36,6 +41,11 @@ IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
   bounds_relation_destroy(b);
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
+  b->exact_projection_depth = 0;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  b->exact_projection_visits = 0;
+  b->exact_projection_skips = 0;
+#endif
 }
 
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
@@ -50,6 +60,11 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   bounds_query_inherit_fork(dst, src);
   dst->equality_disabled_depth = src->equality_disabled_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
+  dst->exact_projection_depth = src->exact_projection_depth;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  dst->exact_projection_visits = src->exact_projection_visits;
+  dst->exact_projection_skips = src->exact_projection_skips;
+#endif
   bounds_range_inherit_fork(dst, src);
   if (!bounds_store_fork_var_index(dst, src) ||
       !bounds_difference_clone_fork(dst, src) ||

@@ -17,6 +17,7 @@
 #include "query_walk.h"
 #include "quotient_algebra.h"
 #include "simplify.h"
+#include <assert.h>
 #include <limits.h>
 #include <string.h>
 
@@ -29,18 +30,27 @@ typedef struct {
 } equivalence_memo_entry;
 
 typedef struct {
+  ixs_node *source;
+  ixs_node *result;
+} equivalence_simplify_entry;
+
+typedef struct {
   ixs_ctx *ctx;
   ixs_bounds *bounds;
   ixs_arena_mark memo_mark;
   equivalence_memo_entry *memo;
   size_t memo_count;
   size_t memo_capacity;
+  equivalence_simplify_entry *simplify_cache;
+  size_t simplify_cache_count;
+  size_t simplify_cache_capacity;
   size_t visited;
   unsigned bounded_subproof_depth;
   bool limited;
   bool invalid;
   bool oom;
   bool arithmetic_unrepresentable;
+  bool roots_simplified;
 } equivalence_state;
 
 static ixs_check_result
@@ -122,6 +132,70 @@ static equivalence_memo_entry *equivalence_memo_get(equivalence_state *state,
     state->memo_count++;
   }
   return &state->memo[index];
+}
+
+static bool equivalence_simplify_cache_grow(equivalence_state *state) {
+  size_t capacity = state->simplify_cache_capacity
+                        ? state->simplify_cache_capacity * 2u
+                        : 32u;
+  equivalence_simplify_entry *grown;
+  size_t i;
+
+  if (capacity <= state->simplify_cache_capacity ||
+      capacity > SIZE_MAX / sizeof(*grown))
+    return false;
+  grown = ixs_arena_alloc(&state->bounds->query_arena,
+                          capacity * sizeof(*grown), sizeof(void *));
+  if (!grown)
+    return false;
+  memset(grown, 0, capacity * sizeof(*grown));
+  for (i = 0; i < state->simplify_cache_capacity; i++) {
+    equivalence_simplify_entry entry = state->simplify_cache[i];
+    size_t slot;
+    if (!entry.source)
+      continue;
+    slot = entry.source->hash & (capacity - 1u);
+    while (grown[slot].source)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = entry;
+  }
+  state->simplify_cache = grown;
+  state->simplify_cache_capacity = capacity;
+  return true;
+}
+
+static ixs_node *equivalence_simplify(equivalence_state *state,
+                                      ixs_node *source, bool *limited) {
+  size_t slot;
+  ixs_node *result;
+
+  if (state->simplify_cache_capacity) {
+    slot = source->hash & (state->simplify_cache_capacity - 1u);
+    while (state->simplify_cache[slot].source &&
+           state->simplify_cache[slot].source != source)
+      slot = (slot + 1u) & (state->simplify_cache_capacity - 1u);
+    if (state->simplify_cache[slot].source)
+      return state->simplify_cache[slot].result;
+  }
+  if (!state->simplify_cache_capacity ||
+      state->simplify_cache_count + 1u > state->simplify_cache_capacity / 2u) {
+    if (!equivalence_simplify_cache_grow(state)) {
+      state->oom = true;
+      return NULL;
+    }
+  }
+  slot = source->hash & (state->simplify_cache_capacity - 1u);
+  while (state->simplify_cache[slot].source &&
+         state->simplify_cache[slot].source != source)
+    slot = (slot + 1u) & (state->simplify_cache_capacity - 1u);
+  result =
+      simp_simplify_bounds_status(state->ctx, source, state->bounds, limited);
+  if (!result || *limited)
+    return result;
+  state->simplify_cache[slot].source = source;
+  state->simplify_cache[slot].result = result;
+  state->simplify_cache_count++;
+  return result;
 }
 
 static void equivalence_state_init(equivalence_state *state, ixs_ctx *ctx,
@@ -416,10 +490,8 @@ equivalence_context_simplify_pair(equivalence_state *state,
   bool lhs_limited = false;
   bool rhs_limited = false;
 
-  *lhs = simp_simplify_bounds_status(state->ctx, pair->lhs, state->bounds,
-                                     &lhs_limited);
-  *rhs = simp_simplify_bounds_status(state->ctx, pair->rhs, state->bounds,
-                                     &rhs_limited);
+  *lhs = equivalence_simplify(state, pair->lhs, &lhs_limited);
+  *rhs = equivalence_simplify(state, pair->rhs, &rhs_limited);
   if (lhs_limited || rhs_limited) {
     state->limited = true;
     return false;
@@ -1950,10 +2022,14 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   if (lhs == rhs)
     return IXS_CHECK_TRUE;
 
-  simplified_lhs =
-      simp_simplify_bounds_status(state->ctx, lhs, state->bounds, &lhs_limited);
-  simplified_rhs =
-      simp_simplify_bounds_status(state->ctx, rhs, state->bounds, &rhs_limited);
+  if (state->roots_simplified) {
+    state->roots_simplified = false;
+    simplified_lhs = lhs;
+    simplified_rhs = rhs;
+  } else {
+    simplified_lhs = equivalence_simplify(state, lhs, &lhs_limited);
+    simplified_rhs = equivalence_simplify(state, rhs, &rhs_limited);
+  }
   if (lhs_limited || rhs_limited) {
     state->limited = true;
     return IXS_CHECK_UNKNOWN;
@@ -2001,9 +2077,9 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                     depth);
 }
 
-IXS_STATIC ixs_algebra_status
-bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
-                                ixs_node *rhs, ixs_check_result *result) {
+static ixs_algebra_status bounds_equivalence_query_detail_impl(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result, bool roots_simplified) {
   ixs_query_transaction transaction;
   equivalence_state state;
   ixs_bounds_transport_snapshot transport;
@@ -2019,6 +2095,7 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   transport = transaction.transport;
   limit_transport = transport;
   equivalence_state_init(&state, ctx, bounds);
+  state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
@@ -2031,7 +2108,13 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
     goto restore;
   }
   limit_transport = ixs_bounds_query_transport_snapshot(bounds);
+  if (roots_simplified) {
+    assert(bounds->exact_projection_depth != UINT_MAX);
+    bounds->exact_projection_depth++;
+  }
   *result = equivalence_core(&state, lhs, rhs, 0);
+  if (roots_simplified)
+    bounds->exact_projection_depth--;
   if (state.invalid || bounds_query_invalid_since(bounds, transport)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_INVALID;
@@ -2052,6 +2135,70 @@ restore:
     bounds_store_invalidate_reads(bounds);
   (void)ixs_query_transaction_finish(&transaction, true);
   return status;
+}
+
+static ixs_algebra_status bounds_equivalence_query_detail_common(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result, bool roots_simplified) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached = NULL;
+  bounds_query_enter_result enter;
+  ixs_algebra_status status;
+
+  /* Exact-integer projection disables itself before entering equivalence.
+   * The resulting restricted proof must not populate the full-proof cache:
+   * UNKNOWN there may still be provable by a top-level query. */
+  if (roots_simplified || bounds->exact_projection_depth != 0)
+    return bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  if (!bounds_query_should_track(bounds, lhs))
+    return bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  enter = bounds_query_begin_pair(bounds, BOUNDS_QUERY_EQUIVALENCE, lhs, rhs,
+                                  &scope, &cached);
+  switch (enter) {
+  case BOUNDS_QUERY_ENTER_CACHED:
+    *result = cached->result.equivalence;
+    return IXS_ALGEBRA_MATCH;
+  case BOUNDS_QUERY_ENTER_CYCLE:
+    *result = IXS_CHECK_UNKNOWN;
+    return IXS_ALGEBRA_MATCH;
+  case BOUNDS_QUERY_ENTER_LIMIT:
+    return IXS_ALGEBRA_LIMITED;
+  case BOUNDS_QUERY_ENTER_INVALID:
+    return IXS_ALGEBRA_INVALID;
+  case BOUNDS_QUERY_ENTER_OOM:
+    return IXS_ALGEBRA_OOM;
+  case BOUNDS_QUERY_ENTER_STARTED:
+    break;
+  }
+
+  status = bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  if (status == IXS_ALGEBRA_LIMITED)
+    bounds_query_note_limit(bounds);
+  else if (status == IXS_ALGEBRA_INVALID)
+    bounds_query_note_invalid(bounds);
+  else if (status == IXS_ALGEBRA_OOM)
+    bounds_query_note_oom(bounds);
+  cached = bounds_query_finish(&scope, status == IXS_ALGEBRA_MATCH);
+  if (status == IXS_ALGEBRA_MATCH)
+    cached->result.equivalence = *result;
+  return status;
+}
+
+IXS_STATIC ixs_algebra_status
+bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
+                                ixs_node *rhs, ixs_check_result *result) {
+  return bounds_equivalence_query_detail_common(bounds, ctx, lhs, rhs, result,
+                                                false);
+}
+
+IXS_STATIC ixs_algebra_status bounds_equivalence_simplified_query_detail(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result) {
+  return bounds_equivalence_query_detail_common(bounds, ctx, lhs, rhs, result,
+                                                true);
 }
 
 typedef struct {

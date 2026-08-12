@@ -68,7 +68,19 @@ static void facts_poison(ixs_facts *facts) {
     facts->usable = false;
 }
 
-static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
+static void facts_query_cache_invalidate(facts_query_cache *cache) {
+  cache->generation++;
+  if (cache->generation == 0) {
+    memset(cache->identity, 0, sizeof(cache->identity));
+    memset(cache->simplify, 0, sizeof(cache->simplify));
+    cache->generation = 1;
+  }
+}
+
+static facts_query_cache *facts_mutable_cache(ixs_facts *facts);
+
+static void facts_commit(ixs_facts *facts, ixs_bounds *candidate,
+                         facts_query_cache *query_cache) {
   /* A fork's projection memo is query-local and cannot be transferred into the
    * committed bounds.  Destroy it, then reuse the destination's persistent
    * table allocation after advancing its semantic generation once. */
@@ -97,6 +109,14 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
   candidate->cache_cap = facts->bounds.cache_cap;
   bounds_store_invalidate_reads(candidate);
   bounds_store_retarget_scratch(candidate, NULL);
+  if (!query_cache) {
+    facts->query_version++;
+    if (facts->query_version == 0)
+      facts->query_version++;
+    query_cache = facts_mutable_cache(facts);
+  }
+  candidate->facts_query_cache = query_cache;
+  candidate->facts_query_generation = query_cache ? query_cache->generation : 0;
   facts->bounds = *candidate;
 }
 
@@ -313,11 +333,13 @@ static bool facts_predicate_set_init(ixs_arena *arena, size_t count,
 /* Expected O(1) at the fixed half-load bound; collisions probe linearly. */
 #define FACTS_CLOSURE_CACHE_CAP 32u
 #define FACTS_CLOSURE_CACHE_SLOT_BYTES (3u * 1024u)
-#define FACTS_CLOSURE_CACHE_RETAINED_LIMIT (128u * 1024u)
+#define FACTS_DIRECT_CACHE_SLOT_NODES 64u
+#define FACTS_CLOSURE_CACHE_RETAINED_LIMIT (256u * 1024u)
 #define FACTS_CLOSURE_CACHE_SLOT_NODES                                         \
   (FACTS_CLOSURE_CACHE_SLOT_BYTES / sizeof(ixs_node *))
 
 typedef struct {
+  facts_query_cache query_cache;
   uint64_t hash;
   size_t n_predicates;
   size_t n_replay;
@@ -326,19 +348,34 @@ typedef struct {
 } facts_closure_cache_entry;
 
 typedef struct {
+  facts_query_cache query_cache;
+  uint64_t hash;
+  /* NULL keys an immutable ordered-predicate domain. Non-NULL keys one
+   * mutable fact handle and semantic version in the same bounded slot pool. */
+  const ixs_facts *owner;
+  uint64_t version;
+  size_t n_predicates;
+  ixs_node *nodes[FACTS_DIRECT_CACHE_SLOT_NODES];
+  bool valid;
+} facts_direct_cache_entry;
+
+typedef struct {
   facts_closure_cache_entry *entries[FACTS_CLOSURE_CACHE_CAP];
+  facts_direct_cache_entry *direct_entries[FACTS_CLOSURE_CACHE_CAP];
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   size_t lookups;
   size_t hits;
   size_t stores;
   size_t bypasses;
   size_t entry_count;
+  size_t direct_entry_count;
 #endif
 } facts_closure_cache;
 
 typedef char facts_closure_cache_must_fit_retained_limit
     [(sizeof(facts_closure_cache) +
-          FACTS_CLOSURE_CACHE_CAP * sizeof(facts_closure_cache_entry) <=
+          FACTS_CLOSURE_CACHE_CAP * (sizeof(facts_closure_cache_entry) +
+                                     sizeof(facts_direct_cache_entry)) <=
       FACTS_CLOSURE_CACHE_RETAINED_LIMIT)
          ? 1
          : -1];
@@ -352,6 +389,7 @@ typedef struct {
 
 typedef struct {
   facts_closure_capture capture;
+  facts_query_cache *identity;
   uint64_t hash;
   bool store;
 } facts_closure_cache_result;
@@ -383,6 +421,89 @@ static uint64_t facts_closure_hash(ixs_node *const *predicates,
   hash *= UINT64_C(0xff51afd7ed558ccd);
   hash ^= hash >> 33;
   return hash;
+}
+
+static facts_query_cache *facts_direct_cache(ixs_ctx *ctx,
+                                             ixs_node *const *predicates,
+                                             size_t n_predicates) {
+  facts_closure_cache *cache;
+  facts_direct_cache_entry *entry;
+  uint64_t hash;
+  size_t i;
+  size_t slot;
+  if (n_predicates == 0 || n_predicates > FACTS_DIRECT_CACHE_SLOT_NODES)
+    return NULL;
+  hash = facts_closure_hash(predicates, n_predicates);
+  cache = facts_closure_cache_get(ctx);
+  if (!cache)
+    return NULL;
+  slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
+  entry = cache->direct_entries[slot];
+  if (entry && entry->valid && entry->owner == NULL && entry->hash == hash &&
+      entry->n_predicates == n_predicates) {
+    for (i = 0; i < n_predicates; i++)
+      if (entry->nodes[i] != predicates[i])
+        break;
+    if (i == n_predicates)
+      return &entry->query_cache;
+  }
+  if (!entry) {
+    entry = ixs_arena_alloc(&ctx->arena, sizeof(*entry), sizeof(void *));
+    if (!entry)
+      return NULL;
+    memset(entry, 0, sizeof(*entry));
+    cache->direct_entries[slot] = entry;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->direct_entry_count++;
+#endif
+  }
+  facts_query_cache_invalidate(&entry->query_cache);
+  entry->valid = false;
+  if (n_predicates)
+    memcpy(entry->nodes, predicates, n_predicates * sizeof(*predicates));
+  entry->hash = hash;
+  entry->owner = NULL;
+  entry->version = 0;
+  entry->n_predicates = n_predicates;
+  entry->valid = true;
+  return &entry->query_cache;
+}
+
+static facts_query_cache *facts_mutable_cache(ixs_facts *facts) {
+  facts_closure_cache *cache;
+  facts_direct_cache_entry *entry;
+  uint64_t hash;
+  size_t slot;
+  assert(facts && facts->ctx && facts->query_version != 0);
+  /* A handle keeps one direct-mapped slot across mutations. Reassignment
+   * advances the slot generation, making any evicted owner's loan stale. */
+  hash = (uint64_t)ixs_hash_ptr(facts);
+  cache = facts_closure_cache_get(facts->ctx);
+  if (!cache)
+    return NULL;
+  slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
+  entry = cache->direct_entries[slot];
+  if (entry && entry->valid && entry->owner == facts &&
+      entry->version == facts->query_version)
+    return &entry->query_cache;
+  if (!entry) {
+    entry = ixs_arena_alloc(&facts->ctx->arena, sizeof(*entry), sizeof(void *));
+    if (!entry)
+      return NULL;
+    memset(entry, 0, sizeof(*entry));
+    cache->direct_entries[slot] = entry;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->direct_entry_count++;
+#endif
+  }
+  facts_query_cache_invalidate(&entry->query_cache);
+  entry->valid = false;
+  entry->hash = hash;
+  entry->owner = facts;
+  entry->version = facts->query_version;
+  entry->n_predicates = 0;
+  entry->valid = true;
+  return &entry->query_cache;
 }
 
 /* Lookup is O(n) in the explicit batch size and never scans context state. */
@@ -435,10 +556,10 @@ static void facts_closure_cache_note_bypass(ixs_ctx *ctx) {
 
 /* Store is O(n + r) in the exact key and replay sequence. Collisions replace
  * an entry in place, so retained cache memory cannot grow after 32 slots. */
-static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
-                                      size_t n_predicates,
-                                      const facts_closure_capture *capture,
-                                      uint64_t hash) {
+static facts_query_cache *
+facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
+                          size_t n_predicates,
+                          const facts_closure_capture *capture, uint64_t hash) {
   facts_closure_cache *cache;
   facts_closure_cache_entry *entry;
   size_t slot;
@@ -448,23 +569,24 @@ static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     facts_closure_cache_note_bypass(ctx);
 #endif
-    return;
+    return NULL;
   }
   cache = facts_closure_cache_get(ctx);
   if (!cache)
-    return;
+    return NULL;
   slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
   entry = cache->entries[slot];
   if (!entry) {
     entry = ixs_arena_alloc(&ctx->arena, sizeof(*entry), sizeof(void *));
     if (!entry)
-      return;
+      return NULL;
     memset(entry, 0, sizeof(*entry));
     cache->entries[slot] = entry;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     cache->entry_count++;
 #endif
   }
+  facts_query_cache_invalidate(&entry->query_cache);
   entry->valid = false;
   if (n_predicates)
     memcpy(entry->nodes, predicates, n_predicates * sizeof(*predicates));
@@ -478,6 +600,7 @@ static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   cache->stores++;
 #endif
+  return &entry->query_cache;
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
@@ -498,7 +621,8 @@ ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
   stats->bypasses = cache->bypasses;
   stats->entries = cache->entry_count;
   stats->retained_bytes =
-      sizeof(*cache) + cache->entry_count * sizeof(facts_closure_cache_entry);
+      sizeof(*cache) + cache->entry_count * sizeof(facts_closure_cache_entry) +
+      cache->direct_entry_count * sizeof(facts_direct_cache_entry);
 }
 #endif
 
@@ -908,14 +1032,18 @@ facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
       candidate->nnonzero == 0 && !candidate->has_modrem &&
       !candidate->contradiction && !candidate->oom;
 
-  if (cache_result)
+  if (cache_result) {
     cache_result->store = false;
+    cache_result->identity = NULL;
+  }
   if (cacheable) {
     cached = facts_closure_cache_lookup(ctx, predicates, n_predicates,
                                         &cache_result->hash);
-    if (cached)
+    if (cached) {
+      cache_result->identity = &cached->query_cache;
       return bounds_assume_ingest_predicates(
           candidate, cached->nodes + cached->n_predicates, cached->n_replay);
+    }
     if (n_predicates <= FACTS_CLOSURE_CACHE_SLOT_NODES) {
       memset(&cache_result->capture, 0, sizeof(cache_result->capture));
       cache_result->capture.replay_limit =
@@ -961,6 +1089,7 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
   ixs_bounds bounds;
   ixs_bounds_build_status status;
   ixs_facts *facts;
+  facts_query_cache *query_cache;
   if (!s)
     return NULL;
   ctx = ixs_session_bind(&binding, s);
@@ -975,6 +1104,7 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
     goto failed;
   }
   memset(facts, 0, sizeof(*facts));
+  query_cache = facts_direct_cache(ctx, predicates, n_predicates);
   facts->impl = binding.impl;
   facts->ctx = ctx;
   facts->epoch = binding.impl->epoch;
@@ -990,6 +1120,9 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
          bounds.query_arena.spare == NULL &&
          bounds.query_arena.inline_chunk == NULL);
   facts->bounds = bounds;
+  facts->bounds.facts_query_cache = query_cache;
+  facts->bounds.facts_query_generation =
+      query_cache ? query_cache->generation : 0;
   facts->usable = true;
   facts->session_next = binding.impl->facts_head;
   binding.impl->facts_head = facts;
@@ -1077,9 +1210,10 @@ static bool facts_assume_predicates(ixs_facts *facts,
         facts_validate_closed_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
     if (closure_cache.store)
-      facts_closure_cache_store(ctx, predicates, n_predicates,
-                                &closure_cache.capture, closure_cache.hash);
-    facts_commit(facts, &candidate);
+      closure_cache.identity =
+          facts_closure_cache_store(ctx, predicates, n_predicates,
+                                    &closure_cache.capture, closure_cache.hash);
+    facts_commit(facts, &candidate, closure_cache.identity);
   } else {
     if (candidate_ready)
       ixs_bounds_destroy(&candidate);
@@ -1121,7 +1255,7 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
   ixs_bounds_add_expr(&candidate, expr, iv);
   if (candidate.oom)
     goto failed;
-  facts_commit(facts, &candidate);
+  facts_commit(facts, &candidate, NULL);
   ok = true;
   goto cleanup;
 
@@ -1171,7 +1305,7 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
     ixs_bounds_query_hold_end(&candidate);
     query_held = false;
   }
-  facts_commit(facts, &candidate);
+  facts_commit(facts, &candidate, NULL);
   ok = true;
   goto cleanup;
 
@@ -1339,7 +1473,7 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
       !bounds_transfer_substituted_nonzero(&candidate, &src->bounds, ctx, nsubs,
                                            targets, replacements))
     goto failed;
-  facts_commit(dst, &candidate);
+  facts_commit(dst, &candidate, NULL);
   ok = true;
   goto cleanup;
 

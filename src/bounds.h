@@ -54,6 +54,8 @@ typedef struct {
   bool equality_disabled;
 } ixs_bounds_cache_entry;
 
+typedef struct facts_query_cache facts_query_cache;
+
 typedef struct ixs_bounds {
   ixs_ctx *ctx;        /* optional; enables expression canonical aliases */
   ixs_ctx *store_ctx;  /* stable owner while ctx is temporarily disabled */
@@ -121,10 +123,17 @@ typedef struct ixs_bounds {
    * predicate probes may re-enter once, but cannot form an unbounded C call
    * chain through another exact proof. */
   unsigned exact_proof_call_depth;
+  unsigned exact_projection_depth;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  size_t exact_projection_visits;
+  size_t exact_projection_skips;
+#endif
   bool interval_evaluating;
   bool query_state_owner;
   bool query_state_borrowed;
   bool equality_projection_cache_transient;
+  facts_query_cache *facts_query_cache;
+  uint32_t facts_query_generation;
   bool *semantic_changed; /* optional fact-mutation observer */
   ixs_arena *scratch;     /* borrowed; must outlive ixs_bounds */
 } ixs_bounds;

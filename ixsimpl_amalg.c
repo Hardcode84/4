@@ -5202,6 +5202,7 @@ IXS_STATIC void bounds_difference_add_range(ixs_bounds *b, ixs_node *expr,
 #include "query_walk.h"
 #include "quotient_algebra.h"
 #include "simplify.h"
+#include <assert.h>
 #include <limits.h>
 #include <string.h>
 
@@ -5214,18 +5215,27 @@ typedef struct {
 } equivalence_memo_entry;
 
 typedef struct {
+  ixs_node *source;
+  ixs_node *result;
+} equivalence_simplify_entry;
+
+typedef struct {
   ixs_ctx *ctx;
   ixs_bounds *bounds;
   ixs_arena_mark memo_mark;
   equivalence_memo_entry *memo;
   size_t memo_count;
   size_t memo_capacity;
+  equivalence_simplify_entry *simplify_cache;
+  size_t simplify_cache_count;
+  size_t simplify_cache_capacity;
   size_t visited;
   unsigned bounded_subproof_depth;
   bool limited;
   bool invalid;
   bool oom;
   bool arithmetic_unrepresentable;
+  bool roots_simplified;
 } equivalence_state;
 
 static ixs_check_result
@@ -5307,6 +5317,70 @@ static equivalence_memo_entry *equivalence_memo_get(equivalence_state *state,
     state->memo_count++;
   }
   return &state->memo[index];
+}
+
+static bool equivalence_simplify_cache_grow(equivalence_state *state) {
+  size_t capacity = state->simplify_cache_capacity
+                        ? state->simplify_cache_capacity * 2u
+                        : 32u;
+  equivalence_simplify_entry *grown;
+  size_t i;
+
+  if (capacity <= state->simplify_cache_capacity ||
+      capacity > SIZE_MAX / sizeof(*grown))
+    return false;
+  grown = ixs_arena_alloc(&state->bounds->query_arena,
+                          capacity * sizeof(*grown), sizeof(void *));
+  if (!grown)
+    return false;
+  memset(grown, 0, capacity * sizeof(*grown));
+  for (i = 0; i < state->simplify_cache_capacity; i++) {
+    equivalence_simplify_entry entry = state->simplify_cache[i];
+    size_t slot;
+    if (!entry.source)
+      continue;
+    slot = entry.source->hash & (capacity - 1u);
+    while (grown[slot].source)
+      slot = (slot + 1u) & (capacity - 1u);
+    grown[slot] = entry;
+  }
+  state->simplify_cache = grown;
+  state->simplify_cache_capacity = capacity;
+  return true;
+}
+
+static ixs_node *equivalence_simplify(equivalence_state *state,
+                                      ixs_node *source, bool *limited) {
+  size_t slot;
+  ixs_node *result;
+
+  if (state->simplify_cache_capacity) {
+    slot = source->hash & (state->simplify_cache_capacity - 1u);
+    while (state->simplify_cache[slot].source &&
+           state->simplify_cache[slot].source != source)
+      slot = (slot + 1u) & (state->simplify_cache_capacity - 1u);
+    if (state->simplify_cache[slot].source)
+      return state->simplify_cache[slot].result;
+  }
+  if (!state->simplify_cache_capacity ||
+      state->simplify_cache_count + 1u > state->simplify_cache_capacity / 2u) {
+    if (!equivalence_simplify_cache_grow(state)) {
+      state->oom = true;
+      return NULL;
+    }
+  }
+  slot = source->hash & (state->simplify_cache_capacity - 1u);
+  while (state->simplify_cache[slot].source &&
+         state->simplify_cache[slot].source != source)
+    slot = (slot + 1u) & (state->simplify_cache_capacity - 1u);
+  result =
+      simp_simplify_bounds_status(state->ctx, source, state->bounds, limited);
+  if (!result || *limited)
+    return result;
+  state->simplify_cache[slot].source = source;
+  state->simplify_cache[slot].result = result;
+  state->simplify_cache_count++;
+  return result;
 }
 
 static void equivalence_state_init(equivalence_state *state, ixs_ctx *ctx,
@@ -5601,10 +5675,8 @@ equivalence_context_simplify_pair(equivalence_state *state,
   bool lhs_limited = false;
   bool rhs_limited = false;
 
-  *lhs = simp_simplify_bounds_status(state->ctx, pair->lhs, state->bounds,
-                                     &lhs_limited);
-  *rhs = simp_simplify_bounds_status(state->ctx, pair->rhs, state->bounds,
-                                     &rhs_limited);
+  *lhs = equivalence_simplify(state, pair->lhs, &lhs_limited);
+  *rhs = equivalence_simplify(state, pair->rhs, &rhs_limited);
   if (lhs_limited || rhs_limited) {
     state->limited = true;
     return false;
@@ -7135,10 +7207,14 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
   if (lhs == rhs)
     return IXS_CHECK_TRUE;
 
-  simplified_lhs =
-      simp_simplify_bounds_status(state->ctx, lhs, state->bounds, &lhs_limited);
-  simplified_rhs =
-      simp_simplify_bounds_status(state->ctx, rhs, state->bounds, &rhs_limited);
+  if (state->roots_simplified) {
+    state->roots_simplified = false;
+    simplified_lhs = lhs;
+    simplified_rhs = rhs;
+  } else {
+    simplified_lhs = equivalence_simplify(state, lhs, &lhs_limited);
+    simplified_rhs = equivalence_simplify(state, rhs, &rhs_limited);
+  }
   if (lhs_limited || rhs_limited) {
     state->limited = true;
     return IXS_CHECK_UNKNOWN;
@@ -7186,9 +7262,9 @@ static ixs_check_result equivalence_core_impl(equivalence_state *state,
                                     depth);
 }
 
-IXS_STATIC ixs_algebra_status
-bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
-                                ixs_node *rhs, ixs_check_result *result) {
+static ixs_algebra_status bounds_equivalence_query_detail_impl(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result, bool roots_simplified) {
   ixs_query_transaction transaction;
   equivalence_state state;
   ixs_bounds_transport_snapshot transport;
@@ -7204,6 +7280,7 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
   transport = transaction.transport;
   limit_transport = transport;
   equivalence_state_init(&state, ctx, bounds);
+  state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
@@ -7216,7 +7293,13 @@ bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
     goto restore;
   }
   limit_transport = ixs_bounds_query_transport_snapshot(bounds);
+  if (roots_simplified) {
+    assert(bounds->exact_projection_depth != UINT_MAX);
+    bounds->exact_projection_depth++;
+  }
   *result = equivalence_core(&state, lhs, rhs, 0);
+  if (roots_simplified)
+    bounds->exact_projection_depth--;
   if (state.invalid || bounds_query_invalid_since(bounds, transport)) {
     *result = IXS_CHECK_UNKNOWN;
     status = IXS_ALGEBRA_INVALID;
@@ -7237,6 +7320,70 @@ restore:
     bounds_store_invalidate_reads(bounds);
   (void)ixs_query_transaction_finish(&transaction, true);
   return status;
+}
+
+static ixs_algebra_status bounds_equivalence_query_detail_common(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result, bool roots_simplified) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached = NULL;
+  bounds_query_enter_result enter;
+  ixs_algebra_status status;
+
+  /* Exact-integer projection disables itself before entering equivalence.
+   * The resulting restricted proof must not populate the full-proof cache:
+   * UNKNOWN there may still be provable by a top-level query. */
+  if (roots_simplified || bounds->exact_projection_depth != 0)
+    return bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  if (!bounds_query_should_track(bounds, lhs))
+    return bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  enter = bounds_query_begin_pair(bounds, BOUNDS_QUERY_EQUIVALENCE, lhs, rhs,
+                                  &scope, &cached);
+  switch (enter) {
+  case BOUNDS_QUERY_ENTER_CACHED:
+    *result = cached->result.equivalence;
+    return IXS_ALGEBRA_MATCH;
+  case BOUNDS_QUERY_ENTER_CYCLE:
+    *result = IXS_CHECK_UNKNOWN;
+    return IXS_ALGEBRA_MATCH;
+  case BOUNDS_QUERY_ENTER_LIMIT:
+    return IXS_ALGEBRA_LIMITED;
+  case BOUNDS_QUERY_ENTER_INVALID:
+    return IXS_ALGEBRA_INVALID;
+  case BOUNDS_QUERY_ENTER_OOM:
+    return IXS_ALGEBRA_OOM;
+  case BOUNDS_QUERY_ENTER_STARTED:
+    break;
+  }
+
+  status = bounds_equivalence_query_detail_impl(bounds, ctx, lhs, rhs, result,
+                                                roots_simplified);
+  if (status == IXS_ALGEBRA_LIMITED)
+    bounds_query_note_limit(bounds);
+  else if (status == IXS_ALGEBRA_INVALID)
+    bounds_query_note_invalid(bounds);
+  else if (status == IXS_ALGEBRA_OOM)
+    bounds_query_note_oom(bounds);
+  cached = bounds_query_finish(&scope, status == IXS_ALGEBRA_MATCH);
+  if (status == IXS_ALGEBRA_MATCH)
+    cached->result.equivalence = *result;
+  return status;
+}
+
+IXS_STATIC ixs_algebra_status
+bounds_equivalence_query_detail(ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs,
+                                ixs_node *rhs, ixs_check_result *result) {
+  return bounds_equivalence_query_detail_common(bounds, ctx, lhs, rhs, result,
+                                                false);
+}
+
+IXS_STATIC ixs_algebra_status bounds_equivalence_simplified_query_detail(
+    ixs_bounds *bounds, ixs_ctx *ctx, ixs_node *lhs, ixs_node *rhs,
+    ixs_check_result *result) {
+  return bounds_equivalence_query_detail_common(bounds, ctx, lhs, rhs, result,
+                                                true);
 }
 
 typedef struct {
@@ -8225,6 +8372,11 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->oom = false;
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
+  b->exact_projection_depth = 0;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  b->exact_projection_visits = 0;
+  b->exact_projection_skips = 0;
+#endif
   bounds_range_init(b, store_initialized);
   return store_initialized;
 }
@@ -8244,6 +8396,11 @@ IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
   bounds_relation_destroy(b);
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
+  b->exact_projection_depth = 0;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  b->exact_projection_visits = 0;
+  b->exact_projection_skips = 0;
+#endif
 }
 
 IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
@@ -8258,6 +8415,11 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   bounds_query_inherit_fork(dst, src);
   dst->equality_disabled_depth = src->equality_disabled_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
+  dst->exact_projection_depth = src->exact_projection_depth;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  dst->exact_projection_visits = src->exact_projection_visits;
+  dst->exact_projection_skips = src->exact_projection_skips;
+#endif
   bounds_range_inherit_fork(dst, src);
   if (!bounds_store_fork_var_index(dst, src) ||
       !bounds_difference_clone_fork(dst, src) ||
@@ -9302,10 +9464,10 @@ bounds_exact_value_project_delta(ixs_ctx *ctx, ixs_bounds *bounds,
   return IXS_ALGEBRA_NO_MATCH;
 }
 
-IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
-                                                           ixs_bounds *bounds,
-                                                           ixs_node *expr,
-                                                           int64_t *value) {
+static ixs_algebra_status bounds_project_exact_integer_impl(ixs_ctx *ctx,
+                                                            ixs_bounds *bounds,
+                                                            ixs_node *expr,
+                                                            int64_t *value) {
   ixs_node *lhs = expr;
   ixs_node *rhs = ctx ? ctx->node_zero : NULL;
   int64_t range_value;
@@ -9353,6 +9515,51 @@ IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
   if (status != IXS_ALGEBRA_MATCH && status != IXS_ALGEBRA_NO_MATCH)
     return status;
   return bounds_exact_value_project_delta(ctx, bounds, lhs, rhs, value);
+}
+
+IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
+                                                           ixs_bounds *bounds,
+                                                           ixs_node *expr,
+                                                           int64_t *value) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached = NULL;
+  bounds_query_enter_result enter;
+  ixs_algebra_status status;
+
+  if (!bounds_query_should_track(bounds, expr)) {
+    return bounds_project_exact_integer_impl(ctx, bounds, expr, value);
+  }
+  enter = bounds_query_begin(bounds, BOUNDS_QUERY_EXACT_INTEGER, expr, 0,
+                             &scope, &cached);
+  switch (enter) {
+  case BOUNDS_QUERY_ENTER_CACHED:
+    if (cached->success)
+      *value = cached->result.exact_integer;
+    status = cached->success ? IXS_ALGEBRA_MATCH : IXS_ALGEBRA_NO_MATCH;
+    return status;
+  case BOUNDS_QUERY_ENTER_CYCLE:
+    return IXS_ALGEBRA_NO_MATCH;
+  case BOUNDS_QUERY_ENTER_LIMIT:
+    return IXS_ALGEBRA_LIMITED;
+  case BOUNDS_QUERY_ENTER_INVALID:
+    return IXS_ALGEBRA_INVALID;
+  case BOUNDS_QUERY_ENTER_OOM:
+    return IXS_ALGEBRA_OOM;
+  case BOUNDS_QUERY_ENTER_STARTED:
+    break;
+  }
+
+  status = bounds_project_exact_integer_impl(ctx, bounds, expr, value);
+  if (status == IXS_ALGEBRA_LIMITED)
+    bounds_query_note_limit(bounds);
+  else if (status == IXS_ALGEBRA_INVALID)
+    bounds_query_note_invalid(bounds);
+  else if (status == IXS_ALGEBRA_OOM)
+    bounds_query_note_oom(bounds);
+  cached = bounds_query_finish(&scope, status == IXS_ALGEBRA_MATCH);
+  if (status == IXS_ALGEBRA_MATCH)
+    cached->result.exact_integer = *value;
+  return status;
 }
 
 /* ==================================================================== */
@@ -9936,7 +10143,10 @@ struct ixs_bounds_query_state {
 
 static bool bounds_query_key_equal(bounds_query_key lhs, bounds_query_key rhs) {
   return lhs.kind == rhs.kind && lhs.owner == rhs.owner &&
-         lhs.expr == rhs.expr && lhs.argument == rhs.argument &&
+         lhs.expr == rhs.expr &&
+         (lhs.kind == BOUNDS_QUERY_EQUIVALENCE
+              ? lhs.selector.peer == rhs.selector.peer
+              : lhs.selector.argument == rhs.selector.argument) &&
          lhs.equality_disabled == rhs.equality_disabled;
 }
 
@@ -10320,7 +10530,12 @@ static bool bounds_query_grow_active(ixs_bounds *b,
 }
 
 static size_t bounds_query_key_hash(bounds_query_key key) {
-  uint64_t mixed = key.owner ^ key.argument ^ ((uint64_t)key.kind << 56);
+  uint64_t mixed = key.owner ^ ((uint64_t)key.kind << 56);
+  if (key.kind == BOUNDS_QUERY_EQUIVALENCE)
+    mixed ^= (uint64_t)((uintptr_t)key.selector.peer >> 3) *
+             UINT64_C(0x9e3779b97f4a7c15);
+  else
+    mixed ^= key.selector.argument;
   if (key.equality_disabled)
     mixed ^= UINT64_C(0x9e3779b97f4a7c15);
   mixed ^= (uint64_t)((uintptr_t)key.expr >> 3);
@@ -10395,9 +10610,11 @@ static bool bounds_query_prepare_cache_insert(ixs_bounds *b,
   return true;
 }
 
-IXS_STATIC bounds_query_enter_result bounds_query_begin(
-    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, uint64_t argument,
-    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+static bounds_query_enter_result
+bounds_query_begin_impl(ixs_bounds *b, bounds_query_kind kind, ixs_node *expr,
+                        ixs_node *peer, uint64_t argument,
+                        bounds_query_scope *scope,
+                        bounds_query_cache_entry **cached) {
   ixs_bounds_query_state *state;
   bounds_query_key key;
   bounds_query_cache_entry *entry;
@@ -10432,7 +10649,10 @@ IXS_STATIC bounds_query_enter_result bounds_query_begin(
   key.kind = kind;
   key.owner = b->query_owner;
   key.expr = expr;
-  key.argument = argument;
+  if (kind == BOUNDS_QUERY_EQUIVALENCE)
+    key.selector.peer = peer;
+  else
+    key.selector.argument = argument;
   key.equality_disabled = b->equality_disabled_depth != 0;
   entry = bounds_query_cache_find(state, key, &found);
   if (found) {
@@ -10483,6 +10703,18 @@ IXS_STATIC bounds_query_enter_result bounds_query_begin(
   scope->key = key;
   scope->active = true;
   return BOUNDS_QUERY_ENTER_STARTED;
+}
+
+IXS_STATIC bounds_query_enter_result bounds_query_begin(
+    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, uint64_t argument,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+  return bounds_query_begin_impl(b, kind, expr, NULL, argument, scope, cached);
+}
+
+IXS_STATIC bounds_query_enter_result bounds_query_begin_pair(
+    ixs_bounds *b, bounds_query_kind kind, ixs_node *expr, ixs_node *peer,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached) {
+  return bounds_query_begin_impl(b, kind, expr, peer, 0, scope, cached);
 }
 
 IXS_STATIC bounds_query_cache_entry *
@@ -14857,6 +15089,8 @@ IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nonzero_index_cap = 0;
   b->has_modrem = false;
   b->contradiction = false;
+  b->facts_query_cache = NULL;
+  b->facts_query_generation = 0;
   b->semantic_changed = NULL;
   return b->vars != NULL;
 }
@@ -14891,6 +15125,8 @@ IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst,
                                         const ixs_bounds *src) {
   dst->ctx = src->ctx;
   dst->store_ctx = src->store_ctx;
+  dst->facts_query_cache = src->facts_query_cache;
+  dst->facts_query_generation = src->facts_query_generation;
   dst->scratch = src->scratch;
   dst->nvars = src->nvars;
   dst->cap = src->nvars ? src->nvars : 1u;
@@ -15018,7 +15254,11 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
 }
 
 IXS_STATIC void bounds_store_mark_semantic_changed(ixs_bounds *b) {
-  if (b && b->semantic_changed)
+  if (!b)
+    return;
+  b->facts_query_cache = NULL;
+  b->facts_query_generation = 0;
+  if (b->semantic_changed)
     *b->semantic_changed = true;
 }
 
@@ -18489,9 +18729,18 @@ static ixs_algebra_status facts_definition_normalize(ixs_ctx *ctx,
   return *result == expr ? IXS_ALGEBRA_NO_MATCH : IXS_ALGEBRA_MATCH;
 }
 
+static ixs_fact_query_status
+facts_status_from_algebra(ixs_algebra_status status);
+static bool facts_simplify_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *source, ixs_node **result);
+static void facts_simplify_cache_store_result(ixs_ctx *ctx, ixs_bounds *bounds,
+                                              ixs_node *source,
+                                              ixs_simplify_result result);
+
 static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
                                      ixs_node *expr,
                                      ixs_simplify_result *result) {
+  ixs_node *cached;
   if (!facts_store_ready(facts)) {
     ixs_ctx_push_error(ctx, "facts: fact set is unusable");
     result->status = IXS_FACT_QUERY_COMPLETE;
@@ -18513,11 +18762,13 @@ static bool facts_simplify_preflight(ixs_facts *facts, ixs_ctx *ctx,
     result->value = expr;
     return true;
   }
+  if (facts_simplify_cache_lookup(ctx, &facts->bounds, expr, &cached)) {
+    result->status = IXS_FACT_QUERY_COMPLETE;
+    result->value = cached;
+    return true;
+  }
   return false;
 }
-
-static ixs_fact_query_status
-facts_status_from_algebra(ixs_algebra_status status);
 
 static ixs_node *facts_definition_simplify(ixs_ctx *ctx, ixs_bounds *bounds,
                                            ixs_node *expr,
@@ -18614,6 +18865,7 @@ cleanup:
                                         !ixs_node_is_sentinel(result.value));
   if (result.status != IXS_FACT_QUERY_COMPLETE)
     result.value = NULL;
+  facts_simplify_cache_store_result(ctx, &facts->bounds, expr, result);
   facts_store_unbind(facts, &binding);
   return result;
 }
@@ -18819,6 +19071,55 @@ facts_status_from_algebra(ixs_algebra_status status) {
   return IXS_FACT_QUERY_COMPLETE;
 }
 
+static bool facts_query_cache_enabled(ixs_ctx *ctx, ixs_bounds *bounds) {
+  return ctx->arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         ctx->scratch.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds->query_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds->query_state_arena.fail_after == IXS_ARENA_FAILURE_DISABLED &&
+         bounds_query_state_transport(bounds) == IXS_BOUNDS_TRANSPORT_CLEAN;
+}
+
+static bool facts_simplify_cache_lookup(ixs_ctx *ctx, ixs_bounds *bounds,
+                                        ixs_node *source, ixs_node **result) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_simplify_entry *entry;
+  if (!cache || cache->generation != bounds->facts_query_generation ||
+      !facts_query_cache_enabled(ctx, bounds))
+    return false;
+  entry = &cache->simplify[source->hash & (FACTS_SIMPLIFY_CACHE_CAP - 1u)];
+  if (entry->generation != cache->generation || entry->source != source)
+    return false;
+  *result = entry->result;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->simplify_hits++;
+#endif
+  return true;
+}
+
+static void facts_simplify_cache_store(ixs_ctx *ctx, ixs_bounds *bounds,
+                                       ixs_node *source, ixs_node *result) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_simplify_entry *entry;
+  if (!cache || cache->generation != bounds->facts_query_generation ||
+      !facts_query_cache_enabled(ctx, bounds))
+    return;
+  entry = &cache->simplify[source->hash & (FACTS_SIMPLIFY_CACHE_CAP - 1u)];
+  entry->source = source;
+  entry->result = result;
+  entry->generation = cache->generation;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  cache->simplify_stores++;
+#endif
+}
+
+static void facts_simplify_cache_store_result(ixs_ctx *ctx, ixs_bounds *bounds,
+                                              ixs_node *source,
+                                              ixs_simplify_result result) {
+  if (result.status == IXS_FACT_QUERY_COMPLETE && result.value &&
+      !ixs_node_is_sentinel(result.value))
+    facts_simplify_cache_store(ctx, bounds, source, result.value);
+}
+
 /* One root truth pipeline is shared by check and simplification. Structural
  * predicate folding, exact comparison proof, and local implication retain
  * their distinct bounded engines but no public entry may omit one of them. */
@@ -18878,13 +19179,26 @@ static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
                                                  ixs_node *rewritten,
                                                  ixs_fact_query_status *status,
                                                  bool *limited) {
+  facts_query_cache *cache = bounds->facts_query_cache;
+  facts_query_identity_entry *entry = NULL;
   ixs_check_result equivalent;
   ixs_algebra_status detail;
 
   if (!facts_additive_identity_candidate(rewritten))
     return rewritten;
-  detail = bounds_equivalence_query_detail(bounds, ctx, rewritten,
-                                           ctx->node_zero, &equivalent);
+  if (cache && cache->generation == bounds->facts_query_generation &&
+      facts_query_cache_enabled(ctx, bounds)) {
+    entry = &cache->identity[rewritten->hash &
+                             (FACTS_QUERY_IDENTITY_CACHE_CAP - 1u)];
+    if (entry->generation == cache->generation && entry->source == rewritten) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+      cache->identity_hits++;
+#endif
+      return entry->result == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
+    }
+  }
+  detail = bounds_equivalence_simplified_query_detail(
+      bounds, ctx, rewritten, ctx->node_zero, &equivalent);
   if (detail == IXS_ALGEBRA_LIMITED) {
     *limited = true;
     return rewritten;
@@ -18892,6 +19206,14 @@ static ixs_node *facts_project_additive_identity(ixs_ctx *ctx,
   *status = facts_status_from_algebra(detail);
   if (*status != IXS_FACT_QUERY_COMPLETE)
     return NULL;
+  if (entry) {
+    entry->source = rewritten;
+    entry->result = equivalent;
+    entry->generation = cache->generation;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->identity_stores++;
+#endif
+  }
   return equivalent == IXS_CHECK_TRUE ? ctx->node_zero : rewritten;
 }
 
@@ -20437,7 +20759,19 @@ static void facts_poison(ixs_facts *facts) {
     facts->usable = false;
 }
 
-static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
+static void facts_query_cache_invalidate(facts_query_cache *cache) {
+  cache->generation++;
+  if (cache->generation == 0) {
+    memset(cache->identity, 0, sizeof(cache->identity));
+    memset(cache->simplify, 0, sizeof(cache->simplify));
+    cache->generation = 1;
+  }
+}
+
+static facts_query_cache *facts_mutable_cache(ixs_facts *facts);
+
+static void facts_commit(ixs_facts *facts, ixs_bounds *candidate,
+                         facts_query_cache *query_cache) {
   /* A fork's projection memo is query-local and cannot be transferred into the
    * committed bounds.  Destroy it, then reuse the destination's persistent
    * table allocation after advancing its semantic generation once. */
@@ -20466,6 +20800,14 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate) {
   candidate->cache_cap = facts->bounds.cache_cap;
   bounds_store_invalidate_reads(candidate);
   bounds_store_retarget_scratch(candidate, NULL);
+  if (!query_cache) {
+    facts->query_version++;
+    if (facts->query_version == 0)
+      facts->query_version++;
+    query_cache = facts_mutable_cache(facts);
+  }
+  candidate->facts_query_cache = query_cache;
+  candidate->facts_query_generation = query_cache ? query_cache->generation : 0;
   facts->bounds = *candidate;
 }
 
@@ -20682,11 +21024,13 @@ static bool facts_predicate_set_init(ixs_arena *arena, size_t count,
 /* Expected O(1) at the fixed half-load bound; collisions probe linearly. */
 #define FACTS_CLOSURE_CACHE_CAP 32u
 #define FACTS_CLOSURE_CACHE_SLOT_BYTES (3u * 1024u)
-#define FACTS_CLOSURE_CACHE_RETAINED_LIMIT (128u * 1024u)
+#define FACTS_DIRECT_CACHE_SLOT_NODES 64u
+#define FACTS_CLOSURE_CACHE_RETAINED_LIMIT (256u * 1024u)
 #define FACTS_CLOSURE_CACHE_SLOT_NODES                                         \
   (FACTS_CLOSURE_CACHE_SLOT_BYTES / sizeof(ixs_node *))
 
 typedef struct {
+  facts_query_cache query_cache;
   uint64_t hash;
   size_t n_predicates;
   size_t n_replay;
@@ -20695,19 +21039,34 @@ typedef struct {
 } facts_closure_cache_entry;
 
 typedef struct {
+  facts_query_cache query_cache;
+  uint64_t hash;
+  /* NULL keys an immutable ordered-predicate domain. Non-NULL keys one
+   * mutable fact handle and semantic version in the same bounded slot pool. */
+  const ixs_facts *owner;
+  uint64_t version;
+  size_t n_predicates;
+  ixs_node *nodes[FACTS_DIRECT_CACHE_SLOT_NODES];
+  bool valid;
+} facts_direct_cache_entry;
+
+typedef struct {
   facts_closure_cache_entry *entries[FACTS_CLOSURE_CACHE_CAP];
+  facts_direct_cache_entry *direct_entries[FACTS_CLOSURE_CACHE_CAP];
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   size_t lookups;
   size_t hits;
   size_t stores;
   size_t bypasses;
   size_t entry_count;
+  size_t direct_entry_count;
 #endif
 } facts_closure_cache;
 
 typedef char facts_closure_cache_must_fit_retained_limit
     [(sizeof(facts_closure_cache) +
-          FACTS_CLOSURE_CACHE_CAP * sizeof(facts_closure_cache_entry) <=
+          FACTS_CLOSURE_CACHE_CAP * (sizeof(facts_closure_cache_entry) +
+                                     sizeof(facts_direct_cache_entry)) <=
       FACTS_CLOSURE_CACHE_RETAINED_LIMIT)
          ? 1
          : -1];
@@ -20721,6 +21080,7 @@ typedef struct {
 
 typedef struct {
   facts_closure_capture capture;
+  facts_query_cache *identity;
   uint64_t hash;
   bool store;
 } facts_closure_cache_result;
@@ -20752,6 +21112,89 @@ static uint64_t facts_closure_hash(ixs_node *const *predicates,
   hash *= UINT64_C(0xff51afd7ed558ccd);
   hash ^= hash >> 33;
   return hash;
+}
+
+static facts_query_cache *facts_direct_cache(ixs_ctx *ctx,
+                                             ixs_node *const *predicates,
+                                             size_t n_predicates) {
+  facts_closure_cache *cache;
+  facts_direct_cache_entry *entry;
+  uint64_t hash;
+  size_t i;
+  size_t slot;
+  if (n_predicates == 0 || n_predicates > FACTS_DIRECT_CACHE_SLOT_NODES)
+    return NULL;
+  hash = facts_closure_hash(predicates, n_predicates);
+  cache = facts_closure_cache_get(ctx);
+  if (!cache)
+    return NULL;
+  slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
+  entry = cache->direct_entries[slot];
+  if (entry && entry->valid && entry->owner == NULL && entry->hash == hash &&
+      entry->n_predicates == n_predicates) {
+    for (i = 0; i < n_predicates; i++)
+      if (entry->nodes[i] != predicates[i])
+        break;
+    if (i == n_predicates)
+      return &entry->query_cache;
+  }
+  if (!entry) {
+    entry = ixs_arena_alloc(&ctx->arena, sizeof(*entry), sizeof(void *));
+    if (!entry)
+      return NULL;
+    memset(entry, 0, sizeof(*entry));
+    cache->direct_entries[slot] = entry;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->direct_entry_count++;
+#endif
+  }
+  facts_query_cache_invalidate(&entry->query_cache);
+  entry->valid = false;
+  if (n_predicates)
+    memcpy(entry->nodes, predicates, n_predicates * sizeof(*predicates));
+  entry->hash = hash;
+  entry->owner = NULL;
+  entry->version = 0;
+  entry->n_predicates = n_predicates;
+  entry->valid = true;
+  return &entry->query_cache;
+}
+
+static facts_query_cache *facts_mutable_cache(ixs_facts *facts) {
+  facts_closure_cache *cache;
+  facts_direct_cache_entry *entry;
+  uint64_t hash;
+  size_t slot;
+  assert(facts && facts->ctx && facts->query_version != 0);
+  /* A handle keeps one direct-mapped slot across mutations. Reassignment
+   * advances the slot generation, making any evicted owner's loan stale. */
+  hash = (uint64_t)ixs_hash_ptr(facts);
+  cache = facts_closure_cache_get(facts->ctx);
+  if (!cache)
+    return NULL;
+  slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
+  entry = cache->direct_entries[slot];
+  if (entry && entry->valid && entry->owner == facts &&
+      entry->version == facts->query_version)
+    return &entry->query_cache;
+  if (!entry) {
+    entry = ixs_arena_alloc(&facts->ctx->arena, sizeof(*entry), sizeof(void *));
+    if (!entry)
+      return NULL;
+    memset(entry, 0, sizeof(*entry));
+    cache->direct_entries[slot] = entry;
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    cache->direct_entry_count++;
+#endif
+  }
+  facts_query_cache_invalidate(&entry->query_cache);
+  entry->valid = false;
+  entry->hash = hash;
+  entry->owner = facts;
+  entry->version = facts->query_version;
+  entry->n_predicates = 0;
+  entry->valid = true;
+  return &entry->query_cache;
 }
 
 /* Lookup is O(n) in the explicit batch size and never scans context state. */
@@ -20804,10 +21247,10 @@ static void facts_closure_cache_note_bypass(ixs_ctx *ctx) {
 
 /* Store is O(n + r) in the exact key and replay sequence. Collisions replace
  * an entry in place, so retained cache memory cannot grow after 32 slots. */
-static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
-                                      size_t n_predicates,
-                                      const facts_closure_capture *capture,
-                                      uint64_t hash) {
+static facts_query_cache *
+facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
+                          size_t n_predicates,
+                          const facts_closure_capture *capture, uint64_t hash) {
   facts_closure_cache *cache;
   facts_closure_cache_entry *entry;
   size_t slot;
@@ -20817,23 +21260,24 @@ static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     facts_closure_cache_note_bypass(ctx);
 #endif
-    return;
+    return NULL;
   }
   cache = facts_closure_cache_get(ctx);
   if (!cache)
-    return;
+    return NULL;
   slot = (size_t)hash & (FACTS_CLOSURE_CACHE_CAP - 1u);
   entry = cache->entries[slot];
   if (!entry) {
     entry = ixs_arena_alloc(&ctx->arena, sizeof(*entry), sizeof(void *));
     if (!entry)
-      return;
+      return NULL;
     memset(entry, 0, sizeof(*entry));
     cache->entries[slot] = entry;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
     cache->entry_count++;
 #endif
   }
+  facts_query_cache_invalidate(&entry->query_cache);
   entry->valid = false;
   if (n_predicates)
     memcpy(entry->nodes, predicates, n_predicates * sizeof(*predicates));
@@ -20847,6 +21291,7 @@ static void facts_closure_cache_store(ixs_ctx *ctx, ixs_node *const *predicates,
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   cache->stores++;
 #endif
+  return &entry->query_cache;
 }
 
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
@@ -20867,7 +21312,8 @@ ixs_facts_closure_cache_stats(const ixs_ctx *ctx,
   stats->bypasses = cache->bypasses;
   stats->entries = cache->entry_count;
   stats->retained_bytes =
-      sizeof(*cache) + cache->entry_count * sizeof(facts_closure_cache_entry);
+      sizeof(*cache) + cache->entry_count * sizeof(facts_closure_cache_entry) +
+      cache->direct_entry_count * sizeof(facts_direct_cache_entry);
 }
 #endif
 
@@ -21277,14 +21723,18 @@ facts_ingest_predicate_closure(ixs_ctx *ctx, ixs_bounds *candidate,
       candidate->nnonzero == 0 && !candidate->has_modrem &&
       !candidate->contradiction && !candidate->oom;
 
-  if (cache_result)
+  if (cache_result) {
     cache_result->store = false;
+    cache_result->identity = NULL;
+  }
   if (cacheable) {
     cached = facts_closure_cache_lookup(ctx, predicates, n_predicates,
                                         &cache_result->hash);
-    if (cached)
+    if (cached) {
+      cache_result->identity = &cached->query_cache;
       return bounds_assume_ingest_predicates(
           candidate, cached->nodes + cached->n_predicates, cached->n_replay);
+    }
     if (n_predicates <= FACTS_CLOSURE_CACHE_SLOT_NODES) {
       memset(&cache_result->capture, 0, sizeof(cache_result->capture));
       cache_result->capture.replay_limit =
@@ -21330,6 +21780,7 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
   ixs_bounds bounds;
   ixs_bounds_build_status status;
   ixs_facts *facts;
+  facts_query_cache *query_cache;
   if (!s)
     return NULL;
   ctx = ixs_session_bind(&binding, s);
@@ -21344,6 +21795,7 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
     goto failed;
   }
   memset(facts, 0, sizeof(*facts));
+  query_cache = facts_direct_cache(ctx, predicates, n_predicates);
   facts->impl = binding.impl;
   facts->ctx = ctx;
   facts->epoch = binding.impl->epoch;
@@ -21359,6 +21811,9 @@ ixs_facts *ixs_facts_create_preds(ixs_session *s, ixs_node *const *predicates,
          bounds.query_arena.spare == NULL &&
          bounds.query_arena.inline_chunk == NULL);
   facts->bounds = bounds;
+  facts->bounds.facts_query_cache = query_cache;
+  facts->bounds.facts_query_generation =
+      query_cache ? query_cache->generation : 0;
   facts->usable = true;
   facts->session_next = binding.impl->facts_head;
   binding.impl->facts_head = facts;
@@ -21446,9 +21901,10 @@ static bool facts_assume_predicates(ixs_facts *facts,
         facts_validate_closed_predicates(&candidate, predicates, n_predicates);
   if (status == IXS_BOUNDS_BUILD_OK) {
     if (closure_cache.store)
-      facts_closure_cache_store(ctx, predicates, n_predicates,
-                                &closure_cache.capture, closure_cache.hash);
-    facts_commit(facts, &candidate);
+      closure_cache.identity =
+          facts_closure_cache_store(ctx, predicates, n_predicates,
+                                    &closure_cache.capture, closure_cache.hash);
+    facts_commit(facts, &candidate, closure_cache.identity);
   } else {
     if (candidate_ready)
       ixs_bounds_destroy(&candidate);
@@ -21490,7 +21946,7 @@ bool ixs_facts_assume_range(ixs_facts *facts, ixs_node *expr,
   ixs_bounds_add_expr(&candidate, expr, iv);
   if (candidate.oom)
     goto failed;
-  facts_commit(facts, &candidate);
+  facts_commit(facts, &candidate, NULL);
   ok = true;
   goto cleanup;
 
@@ -21540,7 +21996,7 @@ bool ixs_facts_derive_affine(ixs_facts *facts, ixs_node *base, int64_t scale,
     ixs_bounds_query_hold_end(&candidate);
     query_held = false;
   }
-  facts_commit(facts, &candidate);
+  facts_commit(facts, &candidate, NULL);
   ok = true;
   goto cleanup;
 
@@ -21708,7 +22164,7 @@ bool ixs_facts_substitute_multi(ixs_facts *dst, const ixs_facts *src,
       !bounds_transfer_substituted_nonzero(&candidate, &src->bounds, ctx, nsubs,
                                            targets, replacements))
     goto failed;
-  facts_commit(dst, &candidate);
+  facts_commit(dst, &candidate, NULL);
   ok = true;
   goto cleanup;
 
@@ -37882,7 +38338,18 @@ static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
   int64_t exact;
   if (!bnds || ixs_node_is_const(n) || ixs_node_is_sentinel(n))
     return n;
+  if (bnds->exact_projection_depth != 0) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    bnds->exact_projection_skips++;
+#endif
+    return n;
+  }
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  bnds->exact_projection_visits++;
+#endif
+  bnds->exact_projection_depth++;
   status = bounds_project_exact_integer(ctx, bnds, n, &exact);
+  bnds->exact_projection_depth--;
   if (status == IXS_ALGEBRA_MATCH)
     return ixs_node_int(ctx, exact);
   if (status == IXS_ALGEBRA_OOM)

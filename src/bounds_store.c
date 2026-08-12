@@ -51,6 +51,8 @@ IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nonzero_index_cap = 0;
   b->has_modrem = false;
   b->contradiction = false;
+  b->facts_query_cache = NULL;
+  b->facts_query_generation = 0;
   b->semantic_changed = NULL;
   return b->vars != NULL;
 }
@@ -85,6 +87,8 @@ IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst,
                                         const ixs_bounds *src) {
   dst->ctx = src->ctx;
   dst->store_ctx = src->store_ctx;
+  dst->facts_query_cache = src->facts_query_cache;
+  dst->facts_query_generation = src->facts_query_generation;
   dst->scratch = src->scratch;
   dst->nvars = src->nvars;
   dst->cap = src->nvars ? src->nvars : 1u;
@@ -212,7 +216,11 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
 }
 
 IXS_STATIC void bounds_store_mark_semantic_changed(ixs_bounds *b) {
-  if (b && b->semantic_changed)
+  if (!b)
+    return;
+  b->facts_query_cache = NULL;
+  b->facts_query_generation = 0;
+  if (b->semantic_changed)
     *b->semantic_changed = true;
 }
 

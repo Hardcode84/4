@@ -387,14 +387,27 @@ incoming domains always use the worklist.
 Each cache slot has one 3 KiB combined key-and-replay budget. There is no
 separate input-count or derived-root limit: a sequence that does not fit is not
 truncated and completes through the ordinary worklist path. Slots are
-allocated lazily and collision replacement reuses their storage, bounding all
-cache objects below 128 KiB per context. Cache allocation failure is an
+allocated lazily and collision replacement reuses their storage. Query results
+use a separate 32-slot context cache. Immutable direct facts share an exact
+ordered-predicate key; each successful mutation claims a fact-pointer and
+semantic-version key. Collision replacement advances the slot generation, so
+an older fact handle observes a cache miss rather than another domain's result.
+No fact handle embeds a result table. Together the lazily allocated tables
+retain at most 256 KiB per context. Cache allocation failure is an
 optimization miss, while any allocation or validation failure during closure
 construction or replay retains the normal transaction-poisoning contract.
 Cached nodes are context-owned and immutable, so entries survive session reset
 and are released with the context. Lookup is O(n) in explicit batch size;
 replay is O(u + r) for `u` unique originals and `r` recorded refinements. Both
 bounds are independent of total context state.
+
+Successful scalar simplification and additive-identity results are cached only
+for an exact fact generation. Direct fact sets with the same ordered predicate
+array share those bounded results, mutated facts use versioned bounded slots,
+and closure-cache hits share a separate table.
+Scratch, query-arena, context-arena failure injection and active query
+transport bypass every result cache. Cached misses remain full tri-state proof
+outcomes; no rule, limit, or diagnostic path is pruned.
 
 A reusable fact set retains its owning session implementation, context, epoch,
 usability latch, and committed bounds payload. Every mutation binds the current

@@ -10,7 +10,9 @@ typedef enum {
   BOUNDS_QUERY_INTERVAL = 1,
   BOUNDS_QUERY_BITFACTS = 2,
   BOUNDS_QUERY_RESIDUE = 3,
-  BOUNDS_QUERY_STRIDE = 4
+  BOUNDS_QUERY_STRIDE = 4,
+  BOUNDS_QUERY_EXACT_INTEGER = 5,
+  BOUNDS_QUERY_EQUIVALENCE = 6
 } bounds_query_kind;
 
 /* VALUE and NO_FACT are semantic outcomes.  LIMITED, INVALID, and OOM are
@@ -44,7 +46,10 @@ typedef struct {
   bounds_query_kind kind;
   uint64_t owner;
   ixs_node *expr;
-  uint64_t argument;
+  union {
+    uint64_t argument;
+    ixs_node *peer;
+  } selector;
   bool equality_disabled;
 } bounds_query_key;
 
@@ -58,6 +63,8 @@ typedef struct {
     ixs_interval interval;
     ixs_bitfacts bitfacts;
     uint64_t residue;
+    int64_t exact_integer;
+    ixs_check_result equivalence;
     struct {
       uint64_t modulus;
       uint64_t residue;
@@ -117,6 +124,9 @@ IXS_STATIC bounds_query_enter_result
 bounds_query_begin(ixs_bounds *bounds, bounds_query_kind kind, ixs_node *expr,
                    uint64_t argument, bounds_query_scope *scope,
                    bounds_query_cache_entry **cached);
+IXS_STATIC bounds_query_enter_result bounds_query_begin_pair(
+    ixs_bounds *bounds, bounds_query_kind kind, ixs_node *expr, ixs_node *peer,
+    bounds_query_scope *scope, bounds_query_cache_entry **cached);
 IXS_STATIC bounds_query_cache_entry *
 bounds_query_finish(bounds_query_scope *scope, bool success);
 IXS_STATIC bool bounds_query_should_track(const ixs_bounds *bounds,

@@ -6969,7 +6969,18 @@ static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
   int64_t exact;
   if (!bnds || ixs_node_is_const(n) || ixs_node_is_sentinel(n))
     return n;
+  if (bnds->exact_projection_depth != 0) {
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+    bnds->exact_projection_skips++;
+#endif
+    return n;
+  }
+#if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
+  bnds->exact_projection_visits++;
+#endif
+  bnds->exact_projection_depth++;
   status = bounds_project_exact_integer(ctx, bnds, n, &exact);
+  bnds->exact_projection_depth--;
   if (status == IXS_ALGEBRA_MATCH)
     return ixs_node_int(ctx, exact);
   if (status == IXS_ALGEBRA_OOM)

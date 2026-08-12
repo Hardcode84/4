@@ -1024,10 +1024,10 @@ bounds_exact_value_project_delta(ixs_ctx *ctx, ixs_bounds *bounds,
   return IXS_ALGEBRA_NO_MATCH;
 }
 
-IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
-                                                           ixs_bounds *bounds,
-                                                           ixs_node *expr,
-                                                           int64_t *value) {
+static ixs_algebra_status bounds_project_exact_integer_impl(ixs_ctx *ctx,
+                                                            ixs_bounds *bounds,
+                                                            ixs_node *expr,
+                                                            int64_t *value) {
   ixs_node *lhs = expr;
   ixs_node *rhs = ctx ? ctx->node_zero : NULL;
   int64_t range_value;
@@ -1075,4 +1075,49 @@ IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
   if (status != IXS_ALGEBRA_MATCH && status != IXS_ALGEBRA_NO_MATCH)
     return status;
   return bounds_exact_value_project_delta(ctx, bounds, lhs, rhs, value);
+}
+
+IXS_STATIC ixs_algebra_status bounds_project_exact_integer(ixs_ctx *ctx,
+                                                           ixs_bounds *bounds,
+                                                           ixs_node *expr,
+                                                           int64_t *value) {
+  bounds_query_scope scope;
+  bounds_query_cache_entry *cached = NULL;
+  bounds_query_enter_result enter;
+  ixs_algebra_status status;
+
+  if (!bounds_query_should_track(bounds, expr)) {
+    return bounds_project_exact_integer_impl(ctx, bounds, expr, value);
+  }
+  enter = bounds_query_begin(bounds, BOUNDS_QUERY_EXACT_INTEGER, expr, 0,
+                             &scope, &cached);
+  switch (enter) {
+  case BOUNDS_QUERY_ENTER_CACHED:
+    if (cached->success)
+      *value = cached->result.exact_integer;
+    status = cached->success ? IXS_ALGEBRA_MATCH : IXS_ALGEBRA_NO_MATCH;
+    return status;
+  case BOUNDS_QUERY_ENTER_CYCLE:
+    return IXS_ALGEBRA_NO_MATCH;
+  case BOUNDS_QUERY_ENTER_LIMIT:
+    return IXS_ALGEBRA_LIMITED;
+  case BOUNDS_QUERY_ENTER_INVALID:
+    return IXS_ALGEBRA_INVALID;
+  case BOUNDS_QUERY_ENTER_OOM:
+    return IXS_ALGEBRA_OOM;
+  case BOUNDS_QUERY_ENTER_STARTED:
+    break;
+  }
+
+  status = bounds_project_exact_integer_impl(ctx, bounds, expr, value);
+  if (status == IXS_ALGEBRA_LIMITED)
+    bounds_query_note_limit(bounds);
+  else if (status == IXS_ALGEBRA_INVALID)
+    bounds_query_note_invalid(bounds);
+  else if (status == IXS_ALGEBRA_OOM)
+    bounds_query_note_oom(bounds);
+  cached = bounds_query_finish(&scope, status == IXS_ALGEBRA_MATCH);
+  if (status == IXS_ALGEBRA_MATCH)
+    cached->result.exact_integer = *value;
+  return status;
 }
