@@ -1266,7 +1266,7 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   proof and returns a canonical expanded quotient only after that proof
   succeeds. The quotient agrees on every defined source evaluation and may be
   more defined than a partial source; a source proved undefined everywhere has
-  no quotient witness and returns `UNKNOWN`. Its result separates
+  no defined value to preserve and refines to canonical zero. Its result separates
   `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, and
   domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
   preserve quotient sign; `INT64_MIN` is handled without taking its signed

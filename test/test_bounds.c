@@ -11158,8 +11158,10 @@ static void test_public_algebra_helper_invalid_inputs(void) {
 
 static void test_public_exact_divide_basic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *d = ixs_sym(ctx, "d");
   ixs_node *item = ixs_sym(ctx, "item");
   ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *within = ixs_sym(ctx, "within");
   ixs_node *k = ixs_sym(ctx, "K");
   ixs_node *expr = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), item),
                            ixs_mul(ctx, ixs_int(ctx, 32), slot));
@@ -11171,7 +11173,14 @@ static void test_public_exact_divide_basic(void) {
   ixs_node *congruence = ixs_cmp(ctx, ixs_mod(ctx, k, ixs_int(ctx, 32)),
                                  IXS_CMP_EQ, ixs_int(ctx, 0));
   ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *undefined = ixs_facts_create(ctx);
   ixs_exact_divide_result result;
+  ixs_node *dynamic_remainder = ixs_sub(
+      ctx, ixs_add(ctx, item, slot),
+      ixs_mul(ctx, d,
+              ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, item, slot), d))));
+  ixs_node *scaled_dynamic_remainder =
+      ixs_mul(ctx, ixs_int(ctx, 32), dynamic_remainder);
 
   result = ixs_try_exact_divide_facts(facts, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
@@ -11180,6 +11189,34 @@ static void test_public_exact_divide_basic(void) {
   result = ixs_try_exact_divide_facts(facts, expr, -8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK((result.quotient == negative_expected));
+
+  result = ixs_try_exact_divide_facts(facts, scaled_dynamic_remainder, 32);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK((result.quotient == dynamic_remainder));
+
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_LT, ixs_int(ctx, 1))));
+  {
+    ixs_node *origin_quotient =
+        ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, item, slot), d));
+    ixs_node *point_quotient = ixs_floor(
+        ctx, ixs_div(ctx, ixs_add(ctx, item, ixs_add(ctx, slot, within)), d));
+    ixs_node *transaction_residual =
+        ixs_mul(ctx, ixs_int(ctx, 4),
+                ixs_mul(ctx, d, ixs_sub(ctx, origin_quotient, point_quotient)));
+    ixs_node *transaction_goal = ixs_cmp(
+        ctx, ixs_mod(ctx, transaction_residual, ixs_int(ctx, 4294967296)),
+        IXS_CMP_EQ, ixs_int(ctx, 0));
+    ixs_node *wave_transaction_goal = parse_bounds_pred(
+        ctx, "Mod(4*d*floor(group/d + item/d) - "
+             "4*d*floor(item/d + (group + within)/d), 4294967296) == 0");
+    CHECK(test_ixs_check_predicate_facts(facts, transaction_goal) ==
+          IXS_CHECK_TRUE);
+    CHECK(test_ixs_check_predicate_facts(facts, wave_transaction_goal) ==
+          IXS_CHECK_TRUE);
+  }
 
   result =
       ixs_try_exact_divide_facts(facts, ixs_add(ctx, item, ixs_int(ctx, 1)), 8);
@@ -11192,6 +11229,13 @@ static void test_public_exact_divide_basic(void) {
       ixs_try_exact_divide_facts(facts, ixs_div(ctx, ixs_int(ctx, 1), item), 1);
   CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
   CHECK(result.quotient == NULL);
+
+  CHECK(ixs_facts_assume_pred(undefined,
+                              ixs_cmp(ctx, item, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  result = ixs_try_exact_divide_facts(undefined,
+                                      ixs_div(ctx, ixs_int(ctx, 1), item), 7);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_node_is_zero(result.quotient));
 
   CHECK(ixs_facts_assume_pred(facts, congruence));
   result = ixs_try_exact_divide_facts(facts, k, 32);
@@ -11411,8 +11455,8 @@ static void test_public_exact_divide_fact_simplification(void) {
   CHECK(ixs_facts_assume_pred(inactive, outside));
   CHECK(test_ixs_check_defined_facts(inactive, piecewise) == IXS_CHECK_FALSE);
   result = ixs_try_exact_divide_facts(inactive, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_node_is_zero(result.quotient));
 
   ixs_ctx_destroy(ctx);
 }

@@ -20053,9 +20053,10 @@ static bool exact_divide_simplify_input(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
-static bool exact_divide_input_not_undefined(ixs_facts *facts, ixs_ctx *ctx,
-                                             ixs_node *expr,
-                                             ixs_exact_divide_result *result) {
+static bool
+exact_divide_input_or_poison_refinement(ixs_facts *facts, ixs_ctx *ctx,
+                                        ixs_node *expr,
+                                        ixs_exact_divide_result *result) {
   bool old_bounds_oom = facts->bounds.oom;
   bool defined_oom = false;
   bool defined_limited = false;
@@ -20079,11 +20080,16 @@ static bool exact_divide_input_not_undefined(ixs_facts *facts, ixs_ctx *ctx,
                                    "resource limit exceeded");
     return false;
   }
-  /* UNKNOWN admits a poison-refining quotient: the constructed value need only
-   * agree where the source is defined. A source proved undefined everywhere
-   * has no defined evaluation from which to construct a quotient. */
+  /* UNKNOWN admits a quotient that agrees on every defined source evaluation.
+   * FALSE has no such evaluations, so canonical zero is a valid refinement. */
   if (defined == IXS_CHECK_FALSE) {
-    *result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+    ixs_node *zero = ixs_node_int(ctx, 0);
+    if (!zero) {
+      *result =
+          exact_divide_failure(ctx, IXS_EXACT_DIVIDE_ERROR, "out of memory");
+      return false;
+    }
+    *result = exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, zero);
     return false;
   }
   return true;
@@ -20108,6 +20114,8 @@ static bool exact_divide_proven(ixs_facts *facts, ixs_ctx *ctx, ixs_node *expr,
     return false;
   }
   if (proof == IXS_CHECK_FALSE) {
+    if (!exact_divide_input_or_poison_refinement(facts, ctx, expr, result))
+      return false;
     *result = exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
     return false;
   }
@@ -20225,7 +20233,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
             : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     goto cleanup;
   }
-  if (!exact_divide_input_not_undefined(facts, ctx, expr, &result))
+  if (!exact_divide_input_or_poison_refinement(facts, ctx, expr, &result))
     goto cleanup;
   if (!exact_divide_simplify_input(facts, ctx, expr, &expr, &result))
     goto cleanup;

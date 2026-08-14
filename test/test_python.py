@@ -3598,6 +3598,13 @@ def test_fact_backed_exact_divide() -> None:
     assert ctx.try_exact_divide(ctx.int_(65), 8, facts) == ("not_exact", None)
     assert ctx.try_exact_divide(1 / item, 1, facts) == ("unknown", None)
 
+    undefined = ctx.facts()
+    undefined.assume(ctx.eq(item, 0))
+    status, quotient = ctx.try_exact_divide(1 / item, 7, undefined)
+    assert status == "proven"
+    assert quotient is not None
+    assert quotient.node_ptr == ctx.int_(0).node_ptr
+
     facts.assume(ctx.eq(k % 32, 0))
     status, quotient = ctx.try_exact_divide(k, 32, facts)
     assert status == "proven"
@@ -3635,7 +3642,10 @@ def test_fact_backed_exact_divide_piecewise() -> None:
 
     inactive = ctx.facts()
     inactive.assume(item >= 64)
-    assert ctx.try_exact_divide(piecewise, 8, inactive) == ("unknown", None)
+    status, quotient = ctx.try_exact_divide(piecewise, 8, inactive)
+    assert status == "proven"
+    assert quotient is not None
+    assert quotient.node_ptr == ctx.int_(0).node_ptr
 
     fact_integer = ixsimpl.pw((k / 2, item > 0))
     product = 16 * fact_integer
