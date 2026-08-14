@@ -858,10 +858,10 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   public fact set, allocation failure, and proof-limit exhaustion return
   `UNKNOWN`; local assumption diagnostics do not escape the query.
 - **Fact-backed equivalence** (`ixs_equivalent_facts`, Python
-  `Context.equivalent`, C++ `Facts::equivalent`): pointer-identical operands
-  refine directly to true, including when the shared expression is partial.
-  Other proofs require both operands to be defined over every valuation
-  admitted by the incoming facts. The query then tries simplification of the
+  `Context.equivalent`, C++ `Facts::equivalent`): proves symmetric refinement
+  compatibility. A true result establishes equality wherever both operands are
+  defined; poison valuations impose no equality obligation. The query tries
+  simplification of the
   difference, expansion followed by simplification under the shared fact
   environment, flattened order-independent matching of predicate `AND`/`OR`
   terms. Aligned ordered comparisons normalize to integer residual cuts

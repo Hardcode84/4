@@ -2715,7 +2715,7 @@ def test_known_bits_and_congruence_binding_failures() -> None:
         ctx.congruent(sentinel, 8, 0, facts)
 
 
-def test_predicate_tree_and_total_equivalence_bindings() -> None:
+def test_predicate_tree_and_refinement_equivalence_bindings() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("binding_equiv_x")
     y = ctx.sym("binding_equiv_y")
@@ -2742,7 +2742,7 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
     reciprocal_rhs = 1 + reciprocal
     assert ctx.equivalent(polynomial, expanded, empty) is True
     assert ctx.equivalent(reciprocal, reciprocal, empty) is True
-    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is None
+    assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is True
 
     nonzero = ctx.facts()
     nonzero.assume(ctx.ne(x, 0))
@@ -2808,6 +2808,60 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
         ctx.check_predicate(x & 7, empty)
     with pytest.raises(ValueError, match="not a predicate tree"):
         ctx.check_predicate(ixsimpl.or_(x, y), empty)
+
+
+def test_partial_equivalence_true_results_agree_on_shared_domain() -> None:
+    """Every sampled TRUE proof agrees wherever both operands are defined."""
+    ctx = ixsimpl.Context()
+    x, y = ctx.sym("partial_sound_x"), ctx.sym("partial_sound_y")
+    expressions = [
+        x,
+        y,
+        1 / x,
+        1 / y,
+        (x + 1) / x,
+        1 + 1 / x,
+        ixsimpl.floor(1 / x),
+        ixsimpl.floor(x / y),
+        x % y,
+        ixsimpl.pw((0, x >= 0)),
+        ixsimpl.pw((1, x <= 0)),
+        ixsimpl.xor_(x, ixsimpl.floor(1 / y)),
+    ]
+    facts = ctx.facts()
+    proved_nonidentical = 0
+
+    for lhs_index, lhs in enumerate(expressions):
+        for rhs in expressions[lhs_index + 1 :]:
+            if ctx.equivalent(lhs, rhs, facts) is not True:
+                continue
+            if lhs.node_ptr != rhs.node_ptr:
+                proved_nonidentical += 1
+            for x_value in range(-3, 4):
+                for y_value in range(-3, 4):
+                    env = {
+                        "partial_sound_x": x_value,
+                        "partial_sound_y": y_value,
+                    }
+                    try:
+                        lhs_value = _eval_ixs_fraction(lhs, ctx, env)
+                    except ValueError:
+                        continue
+                    try:
+                        rhs_value = _eval_ixs_fraction(rhs, ctx, env)
+                    except ValueError:
+                        continue
+                    assert lhs_value == rhs_value
+
+    assert proved_nonidentical > 0
+
+    # Stored relations do not carry an explicit endpoint-defined subdomain.
+    # Keep both the matching and mismatching transports inconclusive rather
+    # than applying the equality where its reciprocal endpoint is poison.
+    relation = ctx.facts()
+    relation.assume(ctx.eq(1 / y, x))
+    assert ctx.equivalent(1 / y + 1, x + 1, relation) is None
+    assert ctx.equivalent(1 / y + 1, x + 2, relation) is None
 
 
 def test_predicate_implication_bindings() -> None:
@@ -3094,7 +3148,7 @@ def test_truncating_remainder_equivalence_projection() -> None:
     assert ctx.equivalent(scaled_next, scaled_zero + 16, negative_wrap) is not True
 
 
-def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
+def test_truncating_remainder_projection_refines_poison_semantics() -> None:
     ctx = ixsimpl.Context()
     x = ctx.sym("x")
     d = ctx.sym("d")
@@ -3123,7 +3177,7 @@ def test_truncating_remainder_projection_rejects_partial_semantics() -> None:
 
     zero_divisor = ctx.facts()
     zero_divisor.assume_many([x >= 0, ctx.eq(d, 0)])
-    assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is None
+    assert ctx.equivalent(wrong_next, wrong_zero + 16, zero_divisor) is True
     assert _simplified_difference(ctx, wrong_next, wrong_zero, zero_divisor) == 16
 
     unknown_divisor = ctx.facts()
@@ -4369,7 +4423,7 @@ def test_equivalent_expression_context_bindings() -> None:
         is None
     )
     partial = ixsimpl.floor(1 / partial_divisor)
-    assert ctx.equivalent(ixsimpl.xor_(left, partial), ixsimpl.xor_(right, partial), facts) is None
+    assert ctx.equivalent(ixsimpl.xor_(left, partial), ixsimpl.xor_(right, partial), facts) is True
 
     narrow = ctx.facts()
     narrow.assume_many([noninjective >= 0, noninjective <= 1])

@@ -7323,10 +7323,6 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   ixs_bounds_transport_snapshot transport;
   ixs_bounds_transport_snapshot limit_transport;
   bool track_limits = bounds_query_is_tracking(bounds);
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
   ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
@@ -7335,20 +7331,9 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   equivalence_state_init(&state, ctx, bounds);
   state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
-  if (lhs == rhs) {
-    *result = IXS_CHECK_TRUE;
-    goto restore;
-  }
-  if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
-          IXS_CHECK_TRUE ||
-      bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
-          IXS_CHECK_TRUE) {
-    if (lhs_oom || rhs_oom || (!transaction.old_oom && bounds->oom))
-      status = IXS_ALGEBRA_OOM;
-    else if (lhs_limited || rhs_limited)
-      status = IXS_ALGEBRA_LIMITED;
-    goto restore;
-  }
+  /* Equivalence is symmetric refinement compatibility, not total-expression
+   * validation. Poison valuations impose no equality obligation; every tactic
+   * must preserve agreement where both original operands are defined. */
   limit_transport = ixs_bounds_query_transport_snapshot(bounds);
   if (roots_simplified) {
     assert(bounds->exact_projection_depth != UINT_MAX);
@@ -7371,7 +7356,6 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
     status = IXS_ALGEBRA_LIMITED;
   }
 
-restore:
   equivalence_state_destroy(&state);
   if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);

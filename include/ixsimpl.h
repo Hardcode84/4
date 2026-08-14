@@ -373,10 +373,10 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
  * rejected because they are not predicate trees. */
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            const ixs_node *predicate);
-/* Prove equivalence over the full domain admitted by facts.  Pointer-identical
- * operands refine directly to TRUE; other TRUE results require both operands
- * to be proved defined everywhere. FALSE is returned only for a universal
- * proof of different values;
+/* Prove refinement compatibility over the full domain admitted by facts. TRUE
+ * proves equality wherever both operands are defined; poison valuations impose
+ * no equality obligation. FALSE is returned only for a universal proof of
+ * different defined values;
  * insufficient facts, contradictory facts, invalid input, and resource
  * limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
