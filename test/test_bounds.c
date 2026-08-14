@@ -3320,6 +3320,34 @@ static void test_bounds_partial_predicate_is_semantic_unknown(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_bounds_partial_implication_defined_domain(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "partial_implication_x");
+  ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
+  ixs_node *partial = ixs_floor(ctx, reciprocal);
+  ixs_node *positive = ixs_cmp(ctx, partial, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *nonnegative = ixs_cmp(ctx, partial, IXS_CMP_GE, ixs_int(ctx, 0));
+  ixs_node *above_one = ixs_cmp(ctx, partial, IXS_CMP_GT, ixs_int(ctx, 1));
+  ixs_node *above_two = ixs_cmp(ctx, partial, IXS_CMP_GT, ixs_int(ctx, 2));
+  ixs_node *tautology = ixs_or(ctx, ixs_not(ctx, positive), nonnegative);
+  ixs_node *gap = ixs_or(ctx, ixs_not(ctx, above_one), above_two);
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *nowhere_defined = ixs_facts_create(ctx);
+
+  CHECK(ctx && x && reciprocal && partial && positive && nonnegative &&
+        above_one && above_two && tautology && gap && facts && nowhere_defined);
+  CHECK(test_ixs_check_predicate_facts(facts, tautology) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(facts, gap) == IXS_CHECK_UNKNOWN);
+  CHECK(facts->bounds.ndefined_domain == 0u);
+  CHECK(ixs_facts_assume_pred(nowhere_defined,
+                              ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0))));
+  CHECK(test_ixs_check_predicate_facts(nowhere_defined, tautology) ==
+        IXS_CHECK_TRUE);
+  CHECK(nowhere_defined->bounds.ndefined_domain == 0u);
+
+  ixs_ctx_destroy(ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Bounds: public range API                                          */
 /* ------------------------------------------------------------------ */
@@ -6040,6 +6068,21 @@ static void test_public_range_piecewise(void) {
   CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
   CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
 
+  values[0] = ixs_int(ctx, 1);
+  values[1] = ixs_int(ctx, 2);
+  conds[0] = ixs_cmp(ctx, ixs_div(ctx, ixs_int(ctx, 1), x), IXS_CMP_GT,
+                     ixs_int(ctx, 0));
+  conds[1] = ixs_true(ctx);
+  expr = ixs_pw(ctx, 2, values, conds);
+  CHECK(ixs_range(ctx, expr, NULL, 0, &r));
+  CHECK(r.has_lower && r.lower_p == 1 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 2 && r.upper_q == 1);
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_EQ, ixs_int(ctx, 0));
+  CHECK(!ixs_range(ctx, expr, assumes, 1, &r));
+
+  assumes[0] = ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0));
+  assumes[1] = ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31));
   values[0] = ixs_div(ctx, ixs_int(ctx, 1), x);
   values[1] = x;
   conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0));
@@ -13160,6 +13203,7 @@ int main(void) {
   test_bounds_check_non_cmp();
   test_bounds_check_extreme_rhs_parity();
   test_bounds_partial_predicate_is_semantic_unknown();
+  test_bounds_partial_implication_defined_domain();
 
   /* Bounds: public range API */
   test_public_range_basic();

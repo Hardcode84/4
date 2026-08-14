@@ -4515,6 +4515,8 @@ IXS_STATIC ixs_check_result bounds_defined_check_detail(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   if (ixs_ctx_owns_node(b->ctx, expr) && ixs_node_is_known_total(expr))
     return IXS_CHECK_TRUE;
+  if (bounds_store_contains_defined_domain(b, expr))
+    return IXS_CHECK_TRUE;
   if (bounds_defined_cache_lookup(b, expr, &result))
     return result;
   defined_state_init(&state, b->ctx, b);
@@ -4527,6 +4529,118 @@ IXS_STATIC ixs_check_result bounds_defined_check_detail(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   }
   return result;
+}
+
+static bool bounds_defined_restrict_operation(ixs_bounds *b, ixs_node *node) {
+  uint32_t i;
+  if (node->tag == IXS_MUL) {
+    for (i = 0; i < node->u.mul.nfactors; i++) {
+      if (node->u.mul.factors[i].exp < 0)
+        bounds_add_nonzero(b, node->u.mul.factors[i].base);
+      if (b->oom)
+        return false;
+    }
+  } else if (node->tag == IXS_MOD) {
+    struct ixs_node_impl positive;
+    memset(&positive, 0, sizeof(positive));
+    positive.tag = IXS_CMP;
+    positive.u.binary.lhs = node->u.binary.rhs;
+    positive.u.binary.rhs = b->ctx->node_zero;
+    positive.u.binary.cmp_op = IXS_CMP_GT;
+    return ixs_bounds_add_assumption(b, &positive);
+  }
+  return true;
+}
+
+static bool bounds_defined_restrict_push_children(
+    ixs_bounds *b, ixs_arena *traversal, ixs_node *node, uint32_t child_count,
+    ixs_node ***stack, size_t *stack_count, size_t *stack_capacity) {
+  uint32_t i;
+  /* A defined Piecewise selects only one value and a condition prefix.
+   * No individual child is therefore defined over its whole root domain. */
+  if (node->tag == IXS_PIECEWISE)
+    return true;
+  for (i = 0; i < child_count; i++) {
+    ixs_node *child = defined_child_at(node, i);
+    if (!child) {
+      bounds_query_note_invalid(b);
+      return false;
+    }
+    if (!query_node_stack_push(traversal, stack, stack_count, stack_capacity,
+                               child)) {
+      b->oom = true;
+      return false;
+    }
+  }
+  return true;
+}
+
+IXS_STATIC bool bounds_defined_restrict_domain(ixs_bounds *b, ixs_node *expr) {
+  ixs_arena traversal;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+  ixs_bounds_transport_snapshot snapshot;
+  ixs_bounds_transport_status transport;
+  ixs_check_result defined;
+  bool oom = false;
+  bool limited = false;
+  bool ok = false;
+
+  if (!b || !b->ctx || !expr || b->oom)
+    return false;
+  snapshot = ixs_bounds_query_transport_snapshot(b);
+  defined = bounds_defined_check_detail(b, expr, &oom, &limited);
+  transport = ixs_bounds_query_transport_since(b, snapshot);
+  if (oom || transport == IXS_BOUNDS_TRANSPORT_OOM) {
+    b->oom = true;
+    return false;
+  }
+  if (limited || transport == IXS_BOUNDS_TRANSPORT_LIMITED ||
+      transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return false;
+  if (defined == IXS_CHECK_TRUE)
+    return true;
+  if (defined == IXS_CHECK_FALSE) {
+    bounds_store_mark_contradiction(b);
+    bounds_store_invalidate_reads(b);
+    return true;
+  }
+
+  ixs_arena_init(&traversal, IXS_ARENA_DEFAULT_SIZE);
+  if (!query_node_stack_push(&traversal, &stack, &stack_count, &stack_capacity,
+                             expr)) {
+    b->oom = true;
+    goto cleanup;
+  }
+  while (stack_count != 0) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+
+    if (ixs_node_is_known_total(node))
+      continue;
+    if (bounds_store_contains_defined_domain(b, node))
+      continue;
+    if (!ixs_ctx_owns_node(b->ctx, node) || ixs_node_is_sentinel(node) ||
+        !defined_child_count(node, &child_count)) {
+      bounds_query_note_invalid(b);
+      goto cleanup;
+    }
+    if (!bounds_store_add_defined_domain(b, node))
+      goto cleanup;
+    if (!bounds_defined_restrict_operation(b, node) ||
+        !bounds_defined_restrict_push_children(b, &traversal, node, child_count,
+                                               &stack, &stack_count,
+                                               &stack_capacity))
+      goto cleanup;
+  }
+  ok = !b->oom;
+
+cleanup:
+  if (!ok && b->oom)
+    bounds_query_note_oom(b);
+  ixs_arena_destroy_transient(&traversal);
+  return ok;
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,
@@ -8472,7 +8586,9 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
       !bounds_difference_clone_fork(dst, src) ||
       !bounds_store_fork_mod_inverse(dst, src) ||
       bounds_relation_clone_fork(dst, src) != IXS_RELATION_STATUS_OK ||
-      !bounds_store_fork_expr(dst, src) || !bounds_store_fork_nonzero(dst, src))
+      !bounds_store_fork_expr(dst, src) ||
+      !bounds_store_fork_nonzero(dst, src) ||
+      !bounds_store_fork_defined_domain(dst, src))
     goto failed;
   return true;
 
@@ -10029,6 +10145,22 @@ IXS_STATIC ixs_check_result bounds_predicate_bounded_finite_domain(
   return predicate_finite_evaluate(bounds, predicate, symbols, symbol_count,
                                    targets, point_count);
 }
+
+static bool predicate_implication_restrict_operand(ixs_bounds *owner,
+                                                   ixs_bounds *branch,
+                                                   ixs_node *operand,
+                                                   ixs_check_result *result) {
+  if (!bounds_defined_restrict_domain(branch, operand)) {
+    if (branch->oom)
+      owner->oom = true;
+    return false;
+  }
+  if (!ixs_bounds_has_empty(branch))
+    return true;
+  *result = IXS_CHECK_TRUE;
+  return false;
+}
+
 /* Check B under a query-local A assumption.  The fork borrows the enclosing
  * query state, so a limit or transport failure invalidates the whole proof. */
 static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
@@ -10057,6 +10189,13 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     goto cleanup;
   }
   branch_ready = true;
+  /* Eager OR is evaluated only where both sides are defined. Keep that domain
+   * local to this fork before either side contributes proof facts. */
+  if (!predicate_implication_restrict_operand(bounds, &branch, antecedent,
+                                              &result) ||
+      !predicate_implication_restrict_operand(bounds, &branch, consequent,
+                                              &result))
+    goto cleanup;
   /* Unsupported local assumptions are proof misses.  Their diagnostics and
    * closure are private to this branch. */
   ixs_query_transaction_begin(&assumption, ctx, NULL, NULL);
@@ -12332,10 +12471,12 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     if (ixs_bounds_has_empty(&remaining)) {
       break;
     }
-    if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
+    if (!bounds_defined_restrict_domain(&remaining, cond)) {
       failed = true;
       break;
     }
+    if (ixs_bounds_has_empty(&remaining))
+      break;
     truth = bounds_condition_truth(&remaining, cond);
     if (truth == IXS_CHECK_FALSE)
       continue;
@@ -15100,6 +15241,7 @@ IXS_STATIC bool bounds_known_residue(ixs_bounds *b, ixs_node *expr,
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_NONZERO_INLINE_COUNT 4u
 #define BOUNDS_NONZERO_INDEX_INIT_CAP 8u
+#define BOUNDS_DEFINED_DOMAIN_INIT_CAP 8u
 #define BOUNDS_INIT_CAP 16u
 
 IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
@@ -15134,6 +15276,11 @@ IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nnonzero = 0;
   b->nonzero_cap = 0;
   b->nonzero_index_cap = 0;
+  b->defined_domain = NULL;
+  b->defined_domain_index = NULL;
+  b->ndefined_domain = 0;
+  b->defined_domain_cap = 0;
+  b->defined_domain_index_cap = 0;
   b->has_modrem = false;
   b->contradiction = false;
   b->facts_query_cache = NULL;
@@ -15202,6 +15349,12 @@ IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst,
   dst->nonzero_index = NULL;
   dst->nonzero_index_cap =
       src->nnonzero > BOUNDS_NONZERO_INLINE_COUNT ? src->nonzero_index_cap : 0;
+  dst->ndefined_domain = src->ndefined_domain;
+  dst->defined_domain_cap = src->ndefined_domain;
+  dst->defined_domain = NULL;
+  dst->defined_domain_index = NULL;
+  dst->defined_domain_index_cap =
+      src->ndefined_domain ? src->defined_domain_index_cap : 0;
   dst->has_modrem = src->has_modrem;
   dst->contradiction = src->contradiction;
   dst->semantic_changed = NULL;
@@ -15297,6 +15450,31 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
     return false;
   memcpy(dst->nonzero_index, src->nonzero_index,
          dst->nonzero_index_cap * sizeof(*src->nonzero_index));
+  return true;
+}
+
+IXS_STATIC bool bounds_store_fork_defined_domain(ixs_bounds *dst,
+                                                 const ixs_bounds *src) {
+  if (!src->ndefined_domain)
+    return true;
+  if (!src->defined_domain || !src->defined_domain_index ||
+      !src->defined_domain_index_cap)
+    return false;
+  dst->defined_domain = ixs_arena_alloc(
+      dst->scratch, dst->defined_domain_cap * sizeof(*dst->defined_domain),
+      sizeof(void *));
+  if (!dst->defined_domain)
+    return false;
+  memcpy(dst->defined_domain, src->defined_domain,
+         src->ndefined_domain * sizeof(*src->defined_domain));
+  dst->defined_domain_index = ixs_arena_alloc(
+      dst->scratch,
+      dst->defined_domain_index_cap * sizeof(*dst->defined_domain_index),
+      sizeof(void *));
+  if (!dst->defined_domain_index)
+    return false;
+  memcpy(dst->defined_domain_index, src->defined_domain_index,
+         dst->defined_domain_index_cap * sizeof(*src->defined_domain_index));
   return true;
 }
 
@@ -15996,6 +16174,122 @@ IXS_STATIC bool bounds_store_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   b->nonzero_index_cap = index_capacity;
   b->nnonzero = count;
   bounds_store_mark_semantic_changed(b);
+  return true;
+}
+
+static size_t bounds_defined_domain_index_slot(const size_t *index,
+                                               size_t capacity,
+                                               ixs_node *const *values,
+                                               const ixs_node *expr) {
+  size_t slot = ixs_hash_ptr(expr) & (capacity - 1u);
+  while (index[slot] && values[index[slot] - 1u] != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static size_t *bounds_defined_domain_build_index(ixs_bounds *b,
+                                                 size_t capacity) {
+  size_t *index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  size_t i;
+  if (!index)
+    return NULL;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->ndefined_domain; i++) {
+    size_t slot = bounds_defined_domain_index_slot(
+        index, capacity, b->defined_domain, b->defined_domain[i]);
+    index[slot] = i + 1u;
+  }
+  return index;
+}
+
+static bool bounds_defined_domain_prepare_index(ixs_bounds *b, size_t count,
+                                                size_t **result,
+                                                size_t *result_capacity) {
+  size_t capacity = b->defined_domain_index_cap;
+  *result = b->defined_domain_index;
+  *result_capacity = capacity;
+  if (capacity && count <= capacity - capacity / 4u)
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_DEFINED_DOMAIN_INIT_CAP;
+  if (capacity <= b->defined_domain_index_cap ||
+      capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result = bounds_defined_domain_build_index(b, capacity);
+  if (!*result)
+    return false;
+  *result_capacity = capacity;
+  return true;
+}
+
+static bool bounds_defined_domain_prepare_values(ixs_bounds *b, size_t count,
+                                                 ixs_node ***result,
+                                                 size_t *result_capacity) {
+  size_t capacity = b->defined_domain_cap;
+  *result = b->defined_domain;
+  *result_capacity = capacity;
+  if (count <= capacity)
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_DEFINED_DOMAIN_INIT_CAP;
+  if (capacity <= b->defined_domain_cap ||
+      capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(**result), sizeof(void *));
+  if (!*result)
+    return false;
+  if (b->ndefined_domain)
+    memcpy(*result, b->defined_domain, b->ndefined_domain * sizeof(**result));
+  *result_capacity = capacity;
+  return true;
+}
+
+IXS_STATIC bool bounds_store_contains_defined_domain(const ixs_bounds *b,
+                                                     const ixs_node *expr) {
+  size_t slot;
+  if (!b || !expr || !b->ndefined_domain)
+    return false;
+  assert(b->defined_domain != NULL && b->defined_domain_index != NULL &&
+         b->defined_domain_index_cap != 0);
+  slot = bounds_defined_domain_index_slot(b->defined_domain_index,
+                                          b->defined_domain_index_cap,
+                                          b->defined_domain, expr);
+  return b->defined_domain_index[slot] != 0;
+}
+
+IXS_STATIC bool bounds_store_add_defined_domain(ixs_bounds *b, ixs_node *expr) {
+  ixs_node **values;
+  size_t *index;
+  size_t count;
+  size_t index_capacity;
+  size_t value_capacity;
+  size_t slot;
+  if (!b || !expr || b->oom)
+    return false;
+  if (bounds_store_contains_defined_domain(b, expr))
+    return true;
+  if (b->ndefined_domain == SIZE_MAX) {
+    b->oom = true;
+    return false;
+  }
+  count = b->ndefined_domain + 1u;
+  if (!bounds_defined_domain_prepare_index(b, count, &index, &index_capacity) ||
+      !bounds_defined_domain_prepare_values(b, count, &values,
+                                            &value_capacity)) {
+    b->oom = true;
+    return false;
+  }
+  values[b->ndefined_domain] = expr;
+  slot = bounds_defined_domain_index_slot(index, index_capacity, values, expr);
+  assert(index[slot] == 0);
+  index[slot] = count;
+  b->defined_domain = values;
+  b->defined_domain_cap = value_capacity;
+  b->defined_domain_index = index;
+  b->defined_domain_index_cap = index_capacity;
+  b->ndefined_domain = count;
+  bounds_store_mark_semantic_changed(b);
+  bounds_store_invalidate_reads(b);
   return true;
 }
 

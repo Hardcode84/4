@@ -15,6 +15,7 @@
 #define BOUNDS_EXPR_INDEX_INIT_CAP 8u
 #define BOUNDS_NONZERO_INLINE_COUNT 4u
 #define BOUNDS_NONZERO_INDEX_INIT_CAP 8u
+#define BOUNDS_DEFINED_DOMAIN_INIT_CAP 8u
 #define BOUNDS_INIT_CAP 16u
 
 IXS_STATIC void ixs_bounds_reset_read_cache(ixs_bounds *b, bool old_oom) {
@@ -49,6 +50,11 @@ IXS_STATIC bool bounds_store_init(ixs_bounds *b, ixs_arena *scratch) {
   b->nnonzero = 0;
   b->nonzero_cap = 0;
   b->nonzero_index_cap = 0;
+  b->defined_domain = NULL;
+  b->defined_domain_index = NULL;
+  b->ndefined_domain = 0;
+  b->defined_domain_cap = 0;
+  b->defined_domain_index_cap = 0;
   b->has_modrem = false;
   b->contradiction = false;
   b->facts_query_cache = NULL;
@@ -117,6 +123,12 @@ IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst,
   dst->nonzero_index = NULL;
   dst->nonzero_index_cap =
       src->nnonzero > BOUNDS_NONZERO_INLINE_COUNT ? src->nonzero_index_cap : 0;
+  dst->ndefined_domain = src->ndefined_domain;
+  dst->defined_domain_cap = src->ndefined_domain;
+  dst->defined_domain = NULL;
+  dst->defined_domain_index = NULL;
+  dst->defined_domain_index_cap =
+      src->ndefined_domain ? src->defined_domain_index_cap : 0;
   dst->has_modrem = src->has_modrem;
   dst->contradiction = src->contradiction;
   dst->semantic_changed = NULL;
@@ -212,6 +224,31 @@ IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
     return false;
   memcpy(dst->nonzero_index, src->nonzero_index,
          dst->nonzero_index_cap * sizeof(*src->nonzero_index));
+  return true;
+}
+
+IXS_STATIC bool bounds_store_fork_defined_domain(ixs_bounds *dst,
+                                                 const ixs_bounds *src) {
+  if (!src->ndefined_domain)
+    return true;
+  if (!src->defined_domain || !src->defined_domain_index ||
+      !src->defined_domain_index_cap)
+    return false;
+  dst->defined_domain = ixs_arena_alloc(
+      dst->scratch, dst->defined_domain_cap * sizeof(*dst->defined_domain),
+      sizeof(void *));
+  if (!dst->defined_domain)
+    return false;
+  memcpy(dst->defined_domain, src->defined_domain,
+         src->ndefined_domain * sizeof(*src->defined_domain));
+  dst->defined_domain_index = ixs_arena_alloc(
+      dst->scratch,
+      dst->defined_domain_index_cap * sizeof(*dst->defined_domain_index),
+      sizeof(void *));
+  if (!dst->defined_domain_index)
+    return false;
+  memcpy(dst->defined_domain_index, src->defined_domain_index,
+         dst->defined_domain_index_cap * sizeof(*src->defined_domain_index));
   return true;
 }
 
@@ -911,6 +948,122 @@ IXS_STATIC bool bounds_store_add_nonzero(ixs_bounds *b, ixs_node *expr) {
   b->nonzero_index_cap = index_capacity;
   b->nnonzero = count;
   bounds_store_mark_semantic_changed(b);
+  return true;
+}
+
+static size_t bounds_defined_domain_index_slot(const size_t *index,
+                                               size_t capacity,
+                                               ixs_node *const *values,
+                                               const ixs_node *expr) {
+  size_t slot = ixs_hash_ptr(expr) & (capacity - 1u);
+  while (index[slot] && values[index[slot] - 1u] != expr)
+    slot = (slot + 1u) & (capacity - 1u);
+  return slot;
+}
+
+static size_t *bounds_defined_domain_build_index(ixs_bounds *b,
+                                                 size_t capacity) {
+  size_t *index =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(*index), sizeof(void *));
+  size_t i;
+  if (!index)
+    return NULL;
+  memset(index, 0, capacity * sizeof(*index));
+  for (i = 0; i < b->ndefined_domain; i++) {
+    size_t slot = bounds_defined_domain_index_slot(
+        index, capacity, b->defined_domain, b->defined_domain[i]);
+    index[slot] = i + 1u;
+  }
+  return index;
+}
+
+static bool bounds_defined_domain_prepare_index(ixs_bounds *b, size_t count,
+                                                size_t **result,
+                                                size_t *result_capacity) {
+  size_t capacity = b->defined_domain_index_cap;
+  *result = b->defined_domain_index;
+  *result_capacity = capacity;
+  if (capacity && count <= capacity - capacity / 4u)
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_DEFINED_DOMAIN_INIT_CAP;
+  if (capacity <= b->defined_domain_index_cap ||
+      capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result = bounds_defined_domain_build_index(b, capacity);
+  if (!*result)
+    return false;
+  *result_capacity = capacity;
+  return true;
+}
+
+static bool bounds_defined_domain_prepare_values(ixs_bounds *b, size_t count,
+                                                 ixs_node ***result,
+                                                 size_t *result_capacity) {
+  size_t capacity = b->defined_domain_cap;
+  *result = b->defined_domain;
+  *result_capacity = capacity;
+  if (count <= capacity)
+    return true;
+  capacity = capacity ? capacity * 2u : BOUNDS_DEFINED_DOMAIN_INIT_CAP;
+  if (capacity <= b->defined_domain_cap ||
+      capacity > SIZE_MAX / sizeof(**result))
+    return false;
+  *result =
+      ixs_arena_alloc(b->scratch, capacity * sizeof(**result), sizeof(void *));
+  if (!*result)
+    return false;
+  if (b->ndefined_domain)
+    memcpy(*result, b->defined_domain, b->ndefined_domain * sizeof(**result));
+  *result_capacity = capacity;
+  return true;
+}
+
+IXS_STATIC bool bounds_store_contains_defined_domain(const ixs_bounds *b,
+                                                     const ixs_node *expr) {
+  size_t slot;
+  if (!b || !expr || !b->ndefined_domain)
+    return false;
+  assert(b->defined_domain != NULL && b->defined_domain_index != NULL &&
+         b->defined_domain_index_cap != 0);
+  slot = bounds_defined_domain_index_slot(b->defined_domain_index,
+                                          b->defined_domain_index_cap,
+                                          b->defined_domain, expr);
+  return b->defined_domain_index[slot] != 0;
+}
+
+IXS_STATIC bool bounds_store_add_defined_domain(ixs_bounds *b, ixs_node *expr) {
+  ixs_node **values;
+  size_t *index;
+  size_t count;
+  size_t index_capacity;
+  size_t value_capacity;
+  size_t slot;
+  if (!b || !expr || b->oom)
+    return false;
+  if (bounds_store_contains_defined_domain(b, expr))
+    return true;
+  if (b->ndefined_domain == SIZE_MAX) {
+    b->oom = true;
+    return false;
+  }
+  count = b->ndefined_domain + 1u;
+  if (!bounds_defined_domain_prepare_index(b, count, &index, &index_capacity) ||
+      !bounds_defined_domain_prepare_values(b, count, &values,
+                                            &value_capacity)) {
+    b->oom = true;
+    return false;
+  }
+  values[b->ndefined_domain] = expr;
+  slot = bounds_defined_domain_index_slot(index, index_capacity, values, expr);
+  assert(index[slot] == 0);
+  index[slot] = count;
+  b->defined_domain = values;
+  b->defined_domain_cap = value_capacity;
+  b->defined_domain_index = index;
+  b->defined_domain_index_cap = index_capacity;
+  b->ndefined_domain = count;
+  bounds_store_mark_semantic_changed(b);
+  bounds_store_invalidate_reads(b);
   return true;
 }
 

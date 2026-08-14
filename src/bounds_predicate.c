@@ -414,6 +414,22 @@ IXS_STATIC ixs_check_result bounds_predicate_bounded_finite_domain(
   return predicate_finite_evaluate(bounds, predicate, symbols, symbol_count,
                                    targets, point_count);
 }
+
+static bool predicate_implication_restrict_operand(ixs_bounds *owner,
+                                                   ixs_bounds *branch,
+                                                   ixs_node *operand,
+                                                   ixs_check_result *result) {
+  if (!bounds_defined_restrict_domain(branch, operand)) {
+    if (branch->oom)
+      owner->oom = true;
+    return false;
+  }
+  if (!ixs_bounds_has_empty(branch))
+    return true;
+  *result = IXS_CHECK_TRUE;
+  return false;
+}
+
 /* Check B under a query-local A assumption.  The fork borrows the enclosing
  * query state, so a limit or transport failure invalidates the whole proof. */
 static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
@@ -442,6 +458,13 @@ static ixs_check_result predicate_query_implication_branch(ixs_bounds *bounds,
     goto cleanup;
   }
   branch_ready = true;
+  /* Eager OR is evaluated only where both sides are defined. Keep that domain
+   * local to this fork before either side contributes proof facts. */
+  if (!predicate_implication_restrict_operand(bounds, &branch, antecedent,
+                                              &result) ||
+      !predicate_implication_restrict_operand(bounds, &branch, consequent,
+                                              &result))
+    goto cleanup;
   /* Unsupported local assumptions are proof misses.  Their diagnostics and
    * closure are private to this branch. */
   ixs_query_transaction_begin(&assumption, ctx, NULL, NULL);

@@ -6,8 +6,9 @@ Many simplification rules require knowing whether a subexpression is
 non-negative, positive, or bounded. A lightweight interval analysis pass:
 
 `bounds_store.c` owns retained variable records, expression ranges, nonzero
-facts, name and expression indexes, modular-inverse watchers, and their raw
-mutation operations. `bounds_assume.c` owns predicate validation and iterative
+facts, fork-local defined-subdomain guards, their pointer indexes,
+modular-inverse watchers, and their raw mutation operations. `bounds_assume.c`
+owns predicate validation and iterative
 AND flattening, comparison fact recognition, nonzero publication, affine and
 proportional range publication, and modular-inverse watcher refinement. It
 validates a complete predicate tree before publishing any leaf. General
@@ -21,7 +22,8 @@ bounds proof or simplification policy. `bounds_relation.c` owns exact-component
 cursor traversal, equality projection, and the projection-cache lifecycle.
 `bounds_bitfacts.c` owns structural known-bit and power-of-two queries.
 `bounds_defined.c` owns iterative domain proofs, Piecewise partition coverage,
-depth-safe range subqueries, and definedness projection-cache publication.
+depth-safe range subqueries, definedness projection-cache publication, and
+iterative eager-child closure for fork-local defined-subdomain restrictions.
 `bounds_integer.c` owns the compound integer, divisibility, and residue
 scheduler plus exact integer and divisibility transitions. `bounds_proof.h`
 owns its internal obligation, frame, and memo representation.
@@ -62,8 +64,9 @@ before relation state and the direct range cache. Fork query ownership
 initialization and inheritance are also allocation-free. Fork payload
 allocations occur in this order: dense variables, the variable index, the
 difference edge index, the difference variable table, modular-inverse heads and
-watchers, the relation clone, expression storage and its index, then nonzero
-facts. Difference fork inheritance is allocation-free; its clone stage copies
+watchers, the relation clone, expression storage and its index, nonzero facts,
+then defined-subdomain guards and their index. Difference fork inheritance is
+allocation-free; its clone stage copies
 the mutable index and variable arrays while their incident lists retain
 immutable edges in the common scratch-arena lifetime. Each stage consumes state
 published by its predecessors, and a failed fork is discarded as one
@@ -134,6 +137,17 @@ layout, load factor, and allocation remain consumer-owned.
   its index, and fact substitution retains the same order. Reciprocal guards
   can therefore use incoming disequalities and branch-local conditions. A
   direct zero range for the same expression is a detected contradiction.
+- **Defined-subdomain guards**: Piecewise range and implication forks may
+  restrict themselves to valuations where an expression is defined. Guards
+  are retained in a dense vector with an open-addressed pointer index from the
+  first entry, giving expected O(1) membership and insertion. Restriction walks
+  the eager-child DAG iteratively and once; a defined eager root makes those
+  children defined on the same local domain. Piecewise remains opaque because
+  root definedness does not make every arm defined. Negative powers also
+  publish a local nonzero base and `Mod` publishes a local positive-divisor
+  constraint. Guards are cloned only with bounds forks and never committed to
+  public facts. Work is O(nodes in the newly guarded eager closure), with
+  amortized O(1) insertion per node.
 - **Contradiction cache**: the detected-empty result is cached until any bound,
   congruence, bit, nonzero, or expression-range mutation. Query hits are O(1);
   a miss scans unique variables, expressions, and exclusions once.
@@ -753,12 +767,13 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   XOR- or layout-specific recognizer.
 - **Piecewise**: propagation follows first-match semantics. Each reachable
   branch is evaluated in a fork containing its condition and the negations of
-  all earlier conditions; dead and shadowed branches are ignored. All
-  reachable conditions and values must be proven defined, every feasible
-  input must be covered, and every reachable value must have a range. The
-  result is the hull of those branch ranges. Otherwise the query reports
-  unknown. Nested range partitioning is capped at 32 Piecewise levels and
-  1024 cases per node.
+  all earlier conditions; dead and shadowed branches are ignored. Before a
+  condition is split, the remaining fork is restricted to that condition's
+  defined subdomain, because poison selectors make the Piecewise itself poison
+  and impose no range obligation. Every reachable defined value must have a
+  range. The result is the hull of those branch ranges; no defined branch value
+  or an unsupported range reports unknown. Nested range partitioning is capped
+  at 32 Piecewise levels and 1024 cases per node.
 - **Overflow widening** (`iv_endpoint_widen`): when `ixs_rat_mul` overflows
   during interval arithmetic, the endpoint is widened to `INT64_MIN` or
   `INT64_MAX` (representing −∞ or +∞) based on the sign of the factors.
@@ -849,14 +864,16 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   its complementary comparison, covering the canonical form of `NOT(CMP)`
   for all six comparison operators. Eager poison does not block a conclusive
   implication because the result is a refinement on defined evaluations. The
-  query forks the current facts, ingests the antecedent without publishing its
-  local closure, and evaluates the other disjunct once without recursively
-  invoking implication. A binary `OR` therefore creates at most two local
-  forks. Each fork is linear in the retained fact state, shares the enclosing
-  query guard and failure transport, and is discarded before returning.
-  Unsupported or partial antecedents, insufficient facts, a contradictory
-  public fact set, allocation failure, and proof-limit exhaustion return
-  `UNKNOWN`; local assumption diagnostics do not escape the query.
+  query forks the current facts, restricts that fork to the defined subdomains
+  of both eager operands, ingests the antecedent without publishing its local
+  closure, and evaluates the other disjunct once without recursively invoking
+  implication. A binary `OR` therefore creates at most two local forks. Each
+  fork is linear in the retained fact state plus the newly guarded eager DAGs,
+  shares the enclosing query guard and failure transport, and is discarded
+  before returning. Unsupported antecedent shapes, facts that cannot express
+  the needed relation, a contradictory public fact set, allocation failure,
+  and proof-limit exhaustion return `UNKNOWN`; local assumptions and domain
+  guards do not escape the query.
 - **Fact-backed equivalence** (`ixs_equivalent_facts`, Python
   `Context.equivalent`, C++ `Facts::equivalent`): proves symmetric refinement
   compatibility. A true result establishes equality wherever both operands are

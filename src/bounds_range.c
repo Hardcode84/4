@@ -1418,10 +1418,12 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
     if (ixs_bounds_has_empty(&remaining)) {
       break;
     }
-    if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
+    if (!bounds_defined_restrict_domain(&remaining, cond)) {
       failed = true;
       break;
     }
+    if (ixs_bounds_has_empty(&remaining))
+      break;
     truth = bounds_condition_truth(&remaining, cond);
     if (truth == IXS_CHECK_FALSE)
       continue;

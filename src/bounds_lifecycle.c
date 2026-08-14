@@ -74,7 +74,9 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
       !bounds_difference_clone_fork(dst, src) ||
       !bounds_store_fork_mod_inverse(dst, src) ||
       bounds_relation_clone_fork(dst, src) != IXS_RELATION_STATUS_OK ||
-      !bounds_store_fork_expr(dst, src) || !bounds_store_fork_nonzero(dst, src))
+      !bounds_store_fork_expr(dst, src) ||
+      !bounds_store_fork_nonzero(dst, src) ||
+      !bounds_store_fork_defined_domain(dst, src))
     goto failed;
   return true;
 

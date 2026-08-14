@@ -2877,6 +2877,22 @@ def test_predicate_implication_bindings() -> None:
     assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), linear < 31), facts) is None
     assert ctx.check_predicate(ixsimpl.or_(ixsimpl.not_(antecedent), 1 / row > 0), facts) is None
 
+    partial_integer = ixsimpl.floor(1 / row)
+    assert (
+        ctx.check_predicate(
+            ixsimpl.or_(ixsimpl.not_(partial_integer > 0), partial_integer >= 0),
+            facts,
+        )
+        is True
+    )
+    assert (
+        ctx.check_predicate(
+            ixsimpl.or_(ixsimpl.not_(partial_integer > 1), partial_integer > 2),
+            facts,
+        )
+        is None
+    )
+
     comparisons = [
         row > 0,
         row >= 0,

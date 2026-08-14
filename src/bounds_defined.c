@@ -1050,6 +1050,8 @@ IXS_STATIC ixs_check_result bounds_defined_check_detail(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   if (ixs_ctx_owns_node(b->ctx, expr) && ixs_node_is_known_total(expr))
     return IXS_CHECK_TRUE;
+  if (bounds_store_contains_defined_domain(b, expr))
+    return IXS_CHECK_TRUE;
   if (bounds_defined_cache_lookup(b, expr, &result))
     return result;
   defined_state_init(&state, b->ctx, b);
@@ -1062,6 +1064,118 @@ IXS_STATIC ixs_check_result bounds_defined_check_detail(ixs_bounds *b,
     return IXS_CHECK_UNKNOWN;
   }
   return result;
+}
+
+static bool bounds_defined_restrict_operation(ixs_bounds *b, ixs_node *node) {
+  uint32_t i;
+  if (node->tag == IXS_MUL) {
+    for (i = 0; i < node->u.mul.nfactors; i++) {
+      if (node->u.mul.factors[i].exp < 0)
+        bounds_add_nonzero(b, node->u.mul.factors[i].base);
+      if (b->oom)
+        return false;
+    }
+  } else if (node->tag == IXS_MOD) {
+    struct ixs_node_impl positive;
+    memset(&positive, 0, sizeof(positive));
+    positive.tag = IXS_CMP;
+    positive.u.binary.lhs = node->u.binary.rhs;
+    positive.u.binary.rhs = b->ctx->node_zero;
+    positive.u.binary.cmp_op = IXS_CMP_GT;
+    return ixs_bounds_add_assumption(b, &positive);
+  }
+  return true;
+}
+
+static bool bounds_defined_restrict_push_children(
+    ixs_bounds *b, ixs_arena *traversal, ixs_node *node, uint32_t child_count,
+    ixs_node ***stack, size_t *stack_count, size_t *stack_capacity) {
+  uint32_t i;
+  /* A defined Piecewise selects only one value and a condition prefix.
+   * No individual child is therefore defined over its whole root domain. */
+  if (node->tag == IXS_PIECEWISE)
+    return true;
+  for (i = 0; i < child_count; i++) {
+    ixs_node *child = defined_child_at(node, i);
+    if (!child) {
+      bounds_query_note_invalid(b);
+      return false;
+    }
+    if (!query_node_stack_push(traversal, stack, stack_count, stack_capacity,
+                               child)) {
+      b->oom = true;
+      return false;
+    }
+  }
+  return true;
+}
+
+IXS_STATIC bool bounds_defined_restrict_domain(ixs_bounds *b, ixs_node *expr) {
+  ixs_arena traversal;
+  ixs_node **stack = NULL;
+  size_t stack_count = 0;
+  size_t stack_capacity = 0;
+  ixs_bounds_transport_snapshot snapshot;
+  ixs_bounds_transport_status transport;
+  ixs_check_result defined;
+  bool oom = false;
+  bool limited = false;
+  bool ok = false;
+
+  if (!b || !b->ctx || !expr || b->oom)
+    return false;
+  snapshot = ixs_bounds_query_transport_snapshot(b);
+  defined = bounds_defined_check_detail(b, expr, &oom, &limited);
+  transport = ixs_bounds_query_transport_since(b, snapshot);
+  if (oom || transport == IXS_BOUNDS_TRANSPORT_OOM) {
+    b->oom = true;
+    return false;
+  }
+  if (limited || transport == IXS_BOUNDS_TRANSPORT_LIMITED ||
+      transport == IXS_BOUNDS_TRANSPORT_INVALID)
+    return false;
+  if (defined == IXS_CHECK_TRUE)
+    return true;
+  if (defined == IXS_CHECK_FALSE) {
+    bounds_store_mark_contradiction(b);
+    bounds_store_invalidate_reads(b);
+    return true;
+  }
+
+  ixs_arena_init(&traversal, IXS_ARENA_DEFAULT_SIZE);
+  if (!query_node_stack_push(&traversal, &stack, &stack_count, &stack_capacity,
+                             expr)) {
+    b->oom = true;
+    goto cleanup;
+  }
+  while (stack_count != 0) {
+    ixs_node *node = stack[--stack_count];
+    uint32_t child_count;
+
+    if (ixs_node_is_known_total(node))
+      continue;
+    if (bounds_store_contains_defined_domain(b, node))
+      continue;
+    if (!ixs_ctx_owns_node(b->ctx, node) || ixs_node_is_sentinel(node) ||
+        !defined_child_count(node, &child_count)) {
+      bounds_query_note_invalid(b);
+      goto cleanup;
+    }
+    if (!bounds_store_add_defined_domain(b, node))
+      goto cleanup;
+    if (!bounds_defined_restrict_operation(b, node) ||
+        !bounds_defined_restrict_push_children(b, &traversal, node, child_count,
+                                               &stack, &stack_count,
+                                               &stack_capacity))
+      goto cleanup;
+  }
+  ok = !b->oom;
+
+cleanup:
+  if (!ok && b->oom)
+    bounds_query_note_oom(b);
+  ixs_arena_destroy_transient(&traversal);
+  return ok;
 }
 
 IXS_STATIC ixs_check_result ixs_bounds_check_defined(ixs_bounds *b,

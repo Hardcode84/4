@@ -91,6 +91,14 @@ typedef struct ixs_bounds {
   size_t nnonzero;
   size_t nonzero_cap;
   size_t nonzero_index_cap;
+  /* Expressions known defined only because the current fork is restricted to
+   * their defined subdomain.  This is query-local proof state, never a public
+   * fact. */
+  ixs_node **defined_domain;
+  size_t *defined_domain_index;
+  size_t ndefined_domain;
+  size_t defined_domain_cap;
+  size_t defined_domain_index_cap;
   ixs_bounds_cache_entry *cache; /* direct-mapped interval cache */
   size_t cache_cap;
   size_t range_pw_depth;

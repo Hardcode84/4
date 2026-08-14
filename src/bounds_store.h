@@ -16,7 +16,8 @@ IXS_STATIC ixs_ctx *bounds_store_swap_active_context(ixs_bounds *bounds,
 IXS_STATIC bool *bounds_store_swap_change_observer(ixs_bounds *bounds,
                                                    bool *observer);
 /* Aggregate fork order is query, begin, var index, difference, inverse,
- * relation, expression, nonzero.  Each phase consumes its predecessors. */
+ * relation, expression, nonzero, defined domain.  Each phase consumes its
+ * predecessors. */
 IXS_STATIC bool bounds_store_fork_begin(ixs_bounds *dst, const ixs_bounds *src);
 IXS_STATIC bool bounds_store_fork_var_index(ixs_bounds *dst,
                                             const ixs_bounds *src);
@@ -25,6 +26,8 @@ IXS_STATIC bool bounds_store_fork_mod_inverse(ixs_bounds *dst,
 IXS_STATIC bool bounds_store_fork_expr(ixs_bounds *dst, const ixs_bounds *src);
 IXS_STATIC bool bounds_store_fork_nonzero(ixs_bounds *dst,
                                           const ixs_bounds *src);
+IXS_STATIC bool bounds_store_fork_defined_domain(ixs_bounds *dst,
+                                                 const ixs_bounds *src);
 
 IXS_STATIC void bounds_store_mark_semantic_changed(ixs_bounds *bounds);
 IXS_STATIC void bounds_store_mark_contradiction(ixs_bounds *bounds);
@@ -77,6 +80,11 @@ IXS_STATIC bool bounds_store_contains_nonzero(const ixs_bounds *bounds,
                                               const ixs_node *expr);
 /* False means duplicate/no-op or OOM; bounds->oom distinguishes OOM. */
 IXS_STATIC bool bounds_store_add_nonzero(ixs_bounds *bounds, ixs_node *expr);
+IXS_STATIC bool bounds_store_contains_defined_domain(const ixs_bounds *bounds,
+                                                     const ixs_node *expr);
+/* True means present after the call. False means OOM or invalid input. */
+IXS_STATIC bool bounds_store_add_defined_domain(ixs_bounds *bounds,
+                                                ixs_node *expr);
 IXS_STATIC void bounds_store_note_mod_inverse_visit(ixs_bounds *bounds);
 IXS_STATIC bool bounds_store_get_modrem(ixs_bounds *bounds, const char *name,
                                         int64_t *modulus, int64_t *remainder);
