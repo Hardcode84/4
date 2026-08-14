@@ -2150,6 +2150,10 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   equivalence_state_init(&state, ctx, bounds);
   state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
+  if (lhs == rhs) {
+    *result = IXS_CHECK_TRUE;
+    goto restore;
+  }
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
       bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
@@ -2465,6 +2469,8 @@ IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
   if (!ixs_bounds_query_hold_begin(bounds, cmp, &query_held))
     return IXS_CHECK_UNKNOWN;
   result = ixs_bounds_check(bounds, cmp);
+  if (result == IXS_CHECK_UNKNOWN && cmp && cmp->tag == IXS_CMP)
+    result = bounds_range_check_relation_refined(bounds, cmp);
   if (result == IXS_CHECK_UNKNOWN && cmp && cmp->tag == IXS_CMP &&
       ixs_node_is_zero(cmp->u.binary.rhs) &&
       (cmp->u.binary.cmp_op == IXS_CMP_EQ ||

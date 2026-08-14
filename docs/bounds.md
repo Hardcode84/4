@@ -770,13 +770,15 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   trades precision for soundness: the interval remains an over-approximation.
 - **Public range query** (`ixs_range`, Python `Context.range`): exposes the
   same bounds-only interval query used by entailment checks.  It returns
-  exact rational endpoints for the inferred inclusive interval, with
-  unbounded sides represented explicitly.  This is not a general optimizer or
-  constraint solver: if propagation cannot derive an interval, the query
-  reports unknown; if independent intervals lose correlations, the returned
-  interval is conservative rather than the mathematical image of the full
-  assumption set. Integer-coefficient positive-literal `Mod` chains in one
-  `ADD` are grouped by their exact structurally total integer representative.
+  exact rational endpoints bounding every defined evaluation; poison points
+  impose no constraint. Incomplete Piecewise coverage and partial branch values
+  therefore do not prevent a range when all reachable defined values are
+  bounded. Unbounded sides are represented explicitly. This is not a general
+  optimizer or constraint solver: if propagation cannot derive an interval,
+  the query reports unknown; if independent intervals lose correlations, the
+  returned interval is conservative rather than the mathematical image of the
+  full assumption set. Integer-coefficient positive-literal `Mod` chains in one
+  `ADD` are grouped by their exact structurally integer representative.
   Each subgroup interval is intersected with its proven gcd congruence before
   independent groups are summed; fractional coefficients, partial or
   noninteger representatives, symbolic moduli, and distinct representatives
@@ -795,15 +797,17 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
 - **Public power-of-two query** (`ixs_get_pow2_fact`, Python
   `Context.pow2_fact`): exposes the semantic pow2 lattice (`unknown`,
   `or_zero`, `positive`). It uses both direct bitfacts and exact integer
-  intervals inferred for arithmetic expressions. Detected contradictory
-  assumptions return unknown.
+  intervals inferred for arithmetic expressions and describes every defined
+  evaluation without requiring the expression to be total. Detected
+  contradictory assumptions return unknown.
 - **Public known-bit query** (`ixs_get_known_bits_facts`, Python
   `Context.known_bits`, C++ `Facts::get_known_bits`): exposes the sound low-64
   `known_zero`, `known_one`, and pow2 facts from a reusable fact set. A valid
   query with no information returns true with zero masks; invalid input,
   contradictory facts, or OOM returns false and initializes the output to that
   same no-information value. The query first proves the expression integer-
-  valued, so a rational interval cannot be misread as integer bits. Interval,
+  valued, so a rational interval cannot be misread as integer bits. It then
+  describes every defined evaluation without requiring totality. Interval,
   `ADD`, positive power-of-two `MUL`, floor division, `Mod`, and bitwise
   propagation never infer anything about source bits above bit 63.
 - **Public congruence queries** (`ixs_get_symbol_congruence_facts`,
@@ -835,28 +839,29 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   storage; allocation failure returns unknown.
 
   Fact simplification replaces a projected root with canonical `0` or `1` only
-  when every enumerated source valuation agrees. A varying result, a partial
-  eager operand, transport failure, or a domain beyond the fixed finite limits
-  leaves the rewritten predicate intact. Scalar and batch simplification use
-  the same one-shot root operation.
+  when every defined enumerated source valuation agrees. Poison valuations are
+  skipped; no defined valuation, a varying defined result, transport failure,
+  or a domain beyond the fixed finite limits leaves the rewritten predicate
+  intact. Scalar and batch simplification use the same one-shot root operation.
 
   An otherwise unknown binary `OR` also admits one bounded implication step.
   An explicit `NOT(A)` disjunct supplies `A`; a comparison disjunct supplies
   its complementary comparison, covering the canonical form of `NOT(CMP)`
-  for all six comparison operators. The query first proves the complete `OR`
-  defined and integer-valued because the operators are eager. It then forks
-  the current facts, ingests the antecedent without publishing its local
-  closure, and evaluates the other disjunct once without recursively invoking
-  implication. A binary `OR` therefore creates at most two local forks. Each
-  fork is linear in the retained fact state, shares the enclosing query guard
-  and failure transport, and is discarded before returning. Unsupported or
-  partial antecedents, insufficient facts, a contradictory public fact set,
-  allocation failure, and proof-limit exhaustion return `UNKNOWN`; local
-  assumption diagnostics do not escape the query.
-- **Total fact-backed equivalence** (`ixs_equivalent_facts`, Python
-  `Context.equivalent`, C++ `Facts::equivalent`): requires both operands to be
-  defined over every valuation admitted by the incoming facts before pointer
-  identity can prove equality. It then tries fact-backed simplification of the
+  for all six comparison operators. Eager poison does not block a conclusive
+  implication because the result is a refinement on defined evaluations. The
+  query forks the current facts, ingests the antecedent without publishing its
+  local closure, and evaluates the other disjunct once without recursively
+  invoking implication. A binary `OR` therefore creates at most two local
+  forks. Each fork is linear in the retained fact state, shares the enclosing
+  query guard and failure transport, and is discarded before returning.
+  Unsupported or partial antecedents, insufficient facts, a contradictory
+  public fact set, allocation failure, and proof-limit exhaustion return
+  `UNKNOWN`; local assumption diagnostics do not escape the query.
+- **Fact-backed equivalence** (`ixs_equivalent_facts`, Python
+  `Context.equivalent`, C++ `Facts::equivalent`): pointer-identical operands
+  refine directly to true, including when the shared expression is partial.
+  Other proofs require both operands to be defined over every valuation
+  admitted by the incoming facts. The query then tries simplification of the
   difference, expansion followed by simplification under the shared fact
   environment, flattened order-independent matching of predicate `AND`/`OR`
   terms. Aligned ordered comparisons normalize to integer residual cuts
@@ -1175,11 +1180,12 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   combines exact point ranges, complete low-64 bitfacts, additive rows over the
   weighted relation forest, and paired-Mod projection. Complete bitfacts are
   converted to signed two's-complement values without implementation-defined
-  unsigned-to-signed casts. A point-range probe runs first, but publication
-  still requires the original definedness proof. If the range is not exact, a
-  tag-specific capability check skips bitfacts only when its transfer would
-  reproduce the same interval seed. ADD relation work first verifies the
-  zero coefficient-sum invariant, and paired-Mod search starts only when the
+  unsigned-to-signed casts. Simplification publishes an exact point range
+  immediately as a poison refinement. Total-value proof consumers additionally
+  require source definedness before publishing the same result. If the range is
+  not exact, a tag-specific capability check skips bitfacts only when its
+  transfer would reproduce the same interval seed. ADD relation work first
+  verifies the zero coefficient-sum invariant, and paired-Mod search starts only when the
   normalized row contains a matching Mod pair. These necessary conditions
   remove proof calls; they do not remove a proof backend. The rewrite memo
   projects each input DAG node once, while interval and bitfacts work reuse the
@@ -1258,9 +1264,9 @@ concrete upper bound and `D` has a symbolic lower bound that guarantees
   `Context.try_exact_divide`, C++ `Facts::try_exact_divide`): first simplifies
   the expression in the supplied fact domain, then reuses the same divisibility
   proof and returns a canonical expanded quotient only after that proof
-  succeeds. A conclusive result also requires the original input to be defined
-  over the complete fact domain, so simplification cannot erase uncovered or
-  undefined partitions. Its result separates
+  succeeds. The quotient agrees on every defined source evaluation and may be
+  more defined than a partial source; a source proved undefined everywhere has
+  no quotient witness and returns `UNKNOWN`. Its result separates
   `PROVEN`, proven `NOT_EXACT`, insufficient or contradictory `UNKNOWN`, and
   domain/OOM `ERROR`. Only `PROVEN` carries a quotient. Negative divisors
   preserve quotient sign; `INT64_MIN` is handled without taking its signed

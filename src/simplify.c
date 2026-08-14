@@ -7,6 +7,7 @@
 #include "bounds_equivalence.h"
 #include "bounds_modular.h"
 #include "bounds_query.h"
+#include "bounds_range.h"
 #include "bounds_store.h"
 #include "hash.h"
 #include "low_bits_algebra.h"
@@ -4448,8 +4449,7 @@ static ixs_node *rule_mod_reduce_product_factors(ixs_ctx *ctx, ixs_bounds *bnds,
   for (i = 0; i < product->u.mul.nfactors; i++) {
     ixs_mulfactor factor = product->u.mul.factors[i];
     if (factor.exp <= 0 ||
-        ixs_bounds_check_integer_valued(bnds, factor.base) != IXS_CHECK_TRUE ||
-        ixs_bounds_check_defined(bnds, factor.base) != IXS_CHECK_TRUE)
+        ixs_bounds_check_integer_valued(bnds, factor.base) != IXS_CHECK_TRUE)
       return n;
   }
 
@@ -6975,6 +6975,9 @@ static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
 #endif
     return n;
   }
+  if (bnds->partial_exact_projection_disabled_depth == 0 &&
+      bounds_range_exact_integer_difference(bnds, n, &exact))
+    return ixs_node_int(ctx, exact);
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   bnds->exact_projection_visits++;
 #endif

@@ -47,6 +47,7 @@ int main() {
   ixs::Facts facts = ctx.facts();
   ixs_range_result explicit_range = {true, true, 0, 1, 63, 1};
   ixs::Expr twice_x = x * ixs::Expr::integer(ctx, 2);
+  ixs::Expr reciprocal = ixs::Expr::parse_expr(ctx, "1/x");
   std::vector<ixs::Expr> fact_predicates = {nonnegative, congruent};
   if (!facts.assume_many(fact_predicates) ||
       !facts.assume_range(x, explicit_range) ||
@@ -61,6 +62,7 @@ int main() {
       facts.check_defined(x) != IXS_CHECK_TRUE ||
       facts.check_predicate(nonnegative) != IXS_CHECK_TRUE ||
       facts.equivalent(x, x) != IXS_CHECK_TRUE ||
+      facts.equivalent(reciprocal, reciprocal) != IXS_CHECK_TRUE ||
       facts.check_divisible(twice_x, 2) != IXS_CHECK_TRUE ||
       facts.get_pow2_fact(eight) != IXS_POW2_POSITIVE || !facts.range(x, range))
     return 4;

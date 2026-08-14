@@ -7,8 +7,6 @@
 #include "bounds.h"
 
 IXS_STATIC ixs_check_result bounds_predicate_not(ixs_check_result result);
-IXS_STATIC bool bounds_predicate_domain_proven(ixs_bounds *bounds,
-                                               ixs_node *predicate);
 IXS_STATIC ixs_check_result bounds_predicate_eval(ixs_bounds *bounds,
                                                   ixs_node *predicate,
                                                   bool *limited);

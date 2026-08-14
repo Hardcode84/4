@@ -167,7 +167,6 @@ static ixs_node *da_piecewise_argument(da_query *query, ixs_node *round) {
                                  query->ctx, round->u.pw.cases[1].value, true,
                                  &ceil_argument, &ceil_residual)) ||
       floor_argument != ceil_argument || floor_residual != ceil_residual ||
-      !da_property(query, floor_residual, false) ||
       !da_property(query, floor_residual, true))
     return NULL;
   return da_build(query, DA_ADD, floor_argument, floor_residual);
@@ -201,12 +200,11 @@ static bool da_round_parts(da_query *query, ixs_node *round,
                               : IXS_ALGEBRA_NO_MATCH);
     return false;
   }
-  if (!da_property(query, round, false) ||
-      !da_property(query, certificate->numerator, true) ||
+  if (!da_property(query, certificate->numerator, true) ||
       !da_property(query, certificate->denominator, true))
     return false;
-  /* A total rounding node transports the shared quotient argument's complete
-   * domain, including numerator definedness and a nonzero denominator. */
+  /* On every defined source evaluation the rounding node transports the
+   * shared quotient argument's domain, including a nonzero denominator. */
   if (round->tag == IXS_PIECEWISE) {
     ixs_node *actual = round->u.pw.cases[0].cond;
     if (!da_guard_matches(query, actual, certificate->numerator,
@@ -422,11 +420,6 @@ IXS_STATIC ixs_division_projection_result ixs_division_algebra_project(
        !ixs_node_contains_rounding(root_rhs)))
     return result;
   query.transport = ixs_bounds_query_transport_snapshot(bounds);
-  if (!da_property(&query, source_lhs, false) ||
-      !da_property(&query, source_rhs, false)) {
-    result.status = query.status;
-    return result;
-  }
   mark = ixs_arena_save(&ctx->scratch);
   if (!da_walk_roots(&query, root_lhs, root_rhs, mode, true, &projection) ||
       projection.count == 0u)

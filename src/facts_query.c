@@ -1772,9 +1772,9 @@ static bool exact_divide_simplify_input(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
-static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
-                                       ixs_node *expr,
-                                       ixs_exact_divide_result *result) {
+static bool exact_divide_input_not_undefined(ixs_facts *facts, ixs_ctx *ctx,
+                                             ixs_node *expr,
+                                             ixs_exact_divide_result *result) {
   bool old_bounds_oom = facts->bounds.oom;
   bool defined_oom = false;
   bool defined_limited = false;
@@ -1798,7 +1798,10 @@ static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
                                    "resource limit exceeded");
     return false;
   }
-  if (defined != IXS_CHECK_TRUE) {
+  /* UNKNOWN admits a poison-refining quotient: the constructed value need only
+   * agree where the source is defined. A source proved undefined everywhere
+   * has no defined evaluation from which to construct a quotient. */
+  if (defined == IXS_CHECK_FALSE) {
     *result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     return false;
   }
@@ -1941,7 +1944,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
             : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     goto cleanup;
   }
-  if (!exact_divide_input_defined(facts, ctx, expr, &result))
+  if (!exact_divide_input_not_undefined(facts, ctx, expr, &result))
     goto cleanup;
   if (!exact_divide_simplify_input(facts, ctx, expr, &expr, &result))
     goto cleanup;
@@ -1981,8 +1984,6 @@ static ixs_pow2_query_result facts_query_get_pow2(ixs_facts *facts,
   ixs_bitfacts bits;
   ixs_interval iv;
   int64_t exact;
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_pow2_query_result result = {IXS_FACT_QUERY_INVALID, IXS_POW2_UNKNOWN};
   if (!facts_store_bind(facts, &binding, &ctx))
@@ -2004,12 +2005,8 @@ static ixs_pow2_query_result facts_query_get_pow2(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(&facts->bounds, expr) != IXS_CHECK_TRUE) {
-    result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                    : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                      : IXS_FACT_QUERY_COMPLETE;
+  if (ixs_bounds_check_integer_valued(&facts->bounds, expr) != IXS_CHECK_TRUE) {
+    result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
   if (ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits))
@@ -2037,8 +2034,6 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
   ixs_bitfacts bits = {0, 0, IXS_POW2_UNKNOWN};
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_known_bits_query_result result;
   result.status = IXS_FACT_QUERY_INVALID;
@@ -2066,13 +2061,9 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
     goto cleanup;
   }
 
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) == IXS_CHECK_TRUE &&
-      ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
+  if (ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
     (void)ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits);
-  result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                  : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                    : IXS_FACT_QUERY_COMPLETE;
+  result.status = IXS_FACT_QUERY_COMPLETE;
   result.bits.known_zero = bits.known_zero;
   result.bits.known_one = bits.known_one;
   result.bits.pow2 = bits.pow2;
@@ -2184,8 +2175,6 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   ixs_ctx *ctx;
   ixs_interval iv;
   ixs_interval truncating_remainder;
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_check_result integer_valued;
   ixs_algebra_status truncating_status;
@@ -2213,19 +2202,12 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) != IXS_CHECK_TRUE) {
-    result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                    : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                      : IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
   result.status = IXS_FACT_QUERY_COMPLETE;
   integer_valued = ixs_bounds_check_integer_valued(&facts->bounds, expr);
   iv = ixs_bounds_get(&facts->bounds, expr);
   if (integer_valued == IXS_CHECK_TRUE) {
     if (!bounds_refine_integral_interval(&facts->bounds, expr,
-                                         /*expression_defined=*/true, &iv))
+                                         /*expression_defined=*/false, &iv))
       goto cleanup;
     interval_to_range_result(iv, &result.range);
     result.available = true;

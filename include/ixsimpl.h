@@ -272,7 +272,8 @@ ixs_check_result ixs_check_defined(ixs_session *s, const ixs_node *expr,
                                    const ixs_node *const *assumptions,
                                    size_t n_assumptions);
 
-/* Return the strongest known power-of-two fact for expr under assumptions.
+/* Return the strongest known power-of-two fact for every defined evaluation of
+ * expr under assumptions; poison points impose no constraint.
  * POSITIVE means expr > 0 and exactly one bit is set.  OR_ZERO additionally
  * permits expr == 0.  UNKNOWN is returned when the fact is not provable, on
  * OOM, for NULL/sentinel expr, or for detected contradictory assumptions. */
@@ -280,7 +281,8 @@ ixs_pow2_fact ixs_get_pow2_fact(ixs_session *s, const ixs_node *expr,
                                 const ixs_node *const *assumptions,
                                 size_t n_assumptions);
 
-/* Infer an inclusive rational range for expr under assumptions. Propagation
+/* Infer an inclusive rational range for every defined evaluation of expr under
+ * assumptions; poison points impose no constraint. Propagation
  * includes bounded integer powers, sound nonnegative XOR, and first-match
  * Piecewise branch hulls; unsupported domains remain unknown.
  * Returns false when the interval engine cannot derive a range, on OOM,
@@ -371,9 +373,10 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
  * rejected because they are not predicate trees. */
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            const ixs_node *predicate);
-/* Prove total equivalence over the full domain admitted by facts.  TRUE is
- * returned only after both operands are proved defined everywhere. FALSE is
- * returned only for a universal proof of different values;
+/* Prove equivalence over the full domain admitted by facts.  Pointer-identical
+ * operands refine directly to TRUE; other TRUE results require both operands
+ * to be proved defined everywhere. FALSE is returned only for a universal
+ * proof of different values;
  * insufficient facts, contradictory facts, invalid input, and resource
  * limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
@@ -401,18 +404,22 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
- * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
- * not prove the input defined.  Invalid input, divisor zero, unrepresentable
- * results, resource limits, and OOM return ERROR and append a diagnostic to
- * the fact set's session when one is available. */
+ * nondivisibility. The quotient agrees on every defined input evaluation and
+ * may be more defined than a partial input. UNKNOWN means facts are
+ * insufficient, contradictory, or prove the input undefined everywhere.
+ * Invalid input, divisor zero, unrepresentable results, resource limits, and
+ * OOM return ERROR and append a diagnostic to the fact set's session when one
+ * is available. */
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
                                                    const ixs_node *expr,
                                                    int64_t divisor);
+/* Return the strongest power-of-two fact for every defined evaluation. */
 ixs_pow2_fact ixs_get_pow2_fact_facts(ixs_facts *facts, const ixs_node *expr);
-/* Return sound low-64-bit facts.  True with zero masks means that the query
- * was valid but proved no bits.  Invalid input, contradictory facts, resource
- * limits, and OOM return false and leave out initialized to the no-information
- * value.  Live failures append a session diagnostic. */
+/* Return sound low-64-bit facts for every defined evaluation. True with zero
+ * masks means that the query was valid but proved no bits. Invalid input,
+ * contradictory facts, resource limits, and OOM return false and leave out
+ * initialized to the no-information value. Live failures append a session
+ * diagnostic. */
 bool ixs_get_known_bits_facts(ixs_facts *facts, const ixs_node *expr,
                               ixs_known_bits *out);
 /* Export the stored congruence record for a symbol.  Output pointers must be

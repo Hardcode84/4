@@ -1422,8 +1422,8 @@ static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
   ixs_cmp_op op;
   if (!ixs_cmp_from_wire(node->u.binary.op, &op))
     return NULL;
-  return ixs_node_binary(ctx, IXS_CMP, built[node->u.binary.lhs],
-                         built[node->u.binary.rhs], op);
+  return simp_cmp(ctx, built[node->u.binary.lhs], op,
+                  built[node->u.binary.rhs]);
 }
 
 static ixs_node *decode_build_assoc(ixs_ctx *ctx, const decode_node *node,

@@ -7335,6 +7335,10 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   equivalence_state_init(&state, ctx, bounds);
   state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
+  if (lhs == rhs) {
+    *result = IXS_CHECK_TRUE;
+    goto restore;
+  }
   if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
           IXS_CHECK_TRUE ||
       bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
@@ -7650,6 +7654,8 @@ IXS_STATIC ixs_check_result ixs_bounds_check_query(ixs_bounds *bounds,
   if (!ixs_bounds_query_hold_begin(bounds, cmp, &query_held))
     return IXS_CHECK_UNKNOWN;
   result = ixs_bounds_check(bounds, cmp);
+  if (result == IXS_CHECK_UNKNOWN && cmp && cmp->tag == IXS_CMP)
+    result = bounds_range_check_relation_refined(bounds, cmp);
   if (result == IXS_CHECK_UNKNOWN && cmp && cmp->tag == IXS_CMP &&
       ixs_node_is_zero(cmp->u.binary.rhs) &&
       (cmp->u.binary.cmp_op == IXS_CMP_EQ ||
@@ -8426,6 +8432,7 @@ IXS_STATIC bool ixs_bounds_init(ixs_bounds *b, ixs_arena *scratch) {
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
   b->exact_projection_depth = 0;
+  b->partial_exact_projection_disabled_depth = 0;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   b->exact_projection_visits = 0;
   b->exact_projection_skips = 0;
@@ -8450,6 +8457,7 @@ IXS_STATIC void ixs_bounds_destroy(ixs_bounds *b) {
   b->equality_disabled_depth = 0;
   b->exact_proof_call_depth = 0;
   b->exact_projection_depth = 0;
+  b->partial_exact_projection_disabled_depth = 0;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   b->exact_projection_visits = 0;
   b->exact_projection_skips = 0;
@@ -8469,6 +8477,8 @@ IXS_STATIC bool ixs_bounds_fork(ixs_bounds *dst, const ixs_bounds *src) {
   dst->equality_disabled_depth = src->equality_disabled_depth;
   dst->exact_proof_call_depth = src->exact_proof_call_depth;
   dst->exact_projection_depth = src->exact_projection_depth;
+  dst->partial_exact_projection_disabled_depth =
+      src->partial_exact_projection_disabled_depth;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   dst->exact_projection_visits = src->exact_projection_visits;
   dst->exact_projection_skips = src->exact_projection_skips;
@@ -9111,6 +9121,10 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
   bool rhs_oom = false;
   bool lhs_limited = false;
   bool rhs_limited = false;
+  if (frame->lhs == frame->rhs) {
+    bounds_delta_complete(query, true, 0);
+    return;
+  }
   if (bounds_defined_check_detail(query->bounds, frame->lhs, &lhs_oom,
                                   &lhs_limited) != IXS_CHECK_TRUE ||
       bounds_defined_check_detail(query->bounds, frame->rhs, &rhs_oom,
@@ -9120,10 +9134,6 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
     if (query->oom || query->limited)
       return;
     bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (frame->lhs == frame->rhs) {
-    bounds_delta_complete(query, true, 0);
     return;
   }
   relation_status = bounds_exact_relation_difference(
@@ -9659,12 +9669,13 @@ IXS_STATIC ixs_check_result bounds_predicate_not(ixs_check_result result) {
 
 static ixs_check_result predicate_cmp_atom(ixs_bounds *bounds, ixs_node *cmp) {
   ixs_check_result result;
-  /* Reflexive equality encodes totality, so a proven domain failure is false
-   * rather than an invalid arithmetic query. */
+  /* Reflexive equality is an exact poison refinement. */
   if (cmp->u.binary.cmp_op == IXS_CMP_EQ &&
       cmp->u.binary.lhs == cmp->u.binary.rhs)
-    return ixs_bounds_check_defined(bounds, cmp->u.binary.lhs);
+    return IXS_CHECK_TRUE;
   result = ixs_bounds_check(bounds, cmp);
+  if (result == IXS_CHECK_UNKNOWN)
+    result = bounds_range_check_relation_refined(bounds, cmp);
   if (result != IXS_CHECK_UNKNOWN || !ixs_node_is_zero(cmp->u.binary.rhs) ||
       (cmp->u.binary.cmp_op != IXS_CMP_EQ &&
        cmp->u.binary.cmp_op != IXS_CMP_NE) ||
@@ -9728,14 +9739,6 @@ predicate_query_short_circuited(const predicate_query_frame *frame) {
          (frame->node->tag == IXS_OR && frame->result == IXS_CHECK_TRUE);
 }
 
-/* An absorber determines a total result only when every retained operand is
- * defined and integer-valued. */
-IXS_STATIC bool bounds_predicate_domain_proven(ixs_bounds *bounds,
-                                               ixs_node *node) {
-  return ixs_bounds_check_defined(bounds, node) == IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(bounds, node) == IXS_CHECK_TRUE;
-}
-
 static void predicate_query_start(predicate_query_frame *frame) {
   if (frame->started)
     return;
@@ -9766,17 +9769,12 @@ static ixs_check_result
 predicate_query_complete(ixs_bounds *bounds,
                          const predicate_query_frame *frame) {
   ixs_node *node = frame->node;
-  ixs_check_result result;
 
   if (!node ||
       (node->tag != IXS_AND && node->tag != IXS_OR && node->tag != IXS_NOT))
     return predicate_query_atom(bounds, node);
 
-  result = frame->result;
-  if (predicate_query_short_circuited(frame) &&
-      !bounds_predicate_domain_proven(bounds, node))
-    result = IXS_CHECK_UNKNOWN;
-  return result;
+  return frame->result;
 }
 
 /* hot */
@@ -9975,6 +9973,7 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
   ixs_query_transaction transaction;
   ixs_node *replacements[PREDICATE_FINITE_MAX_SYMBOLS];
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool have_defined_point = false;
   size_t point;
 
   ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
@@ -9993,12 +9992,12 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       break;
     evaluated = simp_subs_multi(ctx, predicate, (uint32_t)symbol_count, targets,
                                 replacements);
-    if (!evaluated || ixs_node_is_sentinel(evaluated)) {
-      result = IXS_CHECK_UNKNOWN;
-      if (!evaluated)
-        bounds->oom = true;
+    if (!evaluated) {
+      bounds->oom = true;
       break;
     }
+    if (ixs_node_is_sentinel(evaluated))
+      goto next_point;
     if (ixs_node_is_known_true(evaluated))
       current = IXS_CHECK_TRUE;
     else if (ixs_node_is_known_false(evaluated))
@@ -10007,13 +10006,15 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       result = IXS_CHECK_UNKNOWN;
       break;
     }
-    if (point == 0)
+    if (!have_defined_point) {
       result = current;
-    else if (result != current) {
+      have_defined_point = true;
+    } else if (result != current) {
       result = IXS_CHECK_UNKNOWN;
       break;
     }
 
+  next_point:
     for (symbol = symbol_count; symbol > 0; symbol--) {
       predicate_finite_symbol *entry = &symbols[symbol - 1u];
       if (entry->current < entry->upper) {
@@ -10112,10 +10113,9 @@ cleanup:
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
 }
 
-/* A | B is !A => B.  Canonicalization folds NOT(CMP), so reconstruct the
- * complementary comparison when either disjunct is a comparison.  The total
- * source check preserves eager AND/OR semantics, and the branch evaluator
- * deliberately has no implication fallback of its own. */
+/* A | B is !A => B. Canonicalization folds NOT(CMP), so reconstruct the
+ * complementary comparison when either disjunct is a comparison. The branch
+ * evaluator deliberately has no implication fallback of its own. */
 IXS_STATIC ixs_check_result bounds_predicate_implication(ixs_bounds *bounds,
                                                          ixs_node *predicate,
                                                          bool *limited) {
@@ -10123,8 +10123,7 @@ IXS_STATIC ixs_check_result bounds_predicate_implication(ixs_bounds *bounds,
   uint32_t i;
 
   if (!bounds || !predicate || predicate->tag != IXS_OR ||
-      predicate->u.assoc.nargs != 2u ||
-      !bounds_predicate_domain_proven(bounds, predicate))
+      predicate->u.assoc.nargs != 2u)
     return IXS_CHECK_UNKNOWN;
 
   /* Retain explicit NOT intent before deriving a comparison complement. */
@@ -12291,8 +12290,6 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
     ok = true;
     goto cleanup;
   }
-  if (ixs_bounds_check_defined(&active, value) != IXS_CHECK_TRUE)
-    goto cleanup;
   branch = ixs_bounds_get(&active, value);
   if (!branch.valid)
     goto cleanup;
@@ -12318,7 +12315,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
   ixs_arena_mark outer_mark;
   ixs_bounds remaining;
   bool have_result = false;
-  bool covered = false;
   bool failed = false;
   bool remaining_ready = false;
   uint32_t i;
@@ -12350,7 +12346,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
     if (ixs_bounds_has_empty(&remaining)) {
-      covered = true;
       break;
     }
     if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
@@ -12367,7 +12362,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
     if (truth == IXS_CHECK_TRUE) {
-      covered = true;
       break;
     }
     if (!ixs_bounds_add_assumption(
@@ -12378,11 +12372,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
   }
-
-  if (!failed && !covered && ixs_bounds_has_empty(&remaining))
-    covered = true;
-  if (!covered)
-    failed = true;
 
 cleanup:
   if (remaining_ready)
@@ -13223,6 +13212,27 @@ IXS_STATIC ixs_check_result bounds_range_check_relation(const ixs_interval *lhs,
     break;
   }
   return IXS_CHECK_UNKNOWN;
+}
+
+IXS_STATIC ixs_check_result
+bounds_range_check_relation_refined(ixs_bounds *bounds, ixs_node *comparison) {
+  ixs_interval lhs;
+  ixs_interval rhs;
+  if (!bounds || !comparison || comparison->tag != IXS_CMP)
+    return IXS_CHECK_UNKNOWN;
+  lhs = ixs_bounds_get(bounds, comparison->u.binary.lhs);
+  rhs = ixs_bounds_get(bounds, comparison->u.binary.rhs);
+  if (ixs_bounds_check_integer_valued(bounds, comparison->u.binary.lhs) ==
+          IXS_CHECK_TRUE &&
+      !bounds_refine_integral_interval(bounds, comparison->u.binary.lhs,
+                                       /*expression_defined=*/false, &lhs))
+    return IXS_CHECK_UNKNOWN;
+  if (ixs_bounds_check_integer_valued(bounds, comparison->u.binary.rhs) ==
+          IXS_CHECK_TRUE &&
+      !bounds_refine_integral_interval(bounds, comparison->u.binary.rhs,
+                                       /*expression_defined=*/false, &rhs))
+    return IXS_CHECK_UNKNOWN;
+  return bounds_range_check_relation(&lhs, &rhs, comparison->u.binary.cmp_op);
 }
 
 IXS_STATIC ixs_check_result bounds_range_check_raw(ixs_bounds *b,
@@ -17336,7 +17346,6 @@ static ixs_node *da_piecewise_argument(da_query *query, ixs_node *round) {
                                  query->ctx, round->u.pw.cases[1].value, true,
                                  &ceil_argument, &ceil_residual)) ||
       floor_argument != ceil_argument || floor_residual != ceil_residual ||
-      !da_property(query, floor_residual, false) ||
       !da_property(query, floor_residual, true))
     return NULL;
   return da_build(query, DA_ADD, floor_argument, floor_residual);
@@ -17370,12 +17379,11 @@ static bool da_round_parts(da_query *query, ixs_node *round,
                               : IXS_ALGEBRA_NO_MATCH);
     return false;
   }
-  if (!da_property(query, round, false) ||
-      !da_property(query, certificate->numerator, true) ||
+  if (!da_property(query, certificate->numerator, true) ||
       !da_property(query, certificate->denominator, true))
     return false;
-  /* A total rounding node transports the shared quotient argument's complete
-   * domain, including numerator definedness and a nonzero denominator. */
+  /* On every defined source evaluation the rounding node transports the
+   * shared quotient argument's domain, including a nonzero denominator. */
   if (round->tag == IXS_PIECEWISE) {
     ixs_node *actual = round->u.pw.cases[0].cond;
     if (!da_guard_matches(query, actual, certificate->numerator,
@@ -17591,11 +17599,6 @@ IXS_STATIC ixs_division_projection_result ixs_division_algebra_project(
        !ixs_node_contains_rounding(root_rhs)))
     return result;
   query.transport = ixs_bounds_query_transport_snapshot(bounds);
-  if (!da_property(&query, source_lhs, false) ||
-      !da_property(&query, source_rhs, false)) {
-    result.status = query.status;
-    return result;
-  }
   mark = ixs_arena_save(&ctx->scratch);
   if (!da_walk_roots(&query, root_lhs, root_rhs, mode, true, &projection) ||
       projection.count == 0u)
@@ -20066,9 +20069,9 @@ static bool exact_divide_simplify_input(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
-static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
-                                       ixs_node *expr,
-                                       ixs_exact_divide_result *result) {
+static bool exact_divide_input_not_undefined(ixs_facts *facts, ixs_ctx *ctx,
+                                             ixs_node *expr,
+                                             ixs_exact_divide_result *result) {
   bool old_bounds_oom = facts->bounds.oom;
   bool defined_oom = false;
   bool defined_limited = false;
@@ -20092,7 +20095,10 @@ static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
                                    "resource limit exceeded");
     return false;
   }
-  if (defined != IXS_CHECK_TRUE) {
+  /* UNKNOWN admits a poison-refining quotient: the constructed value need only
+   * agree where the source is defined. A source proved undefined everywhere
+   * has no defined evaluation from which to construct a quotient. */
+  if (defined == IXS_CHECK_FALSE) {
     *result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     return false;
   }
@@ -20235,7 +20241,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
             : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     goto cleanup;
   }
-  if (!exact_divide_input_defined(facts, ctx, expr, &result))
+  if (!exact_divide_input_not_undefined(facts, ctx, expr, &result))
     goto cleanup;
   if (!exact_divide_simplify_input(facts, ctx, expr, &expr, &result))
     goto cleanup;
@@ -20275,8 +20281,6 @@ static ixs_pow2_query_result facts_query_get_pow2(ixs_facts *facts,
   ixs_bitfacts bits;
   ixs_interval iv;
   int64_t exact;
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_pow2_query_result result = {IXS_FACT_QUERY_INVALID, IXS_POW2_UNKNOWN};
   if (!facts_store_bind(facts, &binding, &ctx))
@@ -20298,12 +20302,8 @@ static ixs_pow2_query_result facts_query_get_pow2(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) != IXS_CHECK_TRUE ||
-      ixs_bounds_check_integer_valued(&facts->bounds, expr) != IXS_CHECK_TRUE) {
-    result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                    : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                      : IXS_FACT_QUERY_COMPLETE;
+  if (ixs_bounds_check_integer_valued(&facts->bounds, expr) != IXS_CHECK_TRUE) {
+    result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
   if (ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits))
@@ -20331,8 +20331,6 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
   ixs_bitfacts bits = {0, 0, IXS_POW2_UNKNOWN};
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_known_bits_query_result result;
   result.status = IXS_FACT_QUERY_INVALID;
@@ -20360,13 +20358,9 @@ static ixs_known_bits_query_result facts_query_get_known_bits(ixs_facts *facts,
     goto cleanup;
   }
 
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) == IXS_CHECK_TRUE &&
-      ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
+  if (ixs_bounds_check_integer_valued(&facts->bounds, expr) == IXS_CHECK_TRUE)
     (void)ixs_bounds_get_bitfacts(&facts->bounds, expr, &bits);
-  result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                  : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                    : IXS_FACT_QUERY_COMPLETE;
+  result.status = IXS_FACT_QUERY_COMPLETE;
   result.bits.known_zero = bits.known_zero;
   result.bits.known_one = bits.known_one;
   result.bits.pow2 = bits.pow2;
@@ -20478,8 +20472,6 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
   ixs_ctx *ctx;
   ixs_interval iv;
   ixs_interval truncating_remainder;
-  bool defined_oom = false;
-  bool defined_limited = false;
   bool query_held = false;
   ixs_check_result integer_valued;
   ixs_algebra_status truncating_status;
@@ -20507,19 +20499,12 @@ static ixs_range_query_result facts_query_range(ixs_facts *facts,
     result.status = IXS_FACT_QUERY_COMPLETE;
     goto cleanup;
   }
-  if (bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
-                                  &defined_limited) != IXS_CHECK_TRUE) {
-    result.status = defined_oom       ? IXS_FACT_QUERY_OOM
-                    : defined_limited ? IXS_FACT_QUERY_LIMITED
-                                      : IXS_FACT_QUERY_COMPLETE;
-    goto cleanup;
-  }
   result.status = IXS_FACT_QUERY_COMPLETE;
   integer_valued = ixs_bounds_check_integer_valued(&facts->bounds, expr);
   iv = ixs_bounds_get(&facts->bounds, expr);
   if (integer_valued == IXS_CHECK_TRUE) {
     if (!bounds_refine_integral_interval(&facts->bounds, expr,
-                                         /*expression_defined=*/true, &iv))
+                                         /*expression_defined=*/false, &iv))
       goto cleanup;
     interval_to_range_result(iv, &result.range);
     result.available = true;
@@ -20839,6 +20824,7 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate,
    * table allocation after advancing its semantic generation once. */
   assert(candidate->store_ctx != NULL);
   assert(candidate->query_tracking_depth == 0);
+  assert(candidate->partial_exact_projection_disabled_depth == 0);
   assert(!candidate->query_state_owner && !candidate->query_state_borrowed);
   /* Read queries restore their temporary allocations but may retain arena
    * chunks for reuse.  A commit replaces the complete bounds object, so
@@ -21905,6 +21891,22 @@ static ixs_node *facts_supported_true_root(ixs_node *predicate) {
   return root;
 }
 
+/* Simplifying a query result may replace a partial expression with a value
+ * proved on every defined evaluation.  Assumption admission is different: it
+ * must retain the source predicate's poison domain until closure validation
+ * has established all of its dependencies. */
+static ixs_node *facts_simplify_for_admission(ixs_ctx *ctx,
+                                              ixs_bounds *candidate,
+                                              ixs_node *predicate,
+                                              bool *limited) {
+  ixs_node *result;
+  assert(candidate->partial_exact_projection_disabled_depth != UINT_MAX);
+  candidate->partial_exact_projection_disabled_depth++;
+  result = simp_simplify_bounds_status(ctx, predicate, candidate, limited);
+  candidate->partial_exact_projection_disabled_depth--;
+  return result;
+}
+
 /* A selected Boolean carrier can expose a supported predicate behind an exact
  * truth wrapper. Reprocess that predicate until monotone ingestion stops
  * refining facts; the stored wrapper must not hide later consequences. */
@@ -21922,7 +21924,7 @@ facts_saturate_supported_true_root(ixs_ctx *ctx, ixs_bounds *candidate,
     bool limited = false;
     bool *outer_observer =
         bounds_store_swap_change_observer(candidate, &changed);
-    simplified = simp_simplify_bounds_status(ctx, root, candidate, &limited);
+    simplified = facts_simplify_for_admission(ctx, candidate, root, &limited);
     if (limited)
       status = IXS_BOUNDS_BUILD_LIMIT;
     else if (!simplified || candidate->oom)
@@ -21953,8 +21955,8 @@ static ixs_bounds_build_status facts_process_predicate_worklist(
     work->queue_head = (work->queue_head + 1u) % work->n_predicates;
     work->queue_count--;
     work->queued[predicate_index] = false;
-    predicate = simp_simplify_bounds_status(ctx, predicates[predicate_index],
-                                            candidate, &limited);
+    predicate = facts_simplify_for_admission(
+        ctx, candidate, predicates[predicate_index], &limited);
     if (limited) {
       (void)bounds_store_swap_change_observer(candidate, old_observer);
       return IXS_BOUNDS_BUILD_LIMIT;
@@ -22811,6 +22813,8 @@ static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
       ixs_ctx_push_error(dst_ctx, "Mod: divisor is negative");
       return dst_ctx->sentinel_error;
     }
+  } else {
+    return simp_cmp(dst_ctx, lhs, src->u.binary.cmp_op, rhs);
   }
   return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
 }
@@ -31347,8 +31351,8 @@ static ixs_node *decode_build_cmp(ixs_ctx *ctx, const decode_node *node,
   ixs_cmp_op op;
   if (!ixs_cmp_from_wire(node->u.binary.op, &op))
     return NULL;
-  return ixs_node_binary(ctx, IXS_CMP, built[node->u.binary.lhs],
-                         built[node->u.binary.rhs], op);
+  return simp_cmp(ctx, built[node->u.binary.lhs], op,
+                  built[node->u.binary.rhs]);
 }
 
 static ixs_node *decode_build_assoc(ixs_ctx *ctx, const decode_node *node,
@@ -31652,6 +31656,7 @@ ixs_node *ixs_deserialize_node(ixs_session *s, const ixs_reader *r) {
 #include "bounds_equivalence.h"
 #include "bounds_modular.h"
 #include "bounds_query.h"
+#include "bounds_range.h"
 #include "bounds_store.h"
 #include "hash.h"
 #include "low_bits_algebra.h"
@@ -36093,8 +36098,7 @@ static ixs_node *rule_mod_reduce_product_factors(ixs_ctx *ctx, ixs_bounds *bnds,
   for (i = 0; i < product->u.mul.nfactors; i++) {
     ixs_mulfactor factor = product->u.mul.factors[i];
     if (factor.exp <= 0 ||
-        ixs_bounds_check_integer_valued(bnds, factor.base) != IXS_CHECK_TRUE ||
-        ixs_bounds_check_defined(bnds, factor.base) != IXS_CHECK_TRUE)
+        ixs_bounds_check_integer_valued(bnds, factor.base) != IXS_CHECK_TRUE)
       return n;
   }
 
@@ -38620,6 +38624,9 @@ static ixs_node *rewrite_project_exact_integer(ixs_ctx *ctx, ixs_node *n,
 #endif
     return n;
   }
+  if (bnds->partial_exact_projection_disabled_depth == 0 &&
+      bounds_range_exact_integer_difference(bnds, n, &exact))
+    return ixs_node_int(ctx, exact);
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   bnds->exact_projection_visits++;
 #endif

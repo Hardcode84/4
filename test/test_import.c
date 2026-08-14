@@ -403,6 +403,32 @@ static void test_import_uses_poison_refinement(void) {
   destroy_session(src_ctx, &src_s);
 }
 
+#ifndef IXS_TEST_AMALGAMATION
+static void test_import_canonicalizes_reflexive_comparison(void) {
+  ixs_ctx *src_ctx = NULL;
+  ixs_ctx *dst_ctx = NULL;
+  ixs_session src_s;
+  ixs_session dst_s;
+  ixs_node *x;
+  ixs_node *partial;
+  ixs_node *raw;
+
+  if (!init_session(&src_ctx, &src_s))
+    return;
+  if (!init_session(&dst_ctx, &dst_s)) {
+    destroy_session(src_ctx, &src_s);
+    return;
+  }
+  x = ixs_sym(&src_s, "import_cmp_x");
+  partial = ixs_div(&src_s, ixs_int(&src_s, 1), x);
+  raw = ixs_node_binary(src_ctx, IXS_CMP, partial, partial, IXS_CMP_EQ);
+  CHECK(raw != NULL && ixs_node_tag(raw) == IXS_CMP);
+  CHECK(ixs_import_node(&dst_s, raw) == ixs_true(&dst_s));
+  destroy_session(dst_ctx, &dst_s);
+  destroy_session(src_ctx, &src_s);
+}
+#endif
+
 int main(void) {
   test_same_store_structural_import();
   test_cross_store_import();
@@ -416,6 +442,9 @@ int main(void) {
   test_import_many_failure_preserves_out();
   test_import_many();
   test_import_uses_poison_refinement();
+#ifndef IXS_TEST_AMALGAMATION
+  test_import_canonicalizes_reflexive_comparison();
+#endif
 
   if (failures != 0) {
     fprintf(stderr, "test_import: %d failure(s)\n", failures);

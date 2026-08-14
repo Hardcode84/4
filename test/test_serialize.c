@@ -25,10 +25,18 @@ static int failures;
 #define TEST_WIRE_MAX 9u
 #define TEST_WIRE_MIN 10u
 #define TEST_WIRE_XOR 11u
+#define TEST_WIRE_CMP 12u
 #define TEST_WIRE_AND 13u
 #define TEST_WIRE_OR 14u
 #define TEST_WIRE_ERROR 16u
 #define TEST_WIRE_TRUNC 18u
+
+#define TEST_WIRE_CMP_GT 0u
+#define TEST_WIRE_CMP_GE 1u
+#define TEST_WIRE_CMP_LT 2u
+#define TEST_WIRE_CMP_LE 3u
+#define TEST_WIRE_CMP_EQ 4u
+#define TEST_WIRE_CMP_NE 5u
 
 #define CHECK(expr)                                                            \
   do {                                                                         \
@@ -1270,6 +1278,37 @@ static void test_associative_payload_validation(void) {
   destroy_session(ctx, &s);
 }
 
+static void test_comparison_canonicalized_on_deserialize(void) {
+  static const uint8_t ops[] = {
+      TEST_WIRE_CMP_GT, TEST_WIRE_CMP_GE, TEST_WIRE_CMP_LT,
+      TEST_WIRE_CMP_LE, TEST_WIRE_CMP_EQ, TEST_WIRE_CMP_NE,
+  };
+  ixs_ctx *ctx = NULL;
+  ixs_session s;
+  byte_buffer buf = {0};
+  size_t i;
+
+  buf.fail_after = (size_t)-1;
+  if (!init_session(&ctx, &s))
+    return;
+  for (i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+    ixs_node *decoded;
+    bool expected = ops[i] == TEST_WIRE_CMP_GE || ops[i] == TEST_WIRE_CMP_LE ||
+                    ops[i] == TEST_WIRE_CMP_EQ;
+    begin_blob(&buf, 2);
+    append_sym_node(&buf, "deserialize_cmp_x");
+    append_u8(&buf, TEST_WIRE_CMP);
+    append_u8(&buf, ops[i]);
+    append_le32(&buf, 0);
+    append_le32(&buf, 0);
+    append_le32(&buf, 1);
+    decoded = deserialize_from_buffer(&s, &buf);
+    CHECK(decoded == (expected ? ixs_true(&s) : ixs_false(&s)));
+  }
+  buffer_destroy(&buf);
+  destroy_session(ctx, &s);
+}
+
 static void test_trunc_sentinel_child_rejected_without_pollution(void) {
   ixs_ctx *ctx = NULL;
   ixs_session s;
@@ -1615,6 +1654,7 @@ int main(void) {
   test_facts_assume_preds_duplicate_skip();
   test_malformed_root_rejected_without_pollution();
   test_associative_payload_validation();
+  test_comparison_canonicalized_on_deserialize();
   test_trunc_sentinel_child_rejected_without_pollution();
   test_version_mismatch_stops_at_header();
 #ifndef IXS_TEST_AMALGAMATION

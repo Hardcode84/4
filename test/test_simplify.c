@@ -772,6 +772,21 @@ static void test_mod_product_factor_reduction(void) {
       mod17);
   CHECK(test_ixs_simplify_facts(facts, partial) == partial_expected);
 
+  {
+    ixs_node *d = ixs_sym(ctx, "mod_product_partial_integer_divisor");
+    ixs_node *partial_integer = ixs_floor(ctx, ixs_div(ctx, x, d));
+    ixs_node *partial_product =
+        ixs_mod(ctx, ixs_mul(ctx, slot, partial_integer), ixs_int(ctx, 4));
+    ixs_node *partial_product_expected = ixs_mod(ctx, slot, ixs_int(ctx, 4));
+    ixs_range_result one = {true, true, 1, 1, 1, 1};
+    ixs_facts *partial_facts = ixs_facts_create(ctx);
+    CHECK(ixs_facts_assume_range(partial_facts, partial_integer, &one));
+    CHECK(test_ixs_check_defined_facts(partial_facts, partial_integer) ==
+          IXS_CHECK_UNKNOWN);
+    CHECK(test_ixs_simplify_facts(partial_facts, partial_product) ==
+          partial_product_expected);
+  }
+
   huge_x = ixs_sym(ctx, "mod_product_huge_x");
   huge_slot = ixs_sym(ctx, "mod_product_huge_slot");
   huge_modulus = ixs_int(ctx, INT64_MAX);
@@ -4060,18 +4075,21 @@ static void test_fact_backed_affine_truncating_remainder(void) {
   CHECK(batch[0] == expected);
   CHECK(batch[1] == optimized_expected);
 
-  /* A valid remainder child is not projected through an independently
-   * partial sibling: SOURCE definedness covers the complete input DAG. */
+  /* An independently partial sibling does not block an exact refinement. */
   {
     ixs_node *z = ixs_sym(ctx, "affine_partial_sibling");
     ixs_node *partial = ixs_div(ctx, ixs_int(ctx, 1), z);
     ixs_node *partial_source = ixs_add(ctx, source, partial);
     ixs_node *partial_optimized = ixs_add(ctx, optimized_source, partial);
+    ixs_node *partial_expected = ixs_add(ctx, expected, partial);
+    ixs_node *partial_optimized_expected =
+        ixs_add(ctx, optimized_expected, partial);
     ixs_node *partial_batch[2] = {partial_source, partial_optimized};
-    CHECK(test_ixs_simplify_facts(crossing, partial_source) == partial_source);
+    CHECK(test_ixs_simplify_facts(crossing, partial_source) ==
+          partial_expected);
     test_ixs_simplify_batch_facts(crossing, partial_batch, 2);
-    CHECK(partial_batch[0] == partial_source);
-    CHECK(partial_batch[1] == partial_optimized);
+    CHECK(partial_batch[0] == partial_expected);
+    CHECK(partial_batch[1] == partial_optimized_expected);
   }
 
   /* Removing rounds alone is not a simplification when the exact signed
@@ -4166,6 +4184,14 @@ static void test_fact_backed_affine_truncating_remainder(void) {
     ixs_node *unproved_source = ixs_add(ctx, unproved_zero, negative_source);
     ixs_node *unproved_quotient =
         ixs_add(ctx, unproved_zero, negative_quotient);
+    ixs_node *unproved_modulus = ixs_max(ctx, d, ixs_neg(ctx, d));
+    ixs_node *unproved_positive_mod = ixs_mod(ctx, n, unproved_modulus);
+    ixs_node *unproved_negative_mod =
+        ixs_neg(ctx, ixs_mod(ctx, ixs_neg(ctx, n), unproved_modulus));
+    ixs_node *unproved_values[2] = {unproved_positive_mod,
+                                    unproved_negative_mod};
+    ixs_node *unproved_expected =
+        ixs_pw(ctx, 2, unproved_values, negative_remainder_conditions);
     ixs_node *unproved_batch[2] = {unproved_source, unproved_quotient};
     ixs_facts *unproved_divisor = ixs_facts_create(ctx);
     ixs_facts *negative_divisor = ixs_facts_create(ctx);
@@ -4176,9 +4202,9 @@ static void test_fact_backed_affine_truncating_remainder(void) {
         unproved_divisor,
         ixs_cmp(ctx, unproved_zero, IXS_CMP_EQ, ixs_int(ctx, 0))));
     CHECK(test_ixs_simplify_facts(unproved_divisor, unproved_source) ==
-          negative_source);
+          unproved_expected);
     test_ixs_simplify_batch_facts(unproved_divisor, unproved_batch, 2);
-    CHECK(unproved_batch[0] == negative_source);
+    CHECK(unproved_batch[0] == unproved_expected);
     CHECK(unproved_batch[1] == negative_quotient);
 
     CHECK(ixs_facts_assume_pred(
@@ -4270,6 +4296,9 @@ static void test_exact_divide_fact_piecewise(void) {
   ixs_node *outside = ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 64));
   ixs_node *expected = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), item),
                                ixs_mul(ctx, ixs_int(ctx, 4), slot));
+  ixs_node *partial_expected_values[1] = {expected};
+  ixs_node *partial_expected =
+      ixs_pw(ctx, 1, partial_expected_values, conditions);
   ixs_facts *unknown = ixs_facts_create(ctx);
   ixs_facts *active = ixs_facts_create(ctx);
   ixs_facts *inactive = ixs_facts_create(ctx);
@@ -4281,8 +4310,8 @@ static void test_exact_divide_fact_piecewise(void) {
   CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK((result.quotient == partial_expected));
 
   result = ixs_try_exact_divide_facts(unknown, total_piecewise, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
@@ -6054,6 +6083,7 @@ static void test_cmp_const_fold(void) {
 static void test_cmp_identity(void) {
   ixs_ctx *ctx = get_ctx();
   ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *partial = ixs_div(ctx, ixs_int(ctx, 1), x);
 
   /* x >= x -> True */
   CHECK(ixs_cmp(ctx, x, IXS_CMP_GE, x) == ixs_true(ctx));
@@ -6072,6 +6102,14 @@ static void test_cmp_identity(void) {
 
   /* x != x -> False */
   CHECK(ixs_cmp(ctx, x, IXS_CMP_NE, x) == ixs_false(ctx));
+
+  /* Identity is an exact poison refinement even when the operand is partial. */
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_GE, partial) == ixs_true(ctx));
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_LE, partial) == ixs_true(ctx));
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_EQ, partial) == ixs_true(ctx));
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_GT, partial) == ixs_false(ctx));
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_LT, partial) == ixs_false(ctx));
+  CHECK(ixs_cmp(ctx, partial, IXS_CMP_NE, partial) == ixs_false(ctx));
 }
 
 static void test_cmp_normalization_overflow_fallback(void) {

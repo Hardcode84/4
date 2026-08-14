@@ -350,6 +350,8 @@ static ixs_node *import_build_binary(ixs_ctx *dst_ctx, import_state *state,
       ixs_ctx_push_error(dst_ctx, "Mod: divisor is negative");
       return dst_ctx->sentinel_error;
     }
+  } else {
+    return simp_cmp(dst_ctx, lhs, src->u.binary.cmp_op, rhs);
   }
   return ixs_node_binary(dst_ctx, src->tag, lhs, rhs, src->u.binary.cmp_op);
 }

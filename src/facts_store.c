@@ -95,6 +95,7 @@ static void facts_commit(ixs_facts *facts, ixs_bounds *candidate,
    * table allocation after advancing its semantic generation once. */
   assert(candidate->store_ctx != NULL);
   assert(candidate->query_tracking_depth == 0);
+  assert(candidate->partial_exact_projection_disabled_depth == 0);
   assert(!candidate->query_state_owner && !candidate->query_state_borrowed);
   /* Read queries restore their temporary allocations but may retain arena
    * chunks for reuse.  A commit replaces the complete bounds object, so
@@ -1161,6 +1162,22 @@ static ixs_node *facts_supported_true_root(ixs_node *predicate) {
   return root;
 }
 
+/* Simplifying a query result may replace a partial expression with a value
+ * proved on every defined evaluation.  Assumption admission is different: it
+ * must retain the source predicate's poison domain until closure validation
+ * has established all of its dependencies. */
+static ixs_node *facts_simplify_for_admission(ixs_ctx *ctx,
+                                              ixs_bounds *candidate,
+                                              ixs_node *predicate,
+                                              bool *limited) {
+  ixs_node *result;
+  assert(candidate->partial_exact_projection_disabled_depth != UINT_MAX);
+  candidate->partial_exact_projection_disabled_depth++;
+  result = simp_simplify_bounds_status(ctx, predicate, candidate, limited);
+  candidate->partial_exact_projection_disabled_depth--;
+  return result;
+}
+
 /* A selected Boolean carrier can expose a supported predicate behind an exact
  * truth wrapper. Reprocess that predicate until monotone ingestion stops
  * refining facts; the stored wrapper must not hide later consequences. */
@@ -1178,7 +1195,7 @@ facts_saturate_supported_true_root(ixs_ctx *ctx, ixs_bounds *candidate,
     bool limited = false;
     bool *outer_observer =
         bounds_store_swap_change_observer(candidate, &changed);
-    simplified = simp_simplify_bounds_status(ctx, root, candidate, &limited);
+    simplified = facts_simplify_for_admission(ctx, candidate, root, &limited);
     if (limited)
       status = IXS_BOUNDS_BUILD_LIMIT;
     else if (!simplified || candidate->oom)
@@ -1209,8 +1226,8 @@ static ixs_bounds_build_status facts_process_predicate_worklist(
     work->queue_head = (work->queue_head + 1u) % work->n_predicates;
     work->queue_count--;
     work->queued[predicate_index] = false;
-    predicate = simp_simplify_bounds_status(ctx, predicates[predicate_index],
-                                            candidate, &limited);
+    predicate = facts_simplify_for_admission(
+        ctx, candidate, predicates[predicate_index], &limited);
     if (limited) {
       (void)bounds_store_swap_change_observer(candidate, old_observer);
       return IXS_BOUNDS_BUILD_LIMIT;

@@ -618,6 +618,10 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
   bool rhs_oom = false;
   bool lhs_limited = false;
   bool rhs_limited = false;
+  if (frame->lhs == frame->rhs) {
+    bounds_delta_complete(query, true, 0);
+    return;
+  }
   if (bounds_defined_check_detail(query->bounds, frame->lhs, &lhs_oom,
                                   &lhs_limited) != IXS_CHECK_TRUE ||
       bounds_defined_check_detail(query->bounds, frame->rhs, &rhs_oom,
@@ -627,10 +631,6 @@ static void bounds_delta_step_initial(bounds_delta_query *query,
     if (query->oom || query->limited)
       return;
     bounds_delta_complete(query, false, 0);
-    return;
-  }
-  if (frame->lhs == frame->rhs) {
-    bounds_delta_complete(query, true, 0);
     return;
   }
   relation_status = bounds_exact_relation_difference(

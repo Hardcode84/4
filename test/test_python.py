@@ -2741,7 +2741,7 @@ def test_predicate_tree_and_total_equivalence_bindings() -> None:
     reciprocal_lhs = (x + 1) / x
     reciprocal_rhs = 1 + reciprocal
     assert ctx.equivalent(polynomial, expanded, empty) is True
-    assert ctx.equivalent(reciprocal, reciprocal, empty) is None
+    assert ctx.equivalent(reciprocal, reciprocal, empty) is True
     assert ctx.equivalent(reciprocal_lhs, reciprocal_rhs, empty) is None
 
     nonzero = ctx.facts()
@@ -3574,7 +3574,10 @@ def test_fact_backed_exact_divide_piecewise() -> None:
     assert quotient is not None
     assert quotient.node_ptr == expected.node_ptr
 
-    assert ctx.try_exact_divide(piecewise, 8, ctx.facts()) == ("unknown", None)
+    status, quotient = ctx.try_exact_divide(piecewise, 8, ctx.facts())
+    assert status == "proven"
+    assert quotient is not None
+    assert quotient.node_ptr == ixsimpl.pw((expected, item < 64)).node_ptr
 
     inactive = ctx.facts()
     inactive.assume(item >= 64)
@@ -3586,7 +3589,10 @@ def test_fact_backed_exact_divide_piecewise() -> None:
     partial.assume(ctx.eq(k % 2, 0))
     assert ctx.integer_valued(fact_integer, facts=partial) is True
     assert ctx.defined(fact_integer, facts=partial) is None
-    assert ctx.try_exact_divide(product, 8, partial) == ("unknown", None)
+    status, quotient = ctx.try_exact_divide(product, 8, partial)
+    assert status == "proven"
+    assert quotient is not None
+    assert quotient.node_ptr == (2 * fact_integer).node_ptr
 
     covered = ctx.facts()
     covered.assume_many([ctx.eq(k % 2, 0), item > 0])
@@ -4075,7 +4081,7 @@ def test_grouped_mod_congruence_range() -> None:
     assert ctx.range(x % d - x % 16, facts=symbolic) == (-15, 63)
     assert ctx.range((x / 2) % 64 - (x / 2) % 16, facts=facts) is None
     nontotal = ixsimpl.floor(x + 1 / y)
-    assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) is None
+    assert ctx.range(nontotal % 64 - nontotal % 16, facts=facts) == (-15, 63)
 
 
 def test_compositional_mod_wave_identity() -> None:

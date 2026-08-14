@@ -1167,7 +1167,7 @@ static void test_relational_finite_symbol_domain_contract(void) {
   CHECK(test_ixs_check_predicate_facts(facts, is_zero) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(facts, is_nonzero) == IXS_CHECK_FALSE);
   CHECK(test_ixs_check_predicate_facts(facts, partially_defined) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_ctx_nerrors(ctx) == errors);
 
   ixs_ctx_destroy(ctx);

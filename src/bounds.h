@@ -124,6 +124,10 @@ typedef struct ixs_bounds {
    * chain through another exact proof. */
   unsigned exact_proof_call_depth;
   unsigned exact_projection_depth;
+  /* Fact admission must preserve the source predicate's poison domain until
+   * the candidate assumption set is closed.  In that scope, exact interval
+   * points may not replace partial expressions. */
+  unsigned partial_exact_projection_disabled_depth;
 #if defined(IXS_TEST_INTERNAL) && !defined(IXS_AMALGAMATED)
   size_t exact_projection_visits;
   size_t exact_projection_skips;

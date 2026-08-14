@@ -38,12 +38,13 @@ IXS_STATIC ixs_check_result bounds_predicate_not(ixs_check_result result) {
 
 static ixs_check_result predicate_cmp_atom(ixs_bounds *bounds, ixs_node *cmp) {
   ixs_check_result result;
-  /* Reflexive equality encodes totality, so a proven domain failure is false
-   * rather than an invalid arithmetic query. */
+  /* Reflexive equality is an exact poison refinement. */
   if (cmp->u.binary.cmp_op == IXS_CMP_EQ &&
       cmp->u.binary.lhs == cmp->u.binary.rhs)
-    return ixs_bounds_check_defined(bounds, cmp->u.binary.lhs);
+    return IXS_CHECK_TRUE;
   result = ixs_bounds_check(bounds, cmp);
+  if (result == IXS_CHECK_UNKNOWN)
+    result = bounds_range_check_relation_refined(bounds, cmp);
   if (result != IXS_CHECK_UNKNOWN || !ixs_node_is_zero(cmp->u.binary.rhs) ||
       (cmp->u.binary.cmp_op != IXS_CMP_EQ &&
        cmp->u.binary.cmp_op != IXS_CMP_NE) ||
@@ -107,14 +108,6 @@ predicate_query_short_circuited(const predicate_query_frame *frame) {
          (frame->node->tag == IXS_OR && frame->result == IXS_CHECK_TRUE);
 }
 
-/* An absorber determines a total result only when every retained operand is
- * defined and integer-valued. */
-IXS_STATIC bool bounds_predicate_domain_proven(ixs_bounds *bounds,
-                                               ixs_node *node) {
-  return ixs_bounds_check_defined(bounds, node) == IXS_CHECK_TRUE &&
-         ixs_bounds_check_integer_valued(bounds, node) == IXS_CHECK_TRUE;
-}
-
 static void predicate_query_start(predicate_query_frame *frame) {
   if (frame->started)
     return;
@@ -145,17 +138,12 @@ static ixs_check_result
 predicate_query_complete(ixs_bounds *bounds,
                          const predicate_query_frame *frame) {
   ixs_node *node = frame->node;
-  ixs_check_result result;
 
   if (!node ||
       (node->tag != IXS_AND && node->tag != IXS_OR && node->tag != IXS_NOT))
     return predicate_query_atom(bounds, node);
 
-  result = frame->result;
-  if (predicate_query_short_circuited(frame) &&
-      !bounds_predicate_domain_proven(bounds, node))
-    result = IXS_CHECK_UNKNOWN;
-  return result;
+  return frame->result;
 }
 
 /* hot */
@@ -354,6 +342,7 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
   ixs_query_transaction transaction;
   ixs_node *replacements[PREDICATE_FINITE_MAX_SYMBOLS];
   ixs_check_result result = IXS_CHECK_UNKNOWN;
+  bool have_defined_point = false;
   size_t point;
 
   ixs_query_transaction_begin(&transaction, ctx, NULL, NULL);
@@ -372,12 +361,12 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       break;
     evaluated = simp_subs_multi(ctx, predicate, (uint32_t)symbol_count, targets,
                                 replacements);
-    if (!evaluated || ixs_node_is_sentinel(evaluated)) {
-      result = IXS_CHECK_UNKNOWN;
-      if (!evaluated)
-        bounds->oom = true;
+    if (!evaluated) {
+      bounds->oom = true;
       break;
     }
+    if (ixs_node_is_sentinel(evaluated))
+      goto next_point;
     if (ixs_node_is_known_true(evaluated))
       current = IXS_CHECK_TRUE;
     else if (ixs_node_is_known_false(evaluated))
@@ -386,13 +375,15 @@ predicate_finite_evaluate(ixs_bounds *bounds, ixs_node *predicate,
       result = IXS_CHECK_UNKNOWN;
       break;
     }
-    if (point == 0)
+    if (!have_defined_point) {
       result = current;
-    else if (result != current) {
+      have_defined_point = true;
+    } else if (result != current) {
       result = IXS_CHECK_UNKNOWN;
       break;
     }
 
+  next_point:
     for (symbol = symbol_count; symbol > 0; symbol--) {
       predicate_finite_symbol *entry = &symbols[symbol - 1u];
       if (entry->current < entry->upper) {
@@ -491,10 +482,9 @@ cleanup:
   return bounds->oom ? IXS_CHECK_UNKNOWN : result;
 }
 
-/* A | B is !A => B.  Canonicalization folds NOT(CMP), so reconstruct the
- * complementary comparison when either disjunct is a comparison.  The total
- * source check preserves eager AND/OR semantics, and the branch evaluator
- * deliberately has no implication fallback of its own. */
+/* A | B is !A => B. Canonicalization folds NOT(CMP), so reconstruct the
+ * complementary comparison when either disjunct is a comparison. The branch
+ * evaluator deliberately has no implication fallback of its own. */
 IXS_STATIC ixs_check_result bounds_predicate_implication(ixs_bounds *bounds,
                                                          ixs_node *predicate,
                                                          bool *limited) {
@@ -502,8 +492,7 @@ IXS_STATIC ixs_check_result bounds_predicate_implication(ixs_bounds *bounds,
   uint32_t i;
 
   if (!bounds || !predicate || predicate->tag != IXS_OR ||
-      predicate->u.assoc.nargs != 2u ||
-      !bounds_predicate_domain_proven(bounds, predicate))
+      predicate->u.assoc.nargs != 2u)
     return IXS_CHECK_UNKNOWN;
 
   /* Retain explicit NOT intent before deriving a comparison complement. */

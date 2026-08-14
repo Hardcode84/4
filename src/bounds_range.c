@@ -1360,8 +1360,6 @@ static bool bounds_piecewise_active(ixs_bounds *owner, ixs_bounds *remaining,
     ok = true;
     goto cleanup;
   }
-  if (ixs_bounds_check_defined(&active, value) != IXS_CHECK_TRUE)
-    goto cleanup;
   branch = ixs_bounds_get(&active, value);
   if (!branch.valid)
     goto cleanup;
@@ -1387,7 +1385,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
   ixs_arena_mark outer_mark;
   ixs_bounds remaining;
   bool have_result = false;
-  bool covered = false;
   bool failed = false;
   bool remaining_ready = false;
   uint32_t i;
@@ -1419,7 +1416,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
     if (ixs_bounds_has_empty(&remaining)) {
-      covered = true;
       break;
     }
     if (ixs_bounds_check_defined(&remaining, cond) != IXS_CHECK_TRUE) {
@@ -1436,7 +1432,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
     if (truth == IXS_CHECK_TRUE) {
-      covered = true;
       break;
     }
     if (!ixs_bounds_add_assumption(
@@ -1447,11 +1442,6 @@ static ixs_interval bounds_get_piecewise(ixs_bounds *b, ixs_node *expr) {
       break;
     }
   }
-
-  if (!failed && !covered && ixs_bounds_has_empty(&remaining))
-    covered = true;
-  if (!covered)
-    failed = true;
 
 cleanup:
   if (remaining_ready)
@@ -2292,6 +2282,27 @@ IXS_STATIC ixs_check_result bounds_range_check_relation(const ixs_interval *lhs,
     break;
   }
   return IXS_CHECK_UNKNOWN;
+}
+
+IXS_STATIC ixs_check_result
+bounds_range_check_relation_refined(ixs_bounds *bounds, ixs_node *comparison) {
+  ixs_interval lhs;
+  ixs_interval rhs;
+  if (!bounds || !comparison || comparison->tag != IXS_CMP)
+    return IXS_CHECK_UNKNOWN;
+  lhs = ixs_bounds_get(bounds, comparison->u.binary.lhs);
+  rhs = ixs_bounds_get(bounds, comparison->u.binary.rhs);
+  if (ixs_bounds_check_integer_valued(bounds, comparison->u.binary.lhs) ==
+          IXS_CHECK_TRUE &&
+      !bounds_refine_integral_interval(bounds, comparison->u.binary.lhs,
+                                       /*expression_defined=*/false, &lhs))
+    return IXS_CHECK_UNKNOWN;
+  if (ixs_bounds_check_integer_valued(bounds, comparison->u.binary.rhs) ==
+          IXS_CHECK_TRUE &&
+      !bounds_refine_integral_interval(bounds, comparison->u.binary.rhs,
+                                       /*expression_defined=*/false, &rhs))
+    return IXS_CHECK_UNKNOWN;
+  return bounds_range_check_relation(&lhs, &rhs, comparison->u.binary.cmp_op);
 }
 
 IXS_STATIC ixs_check_result bounds_range_check_raw(ixs_bounds *b,

@@ -34,6 +34,10 @@ IXS_STATIC bool bounds_refine_integral_interval(ixs_bounds *bounds,
 IXS_STATIC ixs_check_result bounds_range_check_relation(const ixs_interval *lhs,
                                                         const ixs_interval *rhs,
                                                         ixs_cmp_op op);
+/* Interval-only comparison proof over defined evaluations. Intrinsic integer
+ * refinements are intersected before explicit ranges can prove a result. */
+IXS_STATIC ixs_check_result
+bounds_range_check_relation_refined(ixs_bounds *bounds, ixs_node *comparison);
 IXS_STATIC ixs_check_result bounds_range_check_raw(ixs_bounds *bounds,
                                                    ixs_node *comparison);
 IXS_STATIC bool bounds_range_exact_integer_difference(ixs_bounds *bounds,

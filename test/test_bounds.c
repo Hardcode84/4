@@ -1089,7 +1089,7 @@ static void test_division_projection_transport_precedence(void) {
   errors = ixs_ctx_nerrors(ctx);
 
   /* The wide sibling exhausts scratch after the earlier arithmetic miss. */
-  ixs_arena_set_fail_after(&ctx->scratch, 173u);
+  ixs_arena_set_fail_after(&ctx->scratch, 10u);
   result =
       ixs_division_algebra_project(ctx, &bounds, root, root, ctx->node_zero,
                                    ctx->node_zero, IXS_DIVISION_PROJECT_ALL);
@@ -3315,7 +3315,7 @@ static void test_bounds_partial_predicate_is_semantic_unknown(void) {
   CHECK(ixs_facts_assume_pred(facts,
                               ixs_cmp(ctx, x, IXS_CMP_LE, ixs_int(ctx, 31))));
   result = ixs_check_predicate_facts(facts, query);
-  CHECK(result == IXS_CHECK_UNKNOWN);
+  CHECK(result == IXS_CHECK_TRUE);
 
   ixs_ctx_destroy(ctx);
 }
@@ -3815,9 +3815,11 @@ static void test_public_range_grouped_mod_congruence(void) {
   CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
   CHECK(range.has_upper && range.upper_p == 63 && range.upper_q == 1);
 
-  /* Congruence grouping requires a total integer representative. */
+  /* Congruence grouping bounds every defined evaluation. */
   CHECK(!test_ixs_range_facts(facts, noninteger, &range));
-  CHECK(!test_ixs_range_facts(facts, nontotal, &range));
+  CHECK(test_ixs_range_facts(facts, nontotal, &range));
+  CHECK(range.has_lower && range.lower_p == -15 && range.lower_q == 1);
+  CHECK(range.has_upper && range.upper_p == 63 && range.upper_q == 1);
   CHECK(!test_ixs_range_facts(
       facts, ixs_add(ctx, ixs_mod(ctx, x, ixs_int(ctx, 0)), mod16), &range));
   CHECK(!test_ixs_range_facts(
@@ -6061,7 +6063,9 @@ static void test_public_range_piecewise(void) {
   values[0] = x;
   conds[0] = ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 16));
   expr = ixs_pw(ctx, 1, values, conds);
-  CHECK(!ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(ixs_range(ctx, expr, assumes, 2, &r));
+  CHECK(r.has_lower && r.lower_p == 0 && r.lower_q == 1);
+  CHECK(r.has_upper && r.upper_p == 15 && r.upper_q == 1);
 
   values[0] = y;
   values[1] = ixs_int(ctx, 0);
@@ -8218,6 +8222,34 @@ static void test_public_known_bits_propagation(void) {
   ixs_ctx_destroy(ctx);
 }
 
+static void test_public_partial_value_queries_refine(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "partial_value_x");
+  ixs_node *d = ixs_sym(ctx, "partial_value_d");
+  ixs_node *partial = ixs_mod(ctx, x, d);
+  ixs_node *equals_eight = ixs_cmp(ctx, partial, IXS_CMP_EQ, ixs_int(ctx, 8));
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_range_result exact = {true, true, 8, 1, 8, 1};
+  ixs_range_result observed;
+  ixs_known_bits bits;
+
+  CHECK(ctx && x && d && partial && equals_eight && facts);
+  CHECK(ixs_facts_assume_range(facts, partial, &exact));
+  CHECK(test_ixs_check_defined_facts(facts, partial) == IXS_CHECK_UNKNOWN);
+  CHECK(test_ixs_range_facts(facts, partial, &observed));
+  CHECK(observed.has_lower && observed.has_upper && observed.lower_p == 8 &&
+        observed.lower_q == 1 && observed.upper_p == 8 &&
+        observed.upper_q == 1);
+  CHECK(test_ixs_get_known_bits_facts(facts, partial, &bits));
+  CHECK(bits.known_zero == ~(uint64_t)8 && bits.known_one == 8u);
+  CHECK(bits.pow2 == IXS_POW2_POSITIVE);
+  CHECK(test_ixs_get_pow2_fact_facts(facts, partial) == IXS_POW2_POSITIVE);
+  CHECK(test_ixs_check_facts(facts, equals_eight) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(facts, equals_eight) == IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_public_known_bits_failures(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_ctx *other = ixs_ctx_create();
@@ -8596,6 +8628,8 @@ static void test_public_predicate_tree_query(void) {
   ixs_node *reciprocal = ixs_div(ctx, ixs_int(ctx, 1), x);
   ixs_node *partial_pred =
       ixs_cmp(ctx, reciprocal, IXS_CMP_GT, ixs_int(ctx, 0));
+  ixs_node *partial_and = ixs_and(ctx, x_nonnegative, partial_pred);
+  ixs_node *partial_or = ixs_or(ctx, x_nonnegative, partial_pred);
   ixs_node *guarded_false = ixs_and(ctx, ixs_false(ctx), partial_pred);
   ixs_node *guarded_true = ixs_or(ctx, ixs_true(ctx), partial_pred);
   ixs_facts *all_true = ixs_facts_create(ctx);
@@ -8614,12 +8648,15 @@ static void test_public_predicate_tree_query(void) {
             all_true, ixs_cmp(ctx, y, IXS_CMP_NE, ixs_int(ctx, 2))) ==
         IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(all_true, either) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(all_true, partial_or) == IXS_CHECK_TRUE);
   CHECK(test_ixs_check_predicate_facts(all_true, ixs_not(ctx, both)) ==
         IXS_CHECK_FALSE);
 
   CHECK(ixs_facts_assume_pred(one_false,
                               ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 0))));
   CHECK(test_ixs_check_predicate_facts(one_false, both) == IXS_CHECK_FALSE);
+  CHECK(test_ixs_check_predicate_facts(one_false, partial_and) ==
+        IXS_CHECK_FALSE);
   CHECK(test_ixs_check_predicate_facts(one_false, either) == IXS_CHECK_UNKNOWN);
 
   CHECK(ixs_facts_assume_pred(all_false,
@@ -8824,15 +8861,14 @@ static void test_fact_simplify_projects_finite_root_predicates(void) {
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_simplify_facts(two_points, equals_zero) == equals_zero);
   errors = ixs_ctx_nerrors(ctx);
-  CHECK(test_ixs_check_predicate_facts(two_points, partial) ==
-        IXS_CHECK_UNKNOWN);
-  CHECK(test_ixs_simplify_facts(two_points, partial) == partial);
+  CHECK(test_ixs_check_predicate_facts(two_points, partial) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_simplify_facts(two_points, partial) == ixs_true(ctx));
   CHECK(ixs_ctx_nerrors(ctx) == errors);
   ixs_simplify_batch_facts(two_points, batch, 4);
   CHECK(batch[0] == ixs_true(ctx));
   CHECK(batch[1] == ixs_false(ctx));
   CHECK(batch[2] == equals_zero);
-  CHECK(batch[3] == partial);
+  CHECK(batch[3] == ixs_true(ctx));
 
   range.upper_p = 15;
   CHECK(ixs_facts_assume_range(bit_aligned, x, &range));
@@ -9191,7 +9227,7 @@ static void test_public_equivalence_ordered_candidate_growth(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_total_equivalence(void) {
+static void test_public_equivalence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "equiv_x");
   ixs_node *y = ixs_sym(ctx, "equiv_y");
@@ -9268,7 +9304,7 @@ static void test_public_total_equivalence(void) {
   CHECK(test_ixs_equivalent_facts(empty, or_lhs, or_rhs) == IXS_CHECK_TRUE);
 
   CHECK(test_ixs_equivalent_facts(empty, reciprocal, reciprocal) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(empty, reciprocal_algebraic_lhs,
                                   reciprocal_algebraic_rhs) ==
         IXS_CHECK_UNKNOWN);
@@ -10727,7 +10763,7 @@ static void test_public_equivalence_low_bit_rejections(void) {
   CHECK(test_ixs_equivalent_facts(facts, reciprocal_lhs, reciprocal_rhs) ==
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, undefined, undefined) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
 
   CHECK(ixs_facts_assume_pred(contradictory,
                               ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2))));
@@ -11237,7 +11273,7 @@ static void test_public_exact_divide_fact_scaled_xor_quotient(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_exact_divide_requires_defined_product(void) {
+static void test_public_exact_divide_refines_partial_product(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *k = ixs_sym(ctx, "partial_product_k");
   ixs_node *x = ixs_sym(ctx, "partial_product_x");
@@ -11248,6 +11284,7 @@ static void test_public_exact_divide_requires_defined_product(void) {
   ixs_node *conditions[1] = {condition};
   ixs_node *piecewise = ixs_pw(ctx, 1, values, conditions);
   ixs_node *product = ixs_mul(ctx, ixs_int(ctx, 16), piecewise);
+  ixs_node *partial_quotient = ixs_mul(ctx, two, piecewise);
   ixs_node *even = ixs_cmp(ctx, ixs_mod(ctx, k, two), IXS_CMP_EQ, zero);
   ixs_facts *partial = ixs_facts_create(ctx);
   ixs_facts *covered = ixs_facts_create(ctx);
@@ -11258,8 +11295,8 @@ static void test_public_exact_divide_requires_defined_product(void) {
         IXS_CHECK_TRUE);
   CHECK(test_ixs_check_defined_facts(partial, piecewise) == IXS_CHECK_UNKNOWN);
   result = ixs_try_exact_divide_facts(partial, product, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK((result.quotient == partial_quotient));
 
   CHECK(ixs_facts_assume_pred(covered, even));
   CHECK(ixs_facts_assume_pred(covered, condition));
@@ -11290,6 +11327,9 @@ static void test_public_exact_divide_fact_simplification(void) {
   ixs_node *outside = ixs_cmp(ctx, item, IXS_CMP_GE, ixs_int(ctx, 64));
   ixs_node *expected = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 8), item),
                                ixs_mul(ctx, ixs_int(ctx, 4), slot));
+  ixs_node *partial_expected_values[1] = {expected};
+  ixs_node *partial_expected =
+      ixs_pw(ctx, 1, partial_expected_values, conditions);
   ixs_facts *unknown = ixs_facts_create(ctx);
   ixs_facts *active = ixs_facts_create(ctx);
   ixs_facts *inactive = ixs_facts_create(ctx);
@@ -11309,8 +11349,8 @@ static void test_public_exact_divide_fact_simplification(void) {
   CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK((result.quotient == partial_expected));
 
   CHECK(ixs_facts_assume_pred(inactive, outside));
   CHECK(test_ixs_check_defined_facts(inactive, piecewise) == IXS_CHECK_FALSE);
@@ -13114,6 +13154,7 @@ int main(void) {
   test_public_fact_divisibility_rejects_reciprocal_factor();
   test_public_fact_divisibility_requires_integral_product();
   test_public_known_bits_propagation();
+  test_public_partial_value_queries_refine();
   test_public_known_bits_failures();
   test_exact_integer_projection_reuses_bitfacts();
   test_exact_integer_bitfacts_preflight();
@@ -13129,7 +13170,7 @@ int main(void) {
   test_public_equivalence_congruent_signed_no_wrap();
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();
-  test_public_total_equivalence();
+  test_public_equivalence();
   test_generic_modulo_recurrence_equivalence();
   test_generic_quotient_remainder_algebra();
   test_generic_bounded_scaled_mod_equivalence();
@@ -13153,7 +13194,7 @@ int main(void) {
   test_public_exact_divide_basic();
   test_public_exact_divide_fact_integer_bitwise_factor();
   test_public_exact_divide_fact_scaled_xor_quotient();
-  test_public_exact_divide_requires_defined_product();
+  test_public_exact_divide_refines_partial_product();
   test_public_exact_divide_fact_simplification();
   test_public_exact_divide_canonical_nonzero_factor();
   test_public_exact_divide_scaled_mod_domain();

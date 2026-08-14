@@ -23,11 +23,11 @@ typedef struct {
   ixs_interval range;
 } ixs_division_range_result;
 
-/* ROOT must be a semantics-preserving bounds normalization of SOURCE. SOURCE
- * carries the original whole-domain definedness obligation; ROOT facts never
- * discharge that obligation. MATCH initializes both output roots. Other
- * semantic misses preserve the input ROOT pointers; transport failures abort
- * the owning proof. Candidate UNREPRESENTABLE does not stop independent
+/* ROOT must be a semantics-preserving bounds normalization of SOURCE. A
+ * projection need only agree on defined SOURCE evaluations; poison outside
+ * that domain may refine to any value. MATCH initializes both output roots.
+ * Other semantic misses preserve the input ROOT pointers; transport failures
+ * abort the owning proof. Candidate UNREPRESENTABLE does not stop independent
  * discovery and is reported when no complete projection produces a MATCH.
  * Candidate storage grows in scratch with no semantic cap.
  * Discovery, global descendant filtering, and cost walks are expected
