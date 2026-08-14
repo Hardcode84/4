@@ -1772,14 +1772,16 @@ static bool exact_divide_simplify_input(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
-static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
+static bool exact_divide_refine_poison(ixs_facts *facts, ixs_ctx *ctx,
                                        ixs_node *expr,
-                                       ixs_exact_divide_result *result) {
+                                       ixs_exact_divide_result *result,
+                                       bool *refined) {
   bool old_bounds_oom = facts->bounds.oom;
   bool defined_oom = false;
   bool defined_limited = false;
   ixs_check_result defined;
 
+  *refined = false;
   if (ixs_node_is_known_total(expr))
     return true;
   defined = bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
@@ -1798,10 +1800,16 @@ static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
                                    "resource limit exceeded");
     return false;
   }
-  if (defined != IXS_CHECK_TRUE) {
-    *result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+  if (defined != IXS_CHECK_FALSE)
+    return true;
+  result->quotient = ixs_node_int(ctx, 0);
+  if (!result->quotient) {
+    *result =
+        exact_divide_failure(ctx, IXS_EXACT_DIVIDE_ERROR, "out of memory");
     return false;
   }
+  result->status = IXS_EXACT_DIVIDE_PROVEN;
+  *refined = true;
   return true;
 }
 
@@ -1824,6 +1832,26 @@ static bool exact_divide_proven(ixs_facts *facts, ixs_ctx *ctx, ixs_node *expr,
     return false;
   }
   if (proof == IXS_CHECK_FALSE) {
+    bool defined_oom = false;
+    bool defined_limited = false;
+    ixs_check_result defined = bounds_defined_check_detail(
+        &facts->bounds, expr, &defined_oom, &defined_limited);
+    if (defined == IXS_CHECK_FALSE && !defined_oom && !defined_limited) {
+      ixs_node *zero = ixs_node_int(ctx, 0);
+      if (!zero) {
+        *result =
+            exact_divide_failure(ctx, IXS_EXACT_DIVIDE_ERROR, "out of memory");
+        return false;
+      }
+      *result = exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, zero);
+      return false;
+    }
+    if (defined_oom || defined_limited) {
+      *result = exact_divide_failure(
+          ctx, IXS_EXACT_DIVIDE_ERROR,
+          defined_oom ? "out of memory" : "resource limit exceeded");
+      return false;
+    }
     *result = exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
     return false;
   }
@@ -1925,6 +1953,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
+  bool refined_poison = false;
   bool query_held = false;
   ixs_exact_divide_result result =
       exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
@@ -1941,7 +1970,9 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
             : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     goto cleanup;
   }
-  if (!exact_divide_input_defined(facts, ctx, expr, &result))
+  if (!exact_divide_refine_poison(facts, ctx, expr, &result,
+                                  &refined_poison) ||
+      refined_poison)
     goto cleanup;
   if (!exact_divide_simplify_input(facts, ctx, expr, &expr, &result))
     goto cleanup;

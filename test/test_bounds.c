@@ -9191,7 +9191,7 @@ static void test_public_equivalence_ordered_candidate_growth(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_total_equivalence(void) {
+static void test_public_refinement_equivalence(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "equiv_x");
   ixs_node *y = ixs_sym(ctx, "equiv_y");
@@ -9268,10 +9268,10 @@ static void test_public_total_equivalence(void) {
   CHECK(test_ixs_equivalent_facts(empty, or_lhs, or_rhs) == IXS_CHECK_TRUE);
 
   CHECK(test_ixs_equivalent_facts(empty, reciprocal, reciprocal) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(test_ixs_equivalent_facts(empty, reciprocal_algebraic_lhs,
                                   reciprocal_algebraic_rhs) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(ixs_facts_assume_pred(nonzero,
                               ixs_cmp(ctx, x, IXS_CMP_NE, ixs_int(ctx, 0))));
   CHECK(test_ixs_equivalent_facts(nonzero, reciprocal, reciprocal) ==
@@ -9928,6 +9928,67 @@ static ixs_node *parse_bounds_pred(ixs_ctx *ctx, const char *text) {
   return ixs_parse_pred(ctx, text, strlen(text));
 }
 
+static void test_public_bit_permutation_round_trip(void) {
+  ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *x = ixs_sym(ctx, "x");
+  ixs_node *source_slot = ixs_sym(ctx, "source_packet_slot");
+  ixs_node *packed = parse_bounds_expr(
+      ctx, "4*Mod(x,4) + Mod(floor(x/4),4) + 16*Mod(floor(x/16),2) + "
+           "32*Mod(floor(x/32),2)");
+  ixs_node *unpacked = parse_bounds_expr(
+      ctx, "4*Mod(p/1,2) + 8*Mod(floor(p/2),2) + Mod(floor(p/4),2) + "
+           "2*Mod(floor(p/8),2) + 16*Mod(floor(p/16),2) + "
+           "32*Mod(floor(p/32),2)");
+  ixs_facts *facts = ixs_facts_create(ctx);
+  ixs_facts *canonical_facts = ixs_facts_create(ctx);
+  ixs_node *p = ixs_sym(ctx, "p");
+  ixs_node *targets[1] = {p};
+  ixs_node *replacements[1] = {packed};
+
+  ixs_node *canonical_goal = parse_bounds_pred(
+      ctx,
+      "source_packet_slot - Mod(source_packet_slot, 2) - "
+      "16*Mod(floor(1/4*Mod(source_packet_slot, 4) + "
+      "1/16*Mod(floor(1/4*source_packet_slot), 4)) + "
+      "floor(1/16*source_packet_slot), 2) - "
+      "32*Mod(floor(1/8*Mod(source_packet_slot, 4) + "
+      "1/2*Mod(floor(1/16*source_packet_slot), 2) + "
+      "1/32*Mod(floor(1/4*source_packet_slot), 4)) + "
+      "floor(1/32*source_packet_slot), 2) - "
+      "2*Mod(floor(1/2*Mod(source_packet_slot, 4) + "
+      "1/8*Mod(floor(1/4*source_packet_slot), 4)), 2) - "
+      "4*Mod(floor(1/4*source_packet_slot), 2) - "
+      "8*Mod(floor(1/2*Mod(floor(1/4*source_packet_slot), 4)), 2) == 0");
+
+  CHECK(ctx && x && source_slot && packed && unpacked && facts &&
+        canonical_facts && p && canonical_goal);
+  unpacked = ixs_subs_multi(ctx, unpacked, 1, targets, replacements);
+  CHECK(unpacked);
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(facts,
+                              ixs_cmp(ctx, x, IXS_CMP_LT, ixs_int(ctx, 64))));
+  CHECK(test_ixs_equivalent_facts(facts, x, unpacked) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, x, IXS_CMP_EQ, unpacked)) == IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, packed, IXS_CMP_GE, ixs_int(ctx, 0))) ==
+        IXS_CHECK_TRUE);
+  CHECK(test_ixs_check_predicate_facts(
+            facts, ixs_cmp(ctx, packed, IXS_CMP_LT, ixs_int(ctx, 64))) ==
+        IXS_CHECK_TRUE);
+  CHECK(ixs_facts_assume_pred(
+      canonical_facts,
+      ixs_cmp(ctx, source_slot, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      canonical_facts,
+      ixs_cmp(ctx, source_slot, IXS_CMP_LT, ixs_int(ctx, 64))));
+  CHECK(test_ixs_check_predicate_facts(canonical_facts, canonical_goal) ==
+        IXS_CHECK_TRUE);
+
+  ixs_ctx_destroy(ctx);
+}
+
 static void test_fact_simplify_trunc_primitive_difference(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *x = ixs_sym(ctx, "trunc_primitive_x");
@@ -10166,7 +10227,7 @@ static void test_public_truncating_remainder_equivalence(void) {
   CHECK(ixs_facts_assume_pred(zero_divisor, parse_bounds_pred(ctx, "d == 0")));
   CHECK(test_ixs_equivalent_facts(zero_divisor, next,
                                   ixs_add(ctx, zero, sixteen)) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
   CHECK(
       ixs_facts_assume_pred(unknown_divisor, parse_bounds_pred(ctx, "x >= 0")));
   CHECK(
@@ -10727,7 +10788,7 @@ static void test_public_equivalence_low_bit_rejections(void) {
   CHECK(test_ixs_equivalent_facts(facts, reciprocal_lhs, reciprocal_rhs) ==
         IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, undefined, undefined) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
 
   CHECK(ixs_facts_assume_pred(contradictory,
                               ixs_cmp(ctx, x, IXS_CMP_GE, ixs_int(ctx, 2))));
@@ -11066,8 +11127,10 @@ static void test_public_algebra_helper_invalid_inputs(void) {
 
 static void test_public_exact_divide_basic(void) {
   ixs_ctx *ctx = ixs_ctx_create();
+  ixs_node *d = ixs_sym(ctx, "d");
   ixs_node *item = ixs_sym(ctx, "item");
   ixs_node *slot = ixs_sym(ctx, "slot");
+  ixs_node *within = ixs_sym(ctx, "within");
   ixs_node *k = ixs_sym(ctx, "K");
   ixs_node *expr = ixs_add(ctx, ixs_mul(ctx, ixs_int(ctx, 64), item),
                            ixs_mul(ctx, ixs_int(ctx, 32), slot));
@@ -11081,6 +11144,13 @@ static void test_public_exact_divide_basic(void) {
   ixs_facts *facts = ixs_facts_create(ctx);
   ixs_exact_divide_result result;
 
+  ixs_node *dynamic_remainder = ixs_sub(
+      ctx, ixs_add(ctx, item, slot),
+      ixs_mul(ctx, d,
+              ixs_floor(ctx, ixs_div(ctx, ixs_add(ctx, item, slot), d))));
+  ixs_node *scaled_dynamic_remainder =
+      ixs_mul(ctx, ixs_int(ctx, 32), dynamic_remainder);
+
   result = ixs_try_exact_divide_facts(facts, expr, 8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK((result.quotient == expected));
@@ -11088,6 +11158,34 @@ static void test_public_exact_divide_basic(void) {
   result = ixs_try_exact_divide_facts(facts, expr, -8);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
   CHECK((result.quotient == negative_expected));
+
+  result =
+      ixs_try_exact_divide_facts(facts, scaled_dynamic_remainder, 32);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK((result.quotient == dynamic_remainder));
+
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_GE, ixs_int(ctx, 0))));
+  CHECK(ixs_facts_assume_pred(
+      facts, ixs_cmp(ctx, within, IXS_CMP_LT, ixs_int(ctx, 1))));
+  ixs_node *origin_quotient = ixs_floor(
+      ctx, ixs_div(ctx, ixs_add(ctx, item, slot), d));
+  ixs_node *point_quotient = ixs_floor(
+      ctx, ixs_div(ctx, ixs_add(ctx, item, ixs_add(ctx, slot, within)), d));
+  ixs_node *transaction_residual =
+      ixs_mul(ctx, ixs_int(ctx, 4),
+              ixs_mul(ctx, d,
+                      ixs_sub(ctx, origin_quotient, point_quotient)));
+  ixs_node *transaction_goal = ixs_cmp(
+      ctx, ixs_mod(ctx, transaction_residual, ixs_int(ctx, 4294967296)),
+      IXS_CMP_EQ, ixs_int(ctx, 0));
+  CHECK(test_ixs_check_predicate_facts(facts, transaction_goal) ==
+        IXS_CHECK_TRUE);
+  ixs_node *wave_transaction_goal = parse_bounds_pred(
+      ctx, "Mod(4*d*floor(group/d + item/d) - "
+           "4*d*floor(item/d + (group + within)/d), 4294967296) == 0");
+  CHECK(test_ixs_check_predicate_facts(facts, wave_transaction_goal) ==
+        IXS_CHECK_TRUE);
 
   result =
       ixs_try_exact_divide_facts(facts, ixs_add(ctx, item, ixs_int(ctx, 1)), 8);
@@ -11237,7 +11335,7 @@ static void test_public_exact_divide_fact_scaled_xor_quotient(void) {
   ixs_ctx_destroy(ctx);
 }
 
-static void test_public_exact_divide_requires_defined_product(void) {
+static void test_public_exact_divide_refines_partial_product(void) {
   ixs_ctx *ctx = ixs_ctx_create();
   ixs_node *k = ixs_sym(ctx, "partial_product_k");
   ixs_node *x = ixs_sym(ctx, "partial_product_x");
@@ -11258,8 +11356,8 @@ static void test_public_exact_divide_requires_defined_product(void) {
         IXS_CHECK_TRUE);
   CHECK(test_ixs_check_defined_facts(partial, piecewise) == IXS_CHECK_UNKNOWN);
   result = ixs_try_exact_divide_facts(partial, product, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(result.quotient != NULL);
 
   CHECK(ixs_facts_assume_pred(covered, even));
   CHECK(ixs_facts_assume_pred(covered, condition));
@@ -11309,14 +11407,14 @@ static void test_public_exact_divide_fact_simplification(void) {
   CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(result.quotient != NULL);
 
   CHECK(ixs_facts_assume_pred(inactive, outside));
   CHECK(test_ixs_check_defined_facts(inactive, piecewise) == IXS_CHECK_FALSE);
   result = ixs_try_exact_divide_facts(inactive, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_node_is_zero(result.quotient));
 
   ixs_ctx_destroy(ctx);
 }
@@ -13129,7 +13227,8 @@ int main(void) {
   test_public_equivalence_congruent_signed_no_wrap();
   test_public_equivalence_ordered_congruence_forms();
   test_public_equivalence_ordered_candidate_growth();
-  test_public_total_equivalence();
+  test_public_refinement_equivalence();
+  test_public_bit_permutation_round_trip();
   test_generic_modulo_recurrence_equivalence();
   test_generic_quotient_remainder_algebra();
   test_generic_bounded_scaled_mod_equivalence();
@@ -13153,7 +13252,7 @@ int main(void) {
   test_public_exact_divide_basic();
   test_public_exact_divide_fact_integer_bitwise_factor();
   test_public_exact_divide_fact_scaled_xor_quotient();
-  test_public_exact_divide_requires_defined_product();
+  test_public_exact_divide_refines_partial_product();
   test_public_exact_divide_fact_simplification();
   test_public_exact_divide_canonical_nonzero_factor();
   test_public_exact_divide_scaled_mod_domain();

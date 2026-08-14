@@ -4281,8 +4281,8 @@ static void test_exact_divide_fact_piecewise(void) {
   CHECK((result.quotient == expected));
 
   result = ixs_try_exact_divide_facts(unknown, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(result.quotient != NULL);
 
   result = ixs_try_exact_divide_facts(unknown, total_piecewise, 2);
   CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
@@ -4290,8 +4290,8 @@ static void test_exact_divide_fact_piecewise(void) {
 
   CHECK(ixs_facts_assume_pred(inactive, outside));
   result = ixs_try_exact_divide_facts(inactive, piecewise, 8);
-  CHECK(result.status == IXS_EXACT_DIVIDE_UNKNOWN);
-  CHECK(result.quotient == NULL);
+  CHECK(result.status == IXS_EXACT_DIVIDE_PROVEN);
+  CHECK(ixs_node_is_zero(result.quotient));
 }
 
 static void test_fact_rewrite_constant_power(void) {

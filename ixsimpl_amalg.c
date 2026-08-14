@@ -7323,10 +7323,6 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   ixs_bounds_transport_snapshot transport;
   ixs_bounds_transport_snapshot limit_transport;
   bool track_limits = bounds_query_is_tracking(bounds);
-  bool lhs_oom = false;
-  bool rhs_oom = false;
-  bool lhs_limited = false;
-  bool rhs_limited = false;
   ixs_algebra_status status = IXS_ALGEBRA_MATCH;
 
   ixs_query_transaction_begin(&transaction, NULL, bounds, &ctx->scratch);
@@ -7335,16 +7331,9 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
   equivalence_state_init(&state, ctx, bounds);
   state.roots_simplified = roots_simplified;
   *result = IXS_CHECK_UNKNOWN;
-  if (bounds_defined_check_detail(bounds, lhs, &lhs_oom, &lhs_limited) !=
-          IXS_CHECK_TRUE ||
-      bounds_defined_check_detail(bounds, rhs, &rhs_oom, &rhs_limited) !=
-          IXS_CHECK_TRUE) {
-    if (lhs_oom || rhs_oom || (!transaction.old_oom && bounds->oom))
-      status = IXS_ALGEBRA_OOM;
-    else if (lhs_limited || rhs_limited)
-      status = IXS_ALGEBRA_LIMITED;
-    goto restore;
-  }
+  /* This query serves refinement, not total-expression validation. Poison
+   * valuations impose no equality obligation; the algebra below proves that
+   * defined results agree. */
   limit_transport = ixs_bounds_query_transport_snapshot(bounds);
   if (roots_simplified) {
     assert(bounds->exact_projection_depth != UINT_MAX);
@@ -7367,7 +7356,6 @@ static ixs_algebra_status bounds_equivalence_query_detail_impl(
     status = IXS_ALGEBRA_LIMITED;
   }
 
-restore:
   equivalence_state_destroy(&state);
   if (!transaction.old_oom && bounds->oom)
     bounds_store_invalidate_reads(bounds);
@@ -20066,14 +20054,16 @@ static bool exact_divide_simplify_input(ixs_facts *facts, ixs_ctx *ctx,
   return false;
 }
 
-static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
+static bool exact_divide_refine_poison(ixs_facts *facts, ixs_ctx *ctx,
                                        ixs_node *expr,
-                                       ixs_exact_divide_result *result) {
+                                       ixs_exact_divide_result *result,
+                                       bool *refined) {
   bool old_bounds_oom = facts->bounds.oom;
   bool defined_oom = false;
   bool defined_limited = false;
   ixs_check_result defined;
 
+  *refined = false;
   if (ixs_node_is_known_total(expr))
     return true;
   defined = bounds_defined_check_detail(&facts->bounds, expr, &defined_oom,
@@ -20092,10 +20082,16 @@ static bool exact_divide_input_defined(ixs_facts *facts, ixs_ctx *ctx,
                                    "resource limit exceeded");
     return false;
   }
-  if (defined != IXS_CHECK_TRUE) {
-    *result = exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
+  if (defined != IXS_CHECK_FALSE)
+    return true;
+  result->quotient = ixs_node_int(ctx, 0);
+  if (!result->quotient) {
+    *result =
+        exact_divide_failure(ctx, IXS_EXACT_DIVIDE_ERROR, "out of memory");
     return false;
   }
+  result->status = IXS_EXACT_DIVIDE_PROVEN;
+  *refined = true;
   return true;
 }
 
@@ -20118,6 +20114,26 @@ static bool exact_divide_proven(ixs_facts *facts, ixs_ctx *ctx, ixs_node *expr,
     return false;
   }
   if (proof == IXS_CHECK_FALSE) {
+    bool defined_oom = false;
+    bool defined_limited = false;
+    ixs_check_result defined = bounds_defined_check_detail(
+        &facts->bounds, expr, &defined_oom, &defined_limited);
+    if (defined == IXS_CHECK_FALSE && !defined_oom && !defined_limited) {
+      ixs_node *zero = ixs_node_int(ctx, 0);
+      if (!zero) {
+        *result =
+            exact_divide_failure(ctx, IXS_EXACT_DIVIDE_ERROR, "out of memory");
+        return false;
+      }
+      *result = exact_divide_result(IXS_EXACT_DIVIDE_PROVEN, zero);
+      return false;
+    }
+    if (defined_oom || defined_limited) {
+      *result = exact_divide_failure(
+          ctx, IXS_EXACT_DIVIDE_ERROR,
+          defined_oom ? "out of memory" : "resource limit exceeded");
+      return false;
+    }
     *result = exact_divide_result(IXS_EXACT_DIVIDE_NOT_EXACT, NULL);
     return false;
   }
@@ -20219,6 +20235,7 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
   ixs_session_binding binding;
   facts_read_query_scope read_scope;
   ixs_ctx *ctx;
+  bool refined_poison = false;
   bool query_held = false;
   ixs_exact_divide_result result =
       exact_divide_result(IXS_EXACT_DIVIDE_ERROR, NULL);
@@ -20235,7 +20252,9 @@ ixs_try_exact_divide_facts(ixs_facts *facts, ixs_node *expr, int64_t divisor) {
             : exact_divide_result(IXS_EXACT_DIVIDE_UNKNOWN, NULL);
     goto cleanup;
   }
-  if (!exact_divide_input_defined(facts, ctx, expr, &result))
+  if (!exact_divide_refine_poison(facts, ctx, expr, &result,
+                                  &refined_poison) ||
+      refined_poison)
     goto cleanup;
   if (!exact_divide_simplify_input(facts, ctx, expr, &expr, &result))
     goto cleanup;

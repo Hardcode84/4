@@ -136,7 +136,7 @@ static void test_equivalent_expression_contexts(void) {
   CHECK(test_ixs_equivalent_facts(without_residual_integrality, left_ceil,
                                   right_ceil) == IXS_CHECK_UNKNOWN);
   CHECK(test_ixs_equivalent_facts(facts, partial_lhs, partial_rhs) ==
-        IXS_CHECK_UNKNOWN);
+        IXS_CHECK_TRUE);
 
   CHECK(ixs_facts_assume_pred(
       narrow, ixs_cmp(ctx, noninjective, IXS_CMP_GE, ixs_int(ctx, 0))));

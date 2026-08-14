@@ -371,11 +371,11 @@ ixs_check_result ixs_check_facts(ixs_facts *facts, const ixs_node *expr);
  * rejected because they are not predicate trees. */
 ixs_check_result ixs_check_predicate_facts(ixs_facts *facts,
                                            const ixs_node *predicate);
-/* Prove total equivalence over the full domain admitted by facts.  TRUE is
- * returned only after both operands are proved defined everywhere. FALSE is
- * returned only for a universal proof of different values;
- * insufficient facts, contradictory facts, invalid input, and resource
- * limits return UNKNOWN. */
+/* Prove equivalence over the full domain admitted by facts.  Poison valuations
+ * impose no equality obligation: a TRUE result proves equality wherever both
+ * expressions are defined and may refine poison elsewhere. FALSE is returned
+ * only for a universal proof of different defined values; insufficient facts,
+ * contradictory facts, invalid input, and resource limits return UNKNOWN. */
 ixs_check_result ixs_equivalent_facts(ixs_facts *facts, const ixs_node *lhs,
                                       const ixs_node *rhs);
 /* Decompose expr as coefficient*symbol + residual.  The coefficient is an
@@ -401,8 +401,9 @@ ixs_check_result ixs_check_divisible_facts(ixs_facts *facts,
                                            int64_t modulus);
 /* Prove exact divisibility and construct the simplified quotient.  PROVEN is
  * the only status with a non-NULL quotient.  NOT_EXACT is a proof of
- * nondivisibility; UNKNOWN means facts are insufficient, contradictory, or do
- * not prove the input defined.  Invalid input, divisor zero, unrepresentable
+ * nondivisibility; UNKNOWN means facts are insufficient or contradictory.
+ * Poison in the input may be refined by the quotient. Invalid input, divisor
+ * zero, unrepresentable
  * results, resource limits, and OOM return ERROR and append a diagnostic to
  * the fact set's session when one is available. */
 ixs_exact_divide_result ixs_try_exact_divide_facts(ixs_facts *facts,
