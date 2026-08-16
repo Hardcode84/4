@@ -716,8 +716,6 @@ ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
     if (enter != BOUNDS_QUERY_ENTER_INVALID)
       goto cleanup;
     break;
-  default:
-    goto cleanup;
   }
 
   entry = bounds_query_finish(&outer, true);

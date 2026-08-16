@@ -428,7 +428,6 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
     break;
   case IXS_CMP_EQ:
   case IXS_CMP_NE:
-  default:
     return result;
   }
   if (!ixs_bounds_query_transport_clean(bounds)) {

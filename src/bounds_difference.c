@@ -498,7 +498,7 @@ static bool difference_register_exact_reverse(
     b->oom = true;
     return false;
   }
-  assert(!"unknown certified exact-relation insertion result");
+  assert(0 && "unknown certified exact-relation insertion result");
   abort();
 }
 

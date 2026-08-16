@@ -24,16 +24,19 @@ jobs:
             cxx: g++
             build_type: Debug
             asan: ON
-          - name: Clang Release + max warnings
+          - name: Clang Debug + strict warnings
             cc: clang
             cxx: clang++
-            build_type: Release
+            # Neither diagnostic group is included by -Wall -Wextra.
+            cflags: -Wstring-conversion -Wcovered-switch-default
+            build_type: Debug
             asan: OFF
     name: ${{ matrix.name }}
     timeout-minutes: 10
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      CFLAGS: ${{ matrix.cflags }}
     steps:
       - uses: actions/checkout@v4
 

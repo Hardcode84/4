@@ -293,10 +293,10 @@ bounds_store_publish_relation_status(ixs_bounds *b,
     b->oom = true;
     return;
   case IXS_RELATION_STATUS_UNREPRESENTABLE:
-    assert(!"invalid exact-relation insertion result");
+    assert(0 && "invalid exact-relation insertion result");
     abort();
   }
-  assert(!"unknown exact-relation insertion result");
+  assert(0 && "unknown exact-relation insertion result");
   abort();
 }
 

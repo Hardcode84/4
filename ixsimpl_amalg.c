@@ -5172,7 +5172,7 @@ static bool difference_register_exact_reverse(
     b->oom = true;
     return false;
   }
-  assert(!"unknown certified exact-relation insertion result");
+  assert(0 && "unknown certified exact-relation insertion result");
   abort();
 }
 
@@ -11004,8 +11004,6 @@ ixs_bounds_query_transport_probe(ixs_bounds *b, ixs_node *expr,
     if (enter != BOUNDS_QUERY_ENTER_INVALID)
       goto cleanup;
     break;
-  default:
-    goto cleanup;
   }
 
   entry = bounds_query_finish(&outer, true);
@@ -15519,10 +15517,10 @@ bounds_store_publish_relation_status(ixs_bounds *b,
     b->oom = true;
     return;
   case IXS_RELATION_STATUS_UNREPRESENTABLE:
-    assert(!"invalid exact-relation insertion result");
+    assert(0 && "invalid exact-relation insertion result");
     abort();
   }
-  assert(!"unknown exact-relation insertion result");
+  assert(0 && "unknown exact-relation insertion result");
   abort();
 }
 
@@ -28896,7 +28894,6 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
     break;
   case IXS_CMP_EQ:
   case IXS_CMP_NE:
-  default:
     return result;
   }
   if (!ixs_bounds_query_transport_clean(bounds)) {
