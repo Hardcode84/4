@@ -28875,27 +28875,15 @@ IXS_STATIC ixs_radix_algebra_result ixs_radix_algebra_order(
 
   if (!bounds || !expr || !bounds->scratch)
     return result;
-  switch (op) {
-  case IXS_CMP_GE:
+  if (op == IXS_CMP_GE || op == IXS_CMP_LT) {
     orientation = 1;
-    proven = IXS_CHECK_TRUE;
-    break;
-  case IXS_CMP_LT:
-    orientation = 1;
-    proven = IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_LE:
+  } else if (op == IXS_CMP_LE || op == IXS_CMP_GT) {
     orientation = -1;
-    proven = IXS_CHECK_TRUE;
-    break;
-  case IXS_CMP_GT:
-    orientation = -1;
-    proven = IXS_CHECK_FALSE;
-    break;
-  case IXS_CMP_EQ:
-  case IXS_CMP_NE:
+  } else {
     return result;
   }
+  proven =
+      op == IXS_CMP_GE || op == IXS_CMP_LE ? IXS_CHECK_TRUE : IXS_CHECK_FALSE;
   if (!ixs_bounds_query_transport_clean(bounds)) {
     result.oom = bounds->oom;
     return result;
