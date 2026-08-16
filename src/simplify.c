@@ -1382,7 +1382,7 @@ static bool radix_chain_complete_step(const ixs_addterm *terms, uint32_t nterms,
   ixs_node *rounded;
   ixs_node *numerator;
   bool terminal = false;
-  int64_t digit_count;
+  int64_t digit_count = 0;
   int64_t enclosing = 0;
   int64_t divisor;
 

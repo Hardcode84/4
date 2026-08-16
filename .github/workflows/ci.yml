@@ -14,14 +14,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Release
+          - name: GCC Release
+            cc: gcc
+            cxx: g++
             build_type: Release
             asan: OFF
-          - name: Debug + ASAN
+          - name: GCC Debug + ASAN
+            cc: gcc
+            cxx: g++
             build_type: Debug
             asan: ON
+          - name: Clang Release + max warnings
+            cc: clang
+            cxx: clang++
+            build_type: Release
+            asan: OFF
     name: ${{ matrix.name }}
     timeout-minutes: 10
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
     steps:
       - uses: actions/checkout@v4
 

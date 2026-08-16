@@ -59,9 +59,9 @@ static void test_add_accessors(void) {
     ixs_node *coeff = ixs_node_add_term_coeff(expr, i);
     CHECK(ixs_node_tag(coeff) == IXS_INT);
     CHECK(ixs_node_int_val(coeff) == 1);
-    if ((term == a))
+    if (term == a)
       found_a = 1;
-    else if ((term == b))
+    else if (term == b)
       found_b = 1;
   }
   CHECK(found_a && found_b);
